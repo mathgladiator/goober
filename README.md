@@ -1,3 +1,75 @@
 # goober
 
-A new project.
+**The SlopBox Orchestration Service.**
+
+> Status: **design phase.** There is no code yet. The design is being written in
+> [`design/`](design/), and implementation choices are made deliberately, one at a time.
+
+## The bet
+
+Goober is a personal research bet on how computing ends up once AI agents are doing
+the implementation work. It doesn't wait for a god-level AI. It builds from reasonable
+predictions of the capability curve in front of us. If the god shows up, none of this
+matters, and that is a clean way for it to die.
+
+Today's idioms quietly assume that the worker is a human who can be trusted with the
+keys and moved by incentives. Agents break that assumption. So goober doesn't hand them
+the old keys. It gives them **better boxes, with finer scope, and makes the wrong action
+impossible rather than merely frowned upon.**
+
+The goal is not for a human to read all the code, or to audit every artifact. The goal
+is tooling that lets a person **feel the shape of a box** and the risks of that box going
+wrong, and then act. Ironclad proofs sit on the boundary. The perimeter keeps the shape
+of a mistake inside a contract: an agent trusted with one user profile cannot open
+another, cannot cheat, and cannot delete the universe. Cost control is part of that
+contract, because the system controls the fuel going in and out of every box.
+
+Read the specification as a new operating system. Every existing idiom is up for grabs,
+but it still has to run on the systems that exist today. Boundaries that earned their
+keep, like UNIX, SQLite, and HTTP, are treated as good shapes. The embodiment of a shape
+is disposable.
+
+## The shape
+
+- **Storage and compute stay divided.** Fixed-function machines stay more reliable and
+  cheaper than a model imitating them.
+- **Storage sits above the block** as multi-paradigm engines that are first-class
+  citizens. Storage is addressed hierarchically (`storage/sqlite3/$database/$version/$table`)
+  so a human can read the address and a machine can enforce it. Time is a first-class
+  boundary. SQLite is the tactical start, along with its whole operational burden
+  (replication, schema migration, versioning).
+- **Processes are ephemeral boxes.** A process wakes up, does a thing, and goes to bed.
+  The first box is WASM with no POSIX inheritance. V8 isolates and well-defined
+  containers can come later, along with common, predictable boxes the system can
+  optimize around.
+- **The entrance is shared architecture.** HTTP comes first, so a human reviews the pipe
+  rather than the product. Terminals, bi-directional pipes, and other protocols can be
+  added as they earn their place.
+- **The manifest is the perimeter.** A box is named by a primary key
+  (`/process/wasm/<name>`) and is dead until its manifest (`/manifest/wasm/<name>`)
+  declares its routes, protocols, data requirements, scopes, session variables, write
+  targets, and limits. This is IAM-style authorization that is actually enforced, with
+  fuel limits, rate limits, and per-box costs. Agents can veto manifest changes, but
+  only a human can approve them.
+- **Owning the boundary buys black-box quality control.** Isolation, forking, shadow
+  traffic, A/B tests, per-agent staging, audit logs, and monitoring. When an interior is
+  bad, you see elevated error rates and latency, not a breach.
+
+The five arenas the design has to contend with are: **naming the box, data flowing in,
+data flowing out, interior effects, and process multiplicity and lifetime.**
+
+## Design documents
+
+| Path | Contents |
+|---|---|
+| [`design/human/`](design/human/) | Documents written by the human. These are authoritative. |
+| [`design/human/Goober.Intro.md`](design/human/Goober.Intro.md) | The introduction and foundational thinking. Start here. |
+| [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
+| [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
+
+This isn't Adama with a new coat of paint, though it does rob that grave for the parts
+that still hold.
+
+## License
+
+[MIT](LICENSE) © 2026 Jeffrey M. Barber
