@@ -22,8 +22,12 @@ Read these before doing design work:
     (WASM reactor pattern), behavior (boundary, lifecycle, budget), and sharing rules.
   - `design/human/020.DataFlow.md` (draft): context sources, `data.$provider.$strategy`,
     access patterns, generated data code, per-tenant databases, and SQL forcing solo.
+  - `design/human/025.DataShape.md`: storage shapes and invariants, sequencers and cache
+    coherency, atomic write sets (optional per route), and torn-write reporting.
   - `design/human/030.TheLargerEnvironment.md`: networking through the host, external
     services via OpenAPI, `require` restrictions, host-held credentials, box-to-box calls.
+  - `design/human/035.TheOutBox.md`: effectful network calls as outbox elements in the
+    write set, delivered after commit with idempotency keys and per-scope ordering.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which

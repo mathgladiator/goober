@@ -66,7 +66,9 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/000.Introduction.md`](design/human/000.Introduction.md) | The introduction and foundational thinking. Start here. |
 | [`design/human/010.Manifest.md`](design/human/010.Manifest.md) | The manifest: routes, signals, the host/guest ABI (reactor pattern), behavior, budgets, and sharing rules. |
 | [`design/human/020.DataFlow.md`](design/human/020.DataFlow.md) | Data flow (draft): context, data strategies and access patterns, generated data code, tenants, and SQL vs. solo. |
+| [`design/human/025.DataShape.md`](design/human/025.DataShape.md) | Shape of data: storage options and their invariants, sequencers and cache coherency, atomic write sets, and torn-write reporting. |
 | [`design/human/030.TheLargerEnvironment.md`](design/human/030.TheLargerEnvironment.md) | The network: external services via OpenAPI, request restrictions, host-held credentials, and box-to-box calls. |
+| [`design/human/035.TheOutBox.md`](design/human/035.TheOutBox.md) | The outbox: network side effects captured in the write set and delivered after commit, at least once. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 
