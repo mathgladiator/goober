@@ -64,6 +64,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 |---|---|
 | [`design/human/`](design/human/) | Documents written by the human. These are authoritative. |
 | [`design/human/000.Introduction.md`](design/human/000.Introduction.md) | The introduction and foundational thinking. Start here. |
+| [`design/human/010.Manifest.md`](design/human/010.Manifest.md) | The manifest: routes, signals, the host/guest ABI (reactor pattern), behavior, budgets, and sharing rules. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 

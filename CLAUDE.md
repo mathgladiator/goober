@@ -18,6 +18,8 @@ Read these before doing design work:
   propose it in conversation or in `design/machine/` instead.
   - `design/human/000.Introduction.md`: the introduction and foundational thinking
     (the bet, boxes, manifests, storage, process model, the five arenas).
+  - `design/human/010.Manifest.md`: the manifest shape, the generated host/guest C ABI
+    (WASM reactor pattern), behavior (boundary, lifecycle, budget), and sharing rules.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
