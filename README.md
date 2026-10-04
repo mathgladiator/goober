@@ -63,7 +63,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | Path | Contents |
 |---|---|
 | [`design/human/`](design/human/) | Documents written by the human. These are authoritative. |
-| [`design/human/Goober.Intro.md`](design/human/Goober.Intro.md) | The introduction and foundational thinking. Start here. |
+| [`design/human/000.Introduction.md`](design/human/000.Introduction.md) | The introduction and foundational thinking. Start here. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 

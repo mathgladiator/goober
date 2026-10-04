@@ -16,7 +16,7 @@ Read these before doing design work:
   human meant. Never add, remove, or change ideas, positions, or decisions. If a
   clarity fix would shift the meaning, or if you think the content itself is wrong,
   propose it in conversation or in `design/machine/` instead.
-  - `design/human/Goober.Intro.md`: the introduction and foundational thinking
+  - `design/human/000.Introduction.md`: the introduction and foundational thinking
     (the bet, boxes, manifests, storage, process model, the five arenas).
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
@@ -27,7 +27,8 @@ If a machine doc conflicts with a human doc, the human doc wins. Flag the confli
 rather than resolving it silently.
 
 **When asked to design something, write the design document in `design/machine/`.**
-Name files `Goober.<Topic>.md` to match the existing convention.
+Name files `NNN.<Topic>.md`, where `NNN` is a three-digit numeric prefix chosen so
+that lexical order is the ideal reading order (for example, `000.Introduction.md`).
 
 `README.md` summarizes the human intro. Keep it in sync when the human docs change.
 
