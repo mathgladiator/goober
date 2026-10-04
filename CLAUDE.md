@@ -20,6 +20,10 @@ Read these before doing design work:
     (the bet, boxes, manifests, storage, process model, the five arenas).
   - `design/human/010.Manifest.md`: the manifest shape, the generated host/guest C ABI
     (WASM reactor pattern), behavior (boundary, lifecycle, budget), and sharing rules.
+  - `design/human/020.DataFlow.md` (draft): context sources, `data.$provider.$strategy`,
+    access patterns, generated data code, per-tenant databases, and SQL forcing solo.
+  - `design/human/030.TheLargerEnvironment.md`: networking through the host, external
+    services via OpenAPI, `require` restrictions, host-held credentials, box-to-box calls.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
