@@ -82,6 +82,11 @@ boundaries; naming conventions; and anything that is costly to reverse. Lay out 
 options and tradeoffs, recommend one, and wait for the human. Don't pick quietly and
 keep going.
 
+## Daily review
+
+When the human asks for the daily review or end-of-day feedback, follow
+`design/REVIEW.PROCESS.md` exactly: its inputs, voice, sections, citation format, and checklist.
+
 ## Commit and push every change
 
 After every change made during a session, commit it and push to GitHub. Don't wait

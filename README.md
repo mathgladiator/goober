@@ -88,6 +88,10 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 This isn't Adama with a new coat of paint, though it does rob that grave for the parts
 that still hold.
 
+## Review process
+
+At the end of a working day, Claude writes a dated design review into `design/machine/`, following [`design/REVIEW.PROCESS.md`](design/REVIEW.PROCESS.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Jeffrey M. Barber
