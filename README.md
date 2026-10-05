@@ -76,6 +76,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/099.TheSystem.md`](design/human/099.TheSystem.md) | The system around: own the box, rent the edge (Caddy, Stalwart, Litestream, NATS) to keep the host small. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
+| [`design/machine/feedback-2026-10-04.md`](design/machine/feedback-2026-10-04.md) | Long-form outside review: what is unique, what can be bought, limits and proposals, security, the Hearth rebuild, and the blue-collar OS goal. |
 
 This isn't Adama with a new coat of paint, though it does rob that grave for the parts
 that still hold.

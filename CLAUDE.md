@@ -42,6 +42,9 @@ Read these before doing design work:
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
+  - `design/machine/feedback-2026-10-04.md`: a long-form review of every human doc, with
+    limits, proposals (identity/MCP, timers, fetch, compatibility views, adapters),
+    a security evaluation, and the Hearth and blue-collar OS goals.
 
 If a machine doc conflicts with a human doc, the human doc wins. Flag the conflict
 rather than resolving it silently.
