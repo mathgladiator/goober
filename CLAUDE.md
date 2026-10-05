@@ -57,6 +57,12 @@ that lexical order is the ideal reading order (for example, `000.Introduction.md
 
 ## Precision and decisions
 
+**Manifest naming rule.** Platform-defined manifest keys are lowercase words joined by
+hyphens (`timeout-ms`, `at-field`, `id-is`). Names people choose (route names, strategy
+labels, context variables, type fields) use underscores, since they become C identifiers.
+Keys from a borrowed format (OpenAPI, JSON Schema) keep that format's spelling. Apply this
+to every new example and flag violations when editing.
+
 This project demands extreme precision. Be exact in wording, names, paths, and
 invariants. Don't paper over ambiguity.
 
