@@ -69,6 +69,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/025.DataShape.md`](design/human/025.DataShape.md) | Shape of data: storage options and their invariants, sequencers and cache coherency, atomic write sets, and torn-write reporting. |
 | [`design/human/030.TheLargerEnvironment.md`](design/human/030.TheLargerEnvironment.md) | The network: external services via OpenAPI, request restrictions, host-held credentials, and box-to-box calls. |
 | [`design/human/035.TheOutBox.md`](design/human/035.TheOutBox.md) | The outbox: network side effects captured in the write set and delivered after commit, at least once. |
+| [`design/human/040.TheBus.md`](design/human/040.TheBus.md) | The bus: last-write pub/sub carrying signals not data, coalescing, SSE subscriptions, and broker options. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 

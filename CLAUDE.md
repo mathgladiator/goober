@@ -28,6 +28,8 @@ Read these before doing design work:
     services via OpenAPI, `require` restrictions, host-held credentials, box-to-box calls.
   - `design/human/035.TheOutBox.md`: effectful network calls as outbox elements in the
     write set, delivered after commit with idempotency keys and per-scope ordering.
+  - `design/human/040.TheBus.md`: pub/sub as monotonic signals (not data), coalesced
+    SSE subscriptions that re-evaluate a route, publish-on-commit, and bus options.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
