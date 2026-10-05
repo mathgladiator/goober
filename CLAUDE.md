@@ -28,8 +28,16 @@ Read these before doing design work:
     services via OpenAPI, `require` restrictions, host-held credentials, box-to-box calls.
   - `design/human/035.TheOutBox.md`: effectful network calls as outbox elements in the
     write set, delivered after commit with idempotency keys and per-scope ordering.
+  - `design/human/036.Json.md`: JSON types borrowed from OpenAPI `components.schemas`, a
+    strict subset mapped to C, and safe vs. breaking type changes.
+  - `design/human/037.Http.md`: declared query, headers, and bodies; the status vocabulary;
+    validation, CORS, and ETags handled by the host.
+  - `design/human/038.Mail.md`: mail routes via Stalwart MTA hooks, verified senders as
+    principals, signed reply-address capabilities, and outbound mail via the outbox.
   - `design/human/040.TheBus.md`: pub/sub as monotonic signals (not data), coalesced
     SSE subscriptions that re-evaluate a route, publish-on-commit, and bus options.
+  - `design/human/099.TheSystem.md`: the operational surroundings; rent the edge to keep the
+    host small.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
