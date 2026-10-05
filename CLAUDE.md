@@ -55,6 +55,8 @@ Read these before doing design work:
   - `design/machine/feedback-2026-10-04.md`: a long-form review of every human doc, with
     limits, proposals (identity/MCP, timers, fetch, compatibility views, adapters),
     a security evaluation, and the Hearth and blue-collar OS goals.
+  - `design/machine/feedback-2026-10-05.md`: daily review per REVIEW.PROCESS.md; top gaps are
+    the copy-boundary ABI, deploy/approval flow, and versioned dependency and rendering pins.
 
 If a machine doc conflicts with a human doc, the human doc wins. Flag the conflict
 rather than resolving it silently.
