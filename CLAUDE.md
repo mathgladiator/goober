@@ -18,8 +18,12 @@ Read these before doing design work:
   propose it in conversation or in `design/machine/` instead.
   - `design/human/000.Introduction.md`: the introduction and foundational thinking
     (the bet, boxes, manifests, storage, process model, the five arenas).
+  - `design/human/005.Goals-And-NonGoals.md`: what the experiment is for and against, and
+    how we will know it worked.
   - `design/human/010.Manifest.md`: the manifest shape, the generated host/guest C ABI
     (WASM reactor pattern), behavior (boundary, lifecycle, budget), and sharing rules.
+  - `design/human/015.Identity.md`: OAuth sessions, grant roles (flat strings, `/` namespaces),
+    deny-by-default requirements, grantable/revocable, the login API, anti-phishing UI.
   - `design/human/020.DataFlow.md` (draft): context sources, `data.$provider.$strategy`,
     access patterns, generated data code, per-tenant databases, and SQL forcing solo.
   - `design/human/025.DataShape.md`: storage shapes and invariants, sequencers and cache
@@ -36,6 +40,12 @@ Read these before doing design work:
     principals, signed reply-address capabilities, and outbound mail via the outbox.
   - `design/human/040.TheBus.md`: pub/sub as monotonic signals (not data), coalesced
     SSE subscriptions that re-evaluate a route, publish-on-commit, and bus options.
+  - `design/human/045.Time.md`: timer routes and data-driven schedules (plain `-field` refs).
+  - `design/human/050.AgentsMCP.md`: MCP tools/resources mirroring HTTP; agents limited to
+    mcp routes; isolate agents in their own box.
+  - `design/human/060.Files.md`: upload verb, preprocessing, ledger states, asset routes, GC.
+  - `design/human/064.Keys.md`: vault-held root key, envelope encryption, `keys/<scope>/...`.
+  - `design/human/070.UI.md`: content negotiation, markdown, Mustache, static, objects.
   - `design/human/099.TheSystem.md`: the operational surroundings; rent the edge to keep the
     host small.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
