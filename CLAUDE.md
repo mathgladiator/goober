@@ -16,38 +16,37 @@ Read these before doing design work:
   human meant. Never add, remove, or change ideas, positions, or decisions. If a
   clarity fix would shift the meaning, or if you think the content itself is wrong,
   propose it in conversation or in `design/machine/` instead.
-  - `design/human/000.Introduction.md`: the introduction and foundational thinking
-    (the bet, boxes, manifests, storage, process model, the five arenas).
-  - `design/human/005.Goals-And-NonGoals.md`: what the experiment is for and against, and
-    how we will know it worked.
-  - `design/human/010.Manifest.md`: the manifest shape, the generated host/guest C ABI
-    (WASM reactor pattern), behavior (boundary, lifecycle, budget), and sharing rules.
-  - `design/human/015.Identity.md`: OAuth sessions, grant roles (flat strings, `/` namespaces),
-    deny-by-default requirements, grantable/revocable, the login API, anti-phishing UI.
-  - `design/human/020.DataFlow.md` (draft): context sources, `data.$provider.$strategy`,
-    access patterns, generated data code, per-tenant databases, and SQL forcing solo.
-  - `design/human/025.DataShape.md`: storage shapes and invariants, sequencers and cache
-    coherency, atomic write sets (optional per route), and torn-write reporting.
-  - `design/human/030.TheLargerEnvironment.md`: networking through the host, external
-    services via OpenAPI, `require` restrictions, host-held credentials, box-to-box calls.
-  - `design/human/035.TheOutBox.md`: effectful network calls as outbox elements in the
-    write set, delivered after commit with idempotency keys and per-scope ordering.
-  - `design/human/036.Json.md`: JSON types borrowed from OpenAPI `components.schemas`, a
-    strict subset mapped to C, and safe vs. breaking type changes.
-  - `design/human/037.Http.md`: declared query, headers, and bodies; the status vocabulary;
-    validation, CORS, and ETags handled by the host.
-  - `design/human/038.Mail.md`: mail routes via Stalwart MTA hooks, verified senders as
-    principals, signed reply-address capabilities, and outbound mail via the outbox.
-  - `design/human/040.TheBus.md`: pub/sub as monotonic signals (not data), coalesced
-    SSE subscriptions that re-evaluate a route, publish-on-commit, and bus options.
+  - `design/human/000.Introduction.md`: the introduction and foundational thinking (the bet, boxes, manifests, storage, process model, the five arenas).
+  - `design/human/005.Goals-And-NonGoals.md`: what the experiment is for and against, and how we will know it worked.
+  - `design/human/010.Manifest.md`: manifest shape, protocols, the reactor ABI, behavior, sharing rules, naming rule, schema table.
+  - `design/human/012.Configs.md`: configs as box-less manifests; per-property priority; rewrites with `{name}`/`{name*}` patterns.
+  - `design/human/013.Identity.md`: per-domain identity realms, grant roles (`/` namespaces), deny-by-default, grantable/revocable, login API.
+  - `design/human/015.Domains.md`: domain registry (primary + redirects), `domain/*` context, optional verification, per-domain content.
+  - `design/human/019.Conflicts.md`: route conflicts keyed by domain; priority and share; shadowing reports.
+  - `design/human/020.DataFlow.md`: context sources, `data.$provider.$strategy`, access patterns, per-tenant databases, SQL forcing solo.
+  - `design/human/025.DataShape.md`: storage shapes, sequencers, atomic write sets (optional per route), torn-write reporting.
+  - `design/human/030.TheLargerEnvironment.md`: networking through the host, OpenAPI services, `require` restrictions, `keys/...` credentials.
+  - `design/human/035.TheOutBox.md`: effectful calls as outbox elements, delivered after commit with idempotency keys.
+  - `design/human/036.Json.md`: OpenAPI-only type vocabulary (shorthands, `token`), strict subset, safe vs. breaking changes.
+  - `design/human/037.Http.md`: declared query/headers/bodies; status vocabulary; validation, CORS, ETags in the host.
+  - `design/human/038.Mail.md`: mail routes, verified senders, reply-token capabilities, special providers, mailers.
+  - `design/human/039.InternalMessaging.md`: `internal` routes with `callers`, context propagation, no cycles, non-atomic sync calls.
+  - `design/human/040.TheBus.md`: pub/sub as monotonic signals, coalesced SSE subscriptions, publish-on-commit.
   - `design/human/045.Time.md`: timer routes and data-driven schedules (plain `-field` refs).
-  - `design/human/050.AgentsMCP.md`: MCP tools/resources mirroring HTTP; agents limited to
-    mcp routes; isolate agents in their own box.
+  - `design/human/050.AgentsMCP.md`: MCP tools/resources mirroring HTTP; agents limited to mcp routes; isolate agents in their own box.
   - `design/human/060.Files.md`: upload verb, preprocessing, ledger states, asset routes, GC.
   - `design/human/064.Keys.md`: vault-held root key, envelope encryption, `keys/<scope>/...`.
-  - `design/human/070.UI.md`: content negotiation, markdown, Mustache, static, objects.
-  - `design/human/099.TheSystem.md`: the operational surroundings; rent the edge to keep the
-    host small.
+  - `design/human/070.UI.md`: content negotiation, embedded static content and templates, objects, backing tree.
+  - `design/human/099.TheSystem.md`: the operational surroundings; rent the edge to keep the host small.
+  - `design/human/110.Languages.md`: C and Rust generators at launch; per-language plan and consequences.
+  - `design/human/120.TheBoundary.md`: wasm32 C ABI, fallback copies, pickup + relocation fast path, untrusted pointers.
+  - `design/human/150.DeepManifest.md`: THE field reference for manifests; box manifests vs. configs; reachability.
+  - `design/human/300.OperatingPanel.md`: operations surface, access logs, instrumentation, queues, counters, heat, traces.
+  - `design/human/305.Approvals.md`: version registry, manifest diffs, policies, go/slow/shadow modes.
+  - `design/human/310.Deployments.md`: version lifecycle, shadowing, comparison reports, splitting with guardrails.
+  - `design/human/315.StaticBundles.md`: bundles as content configs, unbundling, rogue-content checks, splitting.
+  - `design/human/320.WorkingSet.md`: editable draft overlay for editors/agents, submitted as a new version.
+  - `design/human/330.Stability.md`: capabilities (send-email@1) with swappable providers, adapter-box redirects, pins, dependency-only updates, replay.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
