@@ -30,13 +30,35 @@ Every section is judged against two stated goals:
 1. **Replace Hearth as new personal infrastructure.** The design should be able to run everything Hearth does today, as ordinary boxes, for one person and the handful of people they know.
 2. **Become a robust blue-collar operating system.** Many products for trades and small businesses, where a product only needs maintenance for its external dependencies, and never needs to change its capabilities or its user interface once approved.
 
+## Use cases to evaluate
+
+Beyond the two goals, every review also walks these use cases through the design. They are not commitments to build them; they are lenses that expose what the design can and can't do.
+
+### Personal public infrastructure
+
+A public service that connects people around personal software: someone vibes up a small game, a personal chat program, or a tiny tool for their friends, and publishes it on the platform for other people to find, use, and talk about. The review should ask:
+
+- Can a person with no operations experience publish a box safely, and can strangers use it without being exposed to each other's data?
+- How do people discover each other's software, and how do they connect around it, like playing a game together or joining a chat?
+- What stops one popular toy from costing the platform a fortune, or one malicious toy from harming its users?
+- How do identity, domains, and grant roles work when the audience is the public rather than a business's team?
+
+### Trad Wife System
+
+A place to gather your life in a safe way, so that an agent, like a Grok bot, can become your "trad wife": it holds the household's calendar, chores, meals, errands, plans, and notes, and turns them into a plan that the people in your life, the "flesh puppets," carry out to actuate change in real life. The agent plans; humans act. The review should ask:
+
+- Can a life's worth of personal data be gathered in one place while staying private, with each piece scoped to the people it belongs to?
+- How does the agent read across that life to produce plans, while the design still keeps it from acting beyond its tools?
+- How are the other people in the household represented, and how do they consent to what the agent knows about them and asks of them?
+- How do plans reach people, through mail, reminders, and subscriptions, and how does the agent learn what actually got done?
+
 ## Sections
 
 Each review contains these sections, in this order.
 
 ### 1. Setting the stage
 
-A short opening in the reviewer's voice: who is reviewing, what was reviewed (with the commit), and the two goals.
+A short opening in the reviewer's voice: who is reviewing, what was reviewed (with the commit), the two goals, and the use cases.
 
 ### 2. The design in one breath
 
@@ -58,7 +80,7 @@ The genuinely original ideas, or original combinations of known ideas, and why e
 
 ### 6. Limits
 
-The design's limits, each with what it is, why it matters, and a citation. Then **prioritize** them in a table against the two goals: for each limit, how much it blocks goal 1, how much it blocks goal 2, and an overall priority. Include a short list of **cross-document inconsistencies** (naming, types, examples that disagree), since this is a precision project.
+The design's limits, each with what it is, why it matters, and a citation. Then **prioritize** them in a table against the two goals and the use cases: for each limit, how much it blocks goal 1, goal 2, personal public infrastructure, and the Trad Wife System, and an overall priority. The goals outrank the use cases when they conflict. Include a short list of **cross-document inconsistencies** (naming, types, examples that disagree), since this is a precision project.
 
 ### 7. Proposals
 
@@ -81,6 +103,8 @@ What it would be like, day to day, for:
 
 - **Goal 1:** a table mapping each Hearth feature to the goober construct that covers it, and what's missing.
 - **Goal 2:** what has to be true for products to need maintenance only for external dependencies, and how close the design is.
+- **Personal public infrastructure:** walk through publishing a small game or chat program, and answer the questions in the use case.
+- **Trad Wife System:** walk through gathering a household's life and producing a plan, and answer the questions in the use case.
 
 ### 11. Build estimate
 
@@ -107,7 +131,8 @@ Every claim about the design is cited inline as **[NNN §Section]**: the documen
 - [ ] Every `design/human/` document was read at `HEAD`, and the previous review and git history were checked.
 - [ ] Every claim about the design has an inline citation, and the citation index is complete.
 - [ ] Every limit from the last review has a status in section 3.
-- [ ] Limits are prioritized against both goals.
+- [ ] Limits are prioritized against both goals and both use cases.
+- [ ] Both use cases are walked through in the goal mapping.
 - [ ] Every proposal names the limits it addresses.
 - [ ] Every component to be built has a confidence level.
 - [ ] The build estimate has phases, ranges, and stated assumptions.
