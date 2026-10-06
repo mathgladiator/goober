@@ -213,7 +213,7 @@ def main():
             f.write(book)
         if args.keep_markdown:
             shutil.copy(source, os.path.splitext(OUTPUT)[0] + ".md")
-        command = [pandoc, source, "--from=markdown-tex_math_dollars", "--to=pdf",
+        command = [pandoc, source, "--from=markdown-tex_math_dollars-citations", "--to=pdf",
                    f"--pdf-engine={typst}", "--toc", "--toc-depth=1",
                    "--number-sections",
                    "--variable=papersize:us-letter", "--variable=margin.x:1in",
