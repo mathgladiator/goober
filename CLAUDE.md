@@ -56,6 +56,8 @@ Read these before doing design work:
     a security evaluation, and the Hearth and blue-collar OS goals.
   - `design/machine/feedback-2026-10-05.md`: daily review per REVIEW.PROCESS.md; top gaps are
     the copy-boundary ABI, deploy/approval flow, and versioned dependency and rendering pins.
+  - `design/machine/feedback-2026-10-06.md`: daily review; P0s are the mail reachability
+    contradiction and the missing cost model; federation and consent for the use cases.
 
 If a machine doc conflicts with a human doc, the human doc wins. Flag the conflict
 rather than resolving it silently.

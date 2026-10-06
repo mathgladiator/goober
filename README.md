@@ -97,6 +97,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 | [`design/machine/feedback-2026-10-04.md`](design/machine/feedback-2026-10-04.md) | Long-form outside review: what is unique, what can be bought, limits and proposals, security, the Hearth rebuild, and the blue-collar OS goal. |
 | [`design/machine/feedback-2026-10-05.md`](design/machine/feedback-2026-10-05.md) | Daily review: changes since 10-04, limits prioritized against the Hearth and blue-collar goals, security under real traffic, build estimate, and one-shot readiness. |
+| [`design/machine/feedback-2026-10-06.md`](design/machine/feedback-2026-10-06.md) | Daily review: 13 new docs, mail reachability contradiction, cost model, per-domain identity vs. public toys, use-case walkthroughs, ~55% one-shot readiness. |
 
 This isn't Adama with a new coat of paint, though it does rob that grave for the parts
 that still hold.
