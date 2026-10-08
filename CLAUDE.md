@@ -17,7 +17,7 @@ Read these before doing design work:
   clarity fix would shift the meaning, or if you think the content itself is wrong,
   propose it in conversation or in `design/machine/` instead.
   - `design/human/000.Introduction.md`: the introduction and foundational thinking (the bet, boxes, manifests, storage, process model, the five arenas).
-  - `design/human/005.Goals-And-NonGoals.md`: what the experiment is for and against, and how we will know it worked.
+  - `design/human/005.Goals.md`: what the experiment is for and against, and how we will know it worked.
   - `design/human/010.Manifest.md`: manifest shape, protocols, the reactor ABI, behavior, sharing rules, naming rule, schema table.
   - `design/human/012.Configs.md`: configs as box-less manifests; per-property priority; rewrites with `{name}`/`{name*}` patterns.
   - `design/human/013.Identity.md`: per-domain identity realms, grant roles (`/` namespaces), deny-by-default, grantable/revocable, login API.

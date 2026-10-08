@@ -63,7 +63,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | Path | Contents |
 |---|---|
 | [`design/human/000.Introduction.md`](design/human/000.Introduction.md) | The introduction and foundational thinking. Start here. |
-| [`design/human/005.Goals-And-NonGoals.md`](design/human/005.Goals-And-NonGoals.md) | Goals and non-goals: confidence without reading code, containment over correctness, research over growth. |
+| [`design/human/005.Goals.md`](design/human/005.Goals.md) | Goals and non-goals: confidence without reading code, containment over correctness, research over growth. |
 | [`design/human/010.Manifest.md`](design/human/010.Manifest.md) | The manifest: routes, signals, the host/guest ABI (reactor pattern), behavior, budgets, sharing rules, and the schema table. |
 | [`design/human/012.Configs.md`](design/human/012.Configs.md) | Configs: manifests with no box, per-property header priority, domain overrides, and segment-based rewrites and redirects. |
 | [`design/human/013.Identity.md`](design/human/013.Identity.md) | Identity: per-domain realms, OAuth sessions, grant roles, substitution, bootstrapping owners, the login API, anti-phishing rules. |
