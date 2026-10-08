@@ -66,6 +66,8 @@ Read these before doing design work:
     the copy-boundary ABI, deploy/approval flow, and versioned dependency and rendering pins.
   - `design/machine/feedback-2026-10-06.md`: daily review; P0s are the mail reachability
     contradiction and the missing cost model; federation and consent for the use cases.
+  - `design/machine/feedback-2026-10-08.md`: daily review; P0s are the role sweep, the `.schema` format,
+    and the tenant-from-path contradiction; proposes a contraction gate for 420.
   - `design/machine/db.versioning.md`: survey of live schema versioning (PostgreSQL, MySQL tools,
     Spanner/CockroachDB, pgroll/Reshape, frameworks, schemaless, registries) and lessons for 420.
   - `design/machine/db.unify.event.source.md`: write logs beside tables, snapshot-and-follow conversion,
