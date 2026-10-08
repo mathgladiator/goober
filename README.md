@@ -99,6 +99,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/330.Stability.md`](design/human/330.Stability.md) | Stability: host capabilities with swappable providers, redirecting dead services to adapter boxes, pins, dependency-only updates, and replay. |
 | [`design/human/390.Quotas.md`](design/human/390.Quotas.md) | Quotas: operator-set limits on users, rows, bytes, and uploads per domain, with red lines before enforcement. |
 | [`design/human/400.Cluster.Service.md`](design/human/400.Cluster.Service.md) | Cluster, routing, and services: service mode, one ownership registry, leases with fencing epochs, routing, and recovery. |
+| [`design/human/401.PrimaryKeys.md`](design/human/401.PrimaryKeys.md) | Primary keys: host-minted, globally unique 64-bit ids from range leases. |
 | [`design/human/410.API.md`](design/human/410.API.md) | The operator API: every operation as HTTP and MCP, by area, with approval as the only UI-only action. |
 | [`design/human/420.Migration.md`](design/human/420.Migration.md) | Migration: schemas as partial table sets, immediate expansion/contraction/indexing, refused changes, data migrations through boxes. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |

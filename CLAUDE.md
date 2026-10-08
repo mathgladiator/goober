@@ -53,6 +53,7 @@ Read these before doing design work:
   - `design/human/330.Stability.md`: capabilities (send-email@1) with swappable providers, adapter-box redirects, pins, dependency-only updates, replay.
   - `design/human/390.Quotas.md`: host-config quotas per domain (users, rows, bytes, uploads), red lines, enforcement points.
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
+  - `design/human/401.PrimaryKeys.md`: host-minted 64-bit ids, counter -> host range -> thread slice, no reuse.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
   - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, data migrations via boxes.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
