@@ -22,9 +22,11 @@ Read these before doing design work:
   - `design/human/012.Configs.md`: configs as box-less manifests; per-property priority; rewrites with `{name}`/`{name*}` patterns.
   - `design/human/013.Identity.md`: per-domain identity realms, grant roles (`/` namespaces), deny-by-default, grantable/revocable, login API.
   - `design/human/015.Domains.md`: domain registry (primary + redirects), `domain/*` context, optional verification, per-domain content.
+  - `design/human/018.Reserved.md`: `{!name}` reserved identifiers set only by the host; `{name}` is caller-chosen; no context field.
   - `design/human/019.Conflicts.md`: route conflicts keyed by domain; priority and share; shadowing reports.
   - `design/human/020.DataFlow.md`: context sources, `data.$provider.$strategy`, access patterns, per-tenant databases, SQL forcing solo.
   - `design/human/025.DataShape.md`: storage shapes, sequencers, atomic write sets (optional per route), torn-write reporting.
+  - `design/human/028.Query.md`: three levels of reach (patterns, manifest iterators, direct SQL), budgets.
   - `design/human/030.TheLargerEnvironment.md`: networking through the host, OpenAPI services, `require` restrictions, `keys/...` credentials.
   - `design/human/035.TheOutBox.md`: effectful calls as outbox elements, delivered after commit with idempotency keys.
   - `design/human/036.Json.md`: OpenAPI-only type vocabulary (shorthands, `token`), strict subset, safe vs. breaking changes.
@@ -32,6 +34,7 @@ Read these before doing design work:
   - `design/human/038.Mail.md`: mail routes, verified senders, reply-token capabilities, special providers, mailers.
   - `design/human/039.InternalMessaging.md`: `internal` routes with `callers`, context propagation, no cycles, non-atomic sync calls.
   - `design/human/040.TheBus.md`: pub/sub as monotonic signals, coalesced SSE subscriptions, publish-on-commit.
+  - `design/human/041.ReservedRoutes.md`: the single list of host-owned prefixes, /internal/ hooks, reserved addresses and names.
   - `design/human/045.Time.md`: timer routes and data-driven schedules (plain `-field` refs).
   - `design/human/050.AgentsMCP.md`: MCP tools/resources mirroring HTTP; agents limited to mcp routes; isolate agents in their own box.
   - `design/human/060.Files.md`: upload verb, preprocessing, ledger states, asset routes, GC.
@@ -46,7 +49,12 @@ Read these before doing design work:
   - `design/human/310.Deployments.md`: version lifecycle, shadowing, comparison reports, splitting with guardrails.
   - `design/human/315.StaticBundles.md`: bundles as content configs, unbundling, rogue-content checks, splitting.
   - `design/human/320.WorkingSet.md`: editable draft overlay for editors/agents, submitted as a new version.
+  - `design/human/325.ManagingKeys.md`: key metadata in the panel, missing/rejected keys are 500s, urgent key requests.
   - `design/human/330.Stability.md`: capabilities (send-email@1) with swappable providers, adapter-box redirects, pins, dependency-only updates, replay.
+  - `design/human/390.Quotas.md`: host-config quotas per domain (users, rows, bytes, uploads), red lines, enforcement points.
+  - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
+  - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
+  - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, data migrations via boxes.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
@@ -58,6 +66,10 @@ Read these before doing design work:
     the copy-boundary ABI, deploy/approval flow, and versioned dependency and rendering pins.
   - `design/machine/feedback-2026-10-06.md`: daily review; P0s are the mail reachability
     contradiction and the missing cost model; federation and consent for the use cases.
+  - `design/machine/db.versioning.md`: survey of live schema versioning (PostgreSQL, MySQL tools,
+    Spanner/CockroachDB, pgroll/Reshape, frameworks, schemaless, registries) and lessons for 420.
+  - `design/machine/db.unify.event.source.md`: write logs beside tables, snapshot-and-follow conversion,
+    event sources for migrations and data services; open questions.
 
 If a machine doc conflicts with a human doc, the human doc wins. Flag the conflict
 rather than resolving it silently.
@@ -72,9 +84,11 @@ that lexical order is the ideal reading order (for example, `000.Introduction.md
 
 **Manifest naming rule.** Platform-defined manifest keys are lowercase words joined by
 hyphens (`timeout-ms`, `at-field`, `id-is`). Names people choose (route names, strategy
-labels, context variables, type fields) use underscores, since they become C identifiers.
-Keys from a borrowed format (OpenAPI, JSON Schema) keep that format's spelling. Apply this
-to every new example and flag violations when editing.
+labels, parameters, type fields) may use any style, snake_case or camelCase, as long as
+they are valid identifiers (letters, digits, underscores; no leading digit; not `goober_`
+or `!`). Don't "fix" their casing. Keys from a borrowed format (OpenAPI, JSON Schema) keep
+that format's spelling. Flag only real violations: hyphens in chosen names, or
+non-hyphenated platform keys.
 
 This project demands extreme precision. Be exact in wording, names, paths, and
 invariants. Don't paper over ambiguity.

@@ -68,9 +68,11 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/012.Configs.md`](design/human/012.Configs.md) | Configs: manifests with no box, per-property header priority, domain overrides, and segment-based rewrites and redirects. |
 | [`design/human/013.Identity.md`](design/human/013.Identity.md) | Identity: per-domain realms, OAuth sessions, grant roles, substitution, bootstrapping owners, the login API, anti-phishing rules. |
 | [`design/human/015.Domains.md`](design/human/015.Domains.md) | Domains: the registry, primary domains and redirects, optional verification, and domains in the secure context. |
+| [`design/human/018.Reserved.md`](design/human/018.Reserved.md) | Reserved identifiers: `{!tenant}`, `{!user_id}` and friends, set only by the host; retires the manifest's context field. |
 | [`design/human/019.Conflicts.md`](design/human/019.Conflicts.md) | Conflicts: the domain as the primary key, rejection by default, per-route priority, and peeling traffic with shares. |
 | [`design/human/020.DataFlow.md`](design/human/020.DataFlow.md) | Data flow (draft): context, data strategies and access patterns, generated data code, tenants, and SQL vs. solo. |
 | [`design/human/025.DataShape.md`](design/human/025.DataShape.md) | Shape of data: storage options and their invariants, sequencers and cache coherency, atomic write sets, and torn-write reporting. |
+| [`design/human/028.Query.md`](design/human/028.Query.md) | Queries: access patterns, manifest query iterators, and direct SQL scoped by SQLite's authorizer. |
 | [`design/human/030.TheLargerEnvironment.md`](design/human/030.TheLargerEnvironment.md) | The network: external services via OpenAPI, request restrictions, host-held credentials, and box-to-box calls. |
 | [`design/human/035.TheOutBox.md`](design/human/035.TheOutBox.md) | The outbox: network side effects captured in the write set and delivered after commit, at least once. |
 | [`design/human/036.Json.md`](design/human/036.Json.md) | JSON types: OpenAPI components.schemas, a strict subset mapped to C, one type vocabulary, and classified type changes. |
@@ -78,6 +80,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/038.Mail.md`](design/human/038.Mail.md) | Mail: Stalwart routes, verified senders, signed reply addresses, special providers, and system vs. tenant mailers. |
 | [`design/human/039.InternalMessaging.md`](design/human/039.InternalMessaging.md) | Internal messaging: internal routes between boxes, callers lists, propagated context, and atomicity rules. |
 | [`design/human/040.TheBus.md`](design/human/040.TheBus.md) | The bus: last-write pub/sub carrying signals not data, coalescing, SSE subscriptions, and broker options. |
+| [`design/human/041.ReservedRoutes.md`](design/human/041.ReservedRoutes.md) | Reserved routes: every host-owned prefix, internal hook, mail address, and name that boxes can never declare. |
 | [`design/human/045.Time.md`](design/human/045.Time.md) | Time: host timers and data-driven schedules, with fire semantics. |
 | [`design/human/050.AgentsMCP.md`](design/human/050.AgentsMCP.md) | MCP: tools and resources mirroring HTTP, agent-only routes, and agentic considerations. |
 | [`design/human/060.Files.md`](design/human/060.Files.md) | Files: uploads, preprocessing, the upload ledger, asset routes, and mark and sweep. |
@@ -92,12 +95,19 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/310.Deployments.md`](design/human/310.Deployments.md) | Deployments: hash-named versions, approval, shadowing, comparison reports, and traffic splitting. |
 | [`design/human/315.StaticBundles.md`](design/human/315.StaticBundles.md) | Static bundles: configs carrying embedded content, unbundled into routes, with rogue-content checks. |
 | [`design/human/320.WorkingSet.md`](design/human/320.WorkingSet.md) | The working set: a live, editable draft of static content visible only to editors and their agents until approved. |
+| [`design/human/325.ManagingKeys.md`](design/human/325.ManagingKeys.md) | Managing keys: operator visibility without values, missing keys as 500s, urgent key requests, coverage, rotation. |
 | [`design/human/330.Stability.md`](design/human/330.Stability.md) | Stability: host capabilities with swappable providers, redirecting dead services to adapter boxes, pins, dependency-only updates, and replay. |
+| [`design/human/390.Quotas.md`](design/human/390.Quotas.md) | Quotas: operator-set limits on users, rows, bytes, and uploads per domain, with red lines before enforcement. |
+| [`design/human/400.Cluster.Service.md`](design/human/400.Cluster.Service.md) | Cluster, routing, and services: service mode, one ownership registry, leases with fencing epochs, routing, and recovery. |
+| [`design/human/410.API.md`](design/human/410.API.md) | The operator API: every operation as HTTP and MCP, by area, with approval as the only UI-only action. |
+| [`design/human/420.Migration.md`](design/human/420.Migration.md) | Migration: schemas as partial table sets, immediate expansion/contraction/indexing, refused changes, data migrations through boxes. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 | [`design/machine/feedback-2026-10-04.md`](design/machine/feedback-2026-10-04.md) | Long-form outside review: what is unique, what can be bought, limits and proposals, security, the Hearth rebuild, and the blue-collar OS goal. |
 | [`design/machine/feedback-2026-10-05.md`](design/machine/feedback-2026-10-05.md) | Daily review: changes since 10-04, limits prioritized against the Hearth and blue-collar goals, security under real traffic, build estimate, and one-shot readiness. |
 | [`design/machine/feedback-2026-10-06.md`](design/machine/feedback-2026-10-06.md) | Daily review: 13 new docs, mail reachability contradiction, cost model, per-domain identity vs. public toys, use-case walkthroughs, ~55% one-shot readiness. |
+| [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
+| [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 
 This isn't Adama with a new coat of paint, though it does rob that grave for the parts
 that still hold.
