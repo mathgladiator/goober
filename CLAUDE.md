@@ -25,6 +25,7 @@ Read these before doing design work:
   - `design/human/018.Reserved.md`: `{!name}` reserved identifiers set only by the host; `{name}` is caller-chosen; no context field.
   - `design/human/019.Conflicts.md`: route conflicts keyed by domain; priority and share; shadowing reports.
   - `design/human/020.DataFlow.md`: context sources, `data.$provider.$strategy`, access patterns, per-tenant databases, SQL forcing solo.
+  - `design/human/021.PrimaryKeys.md`: host-minted 64-bit ids, counter -> host range -> thread slice, no reuse.
   - `design/human/025.DataShape.md`: storage shapes, sequencers, atomic write sets (optional per route), torn-write reporting.
   - `design/human/028.Query.md`: three levels of reach (patterns, manifest iterators, direct SQL), budgets.
   - `design/human/030.TheLargerEnvironment.md`: networking through the host, OpenAPI services, `require` restrictions, `keys/...` credentials.
@@ -53,7 +54,6 @@ Read these before doing design work:
   - `design/human/330.Stability.md`: capabilities (send-email@1) with swappable providers, adapter-box redirects, pins, dependency-only updates, replay.
   - `design/human/390.Quotas.md`: host-config quotas per domain (users, rows, bytes, uploads), red lines, enforcement points.
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
-  - `design/human/401.PrimaryKeys.md`: host-minted 64-bit ids, counter -> host range -> thread slice, no reuse.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
   - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, data migrations via boxes.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.

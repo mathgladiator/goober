@@ -71,6 +71,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/018.Reserved.md`](design/human/018.Reserved.md) | Reserved identifiers: `{!tenant}`, `{!user_id}` and friends, set only by the host; retires the manifest's context field. |
 | [`design/human/019.Conflicts.md`](design/human/019.Conflicts.md) | Conflicts: the domain as the primary key, rejection by default, per-route priority, and peeling traffic with shares. |
 | [`design/human/020.DataFlow.md`](design/human/020.DataFlow.md) | Data flow (draft): context, data strategies and access patterns, generated data code, tenants, and SQL vs. solo. |
+| [`design/human/021.PrimaryKeys.md`](design/human/021.PrimaryKeys.md) | Primary keys: host-minted, globally unique 64-bit ids from range leases. |
 | [`design/human/025.DataShape.md`](design/human/025.DataShape.md) | Shape of data: storage options and their invariants, sequencers and cache coherency, atomic write sets, and torn-write reporting. |
 | [`design/human/028.Query.md`](design/human/028.Query.md) | Queries: access patterns, manifest query iterators, and direct SQL scoped by SQLite's authorizer. |
 | [`design/human/030.TheLargerEnvironment.md`](design/human/030.TheLargerEnvironment.md) | The network: external services via OpenAPI, request restrictions, host-held credentials, and box-to-box calls. |
@@ -99,7 +100,6 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/330.Stability.md`](design/human/330.Stability.md) | Stability: host capabilities with swappable providers, redirecting dead services to adapter boxes, pins, dependency-only updates, and replay. |
 | [`design/human/390.Quotas.md`](design/human/390.Quotas.md) | Quotas: operator-set limits on users, rows, bytes, and uploads per domain, with red lines before enforcement. |
 | [`design/human/400.Cluster.Service.md`](design/human/400.Cluster.Service.md) | Cluster, routing, and services: service mode, one ownership registry, leases with fencing epochs, routing, and recovery. |
-| [`design/human/401.PrimaryKeys.md`](design/human/401.PrimaryKeys.md) | Primary keys: host-minted, globally unique 64-bit ids from range leases. |
 | [`design/human/410.API.md`](design/human/410.API.md) | The operator API: every operation as HTTP and MCP, by area, with approval as the only UI-only action. |
 | [`design/human/420.Migration.md`](design/human/420.Migration.md) | Migration: schemas as partial table sets, immediate expansion/contraction/indexing, refused changes, data migrations through boxes. |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
