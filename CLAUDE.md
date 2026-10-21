@@ -26,6 +26,7 @@ Read these before doing design work:
   - `design/human/019.Conflicts.md`: route conflicts keyed by domain; priority and share; shadowing reports.
   - `design/human/020.DataFlow.md`: context sources, `data.$provider.$strategy`, access patterns, per-tenant databases, SQL forcing solo.
   - `design/human/021.PrimaryKeys.md`: host-minted 64-bit ids, counter -> host range -> thread slice, no reuse.
+  - `design/human/023.Sourcing.md`: sources: append-only, expand-only event tables in source databases; `event` routes with per-route cursors.
   - `design/human/025.DataShape.md`: storage shapes, sequencers, atomic write sets (optional per route), torn-write reporting.
   - `design/human/028.Query.md`: three levels of reach (patterns, manifest iterators, direct SQL), budgets.
   - `design/human/030.TheLargerEnvironment.md`: networking through the host, OpenAPI services, `require` restrictions, `keys/...` credentials.
@@ -55,7 +56,8 @@ Read these before doing design work:
   - `design/human/390.Quotas.md`: host-config quotas per domain (users, rows, bytes, uploads), red lines, enforcement points.
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
-  - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, data migrations via boxes.
+  - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, upgrade boxes that force a change, data migrations via boxes.
+- `design/QUESTIONS.md`: open questions that block or limit a first version, by area.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
