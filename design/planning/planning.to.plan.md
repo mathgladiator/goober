@@ -1,0 +1,7 @@
+This document is how I think about planning the execution such that I can review how to make progress and gate execution.
+
+First thing first, since this is going to be C++, I want a solid breakdown of how each concept in goober is going to be turned into namespaces that have packages that have their own build process and validation lifecycle. I do not want 1,000 file change PRs. I want meaningful changes per package that enhance quality of the package and silo changes in a way that are reasonable for a human to review.
+
+In terms of src layout, I want each package to be a new directory so I expect to deal with many directories. I can see an a package for router, then I can see another package for server_http. Here, we let the underscore represent a namespace and we want lean names.
+
+This directory structure then has a $package/QUALITY.md that outlines the testing quality and philosophy. For example, the server_http package should be fairly straightforward adaptation of the http protocol and provides a common implementation. It sets up the http server, but it exposes the dependencies that packages that speak HTTP should leverage. We will use stable third party packages to be the protocol for isolating changes to modules.
