@@ -12,7 +12,9 @@ beyond what the human asks for.
 - C++20, CMake with Ninja presets, GoogleTest through CTest; dependencies under `~/.local`
   (Boost, GoogleTest, wasmtime v49.0.4 in `~/.local/opt/`).
 - `cmake --preset dev && cmake --build --preset dev && ctest --preset dev` builds and tests
-  everything. `host-src/README.md` covers running and playing.
+  everything (`just test` does the same). `host-src/README.md` covers running and playing.
+- The `justfile` at the repo root drives play: `just run`, `just setup`, `just mcp`. The
+  default host directory is `demo/`, which is ignored by git.
 - One package per directory under `host-src/packages/`, each with its own library, tests,
   and `QUALITY.md`. The underscore in a package name is a namespace (`server_http` is
   `goober::server::http`). Keep changes siloed per package so each is reviewable.
@@ -73,6 +75,8 @@ Read these before doing design work:
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/005.FirstVersion.md`: the v1 decisions from the human's answers: wasmtime,
     CMake, the two thread pools, the v1 ABI, storage and the host WAL, HTTP rules, MCP tools.
+  - `design/machine/006.LocalIdentity.md`: v1 identity (emailed codes, cookie sessions, realms
+    per tenant, route requirements), local mode, operator tokens, setup, and the justfile.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
