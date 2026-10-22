@@ -1,0 +1,12 @@
+{
+  "box": "dice",
+  "mission": "Roll dice and say hello, to play with the host.",
+  "domains": ["*"],
+  "behavior": { "timeout-ms": 200, "fuel": 10000000, "memory-max-bytes": 16777216 },
+  "routes": {
+    "http": {
+      "/roll/{sides : int32}": { "get": { "name": "roll" } },
+      "/hello/{name : string}": { "get": { "name": "hello" } }
+    }
+  }
+}

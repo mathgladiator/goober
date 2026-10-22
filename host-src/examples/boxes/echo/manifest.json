@@ -1,0 +1,11 @@
+{
+  "box": "echo",
+  "mission": "Show a box exactly what the host hands it: the request document.",
+  "domains": ["*"],
+  "routes": {
+    "http": {
+      "/echo": { "get": { "name": "echo_get" }, "post": { "name": "echo_post" } },
+      "/echo/{rest : string}": { "get": { "name": "echo_rest" } }
+    }
+  }
+}

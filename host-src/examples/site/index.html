@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>goober playground</title>
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+  <main>
+    <h1>goober playground</h1>
+    <p>This page is static content for the tenant <code>playground</code>, written through the
+       operator MCP and persisted under <code>storage/content/playground/</code>.</p>
+    <ul>
+      <li><a href="/hello/sensei">/hello/sensei</a>: a Rust box saying hello</li>
+      <li><a href="/roll/20">/roll/20</a>: roll a d20 with replayable randomness</li>
+      <li><a href="/echo/anything?q=1">/echo/anything?q=1</a>: what a box sees</li>
+      <li><a href="/nowhere">/nowhere</a>: the error page</li>
+    </ul>
+    <p><button id="roll">Roll a d6</button> <span id="out"></span></p>
+  </main>
+  <script>
+    document.getElementById('roll').onclick = async () => {
+      const r = await fetch('/roll/6');
+      const j = await r.json();
+      document.getElementById('out').textContent = 'rolled ' + j.roll;
+    };
+  </script>
+</body>
+</html>

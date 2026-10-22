@@ -1,0 +1,11 @@
+goober_package(
+  NAME host
+  SOURCES src/worker_pool.cpp src/host.cpp src/operations.cpp
+  DEPS goober_base goober_json goober_config goober_wal goober_content goober_router goober_manifest
+       goober_runtime_wasm goober_boxes goober_server_http goober_mcp
+  TESTS test/host_test.cpp
+)
+
+add_executable(goober-host src/main.cpp)
+target_link_libraries(goober-host PRIVATE goober_host)
+target_compile_options(goober-host PRIVATE -Wall -Wextra -Wpedantic)
