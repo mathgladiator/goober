@@ -8,6 +8,7 @@
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "goober/host/operator_tokens.h"
 #include "goober/json/json.h"
 
 namespace goober::host {
@@ -70,9 +71,15 @@ Response json_response(int status, std::string body) {
 void Host::handle_operations(const Request& req, const Finish& finish) {
   auto cfg = config_.get();
   std::string auth = req.header("authorization");
-  std::string want = "Bearer " + cfg->operations_token;
-  if (!constant_time_equal(auth, want)) {
-    auto res = json_response(401, R"({"error":"a bearer token from operations.token is required"})");
+  std::string operator_name;
+  if (!cfg->operations_token.empty() && constant_time_equal(auth, "Bearer " + cfg->operations_token)) {
+    operator_name = "config";
+  } else if (auth.starts_with("Bearer ")) {
+    if (auto t = find_operator_token(cfg->storage, std::string_view(auth).substr(7))) operator_name = "token:" + t->name;
+  }
+  if (operator_name.empty()) {
+    auto res = json_response(
+        401, R"({"error":"a bearer token is required: mint one with goober-host token create, or set operations.token"})");
     res.headers.emplace_back("www-authenticate", "Bearer");
     return finish(std::move(res), R"({"why":"operations token"})");
   }
@@ -82,7 +89,8 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     return finish(std::move(res), "");
   }
   auto reply = mcp_->handle(req.body);
-  finish(json_response(reply.status, std::move(reply.body)), R"({"operations":"mcp"})");
+  finish(json_response(reply.status, std::move(reply.body)),
+         json::dump(bj::object{{"operations", "mcp"}, {"operator", operator_name}}));
 }
 
 void Host::register_tools() {
@@ -111,7 +119,7 @@ void Host::register_tools() {
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array out;
                     for (const auto& [domain, entry] : config_.get()->domains) {
-                      out.push_back(bj::object{{"domain", domain}, {"tenant", entry.tenant}});
+                      out.push_back(bj::object{{"domain", domain}, {"tenant", entry.tenant}, {"owner", entry.owner}});
                     }
                     return ToolResult::ok(std::move(out));
                   }});
@@ -303,6 +311,73 @@ void Host::register_tools() {
                     auto lines = base::tail_lines(config_.get()->storage / "logs" / "access.log",
                                                   size_t(std::clamp<int64_t>(int_arg(args, "limit", 50), 1, 1000)));
                     return ToolResult::ok(parse_lines(lines));
+                  }});
+
+  // Identity (013.Identity.md; design/machine/006.LocalIdentity.md). A realm is a tenant.
+  auto realm_prop = string_property("A tenant name from the host config; its identity realm.");
+  auto known_tenant = [this](const std::optional<std::string>& t) {
+    if (!t) return false;
+    for (const auto& [d, e] : config_.get()->domains) {
+      if (e.tenant == *t) return true;
+    }
+    return false;
+  };
+  mcp_->add_tool({"realm_get",
+                  "A tenant realm's users, their roles and live sessions, and the newest identity audit records.",
+                  object_schema({{"tenant", realm_prop}}, {"tenant"}),
+                  [this, known_tenant](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+                    return ToolResult::ok(identity_->describe(*tenant, base::now_unix_ms()));
+                  }});
+  mcp_->add_tool(
+      {"role_grant",
+       "Grants a tenant role (like owner, admin, or admin/project_42) to an email in a tenant's realm. The user is "
+       "created if the address is new, so the role waits for their first sign-in. Host roles come only from the "
+       "host config.",
+       object_schema({{"tenant", realm_prop},
+                      {"email", string_property("The person's email address.")},
+                      {"role", string_property("role or role/scope, each part [A-Za-z0-9_]+.")}},
+                     {"tenant", "email", "role"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto email = arg(args, "email");
+         auto role = arg(args, "role");
+         if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+         if (!email || !role) return ToolResult::fail("email and role are required");
+         std::string why;
+         if (!identity_->grant(*tenant, *email, *role, "operator", base::now_unix_ms(), &why)) {
+           return ToolResult::fail(why);
+         }
+         return ToolResult::ok(bj::object{{"granted", *role}, {"to", *email}, {"tenant", *tenant}});
+       }});
+  mcp_->add_tool({"role_revoke", "Revokes a tenant role from an email in a tenant's realm.",
+                  object_schema({{"tenant", realm_prop},
+                                 {"email", string_property("The person's email address.")},
+                                 {"role", string_property("The exact role string.")}},
+                                {"tenant", "email", "role"}),
+                  [this, known_tenant](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    auto email = arg(args, "email");
+                    auto role = arg(args, "role");
+                    if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+                    if (!email || !role) return ToolResult::fail("email and role are required");
+                    std::string why;
+                    if (!identity_->revoke(*tenant, *email, *role, "operator", base::now_unix_ms(), &why)) {
+                      return ToolResult::fail(why);
+                    }
+                    return ToolResult::ok(bj::object{{"revoked", *role}, {"from", *email}, {"tenant", *tenant}});
+                  }});
+  mcp_->add_tool({"sessions_revoke", "Ends every session of a person in a tenant's realm, at their next request.",
+                  object_schema({{"tenant", realm_prop}, {"email", string_property("The person's email address.")}},
+                                {"tenant", "email"}),
+                  [this, known_tenant](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    auto email = arg(args, "email");
+                    if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+                    if (!email) return ToolResult::fail("email is required");
+                    int n = identity_->revoke_sessions(*tenant, *email, "operator", base::now_unix_ms());
+                    return ToolResult::ok(bj::object{{"ended", n}});
                   }});
 }
 

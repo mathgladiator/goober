@@ -36,9 +36,75 @@ const std::set<std::string> kLaterTopLevel = {"types", "pins",    "policy",   "d
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
                                               "instances"};
-const std::set<std::string> kLaterRoute = {"response", "requirements", "public", "body",  "query",
-                                           "headers",  "callers",      "signal", "max-body-bytes", "timeout-ms",
-                                           "description", "request-headers"};
+const std::set<std::string> kLaterRoute = {"response", "body",     "query",     "headers",     "callers",
+                                           "signal",   "max-body-bytes", "timeout-ms", "description",
+                                           "request-headers", "grantable", "revocable"};
+
+bool is_role_char(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+// A role in a requirement: "host:name", or "role" or "role/scope", where any part
+// may hold {param} (a path parameter of this route), {!tenant}, or {!user_id}.
+bool check_role_template(std::string_view role, const router::RoutePattern& pattern, std::string* why) {
+  std::string_view body = role;
+  bool host = body.starts_with("host:");
+  if (host) body.remove_prefix(5);
+  int slashes = 0;
+  size_t run = 0;  // characters in the current part
+  for (size_t i = 0; i < body.size(); ++i) {
+    char c = body[i];
+    if (c == '{') {
+      size_t close = body.find('}', i);
+      if (close == std::string_view::npos) return *why = "an unclosed { in \"" + std::string(role) + "\"", false;
+      std::string name(body.substr(i + 1, close - i - 1));
+      if (name.starts_with("!")) {
+        if (name != "!tenant" && name != "!user_id") {
+          return *why = "{" + name + "} is not a reserved identifier v1 knows ({!tenant}, {!user_id})", false;
+        }
+      } else {
+        bool found = false;
+        for (const auto& seg : pattern.segments) found = found || (!seg.literal && seg.text == name);
+        if (!found) return *why = "{" + name + "} is not a parameter of " + pattern.source, false;
+      }
+      run += 1;
+      i = close;
+    } else if (c == '/') {
+      if (host || ++slashes > 1 || run == 0) return *why = "\"" + std::string(role) + "\" is not role or role/scope", false;
+      run = 0;
+    } else if (is_role_char(c)) {
+      run += 1;
+    } else {
+      return *why = "\"" + std::string(role) + "\" has a character roles can't hold", false;
+    }
+  }
+  if (run == 0) return *why = "\"" + std::string(role) + "\" is not role or role/scope", false;
+  return true;
+}
+
+bool parse_requirements(const bj::value& v, const router::RoutePattern& pattern,
+                        std::vector<std::vector<std::string>>* out, std::string* why) {
+  if (!v.is_array()) return *why = "requirements must be a list", false;
+  const auto& list = v.get_array();
+  bool flat = list.empty() || list[0].is_string();
+  auto read_clause = [&](const bj::array& items) {
+    std::vector<std::string> clause;
+    for (const auto& r : items) {
+      if (!r.is_string()) return *why = "requirements must hold role strings, or lists of them", false;
+      std::string role(r.get_string());
+      if (!check_role_template(role, pattern, why)) return false;
+      clause.push_back(role);
+    }
+    out->push_back(std::move(clause));
+    return true;
+  };
+  if (flat) return read_clause(list);
+  for (const auto& c : list) {
+    if (!c.is_array()) return *why = "requirements mixes roles and lists of roles", false;
+    if (!read_clause(c.get_array())) return false;
+  }
+  return true;
+}
 const std::set<std::string> kVerbs = {"get", "post", "put", "patch", "delete"};
 
 bool under_reserved(const router::RoutePattern& p) {
@@ -124,7 +190,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           const auto& def = verb.value().get_object();
           for (const auto& f : def) {
             std::string key(f.key());
-            if (key == "name") continue;
+            if (key == "name" || key == "public" || key == "requirements") continue;
             if (kLaterRoute.count(key)) {
               m.warnings.push_back(where + "." + key + " is accepted but not implemented in v1");
               continue;
@@ -140,13 +206,77 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           if (!shapes.add(*pattern, v, 0)) {
             return *error = where + " conflicts with another route of the same shape", std::nullopt;
           }
-          m.routes.push_back(HttpRoute{v, *name, *pattern});
+          HttpRoute route{v, *name, *pattern, false, {}};
+          auto is_public = goober::json::get_bool(def, "public", &err);
+          if (!err.empty()) return *error = where + ": " + err, std::nullopt;
+          auto req = def.find("requirements");
+          if (is_public.value_or(false) && req != def.end()) {
+            return *error = where + ": a route can't be both public and have requirements", std::nullopt;
+          }
+          if (req != def.end()) {
+            std::string why;
+            if (!parse_requirements(req->value(), *pattern, &route.requirements, &why)) {
+              return *error = where + ": " + why, std::nullopt;
+            }
+          } else if (is_public.value_or(false)) {
+            route.is_public = true;
+          } else {
+            return *error = where + ": needs \"public\": true or \"requirements\" ([] is any signed-in user); "
+                                    "a route with neither is denied to everyone",
+                   std::nullopt;
+          }
+          m.routes.push_back(std::move(route));
         }
       }
     }
   }
   if (!err.empty()) return *error = err, std::nullopt;
   return m;
+}
+
+Access check_access(const HttpRoute& route, const Caller* caller, const std::map<std::string, std::string>& params,
+                    std::string_view tenant) {
+  if (route.is_public) return Access::kAllowed;
+  if (!caller) return Access::kSignIn;
+  bool bad_value = false;
+  auto substitute = [&](const std::string& role) {
+    std::string out;
+    for (size_t i = 0; i < role.size(); ++i) {
+      if (role[i] != '{') {
+        out += role[i];
+        continue;
+      }
+      size_t close = role.find('}', i);
+      std::string name = role.substr(i + 1, close - i - 1);
+      std::string value;
+      if (name == "!tenant") {
+        value = tenant;
+      } else if (name == "!user_id") {
+        value = caller->user_id;
+      } else if (auto it = params.find(name); it != params.end()) {
+        value = it->second;
+      }
+      // No substituted value may smuggle in a scope or a namespace.
+      if (value.find('/') != std::string::npos || value.find(':') != std::string::npos) bad_value = true;
+      out += value;
+      i = close;
+    }
+    return out;
+  };
+  for (const auto& clause : route.requirements) {
+    bool applies = true, holds = true;
+    if (caller->host && clause.empty()) applies = false;
+    for (const auto& role : clause) {
+      // A host identity satisfies only clauses that name host roles, and a tenant
+      // identity only clauses that don't.
+      if (role.starts_with("host:") != caller->host) applies = false;
+      std::string want = substitute(role);
+      if (std::find(caller->roles.begin(), caller->roles.end(), want) == caller->roles.end()) holds = false;
+    }
+    if (bad_value) return Access::kBadValue;
+    if (applies && holds) return Access::kAllowed;
+  }
+  return Access::kForbidden;
 }
 
 }  // namespace goober::manifest

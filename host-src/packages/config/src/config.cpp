@@ -21,7 +21,7 @@ int64_t Limit::resolve(std::optional<int64_t> requested) const {
   return *requested > max_value ? max_value : *requested;
 }
 
-std::optional<std::string> HostConfig::tenant_for_host(std::string_view host) const {
+std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std::string_view host) const {
   std::string h = base::to_lower(host);
   if (!h.empty() && h.front() == '[') {
     auto close = h.find(']');
@@ -30,9 +30,41 @@ std::optional<std::string> HostConfig::tenant_for_host(std::string_view host) co
     h = h.substr(0, colon);
   }
   if (!h.empty() && h.back() == '.') h.pop_back();
-  auto it = domains.find(h);
-  if (it == domains.end()) return std::nullopt;
-  return it->second.tenant;
+  if (auto it = domains.find(h); it != domains.end()) return *it;
+  if (!local || domains.empty()) return std::nullopt;
+  constexpr std::string_view kSuffix = ".localhost";
+  if (h.size() > kSuffix.size() && h.ends_with(kSuffix)) {
+    if (auto it = domains.find(h.substr(0, h.size() - kSuffix.size())); it != domains.end()) return *it;
+    return std::nullopt;
+  }
+  if (h == "localhost" || h == "127.0.0.1") {
+    if (auto it = domains.find(platform_domain); it != domains.end()) return *it;
+    return *domains.begin();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> HostConfig::tenant_for_host(std::string_view host) const {
+  auto r = resolve_host(host);
+  if (!r) return std::nullopt;
+  return r->second.tenant;
+}
+
+std::string HostConfig::base_url() const {
+  if (!public_url.empty()) return public_url;
+  std::string addr = listen_address == "0.0.0.0" || listen_address == "::" ? "127.0.0.1" : listen_address;
+  if (addr.find(':') != std::string::npos) addr = "[" + addr + "]";
+  return "http://" + addr + ":" + std::to_string(listen_port);
+}
+
+std::shared_ptr<const HostConfig> local_mode(std::shared_ptr<const HostConfig> config) {
+  auto out = std::make_shared<HostConfig>(*config);
+  out->local = true;
+  out->listen_address = "127.0.0.1";
+  out->identity.cookie_secure = false;
+  out->identity.mailer = "dev";
+  out->public_url.clear();
+  return out;
 }
 
 namespace {
@@ -48,6 +80,15 @@ bool check_keys(const bj::object& obj, std::initializer_list<std::string_view> a
     }
   }
   return true;
+}
+
+bool is_email(std::string_view s) {
+  auto at = s.find('@');
+  if (at == std::string_view::npos || at == 0 || at + 1 >= s.size() || s.size() > 254) return false;
+  for (unsigned char c : s) {
+    if (c <= 0x20 || c == '<' || c == '>' || c == '"' || c == ',' || c >= 0x7f) return false;
+  }
+  return s.find('@', at + 1) == std::string_view::npos;
 }
 
 bool read_limit(const bj::object& limits, std::string_view key, Limit& out, std::string* error) {
@@ -81,7 +122,8 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   }
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
-  if (!check_keys(root, {"listen", "storage", "platform-domain", "domains", "operations", "threads", "limits"},
+  if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
+                          "threads", "limits"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -105,21 +147,58 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       std::string domain = base::to_lower(kv.key());
       if (!kv.value().is_object()) return *error = "domains." + domain + " must be an object", nullptr;
       const auto& entry = kv.value().get_object();
-      if (!check_keys(entry, {"tenant"}, "domains." + domain, &err)) return *error = err, nullptr;
+      if (!check_keys(entry, {"tenant", "owner"}, "domains." + domain, &err)) return *error = err, nullptr;
       auto tenant = get_string(entry, "tenant", &err);
       if (!tenant || !base::is_valid_name(*tenant)) {
         return *error = "domains." + domain + ".tenant must match [a-z][a-z0-9_]*", nullptr;
       }
-      cfg->domains[domain] = DomainEntry{*tenant};
+      std::string owner = base::to_lower(get_string(entry, "owner", &err).value_or(""));
+      if (!owner.empty() && !is_email(owner)) return *error = "domains." + domain + ".owner must be an email", nullptr;
+      cfg->domains[domain] = DomainEntry{*tenant, owner};
     }
   }
   if (const auto* ops = get_object(root, "operations", &err)) {
     if (!check_keys(*ops, {"token"}, "operations", &err)) return *error = err, nullptr;
     if (auto v = get_string(*ops, "token", &err)) cfg->operations_token = *v;
   }
-  if (cfg->operations_token.size() < 16) {
-    *error = "operations.token must be at least 16 characters";
+  if (!cfg->operations_token.empty() && cfg->operations_token.size() < 16) {
+    *error = "operations.token must be at least 16 characters, or left out";
     return nullptr;
+  }
+  if (auto v = get_string(root, "public-url", &err)) {
+    while (!v->empty() && v->back() == '/') v->pop_back();
+    if (!v->starts_with("http://") && !v->starts_with("https://")) {
+      return *error = "public-url must start with http:// or https://", nullptr;
+    }
+    cfg->public_url = *v;
+  }
+  if (const auto* id = get_object(root, "identity", &err)) {
+    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "operators"}, "identity", &err)) {
+      return *error = err, nullptr;
+    }
+    if (auto v = get_bool(*id, "cookie-secure", &err)) cfg->identity.cookie_secure = *v;
+    if (auto v = get_int(*id, "session-days", &err)) cfg->identity.session_days = *v;
+    if (cfg->identity.session_days < 1 || cfg->identity.session_days > 400) {
+      return *error = "identity.session-days must be 1 to 400", nullptr;
+    }
+    if (auto v = get_string(*id, "mailer", &err)) cfg->identity.mailer = *v;
+    if (cfg->identity.mailer != "dev") return *error = "identity.mailer must be \"dev\" in v1", nullptr;
+    if (const auto* ops = get_object(*id, "operators", &err)) {
+      for (const auto& kv : *ops) {
+        std::string email = base::to_lower(kv.key());
+        if (!is_email(email)) return *error = "identity.operators: \"" + email + "\" is not an email", nullptr;
+        if (!kv.value().is_array()) return *error = "identity.operators." + email + " must be a list of host roles", nullptr;
+        auto& roles = cfg->identity.operators[email];
+        for (const auto& r : kv.value().get_array()) {
+          std::string_view role = r.is_string() ? std::string_view(r.get_string()) : "";
+          std::string_view rest = role.starts_with("host:") ? role.substr(5) : "";
+          if (!base::is_valid_name(rest)) {
+            return *error = "identity.operators." + email + ": each role must look like host:owner", nullptr;
+          }
+          roles.emplace_back(role);
+        }
+      }
+    }
   }
   if (const auto* threads = get_object(root, "threads", &err)) {
     if (!check_keys(*threads, {"network", "boxes", "pin-boxes"}, "threads", &err)) return *error = err, nullptr;

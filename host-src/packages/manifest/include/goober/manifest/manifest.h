@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,8 +15,31 @@ struct HttpRoute {
   std::string verb;  // get, post, put, patch, delete
   std::string name;  // the route name; the box exports goober_route_$name
   router::RoutePattern pattern;
+  // Exactly one of these is set (013.Identity.md): "public": true, or requirements
+  // in disjunctive normal form, an OR of AND clauses. An empty clause is any
+  // signed-in user of the realm. Roles may hold {param}, {!tenant}, and {!user_id}.
+  bool is_public = false;
+  std::vector<std::vector<std::string>> requirements;
   std::string export_name() const { return "goober_route_" + name; }
 };
+
+// Who is calling, as the identity service resolved them.
+struct Caller {
+  std::string user_id;
+  bool host = false;               // a host identity: only clauses naming host roles apply
+  std::vector<std::string> roles;  // tenant roles, or host roles for a host identity
+};
+
+enum class Access {
+  kAllowed,
+  kSignIn,     // no caller, and the route isn't public: 401
+  kForbidden,  // a caller who satisfies no clause: 403
+  kBadValue,   // a substituted value holds "/" or ":": 400
+};
+
+// Checks a caller (nullptr when signed out) against a route's requirements.
+Access check_access(const HttpRoute& route, const Caller* caller, const std::map<std::string, std::string>& params,
+                    std::string_view tenant);
 
 struct Behavior {
   std::optional<int64_t> timeout_ms;

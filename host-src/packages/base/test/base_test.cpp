@@ -39,6 +39,9 @@ TEST(Encoding, PercentDecode) {
   EXPECT_EQ(*percent_decode("%2F"), "/");
   EXPECT_FALSE(percent_decode("%2").has_value());
   EXPECT_FALSE(percent_decode("%zz").has_value());
+  EXPECT_EQ(percent_encode("/a b?c=d&e"), "%2Fa%20b%3Fc%3Dd%26e");
+  EXPECT_EQ(*percent_decode(percent_encode("x/y~z é")), "x/y~z é");
+  EXPECT_EQ(html_escape("<a href=\"x\">&'</a>"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;");
 }
 
 TEST(Names, Grammar) {

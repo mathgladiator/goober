@@ -13,4 +13,9 @@ and the `goober-host` binary with SIGHUP reload.
 - Every response carries a `goober-request-id` and gets one access-log line. A box's
   failures land in its log with the outcome and the reason, but never in the page a
   visitor sees.
-- Credentials (`authorization`, `cookie`) never reach a box.
+- Credentials (`authorization`, `cookie`) never reach a box. A box learns who is calling
+  only from `user` in its request document.
+- Every box route is gated by its requirements before the box runs: 303 to sign in for a
+  browser, 401 otherwise, 403 for unmet requirements, 400 for smuggled `/` or `:`.
+- Identity pages are host-owned and unframeable, and refuse cross-origin POSTs.
+- Operator tokens are stored only as hashes and checked per request, so revoking is immediate.

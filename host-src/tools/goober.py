@@ -6,8 +6,9 @@
     tools/goober.py deploy <manifest.json> <module.wat|module.wasm>
     tools/goober.py push <tenant> <directory>     upload a directory as static content
 
-The endpoint and token come from GOOBER_URL (default http://127.0.0.1:8080) and
-GOOBER_TOKEN (default: operations.token from dev/host.json).
+The host comes from a config file: GOOBER_CONFIG, or else demo/host.json at the
+repo root. GOOBER_URL overrides the endpoint (default: the config's listen port on
+127.0.0.1) and GOOBER_TOKEN the bearer token (default: the config's operations.token).
 """
 
 import base64
@@ -19,19 +20,37 @@ import urllib.error
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-URL = os.environ.get("GOOBER_URL", "http://127.0.0.1:8080").rstrip("/") + "/goober-operations-mcp"
+REPO = HERE.parent.parent
+
+
+def config():
+    path = pathlib.Path(os.environ.get("GOOBER_CONFIG", REPO / "demo" / "host.json"))
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        sys.exit(f"no host config at {path}; run `just setup`, or set GOOBER_CONFIG")
+
+
+def url():
+    if "GOOBER_URL" in os.environ:
+        base = os.environ["GOOBER_URL"]
+    else:
+        base = f"http://127.0.0.1:{config().get('listen', {}).get('port', 8080)}"
+    return base.rstrip("/") + "/goober-operations-mcp"
 
 
 def token():
     if "GOOBER_TOKEN" in os.environ:
         return os.environ["GOOBER_TOKEN"]
-    cfg = json.loads((HERE.parent / "dev" / "host.json").read_text())
-    return cfg["operations"]["token"]
+    t = config().get("operations", {}).get("token")
+    if not t:
+        sys.exit("the config has no operations.token; set GOOBER_TOKEN to a token from `just mcp`")
+    return t
 
 
 def rpc(method, params=None):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}).encode()
-    req = urllib.request.Request(URL, data=body, method="POST", headers={
+    req = urllib.request.Request(url(), data=body, method="POST", headers={
         "content-type": "application/json",
         "accept": "application/json, text/event-stream",
         "authorization": "Bearer " + token(),

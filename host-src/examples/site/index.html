@@ -17,6 +17,13 @@
       <li><a href="/echo/anything?q=1">/echo/anything?q=1</a>: what a box sees</li>
       <li><a href="/nowhere">/nowhere</a>: the error page</li>
     </ul>
+    <h2>Identity</h2>
+    <ul>
+      <li><a href="/identity/sign-in">Sign in</a> with an emailed code (local mode prints it in the host's terminal)</li>
+      <li><a href="/identity/account">/identity/account</a>: who you are, your roles, and sign out</li>
+      <li><a href="/whoami">/whoami</a>: any signed-in user; the box sees <code>user</code></li>
+      <li><a href="/owners-room">/owners-room</a>: only <code>owner</code> or a <code>host:owner</code> operator</li>
+    </ul>
     <p><button id="roll">Roll a d6</button> <span id="out"></span></p>
   </main>
   <script>

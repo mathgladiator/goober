@@ -17,36 +17,51 @@ ctest --preset dev          # every package's tests
 
 ## Run and play
 
+From the repo root, with [`just`](https://github.com/casey/just):
+
 ```sh
-build/dev/packages/host/goober-host --config dev/host.json   # serves http://127.0.0.1:8080
-tools/play.sh        # in another shell: builds and deploys the example boxes and site
+just setup   # interactive: dev box or production, domains, owners, operators, threads, limits
+just run     # build, then run demo/ in local mode (dev defaults if there is no config yet)
+just mcp     # mint an operator token and print the `claude mcp add` command
 ```
 
-Then open http://localhost:8080/. `kill -HUP` rereads the config; Ctrl-C stops the host.
-Everything the host owns is under `dev/storage/`, readable by a person and by a backup tool.
+Then open http://localhost:8080/. `just reload` rereads the config; Ctrl-C stops the host.
+Everything the host owns is under `demo/storage/`, readable by a person and by a backup
+tool. Any directory works in place of `demo`: `just setup /srv/goober`, `just run /srv/goober`.
+
+**Local mode** (`--local`, which `just run` uses) listens on 127.0.0.1, uses plain session
+cookies, prints sign-in codes in the terminal, and lets `$domain.localhost` reach any
+configured `$domain`, so a production config can be played on a laptop.
+
+### Identity
+
+Sign in at `/identity/sign-in` on any domain with an emailed six-digit code; in local mode
+the code is printed by the host. `/identity/account` shows who you are and your roles. The
+address set as a domain's `owner` becomes `owner` of that tenant's realm at sign-in, and the
+addresses in `identity.operators` can sign in as host operators. Every route declares
+`"public": true` or `"requirements"`, and the box receives `user` in its request document.
+See [`006.LocalIdentity.md`](../design/machine/006.LocalIdentity.md).
 
 ### Operating it over MCP
 
-The operator endpoint is `/goober-operations-mcp` (MCP over streamable HTTP), with the
-bearer token from `operations.token`. To give Claude Code the tools:
-
-```sh
-claude mcp add --transport http goober http://127.0.0.1:8080/goober-operations-mcp \
-  --header "Authorization: Bearer dev-token-change-me-please"
-```
+The operator endpoint is `/goober-operations-mcp` (MCP over streamable HTTP) with a bearer
+token: one minted by `just mcp` (stored only as a hash), or `operations.token` from the
+config on a dev box.
 
 | tool | does |
 | --- | --- |
 | content_put, content_get, content_list, content_delete | Static files per tenant (`_host` for host-wide ones like `error-message/404.html`). |
 | version_upload | A manifest plus WAT or base64 WASM; checked, stored, and made active. |
 | version_list, version_get, version_promote | Versions of a box; promote is rollback. |
+| realm_get, role_grant, role_revoke, sessions_revoke | A tenant realm's users and roles. |
 | box_list, box_logs, access_log, host_health, domain_list | Looking around. |
 
 `tools/goober.py` is a stdlib-only client for the same endpoint:
 
 ```sh
-tools/goober.py tools
+tools/goober.py tools          # uses demo/host.json, or GOOBER_CONFIG
 tools/goober.py call content_put tenant=playground path=hi.txt text=hello
+tools/goober.py call role_grant tenant=playground email=friend@example.com role=admin
 tools/goober.py deploy examples/boxes/echo/manifest.json examples/boxes/echo/echo.wat
 tools/goober.py push playground examples/site
 ```
@@ -67,9 +82,11 @@ one function per route, `goober_route_$name`, taking nothing and returning i32 (
 | goober_log | (level, ptr, len) -> i32, written to logs/boxes/$box.log after the call |
 
 The request document is JSON: `request_id`, `method`, `path`, `params`, `query`,
-`headers` (without authorization and cookie), `body`, `domain`, and `tenant`.
+`headers` (without authorization and cookie), `body`, `domain`, `tenant`, and `user`
+(null, or `user_id`, `email`, `roles`, `host`).
 
-- `examples/boxes/echo` is hand-written WAT that returns the request document.
+- `examples/boxes/echo` is hand-written WAT that returns the request document, with
+  `/whoami` (any signed-in user) and `/owners-room` (`owner` or `host:owner`).
 - `examples/boxes/dice` is Rust (`cargo build --release --target wasm32-unknown-unknown`)
   with a small binding in `src/goober.rs`.
 
@@ -87,9 +104,10 @@ binary, and a `QUALITY.md`. The underscore in a name is a namespace (`server_htt
 | wal | The host WAL: bundles of file changes, committed then applied, replayed after a crash. |
 | content | Static content per tenant, through the WAL. |
 | router | Path normalization, route patterns, and the route table. |
-| manifest | The v1 manifest subset and its checks. |
+| manifest | The v1 manifest subset, its checks, and route requirements. |
 | runtime_wasm | wasmtime with fuel, epoch timeouts, memory caps, and the goober ABI. |
 | boxes | Box versions, activation, and per-domain route tables. |
+| identity | Sign-in codes, sessions, roles, and the audit, in one SQLite database per realm. |
 | server_http | The HTTP/1.1 server on Boost.Beast. |
 | mcp | MCP over streamable HTTP: JSON-RPC and a tool registry. |
-| host | The wiring, the operator tools, and the `goober-host` binary. |
+| host | The wiring, identity endpoints, operator tools and tokens, and the `goober-host` binary. |

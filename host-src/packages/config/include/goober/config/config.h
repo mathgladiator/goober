@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace goober::config {
 
@@ -21,6 +23,19 @@ struct Limit {
 
 struct DomainEntry {
   std::string tenant;
+  std::string owner;  // the first owner's email, granted "owner" when that address first signs in; or ""
+};
+
+// The built-in identity service (013.Identity.md; design/machine/006.LocalIdentity.md).
+struct IdentityConfig {
+  // Session cookies are Secure and named __Host-goober-session. Off in local mode,
+  // since a plain-HTTP host can't set a Secure cookie everywhere.
+  bool cookie_secure = true;
+  int64_t session_days = 30;
+  // "dev" writes each mail to storage/mail/ as a MIME file. No real provider in v1.
+  std::string mailer = "dev";
+  // Host identities: an email and the host roles it holds, like "host:owner".
+  std::map<std::string, std::vector<std::string>> operators;
 };
 
 // The whole host configuration, from one JSON file (see design/machine/005.FirstVersion.md §6).
@@ -30,7 +45,15 @@ struct HostConfig {
   std::filesystem::path storage = "./storage";
   std::string platform_domain = "localhost";
   std::map<std::string, DomainEntry> domains;
+  // Where people and agents reach this host, like https://goober.example.com. Optional;
+  // used to print links. Defaults to http://$listen_address:$listen_port.
+  std::string public_url;
+  // A bearer token for the operator MCP endpoint, kept in the config. Optional:
+  // tokens minted with `goober-host token create` live in storage instead.
   std::string operations_token;
+  IdentityConfig identity;
+  // Set by --local, never by the file: see local_mode().
+  bool local = false;
   int network_threads = 2;
   int box_threads = 4;
   bool pin_boxes = false;
@@ -39,9 +62,20 @@ struct HostConfig {
   Limit fuel{100'000'000, 2'000'000'000};
   Limit memory_max_bytes{64 << 20, 512 << 20};
 
-  // The tenant for a Host header value, with any port removed and case folded.
+  // The configured domain and its tenant for a Host header value, with any port
+  // removed and case folded. In local mode, "$domain.localhost" also reaches
+  // $domain, and "localhost" or "127.0.0.1", when not configured, reaches the
+  // platform domain (or else the first domain).
+  std::optional<std::pair<std::string, DomainEntry>> resolve_host(std::string_view host) const;
   std::optional<std::string> tenant_for_host(std::string_view host) const;
+
+  // The base URL for links: public_url, or the listen address and port.
+  std::string base_url() const;
 };
+
+// A copy of the config for playing on one machine: listen on 127.0.0.1, plain
+// (not Secure) session cookies, the dev mailer, and the local domain aliases.
+std::shared_ptr<const HostConfig> local_mode(std::shared_ptr<const HostConfig> config);
 
 // Parses and validates a config. On failure returns nullptr and sets `error`.
 // A relative storage path is resolved against `base_dir`.

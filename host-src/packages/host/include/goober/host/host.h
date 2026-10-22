@@ -9,6 +9,7 @@
 #include "goober/boxes/registry.h"
 #include "goober/config/config.h"
 #include "goober/content/content.h"
+#include "goober/identity/identity.h"
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
 #include "goober/runtime_wasm/engine.h"
@@ -19,6 +20,14 @@ namespace goober::host {
 
 inline constexpr std::string_view kVersion = "0.1.0";
 inline constexpr std::string_view kOperationsMcpPath = "/goober-operations-mcp";
+
+// A signed-in caller: a tenant identity in the domain's realm, or a host identity
+// whose roles come from identity.operators in the config.
+struct SignedIn {
+  identity::User user;
+  bool host = false;
+  std::vector<std::string> roles;
+};
 
 // The whole host: config, storage, the WAL, content, boxes, the engine, the
 // operator MCP endpoint, and the HTTP server.
@@ -42,11 +51,18 @@ class Host {
   config::ConfigHolder& config() { return config_; }
   content::ContentStore& content() { return *content_; }
   boxes::BoxRegistry& boxes() { return *boxes_; }
+  identity::Identity& identity() { return *identity_; }
   const std::vector<std::string>& startup_notes() const { return startup_notes_; }
 
  private:
   void handle(server::http::Request req, server::http::Responder respond);
   void handle_operations(const server::http::Request& req, const Finish& finish);
+  // The host-owned /identity/ endpoints (identity_routes.cpp).
+  void handle_identity(const server::http::Request& req, const Finish& finish, const std::string& path,
+                       const std::string& domain, const std::string& tenant);
+  std::optional<SignedIn> signed_in(const server::http::Request& req, const std::string& tenant);
+  std::string session_cookie_name() const;
+  void send_mail(const identity::Mail& mail);
   void serve_box(server::http::Request req, Finish finish, boxes::RouteRef ref,
                  std::map<std::string, std::string> params, std::string domain, std::string tenant,
                  std::shared_ptr<const boxes::ActiveSet> keep_alive);
@@ -63,6 +79,7 @@ class Host {
   std::unique_ptr<content::ContentStore> content_;
   std::unique_ptr<runtime::wasm::Engine> engine_;
   std::unique_ptr<boxes::BoxRegistry> boxes_;
+  std::unique_ptr<identity::Identity> identity_;
   std::unique_ptr<mcp::McpServer> mcp_;
   std::unique_ptr<WorkerPool> pool_;
   std::unique_ptr<server::http::Server> server_;

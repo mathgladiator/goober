@@ -139,8 +139,8 @@ TEST_F(HostTest, BoxesDeployAndAnswer) {
   bj::object manifest{{"box", "hello"},
                       {"domains", bj::array{"*"}},
                       {"behavior", bj::object{{"fuel", 2000000000}}},
-                      {"routes", bj::object{{"http", bj::object{{"/echo/{thing : string}", bj::object{{"get", bj::object{{"name", "echo"}}}}},
-                                                                {"/spin", bj::object{{"get", bj::object{{"name", "spin"}}}}}}}}}};
+                      {"routes", bj::object{{"http", bj::object{{"/echo/{thing : string}", bj::object{{"get", bj::object{{"name", "echo"}, {"public", true}}}}},
+                                                                {"/spin", bj::object{{"get", bj::object{{"name", "spin"}, {"public", true}}}}}}}}}};
   auto v = tool("version_upload", {{"manifest", manifest}, {"wat", kHelloWat}});
   ASSERT_EQ(v.at("result").at("isError"), false) << json::dump(v);
 

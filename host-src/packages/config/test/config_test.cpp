@@ -56,3 +56,48 @@ TEST(Config, ReloadKeepsRestartOnlyFields) {
   EXPECT_EQ(holder.get()->listen_port, 9090);
   EXPECT_EQ(holder.get()->operations_token, "fedcba9876543210");
 }
+
+TEST(Config, ReadsIdentityOwnersAndPublicUrl) {
+  std::string err;
+  auto cfg = parse_config(R"({
+    "public-url": "https://goober.example.com/",
+    "domains": {"bobs.example": {"tenant": "bobs", "owner": "Bob@Example.com"}},
+    "identity": {"cookie-secure": true, "session-days": 7,
+                 "operators": {"Me@Example.com": ["host:owner"]}}
+  })", "/srv", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_TRUE(cfg->operations_token.empty());
+  EXPECT_EQ(cfg->public_url, "https://goober.example.com");
+  EXPECT_EQ(cfg->base_url(), "https://goober.example.com");
+  EXPECT_EQ(cfg->domains.at("bobs.example").owner, "bob@example.com");
+  EXPECT_EQ(cfg->identity.session_days, 7);
+  EXPECT_EQ(cfg->identity.operators.at("me@example.com").at(0), "host:owner");
+
+  EXPECT_FALSE(parse_config(R"({"identity":{"operators":{"me@example.com":["owner"]}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"a","owner":"nope"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"ses"}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"public-url":"goober.example.com"})", "/", &err));
+}
+
+TEST(Config, LocalModeAliasesDomainsUnderLocalhost) {
+  std::string err;
+  auto cfg = parse_config(R"({
+    "listen": {"address": "0.0.0.0", "port": 9090},
+    "public-url": "https://goober.example.com",
+    "platform-domain": "goober.example.com",
+    "domains": {"goober.example.com": {"tenant": "home"}, "bobs.example": {"tenant": "bobs"}}
+  })", "/srv", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_FALSE(cfg->tenant_for_host("bobs.example.localhost").has_value());
+
+  auto local = local_mode(cfg);
+  EXPECT_EQ(local->listen_address, "127.0.0.1");
+  EXPECT_FALSE(local->identity.cookie_secure);
+  EXPECT_EQ(local->base_url(), "http://127.0.0.1:9090");
+  EXPECT_EQ(*local->tenant_for_host("bobs.example.localhost:9090"), "bobs");
+  EXPECT_EQ(local->resolve_host("bobs.example.localhost")->first, "bobs.example");
+  EXPECT_EQ(*local->tenant_for_host("localhost:9090"), "home");
+  EXPECT_EQ(*local->tenant_for_host("127.0.0.1"), "home");
+  EXPECT_FALSE(local->tenant_for_host("nope.localhost").has_value());
+  EXPECT_FALSE(local->tenant_for_host("other.example").has_value());
+}

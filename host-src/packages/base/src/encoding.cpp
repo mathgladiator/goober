@@ -85,6 +85,39 @@ std::optional<std::string> base64_decode(std::string_view text) {
   return out;
 }
 
+std::string percent_encode(std::string_view text) {
+  static const char* kHex = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : text) {
+    bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+                c == '_' || c == '~';
+    if (keep) {
+      out += char(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 15];
+    }
+  }
+  return out;
+}
+
+std::string html_escape(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default: out += c;
+    }
+  }
+  return out;
+}
+
 std::optional<std::string> percent_decode(std::string_view text) {
   std::string out;
   out.reserve(text.size());

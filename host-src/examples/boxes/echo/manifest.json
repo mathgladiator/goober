@@ -1,11 +1,13 @@
 {
   "box": "echo",
-  "mission": "Show a box exactly what the host hands it: the request document.",
+  "mission": "Show a box exactly what the host hands it: the request document, including who is signed in.",
   "domains": ["*"],
   "routes": {
     "http": {
-      "/echo": { "get": { "name": "echo_get" }, "post": { "name": "echo_post" } },
-      "/echo/{rest : string}": { "get": { "name": "echo_rest" } }
+      "/echo": { "get": { "name": "echo_get", "public": true }, "post": { "name": "echo_post", "public": true } },
+      "/echo/{rest : string}": { "get": { "name": "echo_rest", "public": true } },
+      "/whoami": { "get": { "name": "whoami", "requirements": [] } },
+      "/owners-room": { "get": { "name": "owners_room", "requirements": [["owner"], ["host:owner"]] } }
     }
   }
 }

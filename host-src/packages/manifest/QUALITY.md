@@ -9,3 +9,6 @@ Parses and checks the v1 subset of a box manifest (design/machine/005.FirstVersi
   never silently. Fields 150 doesn't define are refused.
 - Route names and box names use the one grammar in `base`. Reserved prefixes come from one
   list here, mirrored from `041.ReservedRoutes.md` plus `/error-message`.
+- Every route says who may call it: `"public": true` or `requirements`, never both or
+  neither. Requirement roles are checked against the role grammar and the route's own
+  parameters at upload, so `check_access` never sees a malformed role.

@@ -16,4 +16,8 @@
   (func (export "goober_route_echo_get") (result i32) (call $echo))
   (func (export "goober_route_echo_post") (result i32) (call $echo))
   (func (export "goober_route_echo_rest") (result i32) (call $echo))
+  ;; Any signed-in user: the document's "user" names them.
+  (func (export "goober_route_whoami") (result i32) (call $echo))
+  ;; Only a tenant "owner" or a host:owner operator gets here.
+  (func (export "goober_route_owners_room") (result i32) (call $echo))
 )

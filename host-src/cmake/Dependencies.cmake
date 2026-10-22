@@ -26,3 +26,10 @@ set_target_properties(goober_wasmtime PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${GOOBER_WASMTIME_DIR}/include"
   INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${GOOBER_WASMTIME_DIR}/include")
 target_link_libraries(goober_wasmtime INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+
+# SQLite: the static amalgamation under ~/.local, for the identity service's realms.
+find_path(GOOBER_SQLITE_INCLUDE sqlite3.h HINTS "${GOOBER_LOCAL}/include" REQUIRED)
+find_library(GOOBER_SQLITE_LIB NAMES libsqlite3.a sqlite3 HINTS "${GOOBER_LOCAL}/lib" REQUIRED)
+add_library(goober_sqlite3 INTERFACE)
+target_include_directories(goober_sqlite3 SYSTEM INTERFACE "${GOOBER_SQLITE_INCLUDE}")
+target_link_libraries(goober_sqlite3 INTERFACE "${GOOBER_SQLITE_LIB}" Threads::Threads ${CMAKE_DL_LIBS} m)

@@ -11,7 +11,7 @@ include(cmake/Dependencies.cmake)
 include(cmake/GooberPackage.cmake)
 
 # Packages, in dependency order. Each is one directory with its own target and tests.
-foreach(pkg base json config wal content router manifest runtime_wasm boxes server_http mcp host)
+foreach(pkg base json config wal content router manifest runtime_wasm boxes identity server_http mcp host)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/packages/${pkg}/CMakeLists.txt")
     add_subdirectory(packages/${pkg})
   endif()

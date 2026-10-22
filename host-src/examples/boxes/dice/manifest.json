@@ -5,8 +5,8 @@
   "behavior": { "timeout-ms": 200, "fuel": 10000000, "memory-max-bytes": 16777216 },
   "routes": {
     "http": {
-      "/roll/{sides : int32}": { "get": { "name": "roll" } },
-      "/hello/{name : string}": { "get": { "name": "hello" } }
+      "/roll/{sides : int32}": { "get": { "name": "roll", "public": true } },
+      "/hello/{name : string}": { "get": { "name": "hello", "public": true } }
     }
   }
 }

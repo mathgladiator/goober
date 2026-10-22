@@ -1,6 +1,7 @@
 #include "goober/host/host.h"
 
 #include <algorithm>
+#include <ctime>
 #include <iostream>
 
 #include "goober/base/encoding.h"
@@ -28,6 +29,7 @@ const char* reason(int status) {
   switch (status) {
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
+    case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 413: return "Payload Too Large";
@@ -56,6 +58,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   content_ = std::make_unique<content::ContentStore>(*wal_);
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
+  identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
+                                                   [this](const identity::Mail& m) { send_mail(m); });
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(
       "goober-operations", std::string(kVersion),
@@ -90,8 +94,39 @@ std::string Host::reload() {
   std::string err;
   auto next = config::load_config(config_file_, &err);
   if (!next) return "reload refused: " + err;
+  if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
   return "config reloaded. " + notes;
+}
+
+// The dev mailer (005 §11, Q45): each mail becomes a MIME file under
+// storage/mail/outbox/ and a line in logs/mail.log. In local mode it is also
+// printed, so the person playing sees their sign-in code in the terminal.
+void Host::send_mail(const identity::Mail& mail) {
+  auto cfg = config_.get();
+  int64_t now = base::now_unix_ms();
+  uint8_t rnd[4];
+  base::os_random_fill(rnd);
+  std::string name = std::to_string(now) + "-" + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), 4)) + ".eml";
+  std::time_t secs = now / 1000;
+  std::tm tm{};
+  gmtime_r(&secs, &tm);
+  char date[64];
+  std::strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S +0000", &tm);
+  std::string eml = "From: goober <no-reply@" + cfg->platform_domain + ">\r\nTo: " + mail.to + "\r\nSubject: " +
+                    mail.subject + "\r\nDate: " + date +
+                    "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + mail.text;
+  auto file = cfg->storage / "mail" / "outbox" / name;
+  base::write_file_durable(file, eml);
+  base::append_line(cfg->storage / "logs" / "mail.log",
+                    json::dump(bj::object{{"at", base::format_utc_ms(now)},
+                                          {"to", mail.to},
+                                          {"subject", mail.subject},
+                                          {"file", "mail/outbox/" + name}}));
+  if (cfg->local) {
+    std::string first = mail.text.substr(0, mail.text.find('\n'));
+    std::cerr << "goober-host: mail to " << mail.to << ": " << first << "\n";
+  }
 }
 
 void Host::access_log(const Request& req, int status, int64_t started_us, const std::string& domain,
@@ -124,6 +159,12 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
   res.headers.emplace_back("x-content-type-options", "nosniff");
   if (page) {
     res.body = std::move(page->data);
+  } else if (status == 401) {
+    res.body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Uh Oh!</title>"
+               "<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem}"
+               "code{color:#666}</style></head><body><h1>Uh Oh!</h1><p>401 Unauthorized: this page needs you to "
+               "<a href=\"/identity/sign-in\">sign in</a>.</p><p><code>request " + request_id +
+               "</code></p></body></html>\n";
   } else {
     res.body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Uh Oh!</title>"
                "<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem}"
@@ -144,8 +185,12 @@ void Host::handle(Request req, Responder respond) {
   req.headers.emplace_back("goober-request-id", request_id);
   auto cfg = config_.get();
   std::string host_header = base::to_lower(req.header("host"));
-  std::string domain = host_header.substr(0, host_header.rfind(':') == std::string::npos ? host_header.size()
-                                                                                          : host_header.rfind(':'));
+  auto resolved = cfg->resolve_host(host_header);
+  // The configured domain (local aliases resolve to it), or the raw host for the log.
+  std::string domain = resolved ? resolved->first
+                                : host_header.substr(0, host_header.rfind(':') == std::string::npos
+                                                            ? host_header.size()
+                                                            : host_header.rfind(':'));
 
   // Every response is logged and stamped with its request id.
   Finish finish = [this, req, respond, started, domain, request_id](Response res, std::string extra) {
@@ -159,9 +204,20 @@ void Host::handle(Request req, Responder respond) {
     pool_->post([this, req, finish] { handle_operations(req, finish); });
     return;
   }
-  auto tenant = cfg->tenant_for_host(host_header);
-  if (!tenant) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");
+  if (!resolved) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");
+  auto tenant = std::optional<std::string>(resolved->second.tenant);
   if (!path) return finish(error_page(*tenant, 400, request_id), R"({"why":"bad path"})");
+  if (path->path.starts_with("/identity/")) {
+    pool_->post([this, req, finish, p = path->path, domain, tenant = *tenant] {
+      try {
+        handle_identity(req, finish, p, domain, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: identity: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"identity failed"})");
+      }
+    });
+    return;
+  }
 
   auto active = boxes_->active();
   const auto& table = active->table_for(domain);
@@ -207,6 +263,45 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   std::string request_id = req.header("goober-request-id");
   const auto& m = ref.box->manifest;
 
+  // Identity: who is calling, and may they use this route.
+  std::optional<SignedIn> who;
+  try {
+    who = signed_in(req, tenant);
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: identity: " << e.what() << "\n";
+    return finish(error_page(tenant, 500, request_id), R"({"why":"identity failed"})");
+  }
+  std::optional<manifest::Caller> caller;
+  if (who) caller = manifest::Caller{std::to_string(who->user.user_id), who->host, who->roles};
+  switch (manifest::check_access(*ref.route, caller ? &*caller : nullptr, params, tenant)) {
+    case manifest::Access::kAllowed:
+      break;
+    case manifest::Access::kSignIn: {
+      if ((req.method == "get" || req.method == "head") && req.header("accept").find("text/html") != std::string::npos) {
+        Response res;
+        res.status = 303;
+        std::string back = req.path + (req.query.empty() ? "" : "?" + req.query);
+        res.headers.emplace_back("location", "/identity/sign-in?return=" + base::percent_encode(back));
+        res.headers.emplace_back("cache-control", "no-store");
+        return finish(std::move(res), R"({"why":"sign in first"})");
+      }
+      return finish(error_page(tenant, 401, request_id), R"({"why":"sign in first"})");
+    }
+    case manifest::Access::kForbidden:
+      return finish(error_page(tenant, 403, request_id), R"({"why":"requirements not met"})");
+    case manifest::Access::kBadValue:
+      return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
+  }
+  bj::value user_json = nullptr;
+  if (who) {
+    bj::array roles;
+    for (const auto& r : who->roles) roles.push_back(bj::value(r));
+    user_json = bj::object{{"user_id", std::to_string(who->user.user_id)},
+                           {"email", who->user.email},
+                           {"roles", std::move(roles)},
+                           {"host", who->host}};
+  }
+
   bj::object headers;
   for (const auto& [k, v] : req.headers) {
     if (!hidden_from_box(k)) headers[k] = v;
@@ -217,7 +312,8 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   for (const auto& [k, v] : params) params_json[k] = v;
   bj::object doc{{"request_id", request_id}, {"method", req.method},       {"path", req.path},
                  {"params", params_json},   {"query", query},             {"headers", headers},
-                 {"body", req.body},        {"domain", domain},           {"tenant", tenant}};
+                 {"body", req.body},        {"domain", domain},           {"tenant", tenant},
+                 {"user", user_json}};
 
   runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64()};
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(m.behavior.timeout_ms), cfg->fuel.resolve(m.behavior.fuel),
@@ -249,6 +345,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                    {"fuel", result.fuel_used},
                    {"seed", std::to_string(input.seed)},
                    {"now_ms", input.now_ms}};
+  if (who) extra["user_id"] = std::to_string(who->user.user_id);
   std::string extra_text = json::dump(extra);
 
   Response res;

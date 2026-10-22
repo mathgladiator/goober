@@ -1,0 +1,274 @@
+// The host-owned identity endpoints under /identity/ (013.Identity.md § The implicit
+// API; design/machine/006.LocalIdentity.md): a sign-in page with emailed codes, a
+// session cookie, an account page, sign-out, and /identity/me.
+
+#include <iostream>
+
+#include "goober/base/encoding.h"
+#include "goober/base/time.h"
+#include "goober/host/host.h"
+#include "goober/json/json.h"
+#include "goober/router/path.h"
+
+namespace goober::host {
+namespace bj = boost::json;
+using base::html_escape;
+using server::http::Request;
+using server::http::Response;
+
+namespace {
+
+// Only a path on this site: no scheme, no "//host", no header injection.
+std::string safe_return(std::string_view r) {
+  if (r.empty() || r.size() > 2048 || r[0] != '/' || r.starts_with("//") || r.starts_with("/\\")) return "/";
+  for (char c : r) {
+    if (c == '\r' || c == '\n' || c == '\0') return "/";
+  }
+  return std::string(r);
+}
+
+std::string read_cookie(const Request& req, std::string_view name) {
+  std::string header = req.header("cookie");
+  size_t i = 0;
+  while (i < header.size()) {
+    size_t end = header.find(';', i);
+    if (end == std::string::npos) end = header.size();
+    std::string_view pair = std::string_view(header).substr(i, end - i);
+    while (!pair.empty() && pair.front() == ' ') pair.remove_prefix(1);
+    if (pair.starts_with(name) && pair.size() > name.size() && pair[name.size()] == '=') {
+      return std::string(pair.substr(name.size() + 1));
+    }
+    i = end + 1;
+  }
+  return "";
+}
+
+// A POST must come from a page on the same host, when the browser says where it came from.
+bool same_origin(const Request& req) {
+  std::string origin = req.header("origin");
+  if (origin.empty()) return true;
+  auto scheme = origin.find("://");
+  if (scheme == std::string::npos) return false;
+  return base::to_lower(origin.substr(scheme + 3)) == base::to_lower(req.header("host"));
+}
+
+constexpr const char* kStyle = R"css(
+:root{color-scheme:light dark;--fg:#1d1d1f;--bg:#fafaf7;--muted:#6b6b6b;--card:#fff;--line:#ddd;--accent:#2457d6}
+@media (prefers-color-scheme:dark){:root{--fg:#ececec;--bg:#141414;--muted:#9a9a9a;--card:#1e1e1e;--line:#333;--accent:#7aa2ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:26rem;margin:10vh auto;padding:0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
+h1{font-size:1.4rem;margin:0 0 4px}p{margin:8px 0}.muted{color:var(--muted);font-size:.9rem}
+label{display:block;margin:16px 0 4px;font-weight:600}
+input[type=email],input[type=text]{width:100%;padding:10px 12px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+.check{font-weight:400;display:flex;gap:8px;align-items:center}
+button{margin-top:16px;width:100%;padding:10px;font:inherit;font-weight:600;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+.error{color:#c0392b;font-weight:600}.local{border-left:3px solid var(--accent);padding-left:10px}
+code{font-size:.9em}ul{padding-left:20px}a{color:var(--accent)}
+)css";
+
+}  // namespace
+
+std::string Host::session_cookie_name() const {
+  return config_.get()->identity.cookie_secure ? "__Host-goober-session" : "goober-session";
+}
+
+std::optional<SignedIn> Host::signed_in(const Request& req, const std::string& tenant) {
+  std::string value = read_cookie(req, session_cookie_name());
+  if (value.size() < 3 || value[1] != '.') return std::nullopt;
+  std::string token = value.substr(2);
+  int64_t now = base::now_unix_ms();
+  if (value[0] == 'h') {
+    auto user = identity_->session(identity::kHostRealm, token, now);
+    if (!user) return std::nullopt;
+    auto cfg = config_.get();
+    auto it = cfg->identity.operators.find(user->email);
+    // An address removed from identity.operators holds no host roles, so it is signed out.
+    if (it == cfg->identity.operators.end() || it->second.empty()) return std::nullopt;
+    return SignedIn{std::move(*user), true, it->second};
+  }
+  if (value[0] == 't') {
+    auto user = identity_->session(tenant, token, now);
+    if (!user) return std::nullopt;
+    auto roles = user->roles;
+    return SignedIn{std::move(*user), false, std::move(roles)};
+  }
+  return std::nullopt;
+}
+
+void Host::handle_identity(const Request& req, const Finish& finish, const std::string& path,
+                           const std::string& domain, const std::string& tenant) {
+  auto cfg = config_.get();
+  std::string request_id = req.header("goober-request-id");
+  auto query = router::parse_query(req.query);
+  auto form = router::parse_query(req.body);
+
+  auto page = [&](int status, const std::string& title, const std::string& body) {
+    Response res;
+    res.status = status;
+    std::string css_link = content_->get(tenant, "sign-in.css") ? "<link rel=\"stylesheet\" href=\"/sign-in.css\">" : "";
+    res.body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+               "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" +
+               html_escape(title) + "</title><style>" + kStyle + "</style>" + css_link +
+               "</head><body><main><div class=\"card\">" + body + "</div></main></body></html>\n";
+    res.headers.emplace_back("content-type", "text/html; charset=utf-8");
+    res.headers.emplace_back("cache-control", "no-store");
+    res.headers.emplace_back("x-frame-options", "DENY");
+    res.headers.emplace_back("referrer-policy", "no-referrer");
+    res.headers.emplace_back("x-content-type-options", "nosniff");
+    res.headers.emplace_back("content-security-policy",
+                             "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; "
+                             "frame-ancestors 'none'; base-uri 'none'");
+    return res;
+  };
+  auto redirect = [&](const std::string& to) {
+    Response res;
+    res.status = 303;
+    res.headers.emplace_back("location", to);
+    res.headers.emplace_back("cache-control", "no-store");
+    return res;
+  };
+  auto cookie = [&](const std::string& value, int64_t max_age_s) {
+    std::string c = session_cookie_name() + "=" + value + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" +
+                    std::to_string(max_age_s);
+    if (cfg->identity.cookie_secure) c += "; Secure";
+    return c;
+  };
+  auto local_note = [&]() -> std::string {
+    if (!cfg->local) return "";
+    return "<p class=\"muted local\">Local mode: no mail leaves this machine. The code is printed in the terminal "
+           "running goober-host, and saved under <code>storage/mail/outbox/</code>.</p>";
+  };
+  auto sign_in_form = [&](const std::string& ret, bool as_host, const std::string& error) {
+    return "<h1>Sign in</h1><p class=\"muted\">to <strong>" + html_escape(domain) + "</strong></p>" +
+           (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
+           "<form method=\"post\" action=\"/identity/email/start\"><label for=\"email\">Email</label>"
+           "<input id=\"email\" type=\"email\" name=\"email\" required autofocus autocomplete=\"email\">"
+           "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">"
+           "<label class=\"check\"><input type=\"checkbox\" name=\"as\" value=\"host\"" +
+           (as_host ? " checked" : "") + "> Sign in as a host operator</label>"
+           "<button>Email me a code</button></form>"
+           "<p class=\"muted\">We'll email you a six-digit code to type here. Nothing to remember.</p>" +
+           local_note();
+  };
+  auto code_form = [&](const std::string& email, const std::string& ret, bool as_host, const std::string& error) {
+    return "<h1>Check your email</h1><p>If <strong>" + html_escape(email) + "</strong> can sign in to <strong>" +
+           html_escape(domain) + "</strong>" + (as_host ? " as a host operator" : "") +
+           ", a code is on its way. It expires in 10 minutes.</p>" +
+           (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
+           "<form method=\"post\" action=\"/identity/email/verify\"><label for=\"code\">Code</label>"
+           "<input id=\"code\" type=\"text\" name=\"code\" required autofocus inputmode=\"numeric\" "
+           "autocomplete=\"one-time-code\" pattern=\"[0-9]{6}\" maxlength=\"6\">"
+           "<input type=\"hidden\" name=\"email\" value=\"" + html_escape(email) + "\">"
+           "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">" +
+           (as_host ? "<input type=\"hidden\" name=\"as\" value=\"host\">" : "") +
+           "<button>Sign in</button></form><p class=\"muted\">Only continue if you started this sign-in yourself. "
+           "<a href=\"/identity/sign-in?return=" + base::percent_encode(ret) + "\">Use a different address</a>.</p>" +
+           local_note();
+  };
+  auto get = [](const std::map<std::string, std::string>& m, const char* k) {
+    auto it = m.find(k);
+    return it == m.end() ? std::string() : it->second;
+  };
+
+  bool is_post = req.method == "post";
+  bool is_get = req.method == "get" || req.method == "head";
+  if (is_post && !same_origin(req)) {
+    return finish(error_page(tenant, 403, request_id), R"({"identity":"cross-origin post"})");
+  }
+  int64_t now = base::now_unix_ms();
+
+  if (path == "/identity/sign-in" && is_get) {
+    return finish(page(200, "Sign in", sign_in_form(safe_return(get(query, "return")), get(query, "as") == "host", "")),
+                  R"({"identity":"sign_in_page"})");
+  }
+  if (path == "/identity/email/start" && is_post) {
+    std::string email = base::to_lower(get(form, "email"));
+    bool as_host = get(form, "as") == "host";
+    std::string ret = safe_return(get(form, "return"));
+    if (as_host) {
+      bool is_operator = cfg->identity.operators.count(email) > 0;
+      identity_->start_email(identity::kHostRealm, email, domain, is_operator, now);
+    } else {
+      identity_->start_email(tenant, email, domain, true, now);
+    }
+    return finish(page(200, "Check your email", code_form(email, ret, as_host, "")), R"({"identity":"email_start"})");
+  }
+  if (path == "/identity/email/verify" && is_post) {
+    std::string email = base::to_lower(get(form, "email"));
+    bool as_host = get(form, "as") == "host";
+    std::string ret = safe_return(get(form, "return"));
+    std::string why;
+    int64_t session_ms = cfg->identity.session_days * 24 * 3600 * 1000;
+    std::optional<identity::SignIn> in;
+    if (as_host) {
+      bool is_operator = cfg->identity.operators.count(email) > 0;
+      in = identity_->verify_email(identity::kHostRealm, email, get(form, "code"), is_operator, now, session_ms, &why);
+    } else {
+      in = identity_->verify_email(tenant, email, get(form, "code"), true, now, session_ms, &why);
+      // The first owner named in the config gets "owner" whenever the realm has none.
+      auto entry = cfg->resolve_host(req.header("host"));
+      if (in && entry && entry->second.owner == in->user.email && identity_->holders(tenant, "owner") == 0) {
+        std::string err;
+        identity_->grant(tenant, in->user.email, "owner", "config:first-owner", now, &err);
+      }
+    }
+    if (!in) {
+      return finish(page(400, "Check your email", code_form(email, ret, as_host, why)), R"({"identity":"verify_failed"})");
+    }
+    auto res = redirect(ret);
+    res.headers.emplace_back("set-cookie",
+                             cookie(std::string(as_host ? "h." : "t.") + in->token, session_ms / 1000));
+    return finish(std::move(res), json::dump(bj::object{{"identity", "sign_in"},
+                                                       {"realm", in->user.realm},
+                                                       {"user_id", std::to_string(in->user.user_id)}}));
+  }
+  if (path == "/identity/sign-out" && is_post) {
+    std::string value = read_cookie(req, session_cookie_name());
+    if (value.size() > 2) {
+      identity_->end_session(value[0] == 'h' ? std::string(identity::kHostRealm) : tenant, value.substr(2), now);
+    }
+    auto res = redirect(safe_return(get(form, "return")));
+    res.headers.emplace_back("set-cookie", cookie("", 0));
+    return finish(std::move(res), R"({"identity":"sign_out"})");
+  }
+  if ((path == "/identity/me" || path == "/identity/account") && is_get) {
+    auto who = signed_in(req, tenant);
+    if (path == "/identity/me") {
+      Response res;
+      res.headers.emplace_back("content-type", "application/json");
+      res.headers.emplace_back("cache-control", "no-store");
+      if (!who) {
+        res.status = 401;
+        res.body = R"({"signed_in":false})";
+      } else {
+        bj::array roles;
+        for (const auto& r : who->roles) roles.push_back(bj::value(r));
+        res.body = json::dump(bj::object{{"signed_in", true},
+                                         {"user_id", std::to_string(who->user.user_id)},
+                                         {"email", who->user.email},
+                                         {"realm", who->user.realm},
+                                         {"host", who->host},
+                                         {"roles", std::move(roles)},
+                                         {"domain", domain}});
+      }
+      return finish(std::move(res), "");
+    }
+    if (!who) return finish(redirect("/identity/sign-in?return=%2Fidentity%2Faccount"), "");
+    std::string roles;
+    for (const auto& r : who->roles) roles += "<li><code>" + html_escape(r) + "</code></li>";
+    if (roles.empty()) roles = "<li class=\"muted\">none yet</li>";
+    return finish(page(200, "Your account",
+                       "<h1>" + html_escape(who->user.email) + "</h1><p class=\"muted\">" +
+                           (who->host ? "Host operator, acting on " : "Signed in to ") + "<strong>" +
+                           html_escape(domain) + "</strong> &middot; user " + std::to_string(who->user.user_id) +
+                           " in realm <code>" + html_escape(who->user.realm) + "</code></p><p><strong>Roles</strong></p><ul>" +
+                           roles +
+                           "</ul><form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>"
+                           "<p class=\"muted\"><a href=\"/\">Back to the site</a></p>"),
+                  "");
+  }
+  finish(error_page(tenant, 404, request_id), R"({"why":"no such identity endpoint"})");
+}
+
+}  // namespace goober::host

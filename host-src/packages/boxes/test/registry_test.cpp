@@ -28,7 +28,7 @@ std::string module_for(std::vector<std::string> routes) {
 std::string manifest_for(const std::string& box, const std::string& domain, const std::string& path,
                          const std::string& route) {
   return R"({"box":")" + box + R"(","domains":[")" + domain + R"("],"routes":{"http":{")" + path +
-         R"(":{"get":{"name":")" + route + R"("}}}}})";
+         R"(":{"get":{"name":")" + route + R"(","public":true}}}}})";
 }
 }  // namespace
 
