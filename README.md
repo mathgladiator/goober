@@ -109,6 +109,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/feedback-2026-10-05.md`](design/machine/feedback-2026-10-05.md) | Daily review: changes since 10-04, limits prioritized against the Hearth and blue-collar goals, security under real traffic, build estimate, and one-shot readiness. |
 | [`design/machine/feedback-2026-10-06.md`](design/machine/feedback-2026-10-06.md) | Daily review: 13 new docs, mail reachability contradiction, cost model, per-domain identity vs. public toys, use-case walkthroughs, ~55% one-shot readiness. |
 | [`design/machine/feedback-2026-10-08.md`](design/machine/feedback-2026-10-08.md) | Daily review: P0s are the tenant-scoped role sweep, the missing `.schema` format, and the tenant-from-path contradiction; a careful look at 420. |
+| [`design/machine/005.FirstVersion.md`](design/machine/005.FirstVersion.md) | The first version: decisions from the human's answers, and the contract `host-src/` follows. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 
@@ -117,7 +118,7 @@ that still hold.
 
 ## Review process
 
-Open questions that block or limit a first version are collected in [`design/QUESTIONS.md`](design/QUESTIONS.md).
+A first host to play with lives in [`host-src/`](host-src/README.md), following the decisions in [`design/machine/005.FirstVersion.md`](design/machine/005.FirstVersion.md). Open questions are collected in [`design/QUESTIONS.md`](design/QUESTIONS.md).
 
 At the end of a working day, Claude writes a dated design review into `design/machine/`, following [`design/REVIEW.PROCESS.md`](design/REVIEW.PROCESS.md).
 

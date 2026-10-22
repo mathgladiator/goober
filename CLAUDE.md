@@ -1,10 +1,22 @@
 # CLAUDE.md
 
-## Phase: design
+## Phase: design, with a first host to play with
 
-Goober is in the **design and context-building phase**. There is no implementation yet.
-Don't write code, scaffolding, or build files unless explicitly asked. The human is
-working through the implementation choices personally.
+Goober is still mostly in the **design and context-building phase**. A first host (v1)
+lives in `host-src/`, built at the human's request so they can play with the design. Its
+decisions are recorded in `design/machine/005.FirstVersion.md`. Don't grow the code
+beyond what the human asks for.
+
+## The host (`host-src/`)
+
+- C++20, CMake with Ninja presets, GoogleTest through CTest; dependencies under `~/.local`
+  (Boost, GoogleTest, wasmtime v49.0.4 in `~/.local/opt/`).
+- `cmake --preset dev && cmake --build --preset dev && ctest --preset dev` builds and tests
+  everything. `host-src/README.md` covers running and playing.
+- One package per directory under `host-src/packages/`, each with its own library, tests,
+  and `QUALITY.md`. The underscore in a package name is a namespace (`server_http` is
+  `goober::server::http`). Keep changes siloed per package so each is reviewable.
+- Every new behavior gets a test in its package. Run the full suite before committing.
 
 ## Design documents
 
@@ -57,8 +69,10 @@ Read these before doing design work:
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
   - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, upgrade boxes that force a change, data migrations via boxes.
-- `design/QUESTIONS.md`: open questions that block or limit a first version, by area.
+- `design/QUESTIONS.md`: questions still open after the first round, plus new ones from building v1.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
+  - `design/machine/005.FirstVersion.md`: the v1 decisions from the human's answers: wasmtime,
+    CMake, the two thread pools, the v1 ABI, storage and the host WAL, HTTP rules, MCP tools.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
