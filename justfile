@@ -5,6 +5,10 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 host_src := justfile_directory() / "host-src"
 bin := host_src / "build/dev/packages/host/goober-host"
 
+# The host directory. Give it as the first argument (`just mcp demo2`), as `dir=demo2`
+# after the recipe, or as `just dir=demo2 mcp`.
+dir := "demo"
+
 # List the recipes.
 default:
     @just --list --unsorted
@@ -18,44 +22,52 @@ test: build
     cd {{host_src}} && ctest --preset dev
 
 # Build, set up DIR with dev defaults if it has no config, and run the host in local mode.
-run dir="demo": build
-    @[ -f {{dir}}/host.json ] || {{host_src}}/tools/setup.sh --defaults {{dir}}
-    exec {{bin}} --config {{dir}}/host.json --local
+run dir=dir: build
+    @[ -f {{trim_start_match(dir, "dir=")}}/host.json ] || {{host_src}}/tools/setup.sh --defaults {{trim_start_match(dir, "dir=")}}
+    exec {{bin}} --config {{trim_start_match(dir, "dir=")}}/host.json --local
 
 # Build and run the host exactly as configured (no local mode), as production would.
-serve dir="demo": build
-    exec {{bin}} --config {{dir}}/host.json
+serve dir=dir: build
+    exec {{bin}} --config {{trim_start_match(dir, "dir=")}}/host.json
 
 # Walk through the core decisions and write DIR/host.json (a dev box or production).
-setup dir="demo": build
-    {{host_src}}/tools/setup.sh {{dir}}
+setup dir=dir: build
+    {{host_src}}/tools/setup.sh {{trim_start_match(dir, "dir=")}}
 
 # Mint an operator MCP token and print the command that registers it with Claude Code.
-mcp dir="demo" name="claude-code": build
-    @[ -f {{dir}}/host.json ] || { echo "no {{dir}}/host.json yet: run just setup (or just run) first"; exit 1; }
-    @echo "Minted operator token '{{name}}' (host:owner). Only its hash is kept, in {{dir}}/storage/operations/tokens/."
-    @echo "Register it with Claude Code by running:"
-    @echo
-    @{{bin}} token create --config {{dir}}/host.json --name {{name}} --claude
-    @echo
-    @echo "List tokens with: just tokens {{dir}}    Revoke one with: just revoke <name-or-id> {{dir}}"
+mcp dir=dir name="claude-code": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Arguments may also be given as dir=... and name=..., in either order.
+    d='{{dir}}' n='{{name}}'
+    case "$d" in *=*) d=demo;; esac
+    case "$n" in *=*) n=claude-code;; esac
+    for a in '{{dir}}' '{{name}}'; do case "$a" in dir=*) d="${a#dir=}";; name=*) n="${a#name=}";; esac; done
+    [ -f "$d/host.json" ] || { echo "no $d/host.json yet: run just setup (or just run) first" >&2; exit 1; }
+    cmd=$('{{bin}}' token create --config "$d/host.json" --name "$n" --claude)
+    echo "Minted operator token '$n' (host:owner). Only its hash is kept, in $d/storage/operations/tokens/."
+    echo "Register it with Claude Code by running:"
+    echo
+    echo "$cmd"
+    echo
+    echo "List tokens with: just tokens    Revoke one with: just revoke <name-or-id>"
 
 # List the operator tokens minted for DIR.
-tokens dir="demo": build
-    @{{bin}} token list --config {{dir}}/host.json
+tokens dir=dir: build
+    @{{bin}} token list --config {{trim_start_match(dir, "dir=")}}/host.json
 
 # Revoke operator tokens by name or id.
-revoke which dir="demo": build
-    @{{bin}} token revoke {{which}} --config {{dir}}/host.json
+revoke which dir=dir: build
+    @{{bin}} token revoke {{which}} --config {{trim_start_match(dir, "dir=")}}/host.json
 
 # Deploy the example boxes and site to the running host for DIR.
-examples dir="demo": build
-    {{host_src}}/tools/examples.sh {{dir}}/host.json
+examples dir=dir: build
+    {{host_src}}/tools/examples.sh {{trim_start_match(dir, "dir=")}}/host.json
 
 # Check DIR/host.json without starting anything.
-check dir="demo": build
-    @{{bin}} check --config {{dir}}/host.json
+check dir=dir: build
+    @{{bin}} check --config {{trim_start_match(dir, "dir=")}}/host.json
 
 # Tell the running host for DIR to reread its config (SIGHUP).
-reload dir="demo":
-    @pkill -HUP -f -- "[g]oober-host --config {{dir}}/host.json" && echo "reloaded" || echo "no running host for {{dir}}"
+reload dir=dir:
+    @pkill -HUP -f -- "[g]oober-host --config {{trim_start_match(dir, "dir=")}}/host.json" && echo "reloaded" || echo "no running host for {{trim_start_match(dir, "dir=")}}"
