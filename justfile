@@ -84,6 +84,14 @@ sql tenant database query dir=dir: build
 sql-exec tenant database query dir=dir: build
     @{{bin}} db exec {{quote(tenant)}} {{quote(database)}} {{quote(query)}} --config {{trim_start_match(dir, "dir=")}}/host.json
 
+# A consistent copy of DIR's storage into DEST, safe while the host runs (logs and mail left out).
+backup dest dir=dir: build
+    @{{bin}} backup {{quote(dest)}} --config {{trim_start_match(dir, "dir=")}}/host.json
+
+# Copy a backup into DIR's storage, which must be empty; stop the host first.
+restore from dir=dir: build
+    @{{bin}} restore {{quote(from)}} --config {{trim_start_match(dir, "dir=")}}/host.json
+
 # Check DIR/host.json without starting anything.
 check dir=dir: build
     @{{bin}} check --config {{trim_start_match(dir, "dir=")}}/host.json

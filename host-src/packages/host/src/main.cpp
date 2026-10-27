@@ -9,6 +9,8 @@
 //   goober-host db describe TENANT DATABASE [--config host.json]
 //   goober-host db query TENANT DATABASE SQL [--config host.json]
 //   goober-host db exec TENANT DATABASE SQL [--config host.json]
+//   goober-host backup DIR [--config host.json]      a consistent copy, while running
+//   goober-host restore DIR [--config host.json]     into an empty storage, host stopped
 //
 // The db commands read the database files directly, so they work whether or not the
 // host is running; exec is logged to logs/db.log as the operator "cli".
@@ -28,6 +30,7 @@
 #include "goober/json/json.h"
 
 #include "goober/base/time.h"
+#include "goober/host/backup.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
 
@@ -42,7 +45,9 @@ constexpr const char* kUsage =
     "       goober-host db list [TENANT] [--config host.json]\n"
     "       goober-host db describe TENANT DATABASE [--config host.json]\n"
     "       goober-host db query TENANT DATABASE SQL [--config host.json]\n"
-    "       goober-host db exec TENANT DATABASE SQL [--config host.json]\n";
+    "       goober-host db exec TENANT DATABASE SQL [--config host.json]\n"
+    "       goober-host backup DIR [--config host.json]\n"
+    "       goober-host restore DIR [--config host.json]\n";
 
 std::string shell_quote(const std::string& s) {
   std::string out = "'";
@@ -208,6 +213,20 @@ int main(int argc, char** argv) {
   }
   if (!positional.empty() && positional[0] == "token") return run_token(positional, config_path, token_name, claude, local);
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
+  if (!positional.empty() && (positional[0] == "backup" || positional[0] == "restore")) {
+    if (positional.size() != 2) return std::cerr << kUsage, 2;
+    std::string err;
+    auto config = goober::config::load_config(config_path, &err);
+    if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+    goober::host::BackupReport report;
+    bool ok = positional[0] == "backup"
+                  ? goober::host::backup_storage(config->storage, positional[1], &report, &err)
+                  : goober::host::restore_storage(positional[1], config->storage, &report, &err);
+    if (!ok) return std::cerr << "goober-host: " << err << "\n", 1;
+    std::cout << (positional[0] == "backup" ? "backed up " : "restored ") << report.databases << " databases and "
+              << report.files << " files (" << report.bytes / 1024 << " KiB)\n";
+    return 0;
+  }
   if (!positional.empty() && positional[0] != "check") {
     std::cerr << kUsage;
     return 2;

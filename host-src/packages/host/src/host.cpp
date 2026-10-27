@@ -3,6 +3,8 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <ctime>
 #include <iostream>
 
@@ -168,7 +170,15 @@ uint16_t Host::start() {
 }
 
 void Host::stop() {
-  if (server_) server_->stop();
+  if (!server_) return;
+  // Graceful: stop taking connections, let the requests already here finish (up to ten
+  // seconds), then close what's left. systemd restarts land between requests, not inside one.
+  server_->stop_accepting();
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (pool_->busy() > 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  server_->stop();
   server_.reset();
 }
 
@@ -336,6 +346,15 @@ void Host::handle(Request req, Responder respond) {
       res.headers.emplace_back("retry-after", std::to_string(wait));
       return finish(std::move(res), json::dump(bj::object{{"why", "rate limited"}, {"bucket", bucket}, {"client", client}}));
     }
+  }
+  // For the proxy and monitors: answers without touching storage, on any configured domain.
+  if (path && path->path == "/goober/health" && resolved) {
+    Response res;
+    res.headers.emplace_back("content-type", "application/json");
+    res.headers.emplace_back("cache-control", "no-store");
+    res.body = R"({"ok":true})";
+    res.head_only = req.method == "head";
+    return finish(std::move(res), "");
   }
   if (path && path->path == kOperationsMcpPath) {
     pool_->post([this, req, finish] { handle_operations(req, finish); });

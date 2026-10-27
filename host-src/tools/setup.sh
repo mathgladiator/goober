@@ -370,7 +370,9 @@ EOF
       d="${entry%%|*}"; [[ "$d" != "$PLATFORM" ]] && sites="$sites, $d"
     done
     echo "$sites {"
-    echo "  reverse_proxy $ADDRESS:$PORT"
+    echo "  reverse_proxy $ADDRESS:$PORT {"
+    echo "    health_uri /goober/health"
+    echo "  }"
     echo "}"
   } >"$DIR/deploy/Caddyfile"
   good "wrote $DIR/deploy/goober-host.service"

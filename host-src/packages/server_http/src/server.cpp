@@ -1,6 +1,7 @@
 #include "goober/server_http/server.h"
 
 #include <atomic>
+#include <future>
 #include <thread>
 
 #include <boost/asio.hpp>
@@ -206,6 +207,21 @@ void Server::start() {
     im.threads.emplace_back([&im] { im.io.run(); });
   }
 }
+
+void Server::stop_accepting() {
+  auto& im = *impl_;
+  if (im.threads.empty()) return;
+  std::promise<void> closed;
+  auto done = closed.get_future();
+  asio::post(im.io, [&im, &closed] {
+    beast::error_code ec;
+    im.acceptor.close(ec);
+    closed.set_value();
+  });
+  done.wait();
+}
+
+int Server::open_connections() const { return impl_->open.load(); }
 
 void Server::stop() {
   auto& im = *impl_;

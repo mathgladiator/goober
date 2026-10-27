@@ -80,8 +80,8 @@ caveats, which Phase 3 works through:
   client with many addresses gets many budgets.
 - **Secrets sit in files** protected only by mode 0600: the operator token in the config,
   the SMTP password in its own file. There is no vault (064).
-- **Backups are manual**: copy `storage/` while the host is stopped. No Litestream, no
-  online SQLite backup, no restore drill.
+- **Backups are on demand**: `just backup DEST` takes a consistent copy while the host runs,
+  and restore is tested, but nothing schedules them and there is no Litestream yet.
 - **Logs rotate** at 64 MiB (three kept), but the access log still records paths, which can
   hold user data (300 wants none).
 - **No approvals**: whoever holds an operator token ships code live (005 §9).
@@ -147,12 +147,14 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] Rate limits per client address: one budget for everything (`limits.requests-per-minute`)
       and tighter ones for sign-in, tokens, registration, the device flow, consent, uploads,
       and `/mcp`; `listen.behind-proxy` reads the address from X-Forwarded-For behind Caddy.
-- [ ] Online backups (SQLite backup API) and a tested restore; Litestream notes.
+- [x] Online backups (`just backup DEST`, SQLite's backup API, safe while running) and a
+      tested restore into empty storage (`just restore FROM`). Litestream is still to come.
 - [x] Logs rotate at 64 MiB keeping three; the access log records paths (capped), never
       query strings or tokens. (Paths themselves can still hold user data.)
 - [x] JSON error bodies for API callers; HSTS on TLS; strict Host headers; the templated
       CSP on box pages; no CR/LF in any header; a private umask for everything stored.
-- [ ] Graceful shutdown that drains requests; a health endpoint for Caddy.
+- [x] Graceful shutdown: stop accepting, finish in-flight requests (up to 10 s), then close;
+      `/goober/health` for Caddy, which setup's Caddyfile now checks.
 
 ### Phase 4: security review
 - [x] Three read-only reviews (identity and OAuth; content and files; the box boundary,

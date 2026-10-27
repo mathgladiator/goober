@@ -62,6 +62,10 @@ class Server {
   // Binds and starts the network threads. Throws on a bind failure.
   void start();
   void stop();
+  // Closes the listening socket; connections already open keep being served.
+  void stop_accepting();
+  // Connections open right now.
+  int open_connections() const;
   uint16_t port() const;
 
  private:

@@ -40,6 +40,11 @@ bool WorkerPool::post(std::function<void()> job, size_t max_queued) {
   return true;
 }
 
+size_t WorkerPool::busy() const {
+  std::lock_guard lock(mu_);
+  return jobs_.size() + running_;
+}
+
 size_t WorkerPool::queued() const {
   std::lock_guard lock(mu_);
   return jobs_.size();
@@ -54,6 +59,7 @@ void WorkerPool::run() {
       if (jobs_.empty()) return;
       job = std::move(jobs_.front());
       jobs_.pop_front();
+      ++running_;
     }
     // A job that throws must not take the thread, or the process, with it.
     try {
@@ -63,6 +69,8 @@ void WorkerPool::run() {
     } catch (...) {
       std::fprintf(stderr, "goober-host: a job failed\n");
     }
+    std::lock_guard lock(mu_);
+    --running_;
   }
 }
 

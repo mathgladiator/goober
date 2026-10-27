@@ -23,6 +23,8 @@ class WorkerPool {
   // caller can answer 503 rather than let a flood grow the queue without bound.
   bool post(std::function<void()> job, size_t max_queued = SIZE_MAX);
   size_t queued() const;
+  // Jobs waiting or running: zero means the pool is idle.
+  size_t busy() const;
 
  private:
   void run();
@@ -30,6 +32,7 @@ class WorkerPool {
   std::condition_variable cv_;
   std::deque<std::function<void()>> jobs_;
   bool stopping_ = false;
+  size_t running_ = 0;
   std::vector<std::thread> threads_;
 };
 
