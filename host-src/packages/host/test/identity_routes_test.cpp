@@ -87,6 +87,7 @@ class IdentityRoutesTest : public ::testing::Test {
 
   // The code in the newest mail in the dev mailer's outbox.
   std::string newest_code() {
+    host->drain_mail();
     auto files = base::list_files(root / "storage/mail/outbox");
     EXPECT_FALSE(files.empty());
     std::sort(files.begin(), files.end());

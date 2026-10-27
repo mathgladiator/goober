@@ -46,6 +46,9 @@ struct ServerOptions {
   int threads = 2;
   uint64_t body_max_bytes = 1 << 20;
   int idle_timeout_seconds = 30;
+  // Connections open at once; past it, new ones are closed at accept, so a flood of idle
+  // sockets can't hold the host's memory and descriptors.
+  int max_connections = 4096;
 };
 
 // An HTTP/1.1 server on Boost.Beast with keep-alive, a body limit, and an idle timeout.

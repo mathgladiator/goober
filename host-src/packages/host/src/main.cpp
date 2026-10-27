@@ -17,6 +17,7 @@
 // cookies, sign-in codes printed here, and "$domain.localhost" reaching $domain.
 // SIGHUP rereads the config; SIGINT and SIGTERM stop the host.
 
+#include <sys/stat.h>
 #include <csignal>
 #include <cstring>
 #include <iostream>
@@ -178,6 +179,9 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Everything the host writes (identity databases, tokens, the WAL, content, logs) is
+  // readable by its own user only.
+  umask(0077);
   std::string config_path = "host.json";
   std::string token_name = "operator";
   bool local = false, claude = false;

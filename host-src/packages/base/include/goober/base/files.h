@@ -26,7 +26,11 @@ bool remove_file_durable(const std::filesystem::path& path);
 std::vector<std::string> list_files(const std::filesystem::path& root);
 
 // Appends one line to the file, creating it and its parents. Not fsynced.
-bool append_line(const std::filesystem::path& path, std::string_view line);
+// Appends one line. A file past kLogRotateBytes becomes path.1 (and older ones move up,
+// to path.3), so a log can't fill the disk.
+inline constexpr uint64_t kLogRotateBytes = 64ull << 20;
+inline constexpr int kLogsKept = 3;
+bool append_line(const std::filesystem::path& path, std::string_view line, uint64_t rotate_bytes = kLogRotateBytes);
 
 // The last `limit` lines of a file, oldest first.
 std::vector<std::string> tail_lines(const std::filesystem::path& path, size_t limit);

@@ -58,7 +58,8 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
          text;
 }
 
-SmtpQueue::SmtpQueue(ConfigFn config) : config_(std::move(config)), worker_([this] { run(); }) {}
+SmtpQueue::SmtpQueue(ConfigFn config, DevFn dev)
+    : config_(std::move(config)), dev_(std::move(dev)), worker_([this] { run(); }) {}
 
 SmtpQueue::~SmtpQueue() {
   {
@@ -95,6 +96,15 @@ void SmtpQueue::run() {
       busy_ = true;
     }
     auto cfg = config_();
+    if (cfg->identity.mailer != "smtp") {
+      if (dev_) dev_(mail);
+      {
+        std::lock_guard lock(mu_);
+        busy_ = false;
+      }
+      cv_.notify_all();
+      continue;
+    }
     std::string error;
     bool sent = false;
     // Three tries, a little apart: a mail server that hiccups shouldn't cost a sign-in.

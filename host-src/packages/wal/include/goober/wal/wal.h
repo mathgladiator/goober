@@ -23,6 +23,9 @@ struct RecoveryReport {
   size_t replayed_bundles = 0;
   size_t discarded_bundles = 0;  // bundles with no commit record
   bool torn_tail = false;        // a truncated or corrupt record ended the log
+  // Committed bundles that still couldn't be applied, set aside under wal/failed/ so the
+  // host starts anyway and an operator can look: "bundle 7: cannot apply change to ...".
+  std::vector<std::string> failed;
 };
 
 // The host WAL for files (design/machine/005.FirstVersion.md §7).
@@ -59,6 +62,7 @@ class HostWal {
   std::filesystem::path root_;
   std::filesystem::path file_;
   uint64_t truncate_after_;
+  bool unapplied_ = false;  // a committed bundle failed to apply; the log must keep it
   std::mutex mu_;
   int fd_ = -1;
   uint64_t next_id_ = 1;

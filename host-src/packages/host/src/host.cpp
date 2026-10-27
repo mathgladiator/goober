@@ -1,5 +1,7 @@
 #include "goober/host/host.h"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <ctime>
 #include <iostream>
@@ -98,6 +100,16 @@ bool valid_host_header(std::string_view h) {
   return true;
 }
 
+// The key a client's rate limits are kept under: its IPv4 address, or its IPv6 /64, since
+// one person routinely holds a whole /64 and could otherwise rotate past every budget.
+std::string rate_key(const std::string& address) {
+  in6_addr a6{};
+  if (address.find(':') != std::string::npos && inet_pton(AF_INET6, address.c_str(), &a6) == 1) {
+    return "v6:" + base::hex_encode(std::string_view(reinterpret_cast<const char*>(a6.s6_addr), 8));
+  }
+  return address;
+}
+
 // Request headers a box never sees: credentials belong to the host.
 bool hidden_from_box(std::string_view name) { return name == "authorization" || name == "cookie"; }
 
@@ -108,6 +120,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   started_ms_ = base::now_unix_ms();
   wal_ = std::make_unique<wal::HostWal>(config->storage);
   const auto& rec = wal_->recovery();
+  for (const auto& f : rec.failed) startup_notes_.push_back("host WAL: set aside " + f + " (see wal/failed/)");
   if (rec.replayed_bundles || rec.discarded_bundles || rec.torn_tail) {
     startup_notes_.push_back("host WAL recovery: replayed " + std::to_string(rec.replayed_bundles) +
                              ", discarded " + std::to_string(rec.discarded_bundles) +
@@ -121,7 +134,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
-  smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); });
+  smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); },
+                                      [this](const identity::Mail& m) { write_dev_mail(m); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
@@ -173,13 +187,11 @@ std::string Host::reload() {
 // printed, so the person playing sees their sign-in code in the terminal.
 void Host::drain_mail() { smtp_->drain(); }
 
-void Host::send_mail(const identity::Mail& mail) {
+// Every mail is queued, so a sign-in answers in the same time whether or not one goes out.
+void Host::send_mail(const identity::Mail& mail) { smtp_->send(mail); }
+
+void Host::write_dev_mail(const identity::Mail& mail) {
   auto cfg = config_.get();
-  if (cfg->identity.mailer == "smtp") {
-    // Queued, so the sign-in answers in the same time whether or not a mail goes out.
-    smtp_->send(mail);
-    return;
-  }
   int64_t now = base::now_unix_ms();
   uint8_t rnd[4];
   base::os_random_fill(rnd);
@@ -308,7 +320,7 @@ void Host::handle(Request req, Responder respond) {
   auto path = router::normalize_path(req.path);
   // Floods and guessing are slowed per client address, before any work is queued.
   {
-    std::string client = client_address(req);
+    std::string client = rate_key(client_address(req));
     int64_t now = base::now_unix_ms();
     double rpm = double(cfg->requests_per_minute);
     int64_t wait = limiter_.take("all", client, RateRule{rpm, std::max(10.0, rpm / 4)}, now);

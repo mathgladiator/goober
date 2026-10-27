@@ -97,6 +97,7 @@ class OAuthRoutesTest : public ::testing::Test {
   void TearDown() override { host.reset(); }
 
   std::string newest_code() {
+    host->drain_mail();
     auto files = base::list_files(root / "storage/mail/outbox");
     std::sort(files.begin(), files.end());
     auto text = *base::read_file(root / "storage/mail/outbox" / files.back());

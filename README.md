@@ -119,6 +119,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/010.Terminal.md`](design/machine/010.Terminal.md) | The terminal's backend: a `terminal` box for the person and a `desk` box for agents, with no write path from agents to decisions. |
 | [`design/machine/011.Types.md`](design/machine/011.Types.md) | Types: the OpenAPI types document in a strict subset, and requests and responses the host checks against each route's declarations. |
 | [`design/machine/012.Agents.md`](design/machine/012.Agents.md) | Agents over MCP: box tools at `/mcp` on every domain, filtered by roles, typed, audited, and discoverable through OAuth. |
+| [`design/machine/013.SecurityReview.md`](design/machine/013.SecurityReview.md) | The first internal security review: findings, fixes, what remains, and what was found sound. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 

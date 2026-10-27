@@ -1,4 +1,6 @@
 #include "goober/wal/wal.h"
+#include "goober/json/json.h"
+#include "goober/base/encoding.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -12,6 +14,8 @@
 #include "goober/base/random.h"
 
 namespace goober::wal {
+
+namespace bj = boost::json;
 namespace fs = std::filesystem;
 
 namespace {
@@ -154,7 +158,19 @@ void HostWal::recover() {
     if (it == pending.end()) continue;
     if (committed.count(id)) {
       std::string err;
-      if (!apply(it->second, &err)) throw std::runtime_error("WAL replay failed: " + err);
+      if (!apply(it->second, &err)) {
+        // Set aside rather than refuse to start: one bad bundle shouldn't brick the host.
+        bj::array changes;
+        for (const auto& c : it->second) {
+          changes.push_back(bj::object{{"kind", c.kind == FileChange::Kind::kWrite ? "write" : "delete"},
+                                       {"path", c.path},
+                                       {"data_base64", base::base64_encode(c.data)}});
+        }
+        base::write_file_durable(root_ / "wal" / "failed" / (std::to_string(id) + ".json"),
+                                 json::pretty(bj::object{{"bundle", id}, {"error", err}, {"changes", changes}}));
+        recovery_.failed.push_back("bundle " + std::to_string(id) + ": " + err);
+        continue;
+      }
       ++recovery_.replayed_bundles;
     } else {
       ++recovery_.discarded_bundles;
@@ -204,14 +220,16 @@ bool HostWal::commit(const Bundle& bundle, std::string* error) {
   uint64_t id = next_id_++;
   if (!append_records(id, bundle, error)) return false;
   if (!apply(bundle, error)) {
-    // The bundle is committed; recovery will retry it on the next start.
+    // The bundle is committed; recovery will retry it on the next start, so the log
+    // keeps it until then.
+    unapplied_ = true;
     return false;
   }
   std::string done = encode_record(kDone, id, "", "");
   write_all(fd_, done);
   struct stat st {};
-  if (::fstat(fd_, &st) == 0 && uint64_t(st.st_size) > truncate_after_) {
-    // Every bundle is applied under this lock, so nothing is in flight.
+  if (!unapplied_ && ::fstat(fd_, &st) == 0 && uint64_t(st.st_size) > truncate_after_) {
+    // Every bundle is applied under this lock, and none failed, so nothing is in flight.
     ::fsync(fd_);
     reopen(true);
   }

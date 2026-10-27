@@ -91,3 +91,21 @@ TEST(Wal, TruncatesWhenLarge) {
   }
   EXPECT_LT(fs::file_size(root / "wal/host.wal"), 2048u);
 }
+
+TEST(Wal, ABundleThatCantApplyIsSetAsideAndNeverLost) {
+  auto root = fresh("wal_failed");
+  {
+    wal::HostWal w(root, 1);  // truncate after every commit, if it may
+    std::string err;
+    ASSERT_TRUE(w.commit({{wal::FileChange::Kind::kWrite, "a", "file"}}, &err)) << err;
+    // "a" is a file, so "a/b" can't be written: committed, but not applied.
+    EXPECT_FALSE(w.commit({{wal::FileChange::Kind::kWrite, "a/b", "x"}}, &err));
+    ASSERT_TRUE(w.commit({{wal::FileChange::Kind::kWrite, "c", "y"}}, &err)) << err;
+    EXPECT_FALSE(w.commit({{wal::FileChange::Kind::kWrite, std::string(300, 'n'), "too long a name"}}, &err));
+  }
+  wal::HostWal again(root);  // starts anyway
+  ASSERT_EQ(again.recovery().failed.size(), 1u);
+  EXPECT_NE(again.recovery().failed[0].find("cannot apply"), std::string::npos);
+  EXPECT_TRUE(fs::exists(root / "wal" / "failed"));
+  EXPECT_EQ(*base::read_file(root / "c"), "y");
+}

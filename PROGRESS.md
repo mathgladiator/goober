@@ -78,15 +78,17 @@ caveats, which Phase 3 works through:
   a stand-in curl, not yet against a real mail server.
 - **Rate limits** are per client address and in memory: they reset on restart, and a
   client with many addresses gets many budgets.
-- **Secrets sit in the config file** (operator token, later mail credentials), protected
-  only by file mode 0600. There is no vault (064).
+- **Secrets sit in files** protected only by mode 0600: the operator token in the config,
+  the SMTP password in its own file. There is no vault (064).
 - **Backups are manual**: copy `storage/` while the host is stopped. No Litestream, no
   online SQLite backup, no restore drill.
-- **Logs grow forever** and the access log records paths, which can hold user data (300
-  wants none).
+- **Logs rotate** at 64 MiB (three kept), but the access log still records paths, which can
+  hold user data (300 wants none).
 - **No approvals**: whoever holds an operator token ships code live (005 §9).
-- **Box isolation is wasmtime's** (fuel, epoch deadlines, memory caps, no imports beyond
-  `goober`), which is sound; the host around it has had no outside security review.
+- **Box isolation is wasmtime's** (fuel, epoch deadlines, one memory and one bounded table,
+  no imports beyond `goober`). The host around it has had one internal review
+  (`013.SecurityReview.md`) and no outside one. The identity screens still share an origin
+  with box pages (Q24).
 
 ## The plan
 
@@ -146,15 +148,20 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       and tighter ones for sign-in, tokens, registration, the device flow, consent, uploads,
       and `/mcp`; `listen.behind-proxy` reads the address from X-Forwarded-For behind Caddy.
 - [ ] Online backups (SQLite backup API) and a tested restore; Litestream notes.
-- [ ] Log rotation, and an access log without query strings or other user data.
-- [ ] JSON error bodies for API callers; security headers everywhere.
+- [x] Logs rotate at 64 MiB keeping three; the access log records paths (capped), never
+      query strings or tokens. (Paths themselves can still hold user data.)
+- [x] JSON error bodies for API callers; HSTS on TLS; strict Host headers; the templated
+      CSP on box pages; no CR/LF in any header; a private umask for everything stored.
 - [ ] Graceful shutdown that drains requests; a health endpoint for Caddy.
 
 ### Phase 4: security review
-- [ ] A written review (`design/machine/013.SecurityReview.md`): identity and OAuth,
-      sessions and CSRF, content and XSS, attachments, SQL authorizer, WASM boundary,
-      operator surface, filesystem paths, denial of service. Each finding fixed or
-      recorded with a reason.
+- [x] Three read-only reviews (identity and OAuth; content and files; the box boundary,
+      SQL, operators, and HTTP), every confirmed finding fixed with a test or recorded with
+      a reason: `design/machine/013.SecurityReview.md`. Two findings let one box crash the
+      whole host; both are fixed.
+- [ ] A separate origin for the identity and consent screens (Q24), the one finding whose
+      full fix is a trust-boundary decision for the human.
+- [ ] Fuzz the parsers (markdown, Mustache, front matter, types, multipart, SQL tokenizer).
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [ ] ETags and 304 on box GETs.

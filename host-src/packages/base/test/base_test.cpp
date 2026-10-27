@@ -126,3 +126,14 @@ TEST(Process, RunsWithoutAShellAndBoundsOutput) {
   EXPECT_EQ(fails.err, "oops\n");
   EXPECT_FALSE(run_process({"no-such-program-goober"}, "", 10, 1000).started);
 }
+
+TEST(Files, LogsRotateAndKeepThreeOld) {
+  auto dir = std::filesystem::path(GOOBER_TEST_TMP) / "rotate";
+  std::filesystem::remove_all(dir);
+  auto log = dir / "x.log";
+  for (int i = 0; i < 50; ++i) ASSERT_TRUE(append_line(log, std::string(9, char('a' + i % 26)), 100));
+  EXPECT_LE(std::filesystem::file_size(log), 100u);
+  EXPECT_TRUE(std::filesystem::exists(dir / "x.log.1"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "x.log.3"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "x.log.4"));
+}

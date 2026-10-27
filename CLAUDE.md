@@ -99,6 +99,8 @@ Read these before doing design work:
     routes that declare body, query, request-headers, and response, checked by the host.
   - `design/machine/012.Agents.md`: `/mcp` on every domain: box tools for bearer tokens,
     filtered discovery, typed inputs, an audit log, and RFC 9728 metadata.
+  - `design/machine/013.SecurityReview.md`: the first internal security review: every
+    finding, its fix and test, what isn't fixed and why, and what was checked and sound.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

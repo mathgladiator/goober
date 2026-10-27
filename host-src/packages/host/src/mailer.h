@@ -24,7 +24,10 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
 class SmtpQueue {
  public:
   using ConfigFn = std::function<std::shared_ptr<const config::HostConfig>()>;
-  explicit SmtpQueue(ConfigFn config);
+  // How the dev mailer delivers (a file and a log line), run on the queue's thread too, so
+  // a sign-in takes the same time whether or not a mail goes out.
+  using DevFn = std::function<void(const identity::Mail&)>;
+  SmtpQueue(ConfigFn config, DevFn dev);
   ~SmtpQueue();
   void send(identity::Mail mail);
   // Waits until the queue is empty (tests).
@@ -35,6 +38,7 @@ class SmtpQueue {
   bool deliver(const config::HostConfig& cfg, const identity::Mail& mail, std::string* error);
 
   ConfigFn config_;
+  DevFn dev_;
   std::mutex mu_;
   std::condition_variable cv_;
   std::deque<identity::Mail> queue_;

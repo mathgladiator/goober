@@ -30,8 +30,11 @@ std::string lower(std::string_view s) {
 
 class Session : public std::enable_shared_from_this<Session> {
  public:
-  Session(tcp::socket socket, const ServerOptions& options, const Handler& handler)
-      : stream_(std::move(socket)), options_(options), handler_(handler) {}
+  Session(tcp::socket socket, const ServerOptions& options, const Handler& handler, std::atomic<int>& open)
+      : stream_(std::move(socket)), options_(options), handler_(handler), open_(open) {
+    ++open_;
+  }
+  ~Session() { --open_; }
 
   void run() {
     asio::dispatch(stream_.get_executor(), [self = shared_from_this()] { self->read(); });
@@ -149,6 +152,7 @@ class Session : public std::enable_shared_from_this<Session> {
   std::optional<bhttp::request_parser<bhttp::string_body>> parser_;
   const ServerOptions& options_;
   const Handler& handler_;
+  std::atomic<int>& open_;
   bool keep_alive_ = false;
 };
 
@@ -162,13 +166,19 @@ struct Server::Impl {
       if (ec) {
         if (ec == asio::error::operation_aborted) return;
       } else {
-        std::make_shared<Session>(std::move(socket), options, handler)->run();
+        if (open.load() >= options.max_connections) {
+          beast::error_code ignored;
+          socket.close(ignored);
+        } else {
+          std::make_shared<Session>(std::move(socket), options, handler, open)->run();
+        }
       }
       accept();
     });
   }
 
   ServerOptions options;
+  std::atomic<int> open{0};
   Handler handler;
   asio::io_context io;
   tcp::acceptor acceptor;

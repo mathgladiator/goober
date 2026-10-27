@@ -19,6 +19,7 @@ const std::set<std::string> kRefused = {"oneOf", "anyOf", "allOf", "not", "patte
                                         "contains", "pattern", "multipleOf", "exclusiveMinimum", "exclusiveMaximum"};
 
 constexpr size_t kMaxDepth = 32;
+constexpr int64_t kMaxExpandedNodes = 10000;
 
 bool fail(std::string* error, const std::string& message) {
   *error = message;
@@ -467,6 +468,7 @@ std::optional<Types> Types::parse(std::string_view text, std::string* error) {
     out.schemas_[name] = *s;
   }
   // Every $ref resolves, and no type reaches itself (036: recursive types are refused).
+  std::set<std::string> done;  // types already walked without finding a cycle
   std::function<bool(const Schema&, std::vector<std::string>&)> walk = [&](const Schema& s,
                                                                          std::vector<std::string>& stack) {
     if (s.kind == Schema::Kind::kRef) {
@@ -474,9 +476,11 @@ std::optional<Types> Types::parse(std::string_view text, std::string* error) {
       for (const auto& n : stack) {
         if (n == s.ref) return fail(error, stack.front() + ": recursive types are refused (" + s.ref + " reaches itself)");
       }
+      if (done.count(s.ref)) return true;
       stack.push_back(s.ref);
       bool ok = walk(*out.schemas_.at(s.ref), stack);
       stack.pop_back();
+      if (ok) done.insert(s.ref);
       return ok;
     }
     if (s.items && !walk(*s.items, stack)) return false;
@@ -488,6 +492,29 @@ std::optional<Types> Types::parse(std::string_view text, std::string* error) {
   for (const auto& [name, s] : out.schemas_) {
     std::vector<std::string> stack{name};
     if (!walk(*s, stack)) return std::nullopt;
+  }
+  // Shared $refs are expanded wherever they're used (in checks and in the JSON Schema
+  // agents read), so a document whose expansion is huge is refused. Sizes are memoized,
+  // since the walk itself would blow up on such a document.
+  std::map<std::string, int64_t> sizes;
+  std::function<int64_t(const Schema&)> size = [&](const Schema& s) -> int64_t {
+    if (s.kind == Schema::Kind::kRef) {
+      auto it = sizes.find(s.ref);
+      if (it != sizes.end()) return it->second;
+      int64_t n = size(*out.schemas_.at(s.ref));
+      sizes[s.ref] = n;
+      return n;
+    }
+    int64_t n = 1;
+    if (s.items) n += size(*s.items);
+    for (const auto& [_, p] : s.properties) n = std::min<int64_t>(n + size(*p), int64_t(1) << 40);
+    return n;
+  };
+  for (const auto& [name, s] : out.schemas_) {
+    if (size(*s) > kMaxExpandedNodes) {
+      *error = name + ": expands to more than " + std::to_string(kMaxExpandedNodes) + " schema nodes";
+      return std::nullopt;
+    }
   }
   return out;
 }

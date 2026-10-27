@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "goober/types/types.h"
 
 using namespace goober;
@@ -111,4 +113,20 @@ TEST(Types, QueryTextAndJsonSchemaForAgents) {
   EXPECT_NE(schema.find(R"("required":["id","quantity"])"), std::string::npos) << schema;
   EXPECT_EQ(json_type_name("json:Order"), "Order");
   EXPECT_EQ(json_type_name("text"), "");
+}
+
+TEST(Types, RefusesDocumentsThatExpandEnormously) {
+  // Each type holds two of the next: 2^30 nodes once expanded.
+  std::string schemas;
+  for (int i = 0; i < 30; ++i) {
+    schemas += (i ? "," : "") + std::string("\"T") + std::to_string(i) +
+               "\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"$ref\":\"#/components/schemas/T" +
+               std::to_string(i + 1) + "\"},\"b\":{\"$ref\":\"#/components/schemas/T" + std::to_string(i + 1) + "\"}}}";
+  }
+  schemas += ",\"T30\":{\"type\":\"boolean\"}";
+  std::string err;
+  auto start = std::chrono::steady_clock::now();
+  EXPECT_FALSE(Types::parse(R"({"openapi":"3.1.0","components":{"schemas":{)" + schemas + "}}}", &err));
+  EXPECT_NE(err.find("expands"), std::string::npos) << err;
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
 }

@@ -1,11 +1,13 @@
 #include "goober/base/files.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <deque>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 #include "goober/base/random.h"
@@ -37,13 +39,14 @@ bool fsync_dir(const fs::path& dir) {
 }  // namespace
 
 bool is_safe_relative_path(std::string_view path) {
-  if (path.empty() || path.front() == '/') return false;
+  // Within what every filesystem accepts: 255 bytes a name, 4096 a path.
+  if (path.empty() || path.front() == '/' || path.size() > 4096) return false;
   size_t start = 0;
   while (start <= path.size()) {
     size_t end = path.find('/', start);
     if (end == std::string_view::npos) end = path.size();
     std::string_view seg = path.substr(start, end - start);
-    if (seg.empty() || seg == "." || seg == "..") return false;
+    if (seg.empty() || seg == "." || seg == ".." || seg.size() > 255) return false;
     for (char c : seg) {
       if (c == '\0' || c == '\\') return false;
     }
@@ -100,11 +103,27 @@ std::vector<std::string> list_files(const fs::path& root) {
   return out;
 }
 
-bool append_line(const fs::path& path, std::string_view line) {
+bool append_line(const fs::path& path, std::string_view line, uint64_t rotate_bytes) {
   std::error_code ec;
   fs::create_directories(path.parent_path(), ec);
   int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
   if (fd < 0) return false;
+  // Logs rotate past kLogRotateBytes, keeping three old files, so they can't fill the disk.
+  struct stat st {};
+  if (::fstat(fd, &st) == 0 && uint64_t(st.st_size) + line.size() + 1 > rotate_bytes) {
+    ::close(fd);
+    static std::mutex rotating;
+    std::lock_guard lock(rotating);
+    struct stat again {};
+    if (::stat(path.c_str(), &again) == 0 && uint64_t(again.st_size) + line.size() + 1 > rotate_bytes) {
+      for (int i = kLogsKept - 1; i >= 1; --i) {
+        fs::rename(path.string() + "." + std::to_string(i), path.string() + "." + std::to_string(i + 1), ec);
+      }
+      fs::rename(path, path.string() + ".1", ec);
+    }
+    fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+  }
   std::string buf(line);
   buf.push_back('\n');
   bool ok = write_all(fd, buf);

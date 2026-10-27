@@ -99,6 +99,7 @@ class Host {
   std::string origin_of(const server::http::Request& req) const;
   std::string session_cookie_name() const;
   void send_mail(const identity::Mail& mail);
+  void write_dev_mail(const identity::Mail& mail);
   struct BoxCall {
     runtime::wasm::CallResult result;
     boost::json::object extra;  // fields for the access log
