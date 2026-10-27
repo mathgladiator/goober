@@ -61,6 +61,16 @@ std::string base64_encode(std::string_view bytes) {
   return out;
 }
 
+std::string base64url_encode(std::string_view bytes) {
+  std::string out = base64_encode(bytes);
+  while (!out.empty() && out.back() == '=') out.pop_back();
+  for (char& c : out) {
+    if (c == '+') c = '-';
+    else if (c == '/') c = '_';
+  }
+  return out;
+}
+
 std::optional<std::string> base64_decode(std::string_view text) {
   std::string out;
   uint32_t acc = 0;

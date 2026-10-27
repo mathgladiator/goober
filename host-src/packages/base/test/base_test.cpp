@@ -34,6 +34,14 @@ TEST(Encoding, Base64RoundTrip) {
   EXPECT_FALSE(base64_decode("Zg==Zg").has_value());
 }
 
+TEST(Encoding, Base64UrlForPkce) {
+  // RFC 7636 appendix B: the S256 challenge of the example verifier.
+  auto digest = sha256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+  EXPECT_EQ(base64url_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+  EXPECT_EQ(base64url_encode("\xfb\xff"), "-_8");
+}
+
 TEST(Encoding, PercentDecode) {
   EXPECT_EQ(*percent_decode("a%20b"), "a b");
   EXPECT_EQ(*percent_decode("%2F"), "/");

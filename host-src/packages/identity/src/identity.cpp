@@ -7,8 +7,11 @@
 #include "goober/base/names.h"
 #include "goober/base/random.h"
 #include "goober/sqlite/sqlite.h"
+#include "internal.h"
 
 namespace goober::identity {
+
+using namespace detail;
 
 namespace {
 
@@ -32,21 +35,44 @@ CREATE INDEX IF NOT EXISTS email_codes_by_email ON email_codes(email, expires_at
 CREATE TABLE IF NOT EXISTS clients (
   client_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  redirect_uris TEXT NOT NULL,
-  kind TEXT NOT NULL,
+  redirect_uris TEXT NOT NULL,           -- JSON array; exact match, except loopback ports (009 §3)
+  kind TEXT NOT NULL,                    -- 'public' (PKCE, no secret); 'confidential' isn't offered yet
   secret_hash TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  acts_as TEXT NOT NULL DEFAULT 'agent', -- 'person' or 'agent' (999 decision 1)
+  source TEXT NOT NULL DEFAULT 'host'    -- 'host' (the sign-in page), 'config', 'operator', or 'dynamic'
 );
-INSERT OR IGNORE INTO clients VALUES ('goober-sign-in', 'the sign-in page', '[]', 'public', NULL, 0);
+CREATE TABLE IF NOT EXISTS authorization_codes (
+  code_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES clients(client_id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,          -- PKCE, S256 only
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  family TEXT                            -- the tokens it was exchanged for, so a replay revokes them
+);
+CREATE TABLE IF NOT EXISTS device_codes (
+  device_code_hash TEXT PRIMARY KEY,
+  user_code TEXT NOT NULL UNIQUE,
+  client_id TEXT NOT NULL REFERENCES clients(client_id),
+  user_id INTEGER REFERENCES users(id),
+  expires_at INTEGER NOT NULL,
+  approved_at INTEGER,
+  denied_at INTEGER,
+  polled_at INTEGER,                     -- for slow_down
+  consumed_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS tokens (
   token_hash TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,                    -- 'session' in v1: the browser's cookie
+  kind TEXT NOT NULL,                    -- 'session' (the browser's cookie), 'access', or 'refresh'
   user_id INTEGER NOT NULL REFERENCES users(id),
   client_id TEXT NOT NULL REFERENCES clients(client_id),
   is_agent INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   rotated_to TEXT,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  family TEXT                            -- one grant: its access and refresh tokens, revoked together
 );
 CREATE INDEX IF NOT EXISTS tokens_by_user ON tokens(user_id);
 CREATE TABLE IF NOT EXISTS roles (
@@ -66,100 +92,29 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 )sql";
 
-std::string hash_secret(std::string_view secret) { return "sha256:" + base::sha256_hex(secret); }
-
-std::string code_hash(std::string_view email, std::string_view code) {
-  return hash_secret(std::string(email) + "\n" + std::string(code));
+// Columns added after a realm's database was first created.
+void migrate(sqlite::Db& db) {
+  auto has = [&](const char* table, const char* column) {
+    sqlite::Stmt s(db, std::string("SELECT count(*) FROM pragma_table_info('") + table + "') WHERE name = ?");
+    s.bind(1, std::string_view(column));
+    return s.step() && s.int64(0) > 0;
+  };
+  if (!has("clients", "acts_as")) db.exec("ALTER TABLE clients ADD COLUMN acts_as TEXT NOT NULL DEFAULT 'agent'");
+  if (!has("clients", "source")) db.exec("ALTER TABLE clients ADD COLUMN source TEXT NOT NULL DEFAULT 'host'");
+  if (!has("tokens", "family")) db.exec("ALTER TABLE tokens ADD COLUMN family TEXT");
+  db.exec(
+      "INSERT OR IGNORE INTO clients (client_id, name, redirect_uris, kind, secret_hash, created_at, acts_as, source) "
+      "VALUES ('goober-sign-in', 'the sign-in page', '[]', 'public', NULL, 0, 'person', 'host')");
+  db.exec("UPDATE clients SET acts_as = 'person' WHERE client_id = 'goober-sign-in'");
+  db.exec("CREATE INDEX IF NOT EXISTS tokens_by_family ON tokens(family)");
 }
-
-bool constant_time_equal(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  unsigned char diff = 0;
-  for (size_t i = 0; i < a.size(); ++i) diff |= static_cast<unsigned char>(a[i] ^ b[i]);
-  return diff == 0;
-}
-
-std::string normalize_email(std::string_view email) {
-  std::string e = base::to_lower(email);
-  while (!e.empty() && (e.back() == ' ' || e.back() == '\t')) e.pop_back();
-  size_t i = 0;
-  while (i < e.size() && (e[i] == ' ' || e[i] == '\t')) ++i;
-  return e.substr(i);
-}
-
-bool looks_like_email(std::string_view e) {
-  auto at = e.find('@');
-  if (at == std::string_view::npos || at == 0 || at + 1 >= e.size() || e.size() > 254) return false;
-  for (unsigned char c : e) {
-    if (c <= 0x20 || c == '<' || c == '>' || c == '"' || c == ',' || c >= 0x7f) return false;
-  }
-  return e.find('@', at + 1) == std::string_view::npos;
-}
-
-bool is_role_part(std::string_view s) {
-  if (s.empty() || s.size() > 128) return false;
-  for (char c : s) {
-    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-    if (!ok) return false;
-  }
-  return true;
-}
-
-void audit(sqlite::Db& db, int64_t at, std::optional<int64_t> actor, std::string_view action,
-           std::optional<int64_t> subject, const bj::object& detail) {
-  sqlite::Stmt s(db, "INSERT INTO audit (at, actor, action, subject, detail) VALUES (?, ?, ?, ?, ?)");
-  s.bind(1, at);
-  actor ? s.bind(2, *actor) : s.bind_null(2);
-  s.bind(3, action);
-  subject ? s.bind(4, *subject) : s.bind_null(4);
-  s.bind(5, json::dump(detail));
-  s.run();
-}
-
-std::vector<std::string> roles_of(sqlite::Db& db, int64_t user_id) {
-  sqlite::Stmt s(db, "SELECT role FROM roles WHERE user_id = ? ORDER BY role");
-  s.bind(1, user_id);
-  std::vector<std::string> out;
-  while (s.step()) out.push_back(s.text(0));
-  return out;
-}
-
-std::optional<int64_t> user_id_for(sqlite::Db& db, std::string_view email) {
-  sqlite::Stmt s(db, "SELECT id FROM users WHERE email = ?");
-  s.bind(1, email);
-  if (!s.step()) return std::nullopt;
-  return s.int64(0);
-}
-
-int64_t create_user(sqlite::Db& db, std::string_view email, int64_t now_ms) {
-  sqlite::Stmt s(db, "INSERT INTO users (email, created_at) VALUES (?, ?)");
-  s.bind(1, email).bind(2, now_ms).run();
-  return db.last_insert_rowid();
-}
-
-// BEGIN IMMEDIATE ... COMMIT, rolled back if anything throws.
-class Transaction {
- public:
-  explicit Transaction(sqlite::Db& db) : db_(db) { db_.exec("BEGIN IMMEDIATE"); }
-  ~Transaction() {
-    if (!done_) {
-      try {
-        db_.exec("ROLLBACK");
-      } catch (...) {
-      }
-    }
-  }
-  void commit() {
-    db_.exec("COMMIT");
-    done_ = true;
-  }
-
- private:
-  sqlite::Db& db_;
-  bool done_ = false;
-};
 
 }  // namespace
+
+Identity::Realm::Realm(const std::filesystem::path& file) : db(file) {
+  db.exec(kSchema);
+  migrate(db);
+}
 
 bool is_valid_tenant_role(std::string_view role) {
   auto slash = role.find('/');
@@ -169,11 +124,6 @@ bool is_valid_tenant_role(std::string_view role) {
 
 bool is_valid_realm(std::string_view realm) { return realm == kHostRealm || base::is_valid_name(realm); }
 
-struct Identity::Realm {
-  explicit Realm(const std::filesystem::path& file) : db(file) { db.exec(kSchema); }
-  std::mutex mu;
-  sqlite::Db db;
-};
 
 Identity::Identity(std::filesystem::path directory, Mailer mailer)
     : directory_(std::move(directory)), mailer_(std::move(mailer)) {}
