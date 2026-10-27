@@ -79,6 +79,14 @@ struct HostConfig {
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.
   bool behind_proxy = false;
+  // The crawler (design/machine/017.Crawl.md): who it says it is, how slowly it reads one
+  // site, and how much it reads of one page.
+  struct Web {
+    std::string contact;            // a URL or email in the User-Agent; "" means the public URL
+    int64_t min_delay_ms = 2000;     // between two fetches from one site, at least
+    int64_t max_page_bytes = 4 << 20;
+    std::vector<std::string> opt_out;  // hosts never fetched, whatever asks
+  } web;
   Limit timeout_ms{1000, 10000};
   Limit fuel{100'000'000, 2'000'000'000};
   Limit memory_max_bytes{64 << 20, 512 << 20};

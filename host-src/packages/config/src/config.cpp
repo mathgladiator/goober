@@ -123,7 +123,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits"},
+                          "threads", "limits", "web"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -280,6 +280,27 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (!read_limit(*limits, "timeout-ms", cfg->timeout_ms, &err) || !read_limit(*limits, "fuel", cfg->fuel, &err) ||
         !read_limit(*limits, "memory-max-bytes", cfg->memory_max_bytes, &err)) {
       return *error = err, nullptr;
+    }
+  }
+  if (const auto* web = get_object(root, "web", &err)) {
+    if (!check_keys(*web, {"contact", "min-delay-ms", "max-page-bytes", "opt-out"}, "web", &err)) return *error = err, nullptr;
+    if (auto v = get_string(*web, "contact", &err)) cfg->web.contact = *v;
+    for (char c : cfg->web.contact) {
+      if (static_cast<unsigned char>(c) < 0x20 || c == '(' || c == ')') return *error = "web.contact holds a character a User-Agent can't", nullptr;
+    }
+    if (auto v = get_int(*web, "min-delay-ms", &err)) {
+      if (*v < 250 || *v > 600000) return *error = "web.min-delay-ms must be 250 to 600000", nullptr;
+      cfg->web.min_delay_ms = *v;
+    }
+    if (auto v = get_int(*web, "max-page-bytes", &err)) {
+      if (*v < 4096 || *v > (64 << 20)) return *error = "web.max-page-bytes must be 4096 to 67108864", nullptr;
+      cfg->web.max_page_bytes = *v;
+    }
+    if (const auto* list = get_array(*web, "opt-out", &err)) {
+      for (const auto& h : *list) {
+        if (!h.is_string()) return *error = "web.opt-out holds host names", nullptr;
+        cfg->web.opt_out.emplace_back(base::to_lower(h.as_string()));
+      }
     }
   }
   if (!err.empty()) {

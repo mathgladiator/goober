@@ -170,6 +170,23 @@ the request later fails. require pins fields to {!email}, {!user_id}, {!tenant},
 literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
 every call without query strings or bodies.
 
+## Reading the web
+
+A box reads web pages through the host's polite robot (robots.txt obeyed, one request per site
+every few seconds, public addresses only, cached):
+"external": {"farms": {"web": {"hosts": ["*"]},     or ["ranch.example", "*.ranch.example"]
+                       "methods": {"fetch": {"budget": {"calls": 5}}}}}
+goober_call("farms", "fetch", {"url": "https://ranch.example/shop", "views": ["jsonld", "links"],
+  "select": ".price", "extract": {"items": ".product", "fields": {"name": ".title",
+  "price": ".price", "url": "a@href"}}, "max_age_ms": 86400000}) answers {"url" (after
+redirects), "status", "content_type", "fetched_at", "from_cache", and the views: "html", "text",
+"markdown", "links", "meta" (title, description, og, feeds, "platform" like shopify),
+"jsonld" (schema.org items: Product, Offer, LocalBusiness), "tables", "json", "select",
+"extract"}, or {"error"} (robots.txt says no, not a page, too large) with "retry_after_ms"
+when the site's turn hasn't come. A crawler is an ordinary box: keep the frontier and what you
+find in your own tables, and walk them with a timer, a few pages per fire. Operators and their
+agents also have web_fetch and crawl_start for looking at sites and one-off crawls.
+
 ## Calling other boxes
 
 A box offers internal routes, reachable only from the boxes it names:

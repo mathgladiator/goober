@@ -131,6 +131,10 @@ struct ExternalMethod {
 struct ExternalService {
   std::string name;
   std::string box;  // another box on this host: methods name its internal routes (039)
+  // The web through the host's crawler (design/machine/017.Crawl.md): the hosts it may read,
+  // like "ranch.example", "*.ranch.example", or "*" for any. Its one method is fetch.
+  bool web = false;
+  std::vector<std::string> web_hosts;
   std::string base;         // https://api.example.com[/prefix]
   std::string credentials;  // keys/system/$name or keys/tenant/{!tenant}/$name, or ""
   std::string auth_header = "authorization";

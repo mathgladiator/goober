@@ -265,9 +265,52 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
       }
-      if (k == "box") continue;
+      if (k == "box" || k == "web") continue;
       if (k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    if (const auto* web = def.if_contains("web")) {
+      // Reading the web, politely, through the host: robots.txt, pacing, public addresses only.
+      if (def.contains("base") || def.contains("credentials") || def.contains("auth") || def.contains("box")) {
+        return *error = where + ": a web service has no base, credentials, or box; the host fetches", false;
+      }
+      const auto* hosts = web->is_object() ? web->as_object().if_contains("hosts") : nullptr;
+      if (!web->is_object() || web->as_object().size() != 1 || !hosts || !hosts->is_array() || hosts->as_array().empty() ||
+          hosts->as_array().size() > 1000) {
+        return *error = where + ".web is {\"hosts\": [\"ranch.example\", \"*.ranch.example\", or \"*\"]}", false;
+      }
+      for (const auto& h : hosts->as_array()) {
+        std::string host = h.is_string() ? base::to_lower(h.as_string()) : "";
+        std::string bare = host.starts_with("*.") ? host.substr(2) : host;
+        bool ok = host == "*" || (!bare.empty() && bare.size() <= 253 && bare.find('.') != std::string::npos);
+        for (char c : bare) ok &= (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
+        if (host == "*") ok = true;
+        if (!ok) return *error = where + ".web.hosts: \"" + host + "\" isn't a host name, *.name, or *", false;
+        svc.web_hosts.push_back(host);
+      }
+      svc.web = true;
+      ExternalMethod fetch;
+      fetch.name = "fetch";
+      fetch.verb = "get";
+      fetch.effect = "none";
+      if (const auto* methods = get_object(def, "methods", &err)) {
+        for (const auto& mk : *methods) {
+          std::string mw = where + ".methods." + std::string(mk.key());
+          if (mk.key() != "fetch") return *error = mw + ": a web service's one method is fetch", false;
+          if (!mk.value().is_object()) return *error = mw + " must be an object", false;
+          for (const auto& f : mk.value().as_object()) {
+            if (f.key() != "budget") return *error = mw + ": unknown field \"" + std::string(f.key()) + "\"", false;
+            if (const auto* b = get_object(mk.value().as_object(), "budget", &err)) {
+              fetch.budget_calls = get_int(*b, "calls", &err).value_or(fetch.budget_calls);
+            }
+          }
+        }
+      }
+      if (!err.empty()) return *error = where + ": " + err, false;
+      if (fetch.budget_calls < 1 || fetch.budget_calls > 100) return *error = where + ".methods.fetch.budget.calls is 1 to 100", false;
+      svc.methods["fetch"] = std::move(fetch);
+      m->external.push_back(std::move(svc));
+      continue;
     }
     svc.box = get_string(def, "box", &err).value_or("");
     if (!svc.box.empty()) {

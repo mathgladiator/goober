@@ -11,6 +11,7 @@
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
+#include "web_fetch.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "goober/json/json.h"
@@ -145,9 +146,11 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "markdown, an HTML fragment in a template, or a whole HTML document), templates (template_put), and images "
       "(attachment_put, from base64 or a URL). Deploy WASM boxes (version_upload), query tenant databases "
       "(db_list, db_query), and read logs.");
+  init_web();
   register_tools();
   register_content_tools();
   register_data_tools();
+  register_web_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -174,6 +177,7 @@ uint16_t Host::start() {
   server_->start();
   timer_thread_ = std::thread([this] { run_timers(); });
   outbox_thread_ = std::thread([this] { run_outbox(); });
+  crawl_thread_ = std::thread([this] { run_crawls(); });
   return server_->port();
 }
 
@@ -186,6 +190,7 @@ void Host::stop() {
     timer_cv_.notify_all();
     timer_thread_.join();
     if (outbox_thread_.joinable()) outbox_thread_.join();
+    if (crawl_thread_.joinable()) crawl_thread_.join();
   }
   if (!server_) {
     if (pool_) pool_->shutdown();

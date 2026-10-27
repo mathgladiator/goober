@@ -267,6 +267,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     request = std::move(*parsed);
   }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
+  if (svc->web) return web_call(ctx, *svc, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
   if (!built) return fail(err);

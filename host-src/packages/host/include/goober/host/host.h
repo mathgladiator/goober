@@ -92,6 +92,9 @@ class Host {
   boxes::BoxRegistry& boxes() { return *boxes_; }
   identity::Identity& identity() { return *identity_; }
   const std::vector<std::string>& startup_notes() const { return startup_notes_; }
+  // One step of every running crawl: at most one page each (design/machine/017.Crawl.md).
+  // The crawler thread calls it; tests call it directly. Returns the pages fetched.
+  int crawl_step();
 
  private:
   void handle(server::http::Request req, server::http::Responder respond);
@@ -221,6 +224,13 @@ class Host {
   bool timers_stopping_ = false;
   void run_timers();
   sqlite::Db& timer_progress(const std::string& tenant);
+  // The polite robot and its crawls (crawler.cpp, web_fetch.cpp).
+  std::unique_ptr<class WebFetcher> web_;
+  std::thread crawl_thread_;
+  void init_web();
+  void register_web_tools();
+  void run_crawls();
+  std::string web_call(struct CallContext& ctx, const manifest::ExternalService& svc, const boost::json::value& request);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class SmtpQueue> smtp_;
 };
