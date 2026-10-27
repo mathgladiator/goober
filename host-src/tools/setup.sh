@@ -214,6 +214,7 @@ if [[ $PROD == 1 ]]; then
     ask SMTP_FROM "Send from:" "no-reply@$PLATFORM" is_email
     ask SMTP_USER "SMTP username (empty for none):" ""
     ask SMTP_PASS_FILE "A file holding only the SMTP password (kept out of the config):" "/etc/goober/smtp-password"
+    note "The host's user must be able to read it: chown root:${GOOBER_USER:-$(id -un)} and chmod 0640."
   fi
 else
   COOKIE_SECURE=false
@@ -347,7 +348,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=$(id -un)
+User=${GOOBER_USER:-$(id -un)}
 WorkingDirectory=$DIR
 ExecStart=$BIN --config $CONFIG
 ExecReload=/bin/kill -HUP \$MAINPID
@@ -370,15 +371,41 @@ EOF
       d="${entry%%|*}"; [[ "$d" != "$PLATFORM" ]] && sites="$sites, $d"
     done
     echo "$sites {"
+    echo "  encode zstd gzip"
     echo "  reverse_proxy $ADDRESS:$PORT {"
     echo "    health_uri /goober/health"
     echo "  }"
     echo "}"
   } >"$DIR/deploy/Caddyfile"
+  # A nightly backup, kept for two weeks: SQLite's online backup, safe while the host runs.
+  cat >"$DIR/deploy/goober-backup.service" <<UNIT
+[Unit]
+Description=Back up the goober host ($DIR)
+
+[Service]
+Type=oneshot
+User=${GOOBER_USER:-$(id -un)}
+ExecStart=/bin/sh -c '$BIN backup "$DIR/backups/\$\$(date +%%F)" --config "$CONFIG" && find "$DIR/backups" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +'
+UNIT
+  cat >"$DIR/deploy/goober-backup.timer" <<UNIT
+# Install next to goober-host.service, then: sudo systemctl enable --now goober-backup.timer
+[Unit]
+Description=Nightly goober backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
   good "wrote $DIR/deploy/goober-host.service"
+  good "wrote $DIR/deploy/goober-backup.service and .timer (nightly, two weeks kept)"
   good "wrote $DIR/deploy/Caddyfile"
-  note "The host binary is the dev build at $BIN. For a server, build the release preset"
-  note "(cmake --preset release && cmake --build --preset release) and point ExecStart at it."
+  if [[ "$BIN" == */build/dev/* ]]; then
+    note "The host binary is the dev build at $BIN. For a server, build the server preset"
+    note "(cmake --preset server && cmake --build --preset server), or use tools/deploy.sh."
+  fi
 fi
 
 # ---------------------------------------------------------------- examples
@@ -416,8 +443,8 @@ Next:
   ${B}just mcp $DIR${N}             mint an operator token and print the claude command
   ${B}just serve $DIR${N}           run it in the foreground to try it (no --local)
   install ${B}$DIR/deploy/${N} for systemd and Caddy, and point DNS at this server
-  sign in as an operator at ${B}$PUBLIC_URL/identity/sign-in/as-host${N}; the code is
-  in ${B}$DIR/storage/mail/outbox/${N} until a real mailer lands
+  sign in as an operator at ${B}$PUBLIC_URL/identity/sign-in/as-host${N}; $(
+  [[ ${USE_SMTP:-0} == 1 ]] && echo "the code comes by email" || echo "the code is in $DIR/storage/mail/outbox/")
 EOF
 else
   cat <<EOF

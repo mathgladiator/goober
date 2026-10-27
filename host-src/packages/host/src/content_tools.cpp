@@ -412,7 +412,7 @@ void Host::register_content_tools() {
            if (!decoded) return ToolResult::fail("base64 is not valid");
            bytes = std::move(*decoded);
          } else {
-           auto fetched = fetch_https(*url, size_t(config_.get()->body_max_bytes), &err);
+           auto fetched = fetch_https(*url, size_t(kOperatorAttachmentMaxBytes), &err);
            if (!fetched) return ToolResult::fail(err);
            bytes = std::move(*fetched);
            if (name.empty()) {
@@ -420,8 +420,9 @@ void Host::register_content_tools() {
              name = u.substr(u.rfind('/') + 1);
            }
          }
-         if (int64_t(bytes.size()) > config_.get()->body_max_bytes) {
-           return ToolResult::fail("larger than limits.body-max-bytes");
+         // Operators may attach more than a visitor may upload (attachment_routes.cpp).
+         if (bytes.size() > kOperatorAttachmentMaxBytes) {
+           return ToolResult::fail("larger than " + std::to_string(kOperatorAttachmentMaxBytes >> 20) + " MiB");
          }
          auto a = attachments_->put(*tenant, bytes, name, arg(args, "alt").value_or(""),
                                     arg(args, "visibility").value_or("public"), base::now_unix_ms(), &err);

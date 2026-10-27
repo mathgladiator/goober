@@ -161,6 +161,14 @@ uint16_t Host::start() {
   opts.port = cfg->listen_port;
   opts.threads = cfg->network_threads;
   opts.body_max_bytes = uint64_t(cfg->body_max_bytes);
+  // Operators push sites and boxes as base64 JSON: their bodies may be larger, once their
+  // token checks out, before a byte of the body is read.
+  opts.body_limit_for = [this](std::string_view target, std::string_view authorization) -> uint64_t {
+    if (target.substr(0, target.find('?')) != kOperationsMcpPath || !authorization.starts_with("Bearer ")) return 0;
+    server::http::Request probe;
+    probe.headers.emplace_back("authorization", std::string(authorization));
+    return bearer_operator(probe).empty() ? 0 : kOperatorBodyMaxBytes;
+  };
   server_ = std::make_unique<server::http::Server>(
       opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond)); });
   server_->start();

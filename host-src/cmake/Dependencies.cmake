@@ -7,7 +7,9 @@ set(GOOBER_WASMTIME_DIR "${GOOBER_LOCAL}/opt/wasmtime-${GOOBER_WASMTIME_VERSION}
 list(PREPEND CMAKE_PREFIX_PATH "${GOOBER_LOCAL}")
 
 find_package(Threads REQUIRED)
-find_package(GTest REQUIRED CONFIG)
+if(BUILD_TESTING)
+  find_package(GTest REQUIRED CONFIG)
+endif()
 
 # Boost: header-only use of Asio, Beast, and JSON (JSON is compiled in packages/json).
 find_path(GOOBER_BOOST_INCLUDE boost/version.hpp HINTS "${GOOBER_LOCAL}/include" REQUIRED)

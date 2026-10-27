@@ -197,3 +197,21 @@ TEST_F(HostTest, FormsArriveDecodedAndAnonymousWritesAreBudgeted) {
   for (int i = 0; i < 15; ++i) limited += fetch(port, bhttp::verb::post, "/signup").status == 429;
   EXPECT_GT(limited, 0);
 }
+
+TEST_F(HostTest, OperatorsMaySendLargerBodiesThanAnyoneElse) {
+  std::string big(3 << 20, 'x');  // past the 1 MiB default
+  auto v = tool("content_put", {{"tenant", "playground"}, {"path", "big.txt"}, {"text", big}});
+  ASSERT_EQ(v.at("result").at("isError"), false) << json::dump(v).substr(0, 300);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/big.txt").body.size(), big.size());
+  // Without the token, the same body is refused before it is read: a 413, or the connection
+  // closed while the client is still sending.
+  auto refused = [&](const std::string& auth) {
+    try {
+      return fetch(port, bhttp::verb::post, "/goober-operations-mcp", "localhost", big, auth).status == 413;
+    } catch (const std::exception&) {
+      return true;
+    }
+  };
+  EXPECT_TRUE(refused("Bearer wrong"));
+  EXPECT_TRUE(refused(""));
+}

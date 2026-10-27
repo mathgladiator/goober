@@ -47,8 +47,36 @@ class Session : public std::enable_shared_from_this<Session> {
     parser_->body_limit(options_.body_max_bytes);
     parser_->header_limit(64 * 1024);
     stream_.expires_after(std::chrono::seconds(options_.idle_timeout_seconds));
-    bhttp::async_read(stream_, buffer_, *parser_,
-                      [self = shared_from_this()](beast::error_code ec, size_t) { self->on_read(ec); });
+    if (!options_.body_limit_for) {
+      bhttp::async_read(stream_, buffer_, *parser_,
+                        [self = shared_from_this()](beast::error_code ec, size_t) { self->on_read(ec); });
+      return;
+    }
+    // Headers first, so the body's limit can depend on who is sending it. Beast checks a
+    // declared length against the limit as the header completes, so the limit is lifted until
+    // the header is in and then set for real.
+    parser_->body_limit(boost::none);
+    bhttp::async_read_header(stream_, buffer_, *parser_, [self = shared_from_this()](beast::error_code ec, size_t) {
+      if (ec) return self->on_read(ec);
+      const auto& h = self->parser_->get();
+      uint64_t limit = 0;
+      try {
+        limit = self->options_.body_limit_for(std::string_view(h.target().data(), h.target().size()),
+                                              std::string_view(h[bhttp::field::authorization].data(),
+                                                               h[bhttp::field::authorization].size()));
+      } catch (...) {
+        limit = 0;
+      }
+      limit = std::max<uint64_t>(limit, self->options_.body_max_bytes);
+      // A declared length past the limit is refused now, before a byte of the body is read;
+      // a chunked body is held to the limit as it arrives.
+      if (auto length = self->parser_->content_length(); length && *length > limit) {
+        return self->on_read(bhttp::error::body_limit);
+      }
+      self->parser_->body_limit(limit);
+      bhttp::async_read(self->stream_, self->buffer_, *self->parser_,
+                        [self](beast::error_code ec2, size_t) { self->on_read(ec2); });
+    });
   }
 
   void on_read(beast::error_code ec) {

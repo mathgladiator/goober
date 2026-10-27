@@ -28,6 +28,9 @@ namespace goober::host {
 
 inline constexpr std::string_view kVersion = "0.1.0";
 inline constexpr std::string_view kOperationsMcpPath = "/goober-operations-mcp";
+// How large an operator's request may be: a pushed site file or a box, as base64 in JSON.
+inline constexpr uint64_t kOperatorBodyMaxBytes = 64ull << 20;
+inline constexpr uint64_t kOperatorAttachmentMaxBytes = 32ull << 20;
 
 // A signed-in caller: a tenant identity in the domain's realm, or a host identity
 // whose roles come from identity.operators in the config.

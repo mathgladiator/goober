@@ -45,6 +45,9 @@ struct ServerOptions {
   uint16_t port = 8080;  // 0 picks a free port
   int threads = 2;
   uint64_t body_max_bytes = 1 << 20;
+  // Once a request's headers are read, may raise its body limit (an operator uploading a
+  // site or a box, say); returns 0 to keep body_max_bytes. Runs on a network thread.
+  std::function<uint64_t(std::string_view target, std::string_view authorization)> body_limit_for;
   int idle_timeout_seconds = 30;
   // Connections open at once; past it, new ones are closed at accept, so a flood of idle
   // sockets can't hold the host's memory and descriptors.

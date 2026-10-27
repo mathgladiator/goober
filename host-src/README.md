@@ -148,6 +148,28 @@ The request document is JSON: `request_id`, `method`, `path`, `params`, `query`,
   terminal (`design/machine/010.Terminal.md`): the person's routes, and the agents' routes
   (`"agents": true`), over one database, sharing the serde binding in `examples/boxes/shared/`.
 
+## Deploy to a server
+
+On a fresh Ubuntu 24.04+ or Debian 13+ machine (x86_64, sudo, DNS already pointing at it):
+
+```sh
+just deploy you@server            # or host-src/tools/deploy.sh you@server [/srv/goober/host]
+```
+
+It builds the `server` preset here (a release binary with libstdc++ linked in, needing only
+glibc 2.38), copies it, and runs `tools/server-bootstrap.sh` there. That script installs Caddy,
+curl, python3, and tzdata; creates a `goober` system user and `/srv/goober/host`; runs setup as
+`goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (two
+weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
+own. Running it again upgrades: it checks the config with the new binary and restarts.
+
+Then, on the server, mint an operator token
+(`sudo -u goober goober-host token create --config /srv/goober/host/host.json --name claude-code --claude`)
+and use it from your laptop: `GOOBER_URL=https://your.domain GOOBER_TOKEN=... tools/goober.py push playground site/`.
+
+For sign-in mail to reach anyone but you, answer yes to SMTP in setup and put the password in a
+file the `goober` user can read (`chown root:goober`, `chmod 0640`).
+
 ## Layout
 
 Each package under `packages/` is one directory, one library (`goober_$name`), one test

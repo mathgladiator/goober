@@ -104,3 +104,7 @@ check dir=dir: build
 # Tell the running host for DIR to reread its config (SIGHUP).
 reload dir=dir:
     @pkill -HUP -f -- "[g]oober-host --config {{trim_start_match(dir, "dir=")}}/host.json" && echo "reloaded" || echo "no running host for {{trim_start_match(dir, "dir=")}}"
+
+# Install or upgrade goober on a server over ssh (Ubuntu 24.04+ / Debian 13+), with Caddy and backups.
+deploy target dir="/srv/goober/host":
+    {{host_src}}/tools/deploy.sh {{target}} {{dir}}
