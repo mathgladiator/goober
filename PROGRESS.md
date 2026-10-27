@@ -19,7 +19,7 @@ turning pages into text, markdown, links, schema.org data, and scraped records; 
 people in with emailed codes or OAuth (the dumb terminal, agents through the device flow,
 MCP clients, or long-lived minted tokens); and is operated by an agent over MCP with 57
 tools. It deploys to a fresh server with one command and backs itself up nightly. It has
-had two rounds of internal review and fuzzing. Two example products run on it end to end:
+had three rounds of internal review and fuzzing. Two example products run on it end to end:
 an ad landing page that collects emails and surveys, and a ranch CRM and meat index fed by
 the crawler. `READINESS.md` says what that means for the human's experiments. It is **not yet** the system the human docs describe: there are
 no approvals, no host write sets, no bus, no generated code, no domain registry, no
@@ -188,6 +188,9 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       and shutdown code, and product readiness; twelve correctness findings and three deploy
       blockers fixed (013 R1 to R12, P1 to P3), among them a `..` path value walking out of
       an external call's declared path with its credential attached.
+- [x] A third review, of the robot and the example products: eleven findings fixed (013 W1 to
+      W11), among them a robots.txt that could hold a thread for 23 s and a cache a box could
+      read past its own allow list. The whole suite also passes under ASan and UBSan.
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).
