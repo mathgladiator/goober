@@ -42,6 +42,15 @@ struct HttpRoute {
   // and its description is part of the box's shape.
   std::string description;
   std::string input;  // "json:$Type", or "" for a tool that takes nothing
+  // A timer (045.Time.md) is a route with verb "timer", called only by the host: it runs
+  // every every_ms, or on cron (in the host's zone, or each row's with a source), or once
+  // at each row's at_field. With a source (a by_timer strategy), each active row is a fire.
+  std::optional<int64_t> every_ms;
+  std::string cron;
+  std::string source;
+  std::string at_field;
+  std::string missed;  // "once" (a catch-up fire after downtime) or "skip"
+  std::optional<int64_t> timeout_ms;
   std::string export_name() const { return "goober_route_" + name; }
 };
 
@@ -82,7 +91,13 @@ struct DataStrategy {
   std::map<std::string, TableGrant> tables;
   int64_t row_limit = 1000;
   int64_t step_budget = 1'000'000;
+  // by_timer (045): the table a timer reads, and the columns it reads as they are.
+  std::string table;
+  std::string timezone_field;
+  std::string active_field;
   bool runnable() const { return pattern == "sql"; }
+  // Strategies whose schema the host applies to the database: sql and by_timer.
+  bool applies_schema() const { return pattern == "sql" || pattern == "by_timer"; }
   // The database's name for a tenant, with {!tenant} filled in.
   std::string database_for(std::string_view tenant) const;
 };
@@ -100,7 +115,8 @@ struct Manifest {
   std::vector<std::string> domains;  // "*" or lowercase domain names
   Behavior behavior;
   std::vector<HttpRoute> routes;
-  std::vector<HttpRoute> tools;  // routes.mcp.$name.tool, with verb "tool"
+  std::vector<HttpRoute> tools;   // routes.mcp.$name.tool, with verb "tool"
+  std::vector<HttpRoute> timers;  // routes.timer.$key, with verb "timer"
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

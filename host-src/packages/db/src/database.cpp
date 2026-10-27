@@ -550,6 +550,65 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
 
 Session::~Session() { rollback(); }
 
+Session::Open* Session::open_database(const std::string& database, std::string* error) {
+  auto& open = open_[database];
+  if (open.db) return &open;
+  // On first use, every schema that any strategy brings to this database is applied,
+  // before the request's transaction begins.
+  std::string err;
+  try {
+    for (const auto& other : strategies_) {
+      if (!other.applies_schema() || other.database_for(tenant_) != database) continue;
+      auto schema = schemas_.get(other.schema);
+      if (!schema) {
+        err = "schema " + other.schema + " isn't stored on this host";
+        break;
+      }
+      if (!dbs_.open(tenant_, database, &*schema, &err)) break;
+    }
+    if (err.empty()) open.db = dbs_.open(tenant_, database, nullptr, &err);
+  } catch (const std::exception& e) {
+    err = e.what();
+  }
+  if (!open.db) {
+    open_.erase(database);
+    *error = err;
+    return nullptr;
+  }
+  return &open;
+}
+
+bool Session::host_exec(const manifest::DataStrategy& strategy, std::string_view sql, const bj::value& params,
+                        std::string* error) {
+  Open* open = open_database(strategy.database_for(tenant_), error);
+  if (!open) return false;
+  sqlite3* raw = open->db->raw();
+  if (!open->in_transaction) {
+    if (sqlite3_exec(raw, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) {
+      *error = sqlite3_errmsg(raw);
+      return false;
+    }
+    open->in_transaction = true;
+  }
+  sqlite3_stmt* st = nullptr;
+  if (sqlite3_prepare_v2(raw, sql.data(), int(sql.size()), &st, nullptr) != SQLITE_OK) {
+    *error = sqlite3_errmsg(raw);
+    return false;
+  }
+  bool ok = true;
+  if (params.is_array()) {
+    for (size_t i = 0; i < params.as_array().size() && ok; ++i) ok = bind_value(st, int(i) + 1, params.as_array()[i], error);
+  }
+  int rc = ok ? sqlite3_step(st) : SQLITE_ERROR;
+  if (ok && rc != SQLITE_DONE && rc != SQLITE_ROW) {
+    *error = sqlite3_errmsg(raw);
+    ok = false;
+  }
+  sqlite3_finalize(st);
+  ++statements_;
+  return ok;
+}
+
 std::string Session::run(std::string_view strategy, std::string_view sql, std::string_view params_text) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   ++statements_;
@@ -567,30 +626,10 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
     params = std::move(*p);
   }
   std::string database = st->database_for(tenant_);
-  auto& open = open_[database];
-  if (!open.db) {
-    // On first use, every schema that any strategy brings to this database is applied,
-    // before the request's transaction begins.
-    std::string err;
-    try {
-      for (const auto& other : strategies_) {
-        if (!other.runnable() || other.database_for(tenant_) != database) continue;
-        auto schema = schemas_.get(other.schema);
-        if (!schema) {
-          err = "schema " + other.schema + " isn't stored on this host";
-          break;
-        }
-        if (!dbs_.open(tenant_, database, &*schema, &err)) break;
-      }
-      if (err.empty()) open.db = dbs_.open(tenant_, database, nullptr, &err);
-    } catch (const std::exception& e) {
-      err = e.what();
-    }
-    if (!open.db) {
-      open_.erase(database);
-      return fail("opening database " + database + ": " + err);
-    }
-  }
+  std::string open_err;
+  Open* opened = open_database(database, &open_err);
+  if (!opened) return fail("opening database " + database + ": " + open_err);
+  auto& open = *opened;
   Auth auth;
   auth.strategy = st;
   sqlite3* raw = open.db->raw();

@@ -384,6 +384,63 @@ pub extern "C" fn goober_route_desk_devices() -> i32 {
     0
 }
 
+/// A timer (045): at 6am in the zone each device registered, put a notification on the
+/// person's devices when approvals are waiting, so the morning starts with what's blocked
+/// on them; with nothing waiting, the notification is removed. The host hands the fire the
+/// device's row, which this box doesn't need: one alarm id serves every device.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_morning() -> i32 {
+    let now = goober::now_ms();
+    let r = goober::sql(
+        DB,
+        "SELECT count(*) FROM approvals a WHERE NOT EXISTS (SELECT 1 FROM decisions d WHERE d.approval_id = a.id)
+           AND (a.expires_ms IS NULL OR a.expires_ms > ?)",
+        json!([now]),
+    );
+    if let Some(e) = r.error() {
+        goober::log(&format!("morning briefing: {e}"));
+        return 1;  // a failed fire: nothing is written
+    }
+    let waiting = r.first().and_then(|v| v.as_i64()).unwrap_or(0);
+    if waiting == 0 {
+        goober::sql(DB, "DELETE FROM alarms WHERE alarm_key = 'morning-briefing'", json!([]));
+        return 0;
+    }
+    let at = now + 60_000;
+    let spec = json!({
+        "id": "morning-briefing",
+        "kind": "notification",
+        "priority": "high",
+        "title": "Good morning",
+        "body": if waiting == 1 { "1 approval is waiting for you.".to_string() } else { format!("{waiting} approvals are waiting for you.") },
+        "trigger": { "type": "at", "at": iso(at) },
+    });
+    goober::sql(
+        DB,
+        "INSERT INTO alarms (alarm_key, spec, updated_ms) VALUES ('morning-briefing', ?, ?)
+         ON CONFLICT (alarm_key) DO UPDATE SET spec = excluded.spec, updated_ms = excluded.updated_ms",
+        json!([spec.to_string(), now]),
+    );
+    0
+}
+
+/// Unix milliseconds as an RFC 3339 instant, to the second.
+fn iso(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
 // ---- Checks
 
 fn bad(message: &str) -> i32 {

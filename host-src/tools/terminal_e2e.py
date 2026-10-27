@@ -94,6 +94,9 @@ def main():
     storage = os.path.join(os.path.dirname(os.path.abspath(a.config)), cfg.get("storage", "storage"))
     owners = [d.get("owner") for d in cfg["domains"].values() if d.get("owner")]
     email = a.email or (owners[0] if owners else sys.exit("no --email and no first owner in the config"))
+    tenant = next(d["tenant"] for d in cfg["domains"].values() if d.get("owner", "").lower() == email.lower()) \
+        if any(d.get("owner", "").lower() == email.lower() for d in cfg["domains"].values()) \
+        else next(iter(cfg["domains"].values()))["tenant"]
     web = Client(a.url)
     same_site = {"Origin": web.origin}
 
@@ -247,6 +250,24 @@ def main():
     check(term("POST", "/events", js=dict(ev, detail={"a": "b"}))[0] == 400, "the old 'detail' map is refused")
     st, _, body = desk("GET", "/devices")
     check(st == 200 and "push_token" not in body and "America/Chicago" in body, "agents see time zones, not push tokens")
+
+    token = cfg.get("operations", {}).get("token")
+    if token:
+        print("the morning briefing timer")
+        st, _, body = desk("POST", "/approvals", {"task": f"Waiting for the morning {run}"})
+        waiting = json_of(body).get("id", "")
+        st, _, body = web.call("POST", "/goober-operations-mcp", js={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "timer_run", "arguments": {"timer": "desk_morning", "tenant": tenant}}},
+            headers={"Authorization": "Bearer " + token})
+        fired = json_of(json_of(body).get("result", {}).get("content", [{}])[0].get("text", "{}")).get("fired", 0)
+        check(fired >= 1, "timer_run fires the 6am briefing once per device")
+        st, _, body = term("GET", "/sync")
+        brief = next((a for a in json_of(body).get("alarms", []) if a.get("id") == "morning-briefing"), {})
+        check("waiting for you" in brief.get("body", ""), "the snapshot carries 'approvals are waiting'")
+        key = secrets.token_hex(8)
+        term("POST", f"/approvals/{waiting}/decision", js={"decision": "deny", "idempotency_key": key,
+             "decided_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, headers={"Idempotency-Key": key})
 
     print("the agent works over MCP")
     def mcp(method, params=None):

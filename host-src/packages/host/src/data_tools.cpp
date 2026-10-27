@@ -27,10 +27,22 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
   for (const auto& [d, e] : config_.get()->domains) tenants.insert(e.tenant);
   for (const auto& t : databases_->tenants()) tenants.insert(t);
   for (const auto& st : m.data) {
-    if (!st.runnable()) continue;
+    if (!st.applies_schema()) continue;
     std::string where = "data.sqlite3." + st.name;
     auto schema = schemas_->get(st.schema);
     if (!schema) return *error = where + ": schema " + st.schema + " isn't stored on this host; store it with schema_put first", false;
+    if (st.pattern == "by_timer") {
+      // The scheduler reads these columns as they are (045), so they must exist.
+      const auto* t = schema->table(st.table);
+      if (!t) return *error = where + ": schema " + st.schema + " has no table " + st.table, false;
+      std::vector<std::string> cols = {st.timezone_field, st.active_field};
+      for (const auto& timer : m.timers) {
+        if (timer.source == st.name && !timer.at_field.empty()) cols.push_back(timer.at_field);
+      }
+      for (const auto& c : cols) {
+        if (!c.empty() && !t->column(c)) return *error = where + ": schema " + st.schema + " has no column " + st.table + "." + c, false;
+      }
+    }
     for (const auto& [table, grant] : st.tables) {
       const auto* t = schema->table(table);
       if (!t) return *error = where + ": schema " + st.schema + " has no table " + table, false;
@@ -52,6 +64,25 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
 
 void Host::register_data_tools() {
   using mcp::any_property;
+  mcp_->add_tool({"timers_list",
+                  "The timers the host has planned (045): each timer, tenant, and row, with when it is next due.",
+                  mcp::object_schema({}, {}),
+                  [this](const bj::object&) { return ToolResult::ok(timers_due()); }});
+  mcp_->add_tool({"timer_run",
+                  "Fires a timer now for one tenant, once per active row of its source, as its schedule would. For "
+                  "trying a timer without waiting for its time.",
+                  mcp::object_schema({{"timer", mcp::string_property("The timer's route name.")},
+                                      {"tenant", mcp::string_property("A tenant, like playground.")}},
+                                     {"timer", "tenant"}),
+                  [this](const bj::object& args) {
+                    auto timer = arg(args, "timer");
+                    auto tenant = arg(args, "tenant");
+                    if (!timer || !tenant) return ToolResult::fail("timer and tenant are required");
+                    std::string err;
+                    auto fired = run_timer_now(*timer, *tenant, &err);
+                    if (!fired) return ToolResult::fail(err);
+                    return ToolResult::ok(bj::object{{"fired", *fired}});
+                  }});
   using mcp::boolean_property;
   using mcp::integer_property;
   using mcp::object_schema;
@@ -110,7 +141,7 @@ void Host::register_data_tools() {
            std::map<std::string, bj::array> users;
            for (const auto& [name, box] : active->boxes) {
              for (const auto& st : box->manifest.data) {
-               if (!st.runnable()) continue;
+               if (!st.applies_schema()) continue;
                users[st.database_for(tenant)].push_back(
                    bj::object{{"box", name}, {"strategy", st.name}, {"schema", st.schema}});
              }

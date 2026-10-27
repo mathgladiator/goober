@@ -66,6 +66,10 @@ class Session {
   // {"columns","rows","changes","last_insert_id"} or {"error"}.
   std::string run(std::string_view strategy, std::string_view sql, std::string_view params);
 
+  // Runs a statement for the host itself (like turning off a one-shot timer's row) in
+  // the same transaction as the box's writes to that strategy's database, with no grants.
+  bool host_exec(const manifest::DataStrategy& strategy, std::string_view sql, const bj::value& params,
+                 std::string* error);
   bool commit(std::string* error);
   void rollback();
   // How many statements ran, for the access log.
@@ -81,6 +85,8 @@ class Session {
   const std::vector<manifest::DataStrategy>& strategies_;
   const SchemaStore& schemas_;
   std::map<std::string, Open> open_;
+  // Opens a strategy's database on first use, applying every schema bound to it.
+  Open* open_database(const std::string& database, std::string* error);
   int statements_ = 0;
 };
 

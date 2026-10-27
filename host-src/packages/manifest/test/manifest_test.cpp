@@ -24,7 +24,7 @@ TEST(Manifest, ParsesTheV1Subset) {
   EXPECT_EQ(m->box, "hello");
   EXPECT_EQ(m->routes.size(), 3u);
   EXPECT_EQ(*m->behavior.timeout_ms, 500);
-  EXPECT_EQ(m->warnings.size(), 2u);  // data and response are read now; lifecycle and timer warn
+  EXPECT_EQ(m->warnings.size(), 1u);  // data, response, and timers are read now; lifecycle warns
   EXPECT_TRUE(m->applies_to("anything.com"));
   EXPECT_EQ(m->routes[0].export_name().substr(0, 13), "goober_route_");
 }
@@ -232,4 +232,40 @@ TEST(Manifest, RequestPartsTypesAndTools) {
   refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"description":"d"}}}}})", "needs requirements");
   refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"name":"u","description":"d","requirements":[]}}}}})", "tool's key");
   refuse(R"({"box":"o","domains":["*"],"types":"../x.json"})", "types document");
+}
+
+TEST(Manifest, TimersAndTimerSources) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"t","domains":["*"],
+    "data":{"sqlite3":{"people":{"schema":"s1","database":"d","pattern":"by_timer","table":"devices",
+                                 "timezone-field":"timezone","active-field":"on"}}},
+    "routes":{"timer":{
+      "sweep":{"name":"sweep","every-ms":60000},
+      "nightly":{"name":"nightly","cron":"0 3 * * *"},
+      "morning":{"name":"morning","source":"people","cron":"0 6 * * *"},
+      "remind":{"name":"remind","source":"people","at-field":"remind_at","timeout-ms":500}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->timers.size(), 4u);
+  EXPECT_EQ(m->timers[0].verb, "timer");
+  EXPECT_EQ(m->timers[0].missed, "skip");  // periodic timers skip what they missed
+  EXPECT_EQ(m->timers[1].missed, "once");  // cron timers catch up once
+  EXPECT_EQ(m->data[0].table, "devices");
+  EXPECT_EQ(m->data[0].timezone_field, "timezone");
+  EXPECT_FALSE(m->data[0].runnable());  // the box can't run it as code
+  EXPECT_TRUE(m->data[0].applies_schema());
+
+  auto refuse = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x"}}}})", "exactly one");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","every-ms":5,"cron":"* * * * *"}}}})", "exactly one");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","every-ms":10}}}})", "every-ms");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","cron":"0 25 * * *"}}}})", "cron");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","cron":"0 1 * * *","public":true}}}})", "only by the host");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","at-field":"when"}}}})", "needs a source");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"timer":{"x":{"name":"x","source":"nope","cron":"0 1 * * *"}}}})", "by_timer");
+  refuse(R"({"box":"t","domains":["*"],"data":{"sqlite3":{"p":{"schema":"s","database":"d","pattern":"by_timer","table":"t"}}},
+            "routes":{"timer":{"x":{"name":"x","source":"p","at-field":"when"}}}})", "active-field");
 }

@@ -1,4 +1,5 @@
 #include "goober/manifest/manifest.h"
+#include "goober/timers/cron.h"
 
 #include "goober/router/table.h"
 
@@ -170,6 +171,62 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
   return true;
 }
 
+// routes.timer.$key (045.Time.md). Timers have no verb, no requirements, and no "public":
+// only the host calls them.
+bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!timers.is_object()) return *error = "routes.timer must be an object", false;
+  std::string err;
+  for (const auto& kv : timers.as_object()) {
+    std::string where = "routes.timer." + std::string(kv.key());
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    const auto& def = kv.value().as_object();
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "name" || k == "every-ms" || k == "cron" || k == "source" || k == "at-field" || k == "timeout-ms" ||
+          k == "missed") {
+        continue;
+      }
+      if (k == "requirements" || k == "public") return *error = where + ": timers are called only by the host, so they carry no " + k, false;
+      if (k == "target" || k == "tenant-field") {
+        m->warnings.push_back(where + "." + k + " is accepted but not implemented in v1");
+        continue;
+      }
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    HttpRoute t;
+    t.verb = "timer";
+    auto name = get_string(def, "name", &err);
+    if (!name || !base::is_valid_name(*name)) return *error = where + ": name is required, matching [a-z][a-z0-9_]*", false;
+    if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+    t.name = *name;
+    t.every_ms = get_int(def, "every-ms", &err);
+    t.cron = get_string(def, "cron", &err).value_or("");
+    t.source = get_string(def, "source", &err).value_or("");
+    t.at_field = get_string(def, "at-field", &err).value_or("");
+    t.timeout_ms = get_int(def, "timeout-ms", &err);
+    t.missed = get_string(def, "missed", &err).value_or("");
+    if (!err.empty()) return *error = where + ": " + err, false;
+    int kinds = int(t.every_ms.has_value()) + int(!t.cron.empty()) + int(!t.at_field.empty());
+    if (kinds != 1) return *error = where + ": give exactly one of every-ms, cron, or at-field", false;
+    if (t.every_ms && (*t.every_ms < 1000 || *t.every_ms > 31LL * 24 * 3600 * 1000)) {
+      return *error = where + ".every-ms must be 1000 (a second) to 31 days", false;
+    }
+    if (!t.cron.empty()) {
+      std::string why;
+      if (!timers::Cron::parse(t.cron, &why)) return *error = where + ".cron: " + why, false;
+    }
+    if (!t.at_field.empty() && (t.source.empty() || !base::is_valid_name(t.at_field))) {
+      return *error = where + ": at-field names a column of the source, so it needs a source", false;
+    }
+    if (t.every_ms && !t.source.empty()) return *error = where + ": a source is scheduled by cron or at-field, not every-ms", false;
+    if (t.missed.empty()) t.missed = t.every_ms ? "skip" : "once";
+    if (t.missed != "once" && t.missed != "skip") return *error = where + ".missed must be once or skip", false;
+    if (t.timeout_ms && (*t.timeout_ms < 1 || *t.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    m->timers.push_back(std::move(t));
+  }
+  return true;
+}
+
 bool is_role_char(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
@@ -298,12 +355,26 @@ bool parse_data(const bj::object& data, Manifest* m, std::string* error) {
       for (const auto& f : def) {
         std::string key(f.key());
         if (key == "schema" || key == "database" || key == "pattern") continue;
+        if (st.pattern == "by_timer" && (key == "table" || key == "timezone-field" || key == "active-field")) continue;
         if (st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget")) continue;
         if (kLaterStrategy.count(key) || (!st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget"))) {
           if (st.runnable()) return *error = where + "." + key + " doesn't apply to pattern sql", false;
           continue;
         }
         return *error = where + ": unknown field \"" + key + "\"", false;
+      }
+      if (st.pattern == "by_timer") {
+        // Read only by the scheduler: the box can't call it from code (045).
+        st.table = get_string(def, "table", &err).value_or("");
+        st.timezone_field = get_string(def, "timezone-field", &err).value_or("");
+        st.active_field = get_string(def, "active-field", &err).value_or("");
+        if (!err.empty()) return *error = where + ": " + err, false;
+        if (!is_sql_name(st.table)) return *error = where + ": by_timer needs table, a table in its schema", false;
+        for (const auto* col : {&st.timezone_field, &st.active_field}) {
+          if (!col->empty() && !is_sql_name(*col)) return *error = where + ": a -field names a column", false;
+        }
+        m->data.push_back(std::move(st));
+        continue;
       }
       if (!st.runnable()) {
         m->warnings.push_back(where + ": pattern " + st.pattern + " is accepted but not implemented in v1");
@@ -445,6 +516,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
         if (!parse_tools(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
+      if (protocol == "timer") {
+        if (!parse_timers(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
       if (protocol != "http") {
         m.warnings.push_back("routes." + protocol + " is accepted but not implemented in v1");
         continue;
@@ -518,6 +593,20 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     }
   }
   if (!err.empty()) return *error = err, std::nullopt;
+  for (const auto& t : m.timers) {
+    if (t.source.empty()) continue;
+    const DataStrategy* st = nullptr;
+    for (const auto& d : m.data) {
+      if (d.name == t.source) st = &d;
+    }
+    if (!st || st->pattern != "by_timer") {
+      return *error = "routes.timer: " + t.name + "'s source must be a by_timer strategy in data.sqlite3", std::nullopt;
+    }
+    if (!t.at_field.empty() && st->active_field.empty()) {
+      return *error = "routes.timer: " + t.name + " fires once per row, so " + st->name +
+                          " needs an active-field the host can turn off after the fire", std::nullopt;
+    }
+  }
   return m;
 }
 

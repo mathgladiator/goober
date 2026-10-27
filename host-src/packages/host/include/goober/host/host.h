@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -54,6 +57,16 @@ class Host {
   // Rereads the config file. Returns a note for the log.
   std::string reload();
 
+  // Timers (045; design/machine/014.Time.md): runs every fire due at now_ms. A host thread
+  // calls it each second; tests call it with their own clock, after set_timers_inline(true)
+  // so fires run on the calling thread.
+  void timer_tick(int64_t now_ms);
+  void set_timers_inline(bool inline_fires);
+  // What the scheduler plans next, and firing a timer now for one tenant (operators):
+  // returns how many fires ran, or nullopt with `error`.
+  boost::json::array timers_due();
+  std::optional<int> run_timer_now(const std::string& name, const std::string& tenant, std::string* error);
+
   // Waits until queued mail has been handed to the mail server (tests).
   void drain_mail();
 
@@ -104,8 +117,19 @@ class Host {
     runtime::wasm::CallResult result;
     boost::json::object extra;  // fields for the access log
   };
+  // Optional parts of a box call: a timer's own timeout, and host work that must commit
+  // with the box's writes (a one-shot timer turning its row off), run only on success.
+  struct CallOptions {
+    std::optional<int64_t> timeout_ms;
+    std::function<bool(db::Session&, std::string*)> before_commit;
+    bool no_response_ok = false;  // a timer fire may just return: there is nobody to answer
+  };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
-                   const std::string& request_id, const std::optional<SignedIn>& who);
+                   const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
+  BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
+                   const std::string& request_id, const std::optional<SignedIn>& who) {
+    return call_box(ref, doc, tenant, request_id, who, CallOptions());
+  }
   // /mcp on every domain: box tools for agents and people with bearer tokens (mcp_routes.cpp).
   void handle_tenant_mcp(const server::http::Request& req, const Finish& finish, const std::string& domain,
                          const std::string& tenant);
@@ -157,6 +181,14 @@ class Host {
   int64_t started_ms_ = 0;
   std::atomic<uint64_t> requests_{0};
   RateLimiter limiter_;
+  struct TimerState;
+  std::unique_ptr<TimerState> timers_;
+  std::thread timer_thread_;
+  std::mutex timer_thread_mu_;
+  std::condition_variable timer_cv_;
+  bool timers_stopping_ = false;
+  void run_timers();
+  sqlite::Db& timer_progress(const std::string& tenant);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class SmtpQueue> smtp_;
 };

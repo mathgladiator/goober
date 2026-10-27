@@ -101,6 +101,8 @@ Read these before doing design work:
     filtered discovery, typed inputs, an audit log, and RFC 9728 metadata.
   - `design/machine/013.SecurityReview.md`: the first internal security review: every
     finding, its fix and test, what isn't fixed and why, and what was checked and sound.
+  - `design/machine/014.Time.md`: timers: every-ms and cron routes, `by_timer` sources firing
+    per row in each row's zone or once at an at-field, catch-up, and the desk's 6am briefing.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

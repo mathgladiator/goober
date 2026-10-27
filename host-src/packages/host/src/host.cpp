@@ -16,6 +16,7 @@
 #include "goober/router/path.h"
 #include "http_util.h"
 #include "mailer.h"
+#include "timer_state.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -136,6 +137,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
+  timers_ = std::make_unique<TimerState>();
   smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
@@ -166,10 +168,19 @@ uint16_t Host::start() {
   server_ = std::make_unique<server::http::Server>(
       opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond)); });
   server_->start();
+  timer_thread_ = std::thread([this] { run_timers(); });
   return server_->port();
 }
 
 void Host::stop() {
+  if (timer_thread_.joinable()) {
+    {
+      std::lock_guard lock(timer_thread_mu_);
+      timers_stopping_ = true;
+    }
+    timer_cv_.notify_all();
+    timer_thread_.join();
+  }
   if (!server_) return;
   // Graceful: stop taking connections, let the requests already here finish (up to ten
   // seconds), then close what's left. systemd restarts land between requests, not inside one.
@@ -558,7 +569,8 @@ void Host::serve_content(const Request& req, const Finish& finish, const std::st
 // Runs one route or tool of a box: its databases' transactions, its logs, and the check
 // of a typed response. Commits when the box answered below 500, else rolls back.
 Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, const std::string& tenant,
-                             const std::string& request_id, const std::optional<SignedIn>& who) {
+                             const std::string& request_id, const std::optional<SignedIn>& who,
+                             const CallOptions& options) {
   auto cfg = config_.get();
   const auto& m = ref.box->manifest;
   const auto& route = *ref.route;
@@ -571,7 +583,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       return session->run(strategy, sql, params);
     };
   }
-  runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(m.behavior.timeout_ms), cfg->fuel.resolve(m.behavior.fuel),
+  runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(options.timeout_ms ? options.timeout_ms : m.behavior.timeout_ms),
+                                   cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
   auto result = engine_->call(*ref.box->compiled, ref.route->export_name(), input, limits);
 
@@ -622,7 +635,17 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       result.body = json::dump(*checked);
     }
   }
-  bool ok = result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status < 500;
+  bool ok = (result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status < 500) ||
+            (options.no_response_ok && result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse);
+  if (ok && session && options.before_commit) {
+    std::string err;
+    if (!options.before_commit(*session, &err)) {
+      ok = false;
+      result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+      result.error = err;
+      extra["outcome"] = "host_write_failed";
+    }
+  }
   if (session && session->statements() > 0) {
     extra["sql"] = session->statements();
     std::string err;

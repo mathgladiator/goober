@@ -46,7 +46,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 039 Internal | none | | Internal routes, callers, context propagation. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
-| 045 Time | none | | Timer routes, `by_timer`, cron, DST rules. |
+| 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
 | 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, the agent history on the account page, a run with a real MCP client. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
 | 064 Keys | none | Secrets live in the host config file (mode 0600). | The vault, envelope encryption, `keys/...`. |
@@ -171,8 +171,11 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [ ] CORS declared in the manifest, preflight answered by the host.
 
 ### Phase 6: time (045)
-- [ ] Timer routes with `every-ms` and `cron`, and data-driven `by_timer` rows with
-      `timezone-field`, so "6am in each person's zone" can write the day's alarms.
+- [x] Timer routes with `every-ms` and `cron`, and data-driven `by_timer` sources firing per
+      row in each row's zone or once at a row's `at-field` (turned off with the fire's own
+      writes); catch-up after downtime; `timers_list` and `timer_run`
+      (`design/machine/014.Time.md`).
+- [x] The desk's 6am briefing: in each device's zone, "N approvals are waiting for you."
 
 ### Phase 7: effects (035, 039) and push
 - [ ] The outbox: elements captured with the request, delivered after commit, with

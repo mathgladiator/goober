@@ -64,6 +64,13 @@
           }
         },
         "row-limit": 200
+      },
+      "devices_t": {
+        "schema": "terminal1",
+        "database": "terminal",
+        "pattern": "by_timer",
+        "table": "devices",
+        "timezone-field": "timezone"
       }
     }
   },
@@ -289,6 +296,14 @@
             ]
           ]
         }
+      }
+    },
+    "timer": {
+      "morning-briefing": {
+        "name": "desk_morning",
+        "source": "devices_t",
+        "cron": "0 6 * * *",
+        "timeout-ms": 1000
       }
     }
   },
