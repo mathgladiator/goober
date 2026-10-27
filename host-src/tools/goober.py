@@ -22,6 +22,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -61,11 +62,17 @@ def rpc(method, params=None):
         "accept": "application/json, text/event-stream",
         "authorization": "Bearer " + token(),
     })
-    try:
-        with urllib.request.urlopen(req) as r:
-            reply = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        sys.exit(f"{e.code}: {e.read().decode()}")
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req) as r:
+                reply = json.loads(r.read())
+            break
+        except urllib.error.HTTPError as e:
+            # Rate limited: wait as told and try again, so a big push finishes.
+            if e.code == 429 and attempt < 5:
+                time.sleep(min(60, int(e.headers.get("retry-after", "2") or 2)))
+                continue
+            sys.exit(f"{e.code}: {e.read().decode()}")
     if "error" in reply:
         sys.exit(f"error: {reply['error']['message']}")
     return reply["result"]

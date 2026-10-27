@@ -1,5 +1,6 @@
 #include "mailer.h"
 
+#include <iostream>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -97,7 +98,11 @@ void SmtpQueue::run() {
     }
     auto cfg = config_();
     if (cfg->identity.mailer != "smtp") {
-      if (dev_) dev_(mail);
+      try {
+        if (dev_) dev_(mail);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: the dev mailer failed: " << e.what() << "\n";
+      }
       {
         std::lock_guard lock(mu_);
         busy_ = false;
@@ -110,7 +115,11 @@ void SmtpQueue::run() {
     // Three tries, a little apart: a mail server that hiccups shouldn't cost a sign-in.
     for (int attempt = 0; attempt < 3 && !sent; ++attempt) {
       if (attempt > 0) std::this_thread::sleep_for(std::chrono::seconds(attempt * 3));
-      sent = deliver(*cfg, mail, &error);
+      try {
+        sent = deliver(*cfg, mail, &error);
+      } catch (const std::exception& e) {
+        error = e.what();
+      }
     }
     bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())},
                     {"to", mail.to},
@@ -145,14 +154,19 @@ bool SmtpQueue::deliver(const config::HostConfig& cfg, const identity::Mail& mai
     if (!password) return *error = "can't read identity.smtp.password-file", false;
     while (!password->empty() && (password->back() == '\n' || password->back() == '\r')) password->pop_back();
     conf = cfg.storage / "mail" / (".curl-" + id);
-    std::filesystem::create_directories(conf.parent_path());
+    std::error_code mkdir_error;
+    std::filesystem::create_directories(conf.parent_path(), mkdir_error);
     std::string text = "user = " + curl_quoted(smtp.username + ":" + *password) + "\n";
     // Created 0600 from the start, so the password is never readable by anyone else.
     int fd = open(conf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) return *error = "can't write the curl config", false;
     bool ok = write(fd, text.data(), text.size()) == ssize_t(text.size());
     close(fd);
-    if (!ok) return *error = "can't write the curl config", false;
+    if (!ok) {
+      std::error_code ec;
+      std::filesystem::remove(conf, ec);
+      return *error = "can't write the curl config", false;
+    }
     argv.push_back("-K");
     argv.push_back(conf.string());
   }

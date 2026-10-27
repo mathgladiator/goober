@@ -222,7 +222,12 @@ struct Engine::Impl {
                             auto params = view(mem, params_ptr, params_len);
                             if (!strategy || !sql || !params) return -1;
                             if (st.input->sql) {
-                              st.result = st.input->sql(*strategy, *sql, *params);
+                              // An exception must never unwind through wasmtime's frames.
+                              try {
+                                st.result = st.input->sql(*strategy, *sql, *params);
+                              } catch (...) {
+                                st.result = R"({"error":"the host failed running the statement"})";
+                              }
                             } else {
                               st.result = R"({"error":"this box has no databases: declare data.sqlite3 in its manifest"})";
                             }
@@ -241,7 +246,11 @@ struct Engine::Impl {
                             // Copied out first: the call may take a while, and the views point into box memory.
                             std::string sv(*service), me(*method), rq(*request);
                             if (st.input->call) {
-                              st.result = st.input->call(sv, me, rq);
+                              try {
+                                st.result = st.input->call(sv, me, rq);
+                              } catch (...) {
+                                st.result = R"({"error":"the host failed making the call"})";
+                              }
                             } else {
                               st.result = R"({"error":"this box declares no external services"})";
                             }

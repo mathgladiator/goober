@@ -6,6 +6,8 @@
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
+#include "goober/base/random.h"
+#include "goober/base/encoding.h"
 #include "goober/base/time.h"
 
 namespace goober::host {
@@ -27,17 +29,24 @@ bool KeyStore::set(std::string_view scope, std::string_view tenant, std::string_
   for (unsigned char c : value) {
     if (c < 0x20 || c == 0x7f) return *error = "a key's value can't hold control characters", false;
   }
-  fs::create_directories(f->parent_path());
+  std::error_code mkdir_error;
+  fs::create_directories(f->parent_path(), mkdir_error);
   std::string body = json::dump(bj::object{{"value", value}, {"set_at", now_ms}});
   // Written 0600 from the start, then renamed into place.
-  auto tmp = f->string() + ".tmp";
-  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  // A temporary name of its own, so two writers never interleave in one file.
+  uint8_t rnd[8];
+  base::os_random_fill(rnd);
+  auto tmp = f->string() + "." + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd)) + ".tmp";
+  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   if (fd < 0) return *error = "can't write the key", false;
   bool ok = ::write(fd, body.data(), body.size()) == ssize_t(body.size()) && ::fsync(fd) == 0;
   ::close(fd);
   std::error_code ec;
   if (ok) fs::rename(tmp, *f, ec);
-  if (!ok || ec) return *error = "can't write the key", false;
+  if (!ok || ec) {
+    fs::remove(tmp, ec);
+    return *error = "can't write the key", false;
+  }
   return true;
 }
 
@@ -56,8 +65,9 @@ std::optional<std::string> KeyStore::resolve(std::string_view credentials, std::
   if (!text) return std::nullopt;
   std::string err;
   auto v = json::parse(*text, &err);
-  if (!v || !v->is_object() || !v->as_object().contains("value")) return std::nullopt;
-  return std::string(v->as_object().at("value").as_string());
+  const bj::value* value = v && v->is_object() ? v->as_object().if_contains("value") : nullptr;
+  if (!value || !value->is_string()) return std::nullopt;
+  return std::string(value->as_string());
 }
 
 bj::array KeyStore::list() const {

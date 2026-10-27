@@ -25,7 +25,8 @@ struct Reply {
 };
 
 Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target, const std::string& host = "localhost",
-            const std::string& body = "", const std::string& auth = "", const std::string& if_none_match = "") {
+            const std::string& body = "", const std::string& auth = "", const std::string& if_none_match = "",
+            const std::string& content_type = "") {
   asio::io_context io;
   beast::tcp_stream stream(io);
   stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
@@ -33,6 +34,7 @@ Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target, const st
   req.set(bhttp::field::host, host);
   if (!auth.empty()) req.set(bhttp::field::authorization, auth);
   if (!if_none_match.empty()) req.set(bhttp::field::if_none_match, if_none_match);
+  if (!content_type.empty()) req.set(bhttp::field::content_type, content_type);
   req.body() = body;
   req.prepare_payload();
   bhttp::write(stream, req);
@@ -171,4 +173,27 @@ TEST_F(HostTest, BadUploadsExplainThemselves) {
   EXPECT_EQ(v.at("result").at("isError"), true);
   EXPECT_NE(std::string(v.at("result").at("content").at(0).at("text").as_string()).find("domains"),
             std::string::npos);
+}
+
+TEST_F(HostTest, FormsArriveDecodedAndAnonymousWritesAreBudgeted) {
+  bj::object manifest{{"box", "hello"},
+                      {"domains", bj::array{"*"}},
+                      {"routes", bj::object{{"http", bj::object{{"/signup", bj::object{{"post", bj::object{{"name", "echo"}, {"public", true}}}}}}}}}};
+  auto v = tool("version_upload", {{"manifest", manifest}, {"wat", kHelloWat}});
+  ASSERT_EQ(v.at("result").at("isError"), false) << json::dump(v);
+  auto r = fetch(port, bhttp::verb::post, "/signup", "localhost", "email=ada%40example.com&why=more+beef&x", "", "",
+                 "application/x-www-form-urlencoded");
+  ASSERT_EQ(r.status, 200) << r.body;
+  std::string err;
+  auto doc = json::parse(r.body, &err);
+  ASSERT_TRUE(doc) << r.body;
+  EXPECT_EQ(doc->at("form").at("email"), "ada@example.com");
+  EXPECT_EQ(doc->at("form").at("why"), "more beef");
+  // A stable pseudonymous key per address and site, never the address itself.
+  EXPECT_EQ(doc->at("client_key").as_string().size(), 16u);
+  EXPECT_EQ(r.body.find("127.0.0.1"), std::string::npos);
+  // Anonymous writes have their own budget per address.
+  int limited = 0;
+  for (int i = 0; i < 15; ++i) limited += fetch(port, bhttp::verb::post, "/signup").status == 429;
+  EXPECT_GT(limited, 0);
 }

@@ -241,3 +241,45 @@ TEST_F(AgentsTest, UploadsCheckTheTypesDocument) {
                                     R"({"openapi":"3.1.0","components":{"schemas":{"Order":{"type":"integer"}}}})", &err));
   EXPECT_NE(err.find("int32 or int64"), std::string::npos) << err;
 }
+
+TEST_F(AgentsTest, OperatorsMintLongLivedAgentTokens) {
+  auto& id = host->identity();
+  std::string err;
+  int64_t now = base::now_unix_ms();
+  identity::Client grok;
+  grok.client_id = "grokbot";
+  grok.name = "GrokBot";
+  grok.person = false;
+  grok.source = "operator";
+  ASSERT_TRUE(id.put_client("playground", grok, now, &err)) << err;
+  identity::Client phone = grok;
+  phone.client_id = "phone";
+  phone.person = true;
+  phone.redirect_uris = {"http://127.0.0.1/cb"};
+  ASSERT_TRUE(id.put_client("playground", phone, now, &err)) << err;
+  int64_t day = 24LL * 3600 * 1000;
+  EXPECT_FALSE(id.mint_agent_token("playground", "phone", "exec@example.com", 30 * day, now, &err));
+  EXPECT_FALSE(id.mint_agent_token("playground", "grokbot", "nobody@example.com", 30 * day, now, &err));
+  EXPECT_FALSE(id.mint_agent_token("playground", "grokbot", "exec@example.com", 400 * day, now, &err));
+  auto token = id.mint_agent_token("playground", "grokbot", "exec@example.com", 30 * day, now, &err);
+  ASSERT_TRUE(token) << err;
+  // It works on /mcp as an agent, well past the hour an OAuth access token lives.
+  auto b = id.bearer("playground", *token, now + 20 * day);
+  ASSERT_TRUE(b);
+  EXPECT_TRUE(b->agent);
+  agent_token = *token;
+  auto list = rpc("tools/list", {});
+  EXPECT_EQ(list.at("result").at("tools").as_array().size(), 1u) << json::dump(list);
+  // The person sees it as a grant and can end it.
+  auto grants = id.grants("playground", b->user.user_id, now);
+  std::string family;
+  for (const auto& g : grants) {
+    if (g.at("client_id") == "grokbot") family = std::string(g.at("grant").as_string());
+  }
+  ASSERT_FALSE(family.empty()) << json::dump(grants);
+  ASSERT_TRUE(id.revoke_grant("playground", b->user.user_id, family, now));
+  EXPECT_FALSE(id.bearer("playground", *token, now));
+  int status = 0;
+  rpc("tools/list", {}, &status);
+  EXPECT_EQ(status, 401);
+}

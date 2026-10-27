@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "../src/keys.h"
+#include "../src/network.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -210,4 +211,20 @@ TEST_F(NetworkTest, EffectfulCallsWaitForTheCommitAndRetryWithOneKey) {
   EXPECT_TRUE(host->outbox_set("playground", "notify", id, true));
   EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
   EXPECT_TRUE(host->outbox_list("dead").empty());
+}
+
+TEST(BuildCall, PathValuesCanNeitherAddNorWalkSegments) {
+  manifest::ExternalService svc;
+  svc.base = "https://api.example.com/v1";
+  manifest::ExternalMethod m;
+  m.verb = "get";
+  m.path = "/customers/{id}";
+  host::CallContext ctx;
+  std::string err;
+  for (const char* bad : {"..", ".", ""}) {
+    EXPECT_FALSE(host::build_call(svc, m, bj::object{{"path", bj::object{{"id", bad}}}}, ctx, &err)) << bad;
+  }
+  auto ok = host::build_call(svc, m, bj::object{{"path", bj::object{{"id", "../admin"}}}}, ctx, &err);
+  ASSERT_TRUE(ok) << err;
+  EXPECT_EQ(ok->url, "https://api.example.com/v1/customers/..%2Fadmin");
 }

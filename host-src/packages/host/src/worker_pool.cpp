@@ -21,19 +21,24 @@ WorkerPool::WorkerPool(int threads, bool pin) {
   }
 }
 
-WorkerPool::~WorkerPool() {
+WorkerPool::~WorkerPool() { shutdown(); }
+
+void WorkerPool::shutdown() {
   {
     std::lock_guard lock(mu_);
     stopping_ = true;
+    jobs_.clear();  // never started, so nothing of theirs is half done
   }
   cv_.notify_all();
-  for (auto& t : threads_) t.join();
+  for (auto& t : threads_) {
+    if (t.joinable()) t.join();
+  }
 }
 
 bool WorkerPool::post(std::function<void()> job, size_t max_queued) {
   {
     std::lock_guard lock(mu_);
-    if (jobs_.size() >= max_queued) return false;
+    if (stopping_ || jobs_.size() >= max_queued) return false;
     jobs_.push_back(std::move(job));
   }
   cv_.notify_one();

@@ -23,6 +23,9 @@ class WorkerPool {
   // caller can answer 503 rather than let a flood grow the queue without bound.
   bool post(std::function<void()> job, size_t max_queued = SIZE_MAX);
   size_t queued() const;
+  // Drops the jobs still waiting, lets the running ones finish, and joins the threads.
+  // Nothing posted afterwards runs. Safe to call twice.
+  void shutdown();
   // Jobs waiting or running: zero means the pool is idle.
   size_t busy() const;
 

@@ -184,9 +184,13 @@ std::optional<std::string> page_url(std::string_view path) {
 }
 
 bool is_private_path(std::string_view path) {
+  // Static site generators put their assets in these; nobody hides anything in them.
+  static constexpr std::string_view kGeneratorDirs[] = {"_astro/", "_next/", "_nuxt/", "_app/"};
   size_t start = 0;
   while (start <= path.size()) {
-    if (start < path.size() && path[start] == '_') return true;
+    bool generator = false;
+    for (auto dir : kGeneratorDirs) generator |= path.substr(start).starts_with(dir);
+    if (start < path.size() && path[start] == '_' && !generator) return true;
     size_t slash = path.find('/', start);
     if (slash == std::string_view::npos) break;
     start = slash + 1;

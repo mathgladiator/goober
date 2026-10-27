@@ -48,8 +48,14 @@ requests except what you write to the database.
 The request document is JSON:
 {"request_id", "method", "path", "params": {path parameters, int64 as strings}, "query",
  "headers", "body": text, "domain", "tenant", "user": null or {"user_id", "email", "roles",
- "host", "agent", "client_id" (agents only)}}
+ "host", "agent", "client_id" (agents only)}, "client_key", "form" (forms only)}
 - An HTTP route: method get/post/put/patch/delete. Credentials (cookie, authorization) never appear.
+- "form": a plain HTML form's fields (application/x-www-form-urlencoded), decoded, on routes
+  without a json body type. One value per name (the last).
+- "client_key": 16 hex characters, the same for the same address on the same site, so a box
+  can spot repeats (one signup per visitor, say) without ever holding an IP address.
+- Anonymous POSTs are limited per address (20 a minute, bursts of 10), on top of the host's
+  overall limit, so a public form can't become a flood.
 - An MCP tool: method "tool", path "mcp:$name", body = the checked input as JSON.
 - A timer: method "timer", path "timer:$name", body = the row as JSON (data-driven) or "",
   user null. A timer may simply return without responding.
@@ -82,7 +88,8 @@ Route, tool, and timer names are [a-z][a-z0-9_]*, unique across the whole host.
   "cors": ["https://app.example.com"]       browser pages there may call it with a bearer token
 }}}}
 Answers: 2xx and 4xx as you send them; 5xx is the host's (your body is replaced and your writes
-roll back); a redirect (301/302/303/307/308) must point at a path on this site; "response":
+roll back); a redirect (301/302/303/307/308) must point at a path on this site, like
+Location: /thanks?ok=1 (an absolute URL, even to this site, is a 500); "response":
 "empty" makes any 2xx a 204. GET answers get an ETag and a 304 when the caller has the bytes.
 Parameters: {name : string|int32|int64}; literal segments win over parameters.
 Requirements are an OR of AND clauses of roles: [] is any signed-in user; "owner",
@@ -186,10 +193,27 @@ maxLength, minLength, enum, and format date-time (RFC 3339 UTC) or date; objects
 #/components/schemas/X; no oneOf/anyOf/allOf/null/recursion. Defaults are filled in, and
 int64 values reach the box as strings.
 
+## Landing pages and forms
+
+A landing page (an ad's destination, say) is content: a whole .html document with no front
+matter is served exactly as written, inline scripts and pixels included (site_guide). Its
+<form method="post" action="/signup"> posts to a public box route; the box reads "form",
+stores the row (a unique column and ON CONFLICT DO NOTHING make repeats harmless), sends any
+confirmation mail through an outbox service, and answers 303 with Location: /thanks. Don't pin
+{!email} in require for anonymous visitors: nobody is signed in, so the call would fail.
+
+## Agents that can't do OAuth
+
+An agent that sends one fixed bearer header (Grok's remote MCP tool, a script) gets a token from
+agent_token_mint: register it with client_put (acts_as agent), have the person sign in once,
+then mint a token for 1 to 366 days. It reaches https://<domain>/mcp and routes with
+"agents": true, as that person; the person can revoke it on their account page.
+
 ## Writing boxes in Rust
 
-host-src/examples/boxes/shared/goober.rs is a ready binding (Request, respond_json, sql,
-and checks), used by the terminal and desk boxes. A crate needs only
+The rust_binding tool returns goober.rs, a ready binding (Request, respond_json, sql, call,
+and checks), with the Cargo.toml and build command; it is also
+host-src/examples/boxes/shared/goober.rs, used by the terminal and desk boxes. A crate needs only
 `crate-type = ["cdylib"]`, `serde_json`, and `#[unsafe(no_mangle)] pub extern "C" fn
 goober_route_x() -> i32`. Small boxes can be WAT; see host-src/examples/boxes/echo.
 

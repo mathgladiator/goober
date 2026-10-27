@@ -8,6 +8,7 @@
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "box_guide.h"
+#include "rust_binding.h"
 #include "keys.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
@@ -51,6 +52,18 @@ bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
         if (!r) return *error = where + " calls " + svc.box + "." + method + ", which isn't an internal route of it", false;
         if (std::find(r->callers.begin(), r->callers.end(), name) == r->callers.end()) {
           return *error = where + " calls " + svc.box + "." + method + ", whose callers don't list " + name, false;
+        }
+      }
+      // A callee runs while its caller's transaction is open; on a database they share, the
+      // callee's writes would wait on the caller's lock until they failed (016 §5).
+      for (const auto& mine : man->data) {
+        for (const auto& theirs : callee->second->data) {
+          if (!mine.applies_schema() || !theirs.applies_schema() || mine.database != theirs.database) continue;
+          if (!mine.tenant.empty() && !theirs.tenant.empty() && mine.tenant != theirs.tenant) continue;
+          return *error = where + " calls box " + svc.box + ", and both use database " + mine.database +
+                          "; a box can't call one that shares its database, since the call would wait on the caller's "
+                          "own transaction. Share the database or call the box, not both.",
+                 false;
         }
       }
     }
@@ -140,6 +153,23 @@ void Host::register_data_tools() {
                   "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, "
                   "databases, and types work on goober, and how to deploy them.",
                   mcp::object_schema({}, {}), [](const bj::object&) { return ToolResult::ok(bj::value(kBoxGuide)); }});
+  mcp_->add_tool({"rust_binding",
+                  "The Rust source of goober.rs, a ready binding for writing boxes in Rust (Request, respond_json, "
+                  "sql, call), with the Cargo.toml and build command to use it. Save it as src/goober.rs in your crate.",
+                  mcp::object_schema({}, {}), [](const bj::object&) {
+                    return ToolResult::ok(bj::object{
+                        {"file", "src/goober.rs"},
+                        {"source", kRustBinding},
+                        {"cargo_toml",
+                         "[package]\nname = \"mybox\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n"
+                         "[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nserde_json = \"1\"\n\n"
+                         "[profile.release]\nopt-level = \"s\"\nlto = true\npanic = \"abort\"\n"},
+                        {"lib_rs_starts_with", "mod goober;\nuse goober::*;\n"},
+                        {"build", "rustup target add wasm32-unknown-unknown && cargo build --release --target "
+                                  "wasm32-unknown-unknown"},
+                        {"upload", "version_upload with manifest and wasm_base64 = base64 of "
+                                   "target/wasm32-unknown-unknown/release/mybox.wasm"}});
+                  }});
   // Keys for external services (015 §5): write-only.
   auto scope_props = [](std::initializer_list<std::pair<std::string, bj::value>> extra) {
     bj::object props{{"scope", mcp::enum_property("system, for every tenant; or tenant, for one.", {"system", "tenant"})},

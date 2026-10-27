@@ -1,9 +1,21 @@
 #include "goober/host/rate_limit.h"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <cmath>
 
+#include "goober/base/encoding.h"
+
 namespace goober::host {
+
+std::string rate_key(const std::string& address) {
+  in6_addr a6{};
+  if (address.find(':') != std::string::npos && inet_pton(AF_INET6, address.c_str(), &a6) == 1) {
+    return "v6:" + base::hex_encode(std::string_view(reinterpret_cast<const char*>(a6.s6_addr), 8));
+  }
+  return address;
+}
 
 int64_t RateLimiter::take(std::string_view bucket, std::string_view key, const RateRule& rule, int64_t now_ms) {
   std::string id = std::string(bucket) + "\n" + std::string(key);

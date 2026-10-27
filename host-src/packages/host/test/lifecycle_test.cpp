@@ -15,14 +15,14 @@ namespace bhttp = beast::http;
 namespace fs = std::filesystem;
 
 namespace {
-int get(uint16_t port, const std::string& target, std::string* body = nullptr) {
+int get(uint16_t port, const std::string& target, std::string* body = nullptr, const std::string& host = "localhost") {
   asio::io_context io;
   beast::tcp_stream stream(io);
   beast::error_code cec;
   stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port), cec);
   if (cec) return -1;
   bhttp::request<bhttp::string_body> req(bhttp::verb::get, target, 11);
-  req.set(bhttp::field::host, "localhost");
+  req.set(bhttp::field::host, host);
   bhttp::write(stream, req);
   beast::flat_buffer buf;
   bhttp::response<bhttp::string_body> res;
@@ -59,6 +59,9 @@ TEST(Lifecycle, HealthAndGracefulShutdown) {
   std::string body;
   EXPECT_EQ(get(port, "/goober/health", &body), 200);
   EXPECT_EQ(body, R"({"ok":true})");
+  // A proxy's health check names the upstream address, which is no configured domain.
+  EXPECT_EQ(get(port, "/goober/health", &body, "10.1.2.3:8080"), 200);
+  EXPECT_NE(get(port, "/", &body, "10.1.2.3:8080"), 200);
   ASSERT_TRUE(h.boxes().upload(R"({"box":"slow","domains":["*"],"behavior":{"timeout-ms":5000,"fuel":2000000000},
       "routes":{"http":{"/slow":{"get":{"name":"slow","public":true}}}}})",
                                kSlow, &err))

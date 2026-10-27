@@ -8,6 +8,7 @@
 
 #include <iostream>
 
+#include "goober/base/names.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -96,9 +97,32 @@ bool Host::enqueue_outbox(const manifest::Manifest& m, const std::string& tenant
   return true;
 }
 
-// Every outbox a box could have filled: (tenant, database or "" for outbox.db).
+// Every outbox a box could have filled: (tenant, database or "" for outbox.db). Besides what
+// the active boxes name, storage is scanned now and then, so the elements of a box that was
+// removed or changed are still delivered, listed, and discardable.
 std::vector<std::pair<std::string, std::string>> Host::outbox_locations() {
   std::set<std::pair<std::string, std::string>> out;
+  {
+    std::lock_guard lock(outbox_scan_mu_);
+    int64_t now = base::now_unix_ms();
+    if (now - outbox_scan_ms_ > 60'000) {
+      outbox_scan_ms_ = now;
+      outbox_scanned_.clear();
+      std::error_code ec;
+      for (const auto& e : fs::directory_iterator(config_.get()->storage / "sqlite3", ec)) {
+        std::string tenant = e.path().filename().string();
+        if (!base::is_valid_name(tenant)) continue;
+        if (fs::exists(e.path() / "outbox.db")) outbox_scanned_.emplace(tenant, "");
+        for (const auto& database : databases_->databases(tenant)) {
+          try {
+            if (open_outbox(tenant, database)) outbox_scanned_.emplace(tenant, database);
+          } catch (const std::exception&) {
+          }
+        }
+      }
+    }
+    out = outbox_scanned_;
+  }
   auto cfg = config_.get();
   auto active = boxes_->active();
   for (const auto& [name, box] : active->boxes) {
@@ -135,41 +159,61 @@ int Host::outbox_tick(int64_t now_ms) {
   auto cfg = config_.get();
   int delivered = 0;
   for (const auto& [tenant, database] : outbox_locations()) {
-    auto db = open_outbox(tenant, database);
-    if (!db) continue;
-    db->exec("DELETE FROM goober_outbox WHERE state = 'done' AND done_ms < " +
-             std::to_string(now_ms - 7LL * 24 * 3600 * 1000));
-    struct Row {
-      int64_t id, attempts, max_attempts, backoff_ms, deadline_ms;
-      std::string box, service, method, verb, url, headers, body, content_type, credentials, auth_header, auth_prefix,
-          idem_header, idem_key;
-    };
-    std::vector<Row> rows;
-    {
-      sqlite::Stmt s(*db,
-                     "SELECT id, attempts, max_attempts, backoff_ms, deadline_ms, box, service, method, verb, url, headers, "
-                     "body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key FROM goober_outbox "
-                     "WHERE state = 'pending' ORDER BY id LIMIT 50");
-      while (s.step()) {
-        rows.push_back(Row{s.int64(0), s.int64(1), s.int64(2), s.int64(3), s.int64(4), s.text(5), s.text(6), s.text(7),
-                           s.text(8), s.text(9), s.text(10), s.text(11), s.text(12), s.text(13), s.text(14), s.text(15),
-                           s.text(16), s.text(17)});
-      }
+    // One bad location (busy, corrupt, gone) never holds up the others.
+    try {
+      delivered += outbox_deliver(tenant, database, now_ms);
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: outbox for " << tenant << "/" << (database.empty() ? "outbox" : database) << ": "
+                << e.what() << "\n";
     }
-    // Commit order per service: once one element waits, the ones behind it wait too.
-    std::set<std::string> waiting;
-    for (const auto& r : rows) {
-      if (waiting.count(r.service)) continue;
-      sqlite::Stmt next(*db, "SELECT next_ms FROM goober_outbox WHERE id = ?");
-      next.bind(1, r.id);
-      if (next.step() && next.int64(0) > now_ms) {
-        waiting.insert(r.service);
-        continue;
+  }
+  return delivered;
+}
+
+int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms) {
+  auto cfg = config_.get();
+  auto db = open_outbox(tenant, database);
+  if (!db) return 0;
+  db->exec("DELETE FROM goober_outbox WHERE state = 'done' AND done_ms < " +
+           std::to_string(now_ms - 7LL * 24 * 3600 * 1000));
+  struct Row {
+    int64_t id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms;
+    std::string box, service, method, verb, url, headers, body, content_type, credentials, auth_header, auth_prefix,
+        idem_header, idem_key;
+  };
+  std::vector<std::string> services;
+  {
+    sqlite::Stmt s(*db, "SELECT DISTINCT service FROM goober_outbox WHERE state = 'pending'");
+    while (s.step()) services.push_back(s.text(0));
+  }
+  int delivered = 0;
+  // Commit order per service: each service's oldest pending element goes first, and once it
+  // waits, the ones behind it wait too. Services don't wait for each other.
+  for (const auto& service : services) {
+    for (int n = 0; n < 50; ++n) {
+      std::optional<Row> head;
+      {
+        sqlite::Stmt s(*db,
+                       "SELECT id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms, box, service, method, verb, "
+                       "url, headers, body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key "
+                       "FROM goober_outbox WHERE state = 'pending' AND service = ? ORDER BY id LIMIT 1");
+        s.bind(1, service);
+        if (s.step()) {
+          head = Row{s.int64(0),  s.int64(1),  s.int64(2),  s.int64(3),  s.int64(4),  s.int64(5),  s.text(6),
+                     s.text(7),   s.text(8),   s.text(9),   s.text(10),  s.text(11), s.text(12), s.text(13),
+                     s.text(14),  s.text(15),  s.text(16), s.text(17), s.text(18)};
+        }
       }
+      if (!head || head->next_ms > now_ms) break;
+      const Row& r = *head;
       std::vector<std::pair<std::string, std::string>> headers;
       std::string err;
       if (auto h = json::parse(r.headers, &err); h && h->is_array()) {
-        for (const auto& p : h->as_array()) headers.emplace_back(p.at(0).as_string(), p.at(1).as_string());
+        for (const auto& p : h->as_array()) {
+          if (p.is_array() && p.as_array().size() == 2 && p.as_array()[0].is_string() && p.as_array()[1].is_string()) {
+            headers.emplace_back(p.as_array()[0].as_string(), p.as_array()[1].as_string());
+          }
+        }
       }
       if (!r.idem_header.empty()) headers.emplace_back(r.idem_header, r.idem_key);
       HttpOut reply;
@@ -192,19 +236,31 @@ int Host::outbox_tick(int64_t now_ms) {
       std::string state = ok ? "done" : (permanent || attempts >= r.max_attempts || now_ms >= r.deadline_ms) ? "dead" : "pending";
       int64_t backoff = r.backoff_ms << std::min<int64_t>(attempts - 1, 20);
       int64_t next_ms = now_ms + std::min<int64_t>(backoff, 3'600'000);
-      sqlite::Stmt u(*db,
-                     "UPDATE goober_outbox SET attempts = ?, state = ?, next_ms = ?, last_status = ?, last_error = ?, "
-                     "done_ms = ? WHERE id = ?");
-      u.bind(1, attempts).bind(2, state).bind(3, next_ms).bind(4, int64_t(reply.status));
-      reply.error.empty() ? u.bind_null(5) : u.bind(5, reply.error);
-      state == "pending" ? u.bind_null(6) : u.bind(6, now_ms);
-      u.bind(7, r.id).run();
+      // The call went out, so its outcome must be written down: a busy database is waited out
+      // rather than leaving the element pending to be sent again.
+      bool recorded = false;
+      for (int tries = 0; tries < 5 && !recorded; ++tries) {
+        try {
+          sqlite::Stmt u(*db,
+                         "UPDATE goober_outbox SET attempts = ?, state = ?, next_ms = ?, last_status = ?, last_error = ?, "
+                         "done_ms = ? WHERE id = ?");
+          u.bind(1, attempts).bind(2, state).bind(3, next_ms).bind(4, int64_t(reply.status));
+          reply.error.empty() ? u.bind_null(5) : u.bind(5, reply.error);
+          state == "pending" ? u.bind_null(6) : u.bind(6, now_ms);
+          u.bind(7, r.id).run();
+          recorded = true;
+        } catch (const std::exception& e) {
+          std::cerr << "goober-host: outbox element " << r.id << " was sent but its outcome couldn't be recorded yet: "
+                    << e.what() << "\n";
+        }
+      }
+      if (!recorded) return delivered;  // the next tick sends it again, under the same idempotency key
       if (ok) ++delivered;
-      if (state == "pending") waiting.insert(r.service);
       if (state == "dead") {
         std::cerr << "goober-host: outbox element " << r.id << " (" << r.service << "." << r.method << ") for " << tenant
                   << " is dead: " << (reply.error.empty() ? "status " + std::to_string(reply.status) : reply.error) << "\n";
       }
+      if (state == "pending") break;
     }
   }
   return delivered;

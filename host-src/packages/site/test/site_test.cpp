@@ -43,6 +43,12 @@ TEST(SitePaths, UrlsAndPrivacy) {
   EXPECT_TRUE(site::is_private_path("_templates/page.html"));
   EXPECT_TRUE(site::is_private_path("a/_b/c"));
   EXPECT_FALSE(site::is_private_path("a/b_c"));
+  // Generator output directories are served; anything private inside them still isn't.
+  EXPECT_FALSE(site::is_private_path("_astro/index.abc123.css"));
+  EXPECT_FALSE(site::is_private_path("_next/static/chunks/main.js"));
+  EXPECT_TRUE(site::is_private_path("_next/_secret/x"));
+  EXPECT_TRUE(site::is_private_path("_astro"));
+  EXPECT_TRUE(site::is_private_path("_nextish/x"));
   EXPECT_EQ(site::kind_of("a.html", "---\ntitle: x\n---\n"), site::Kind::kFragment);
   EXPECT_EQ(site::kind_of("a.html", "<!doctype html>"), site::Kind::kDocument);
 }

@@ -86,6 +86,12 @@ std::string Host::bearer_operator(const Request& req) const {
 void Host::handle_operations(const Request& req, const Finish& finish) {
   std::string operator_name = bearer_operator(req);
   if (operator_name.empty()) {
+    // Wrong tokens are slowed per address; right ones aren't counted at all.
+    if (int64_t wait = limiter_.take("operator-auth", rate_key(client_address(req)), RateRule{10, 5}, base::now_unix_ms())) {
+      auto res = json_response(429, R"({"error":"too many requests without a valid token"})");
+      res.headers.emplace_back("retry-after", std::to_string(wait));
+      return finish(std::move(res), R"({"why":"rate limited","bucket":"operator-auth"})");
+    }
     auto res = json_response(
         401, R"({"error":"a bearer token is required: mint one with goober-host token create, or set operations.token"})");
     res.headers.emplace_back("www-authenticate", "Bearer");
@@ -462,6 +468,40 @@ void Host::register_tools() {
                     }
                     return ToolResult::ok(bj::object{{"removed", *id}});
                   }});
+  mcp_->add_tool(
+      {"agent_token_mint",
+       "Mints a long-lived access token for an agent client to act for one person, for agents that send a fixed "
+       "bearer header and can't refresh, like Grok's remote MCP tool or a script. Use it as Authorization: Bearer "
+       "<token> on https://<domain>/mcp (box tools) and on box routes that allow agents. The person is mailed, sees "
+       "it on their account page, and can revoke it there. Prefer OAuth (dynamic registration or the device flow) "
+       "for agents that can do it.",
+       object_schema({{"tenant", realm_prop},
+                      {"client_id", string_property("An agent client from client_put (acts_as agent).")},
+                      {"email", string_property("The person the agent acts for; they must have signed in once.")},
+                      {"days", mcp::integer_property("How long it lives: 1 to 366 days.")}},
+                     {"tenant", "client_id", "email", "days"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+         auto* days = args.if_contains("days");
+         if (!days || !days->is_int64() || days->as_int64() < 1 || days->as_int64() > 366) {
+           return ToolResult::fail("days is 1 to 366");
+         }
+         std::string client_id = arg(args, "client_id").value_or(""), email = arg(args, "email").value_or("");
+         int64_t now = base::now_unix_ms(), ttl = days->as_int64() * 24 * 3600 * 1000;
+         std::string why;
+         auto token = identity_->mint_agent_token(*tenant, client_id, email, ttl, now, &why);
+         if (!token) return ToolResult::fail(why);
+         auto client = identity_->client(*tenant, client_id);
+         send_mail(identity::Mail{
+             email, "An agent can act for you on " + *tenant,
+             "An operator just gave the agent " + (client ? client->name : client_id) + " a token to act for you for " +
+                 std::to_string(days->as_int64()) +
+                 " days.\n\nIf you expected that, there is nothing to do. If not, open your account page and remove it.\n"});
+         return ToolResult::ok(bj::object{{"access_token", *token},
+                                          {"expires_at", base::format_utc_ms(now + ttl)},
+                                          {"note", "Shown once; goober keeps only its hash."}});
+       }});
 }
 
 }  // namespace goober::host

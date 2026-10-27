@@ -199,6 +199,17 @@ void Host::timer_tick(int64_t now_ms) {
 
   for (auto& d : due) {
     auto job = [this, d, cfg]() mutable {
+      // However the fire ends, even by throwing, its key stops being "running", or the timer
+      // would never fire again for that row.
+      struct Release {
+        Host* host;
+        std::string key;
+        ~Release() {
+          std::lock_guard lock(host->timers_->mu);
+          host->timers_->running.erase(key);
+        }
+      } release{this, d.key};
+      int64_t started_us = base::monotonic_us();
       uint8_t rnd[8];
       base::os_random_fill(rnd);
       std::string request_id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
@@ -245,10 +256,10 @@ void Host::timer_tick(int64_t now_ms) {
       pseudo.method = "timer";
       pseudo.path = "timer:" + t.name;
       pseudo.headers.emplace_back("goober-request-id", request_id);
-      access_log(pseudo, ok ? (call.result.status ? call.result.status : 204) : 500, base::monotonic_us(), d.domain, json::dump(call.extra));
+      access_log(pseudo, ok ? (call.result.status ? call.result.status : 204) : 500, started_us, d.domain, json::dump(call.extra));
       std::lock_guard lock(timers_->mu);
-      timers_->running.erase(d.key);
-      if (!t.cron.empty()) {
+      // Only a fire that completed counts as done, so a failed one is caught up (014 §3).
+      if (!t.cron.empty() && ok) {
         auto& db = timer_progress(d.tenant);
         sqlite::Stmt s(db, "INSERT INTO goober_timer_fires (timer, row_key, last_due) VALUES (?, ?, ?) "
                            "ON CONFLICT (timer, row_key) DO UPDATE SET last_due = excluded.last_due");
@@ -304,6 +315,10 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
       // forgotten so it can fire the rows again.
       {
         std::lock_guard lock(timers_->mu);
+        // A fire already under way would race this one and could be planned again.
+        for (const auto& key : timers_->running) {
+          if (key.starts_with(tenant + "|" + name + "|")) return *error = "timer " + name + " is firing right now; try again", std::nullopt;
+        }
         for (auto it = timers_->next_due.begin(); it != timers_->next_due.end();) {
           bool mine = it->first.starts_with(tenant + "|" + name + "|");
           it = mine ? timers_->next_due.erase(it) : std::next(it);
@@ -336,7 +351,7 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
       for (const auto& row : rows) {
         std::string domain;
         for (const auto& [tn, dm] : tenants_of(*config_.get(), box->manifest)) {
-          if (tn == tenant) domain = dm;
+          if (tn == tenant || domain.empty()) domain = dm;  // a fixed tenant may have no domain of its own
         }
         uint8_t rnd[8];
         base::os_random_fill(rnd);

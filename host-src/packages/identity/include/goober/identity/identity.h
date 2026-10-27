@@ -175,6 +175,14 @@ class Identity {
   // The person behind a live access token, or nullopt.
   std::optional<Bearer> bearer(std::string_view realm, std::string_view token, int64_t now_ms);
 
+  // An operator mints an agent's access token directly, for agents that send one fixed
+  // bearer header and can't refresh (Grok's remote MCP, scripts). The client must act as an
+  // agent and the person must already exist. It lives `ttl_ms` (an hour to a year), shows on
+  // the person's account page as a grant, and the person can revoke it there.
+  std::optional<std::string> mint_agent_token(std::string_view realm, std::string_view client_id,
+                                              std::string_view email, int64_t ttl_ms, int64_t now_ms,
+                                              std::string* why);
+
   // ---- OAuth: the device flow, for agents without a browser
   std::optional<DeviceStart> start_device(std::string_view realm, std::string_view client_id, int64_t now_ms,
                                           OAuthError* error);

@@ -17,6 +17,10 @@ struct RateRule {
   double burst = 30;       // how many may come at once
 };
 
+// The key a client's rate limits are kept under: its IPv4 address, or its IPv6 /64, since
+// one person routinely holds a whole /64 and could otherwise rotate past every budget.
+std::string rate_key(const std::string& address);
+
 class RateLimiter {
  public:
   // Takes one token for (bucket, key). Returns 0 when allowed, or the seconds to wait.

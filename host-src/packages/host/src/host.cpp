@@ -106,16 +106,6 @@ bool valid_host_header(std::string_view h) {
   return true;
 }
 
-// The key a client's rate limits are kept under: its IPv4 address, or its IPv6 /64, since
-// one person routinely holds a whole /64 and could otherwise rotate past every budget.
-std::string rate_key(const std::string& address) {
-  in6_addr a6{};
-  if (address.find(':') != std::string::npos && inet_pton(AF_INET6, address.c_str(), &a6) == 1) {
-    return "v6:" + base::hex_encode(std::string_view(reinterpret_cast<const char*>(a6.s6_addr), 8));
-  }
-  return address;
-}
-
 // Request headers a box never sees: credentials belong to the host.
 bool hidden_from_box(std::string_view name) { return name == "authorization" || name == "cookie"; }
 
@@ -189,7 +179,10 @@ void Host::stop() {
     timer_thread_.join();
     if (outbox_thread_.joinable()) outbox_thread_.join();
   }
-  if (!server_) return;
+  if (!server_) {
+    if (pool_) pool_->shutdown();
+    return;
+  }
   // Graceful: stop taking connections, let the requests already here finish (up to ten
   // seconds), then close what's left. systemd restarts land between requests, not inside one.
   server_->stop_accepting();
@@ -197,6 +190,9 @@ void Host::stop() {
   while (pool_->busy() > 0 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
+  // Before anything the jobs use is torn down: what never started is dropped, and what is
+  // running finishes while the server can still answer it.
+  pool_->shutdown();
   server_->stop();
   server_.reset();
 }
@@ -352,7 +348,10 @@ void Host::handle(Request req, Responder respond) {
     std::string client = rate_key(client_address(req));
     int64_t now = base::now_unix_ms();
     double rpm = double(cfg->requests_per_minute);
-    int64_t wait = limiter_.take("all", client, RateRule{rpm, std::max(10.0, rpm / 4)}, now);
+    // Operators are limited only when their token fails (handle_operations), so a big push
+    // from the operator's own machine isn't cut off halfway.
+    bool operations = path && path->path == kOperationsMcpPath;
+    int64_t wait = operations ? 0 : limiter_.take("all", client, RateRule{rpm, std::max(10.0, rpm / 4)}, now);
     std::string bucket = "all";
     if (!wait && path) {
       if (auto rule = sensitive(path->path, req.method)) {
@@ -366,8 +365,9 @@ void Host::handle(Request req, Responder respond) {
       return finish(std::move(res), json::dump(bj::object{{"why", "rate limited"}, {"bucket", bucket}, {"client", client}}));
     }
   }
-  // For the proxy and monitors: answers without touching storage, on any configured domain.
-  if (path && path->path == "/goober/health" && resolved) {
+  // For the proxy and monitors: answers without touching storage, whatever the Host (a
+  // proxy's health check names the upstream address, which is no configured domain).
+  if (path && path->path == "/goober/health") {
     Response res;
     res.headers.emplace_back("content-type", "application/json");
     res.headers.emplace_back("cache-control", "no-store");
@@ -776,6 +776,16 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   if (req.method != "get" && req.method != "head" && !bearer_call && !same_origin(req, origin_of(req))) {
     return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
   }
+  // Anonymous writes (a landing page's form, say) get their own, tighter budget per address,
+  // so a public route that stores or mails what it's given can't be turned into a flood.
+  std::string client_key = rate_key(client_address(req));
+  if (!who && req.method != "get" && req.method != "head") {
+    if (int64_t wait = limiter_.take("anonymous-write", client_key, RateRule{20, 10}, base::now_unix_ms())) {
+      auto res = error_page(tenant, 429, request_id);
+      res.headers.emplace_back("retry-after", std::to_string(wait));
+      return finish(std::move(res), R"({"why":"rate limited","bucket":"anonymous-write"})");
+    }
+  }
 
   // What the request carries, checked against what the route declares (037): nothing
   // invalid reaches the box.
@@ -836,6 +846,16 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                  {"params", params_json},   {"query", query},             {"headers", headers},
                  {"body", body},            {"domain", domain},           {"tenant", tenant},
                  {"user", user_json(who)}};
+  // A plain HTML form's fields, decoded, so a box needn't parse urlencoded text itself.
+  if (types::json_type_name(route.body).empty() &&
+      base::to_lower(req.header("content-type")).starts_with("application/x-www-form-urlencoded")) {
+    bj::object form;
+    for (const auto& [k, v] : router::parse_query(req.body)) form[k] = v;
+    doc["form"] = std::move(form);
+  }
+  // Who is asking, without saying who: the same address on the same site gives the same key,
+  // so a box can spot repeats without ever holding an IP address.
+  doc["client_key"] = base::sha256_hex("goober-client\n" + tenant + "\n" + client_key).substr(0, 16);
 
   auto call = call_box(ref, doc, tenant, request_id, who);
   auto& result = call.result;

@@ -630,6 +630,36 @@ std::optional<Tokens> Identity::poll_device(std::string_view realm_name, std::st
   return t;
 }
 
+std::optional<std::string> Identity::mint_agent_token(std::string_view realm_name, std::string_view client_id,
+                                                      std::string_view email_in, int64_t ttl_ms, int64_t now_ms,
+                                                      std::string* why) {
+  if (ttl_ms < 3600LL * 1000 || ttl_ms > 366LL * 24 * 3600 * 1000) return *why = "a minted token lives an hour to a year", std::nullopt;
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  auto c = find_client(r.db, client_id);
+  if (!c) return *why = "no client " + std::string(client_id) + "; register one with client_put, acts_as agent", std::nullopt;
+  if (c->person) return *why = "only agent clients get minted tokens; a person client signs in itself", std::nullopt;
+  sqlite::Stmt find(r.db, "SELECT id FROM users WHERE email = ?");
+  find.bind(1, normalize_email(email_in));
+  if (!find.step()) return *why = "nobody with that email has signed in to this realm yet", std::nullopt;
+  int64_t user_id = find.int64(0);
+  if (!user_active(r.db, user_id)) return *why = "the account is disabled", std::nullopt;
+  Transaction tx(r.db);
+  std::string family = random_hex(16);
+  std::string token = "goa_" + random_hex(32);
+  // The refresh row is never handed out; it is what lists the grant and lets the person end it.
+  for (auto [kind, secret] : {std::pair<std::string_view, std::string>{"access", token}, {"refresh", "gor_" + random_hex(32)}}) {
+    sqlite::Stmt ins(r.db,
+                     "INSERT INTO tokens (token_hash, kind, user_id, client_id, is_agent, expires_at, family) "
+                     "VALUES (?, ?, ?, ?, 1, ?, ?)");
+    ins.bind(1, hash_secret(secret)).bind(2, kind).bind(3, user_id).bind(4, client_id).bind(5, now_ms + ttl_ms).bind(6, family).run();
+  }
+  audit(r.db, now_ms, std::nullopt, "token_minted", user_id,
+        bj::object{{"client_id", client_id}, {"days", ttl_ms / (24 * 3600 * 1000)}, {"agent", true}});
+  tx.commit();
+  return token;
+}
+
 bj::array Identity::grants(std::string_view realm_name, int64_t user_id, int64_t now_ms) {
   auto& r = realm(realm_name);
   std::lock_guard lock(r.mu);

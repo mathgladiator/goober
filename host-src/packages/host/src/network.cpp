@@ -117,8 +117,11 @@ std::optional<BuiltCall> build_call(const manifest::ExternalService& svc, const 
     std::string name = m.path.substr(i + 1, close - i - 1);
     auto* v = path_params.if_contains(name);
     if (!v || v->is_null()) return *error = "the call needs path." + name, std::nullopt;
-    // Every byte but the unreserved ones is escaped, so a value can't add a segment or a query.
-    path += base::percent_encode(text_of(*v));
+    // Every byte but the unreserved ones is escaped, so a value can't add a segment or a query;
+    // and . and .. would walk the path itself (curl resolves them), so they are refused.
+    std::string text = text_of(*v);
+    if (text.empty() || text == "." || text == "..") return *error = "path." + name + " can't be empty, . or ..", std::nullopt;
+    path += base::percent_encode(text);
     i = close;
   }
   out.url = svc.base + path;
@@ -168,7 +171,8 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
   if (!content_type.empty()) conf += "header = " + curl_quoted("Content-Type: " + content_type) + "\n";
   uint8_t rnd[12];
   base::os_random_fill(rnd);
-  fs::create_directories(scratch);
+  std::error_code mkdir_error;
+  fs::create_directories(scratch, mkdir_error);
   fs::path conf_file = scratch / (".call-" + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd)));
   int fd = ::open(conf_file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   if (fd < 0 || ::write(fd, conf.data(), conf.size()) != ssize_t(conf.size())) {
@@ -179,9 +183,11 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
   ::close(fd);
   std::string upper = verb;
   for (auto& c : upper) c = char(std::toupper(static_cast<unsigned char>(c)));
-  std::vector<std::string> argv = {"curl", "-q", "-g", "--noproxy", "*", "-sS", "-i", "--max-redirs", "0",
+  std::vector<std::string> argv = {"curl", "-q", "-g", "--path-as-is", "--noproxy", "*", "-sS", "-i", "--max-redirs", "0",
                                    "--proto", loopback ? "=http" : "=https", "--max-time",
-                                   std::to_string(std::max<int64_t>(1, timeout_ms / 1000)), "-X", upper, "-K",
+                                   std::to_string(std::max<int64_t>(50, timeout_ms) / 1000) + "." +
+                                       std::to_string(std::max<int64_t>(50, timeout_ms) % 1000 / 100),
+                                   "-X", upper, "-K",
                                    conf_file.string()};
   if (!body.empty()) {
     argv.push_back("--data-binary");
@@ -189,7 +195,7 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
   }
   argv.push_back("--");
   argv.push_back(url);
-  auto r = base::run_process(argv, body, kMaxReplyBytes + 65536, timeout_ms + 2000);
+  auto r = base::run_process(argv, body, kMaxReplyBytes + 65536, timeout_ms + 500);
   std::error_code ec;
   fs::remove(conf_file, ec);
   if (!r.started) {
@@ -300,8 +306,14 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   }
   auto cfg = config_.get();
   int64_t started = base::monotonic_us();
+  // A call never outlives the request that makes it: wasm deadlines can't interrupt a host call.
+  int64_t timeout_ms = 10000;
+  if (ctx.deadline_us) {
+    timeout_ms = std::min(timeout_ms, (ctx.deadline_us - base::monotonic_us()) / 1000);
+    if (timeout_ms < 50) return fail("no time left for the call");
+  }
   auto reply = send_http(m.verb, built->url, headers, built->body, built->content_type, cfg->local,
-                         cfg->storage / "tmp", 10000);
+                         cfg->storage / "tmp", timeout_ms);
   egress_log(ctx.tenant, ctx.manifest->box, svc->name, m.name, m.verb, built->url, reply.status, reply.error,
              base::monotonic_us() - started, built->body.size(), reply.body.size(), ctx.request_id, 0);
   if (!reply.error.empty()) return fail(reply.error);
