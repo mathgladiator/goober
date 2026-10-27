@@ -36,7 +36,8 @@ class Robots {
   bool all_disallowed_ = false;
 };
 
-// Whether a robots.txt pattern (with * and a trailing $) matches a target.
-bool robots_match(std::string_view pattern, std::string_view target);
+// Whether a robots.txt pattern (with * and a trailing $) matches a target. `steps`, when
+// given, is a budget of comparisons shared across calls; running out answers false.
+bool robots_match(std::string_view pattern, std::string_view target, int64_t* steps = nullptr);
 
 }  // namespace goober::web

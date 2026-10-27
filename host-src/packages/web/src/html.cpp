@@ -858,6 +858,7 @@ std::optional<Selector> Selector::parse(std::string_view text, std::string* erro
       skip_ws();
       sel.groups_.push_back(std::move(chain));
       chain.clear();
+      if (sel.groups_.size() >= 63) return *error = "a selector has at most 64 comma-separated parts", std::nullopt;
       continue;
     }
     if (text[i] == '>') {

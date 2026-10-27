@@ -18,5 +18,10 @@ the box serves shares one index.
   and `/meat/ranches` are public (CORS open), without notes, emails, or the contact log.
 - `offering_add` records what the robot can't read: a price from a call or a market stall.
 
+**Who can work it.** The tools require `owner`, checked in the realm of the domain the agent
+calls. With `"domains": ["*"]`, the owner of any domain on the host reaches the one shared
+index, notes and contact log included. On a host where other people own domains, set
+`domains` to your own.
+
 Finding ranches in the first place is the agent's job (a search engine, a map, a farmers
 market list); this box is where what it finds is kept.

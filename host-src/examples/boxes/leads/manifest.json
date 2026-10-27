@@ -1,6 +1,6 @@
 {
   "box": "leads",
-  "mission": "Collect emails and survey answers from a landing page's form (an ad's destination, say), confirm them by email when a mail service is set up, and let the owner and their agents read, count, and export them. Visitors can only add or update their own entry; nothing they send is shown to anyone but the owner.",
+  "mission": "Collect emails and survey answers from a landing page's form (an ad's destination, say), confirm them by email when a mail service is set up, and let the owner and their agents read, count, and export them. Visitors can only add an entry, or update theirs from the same place; nothing they send is shown to anyone but the owner.",
   "domains": ["*"],
   "types": "leads.openapi.json",
   "behavior": { "timeout-ms": 3000, "fuel": 200000000, "memory-max-bytes": 33554432 },

@@ -28,4 +28,7 @@ std::string html_escape(std::string_view text);
 
 std::string to_lower(std::string_view text);
 
+// The text with every invalid UTF-8 sequence replaced by U+FFFD, so it is always text.
+std::string valid_utf8(std::string_view text);
+
 }  // namespace goober::base

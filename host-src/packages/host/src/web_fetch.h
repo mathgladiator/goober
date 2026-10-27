@@ -70,6 +70,9 @@ class WebFetcher {
   bool opt_out(const std::string& host, bool add);
   std::vector<std::string> opted_out();
 
+  // Drops cached pages read more than 30 days ago, and the oldest past 20,000.
+  void prune(int64_t now_ms);
+
   sqlite::Db& db() { return *db_; }
   std::mutex& db_mu() { return db_mu_; }
 
@@ -88,7 +91,11 @@ class WebFetcher {
   bool host_allowed(const web::Url& u, const FetchOptions& o, std::string* why);
   // Waits for the origin's turn (if it comes before the deadline) and books the next one.
   bool take_turn(const web::Url& u, int64_t deadline_ms, int64_t max_wait_ms, int64_t* retry_after_ms);
-  web::Robots robots_for(const web::Url& u, int64_t deadline_ms, const FetchOptions& o);
+  // The origin's robots.txt, or nullopt when there was no time to ask (retry_after_ms set);
+  // only a real answer, or a real failure of the site, is remembered.
+  std::optional<web::Robots> robots_for(const web::Url& u, int64_t deadline_ms, const FetchOptions& o,
+                                        int64_t* retry_after_ms);
+  void forget_idle_origins();  // with mu_ held
   Raw get(const web::Url& u, const std::vector<std::pair<std::string, std::string>>& headers, int64_t timeout_ms,
           size_t max_bytes);
   void back_off(const web::Url& u, int64_t ms);

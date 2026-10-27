@@ -631,7 +631,7 @@ pub extern "C" fn goober_route_meat_ranches() -> i32 {
     let Some(r) = sql_or_500(
         DB,
         "SELECT json_object('ranches', json_group_array(json_object('name', name, 'slug', slug, 'kind', kind, \
-           'city', city, 'region', region, 'website', website, 'phone', phone, \
+           'city', city, 'region', region, 'website', website, \
            'offerings', (SELECT count(*) FROM offerings o WHERE o.ranch_id = ranches.id)))) \
          FROM (SELECT * FROM ranches WHERE status != 'declined' AND (:region IS NULL OR region = :region COLLATE NOCASE) \
                ORDER BY name LIMIT 1000) AS ranches",

@@ -237,8 +237,14 @@ int Host::crawl_step() {
           for (const auto& loc : sitemap_locs(page.body, 50000)) {
             auto u = web::parse_url(loc);
             if (!u) continue;
-            if (index) found.emplace_back("sitemap:" + u->str(), 0);
-            else if (scope.allows(*u)) found.emplace_back(u->str(), 1);
+            if (index) {
+              // A sitemap index may only point at the crawl's own sites.
+              bool ours = false;
+              for (const auto& seed : scope.seeds) ours |= web::same_site(seed, *u);
+              if (ours) found.emplace_back("sitemap:" + u->str(), 0);
+            } else if (scope.allows(*u)) {
+              found.emplace_back(u->str(), 1);
+            }
           }
         } else if (page.is_html()) {
           auto doc = web::Document::parse(page.body);
@@ -277,12 +283,18 @@ int Host::crawl_step() {
         u.bind(1, page.error.empty() ? "done" : "error").bind(2, int64_t(page.status)).bind(3, title);
         page.error.empty() ? u.bind_null(4) : u.bind(4, page.error);
         u.bind(5, base::now_unix_ms()).bind(6, c.id).bind(7, n.url).run();
-        sqlite::Stmt count(db, "SELECT count(*) FROM frontier WHERE crawl_id = ? AND kind = 'page'");
+        sqlite::Stmt count(db, "SELECT count(*), coalesce(sum(kind = 'sitemap'), 0) FROM frontier WHERE crawl_id = ?");
         count.bind(1, c.id);
-        int64_t total = count.step() ? count.int64(0) : 0;
+        int64_t total = 0, sitemaps = 0;
+        if (count.step()) {
+          sitemaps = count.int64(1);
+          total = count.int64(0) - sitemaps;
+        }
         for (const auto& [url, depth] : found) {
           bool sitemap = url.starts_with("sitemap:");
-          if (!sitemap && total >= max_pages) break;
+          if (!sitemap && total >= max_pages) continue;
+          if (sitemap && sitemaps >= 100) continue;  // nested indexes can't grow a crawl forever
+          if (sitemap) ++sitemaps;
           sqlite::Stmt ins(db,
                            "INSERT OR IGNORE INTO frontier (crawl_id, url, depth, kind, state) VALUES (?, ?, ?, ?, 'pending')");
           ins.bind(1, c.id).bind(2, sitemap ? url.substr(8) : url).bind(3, depth).bind(4, sitemap ? "sitemap" : "page").run();
@@ -311,6 +323,11 @@ void Host::run_crawls() {
     lock.unlock();
     int fetched = 0;
     try {
+      static thread_local int64_t pruned_ms = 0;
+      if (web_ && base::now_unix_ms() - pruned_ms > 3600000) {
+        pruned_ms = base::now_unix_ms();
+        web_->prune(pruned_ms);
+      }
       fetched = crawl_step();
     } catch (const std::exception& e) {
       std::cerr << "goober-host: crawler: " << e.what() << "\n";

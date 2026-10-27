@@ -851,7 +851,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       query[name] = std::move(*v);
     }
   } else {
-    for (const auto& [k, v] : raw_query) query[k] = v;
+    for (const auto& [k, v] : raw_query) query[base::valid_utf8(k)] = base::valid_utf8(v);
   }
   bj::object params_json;
   for (const auto& [k, v] : params) params_json[k] = v;
@@ -863,7 +863,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   if (types::json_type_name(route.body).empty() &&
       base::to_lower(req.header("content-type")).starts_with("application/x-www-form-urlencoded")) {
     bj::object form;
-    for (const auto& [k, v] : router::parse_query(req.body)) form[k] = v;
+    for (const auto& [k, v] : router::parse_query(req.body)) form[base::valid_utf8(k)] = base::valid_utf8(v);
     doc["form"] = std::move(form);
   }
   // Who is asking, without saying who: the same address on the same site gives the same key,

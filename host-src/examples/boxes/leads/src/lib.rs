@@ -104,12 +104,14 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
     }
     let mut utm = Map::new();
     for k in UTM {
-        let v = field(k).or_else(|| req.query(k).map(str::to_string));
+        let v = field(k).or_else(|| req.query(k).map(|q| q.trim().to_string())).filter(|v| !v.is_empty());
         utm.insert(k.to_string(), v.map(|s| Value::String(s.chars().take(200).collect())).unwrap_or(Value::Null));
     }
     let now = goober::now_ms();
     let token = goober::random_hex(16);
-    // One row per email per campaign: coming back updates the answers, never the first source.
+    // One row per email per campaign. Coming back from the same place (the same client_key)
+    // updates the answers, never the first source; someone else typing that email changes
+    // nothing.
     let Some(r) = sql_or_500(
         DB,
         "INSERT INTO leads (campaign, email, name, answers, utm_source, utm_medium, utm_campaign, utm_content, \
@@ -118,6 +120,7 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
            :client_key, :token, :now, :now) \
          ON CONFLICT (campaign, email) DO UPDATE SET answers = json_patch(leads.answers, excluded.answers), \
            name = coalesce(excluded.name, leads.name), updated_ms = excluded.updated_ms \
+           WHERE leads.client_key IS excluded.client_key \
          RETURNING token = :token AS fresh",
         json!({ "campaign": campaign, "email": email, "name": name, "answers": Value::Object(answers).to_string(),
                 "utm_source": utm["utm_source"], "utm_medium": utm["utm_medium"], "utm_campaign": utm["utm_campaign"],
@@ -126,7 +129,12 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
         return 0;
     };
     let fresh = r.first().and_then(|v| v.as_i64()) == Some(1);
-    if fresh {
+    // At most one confirmation a day to an address, whatever campaigns it is entered in, so
+    // the form can't be used to flood someone's inbox.
+    let recent = sql(DB, "SELECT count(*) FROM leads WHERE email = :email AND created_ms > :since",
+                     json!({ "email": email, "since": now - 86_400_000 }))
+        .first().and_then(|v| v.as_i64()).unwrap_or(0);
+    if fresh && recent <= 1 {
         let domain = req.doc["domain"].as_str().unwrap_or("");
         let link = format!("https://{domain}/leads/confirm/{token}");
         let sent = goober::call(
@@ -249,7 +257,7 @@ fn csv_cell(v: &Value) -> String {
         other => other.to_string(),
     };
     // Quoted when needed, and never a formula when a spreadsheet opens it.
-    let s = if s.starts_with(['=', '+', '-', '@']) { format!("'{s}") } else { s };
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s };
     if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
 }
 

@@ -74,36 +74,6 @@ std::string from_latin1(std::string_view s) {
   return out;
 }
 
-// Invalid UTF-8 becomes U+FFFD, so what reaches JSON and agents is always text.
-std::string valid_utf8(std::string_view s) {
-  std::string out;
-  out.reserve(s.size());
-  size_t i = 0;
-  while (i < s.size()) {
-    unsigned char c = s[i];
-    int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
-    bool ok = n > 0 && i + size_t(n) <= s.size();
-    for (int k = 1; ok && k < n; ++k) ok = (static_cast<unsigned char>(s[i + size_t(k)]) & 0xC0) == 0x80;
-    if (ok && n == 2) ok = c >= 0xC2;
-    if (ok && n == 3) {
-      unsigned char c1 = s[i + 1];
-      ok = !(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0);
-    }
-    if (ok && n == 4) {
-      unsigned char c1 = s[i + 1];
-      ok = c <= 0xF4 && !(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90);
-    }
-    if (!ok) {
-      out += "\xEF\xBF\xBD";
-      ++i;
-      continue;
-    }
-    out.append(s.substr(i, size_t(n)));
-    i += size_t(n);
-  }
-  return out;
-}
-
 std::string charset_of(std::string_view content_type, std::string_view body, bool html) {
   auto find_charset = [](std::string_view text) -> std::string {
     std::string l = base::to_lower(text);
@@ -340,45 +310,84 @@ WebFetcher::Raw WebFetcher::get(const web::Url& u, const std::vector<std::pair<s
   return out;
 }
 
-web::Robots WebFetcher::robots_for(const web::Url& u, int64_t deadline_ms, const FetchOptions& o) {
+std::optional<web::Robots> WebFetcher::robots_for(const web::Url& u, int64_t deadline_ms, const FetchOptions& o,
+                                                  int64_t* retry_after_ms) {
   {
     std::lock_guard lock(mu_);
     auto& origin = origins_[u.origin()];
     if (origin.robots && origin.robots_until_ms > base::now_unix_ms()) return *origin.robots;
   }
-  web::Robots robots = web::Robots::disallow_all();
+  std::optional<web::Robots> robots;
   int64_t ttl = kRobotsFailTtlMs;
-  int64_t retry = 0;
   auto at = web::parse_url(u.origin() + "/robots.txt");
-  std::string url = at->str();
+  std::string why;
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
-    if (!take_turn(*at, deadline_ms, INT64_MAX, &retry)) break;
+    // Every hop obeys the host's rules (opt-out, ports, addresses), but not one box's own
+    // allow list: what is remembered here is shared by everyone who reads this site.
+    FetchOptions any = o;
+    any.hosts.clear();
+    if (hop > 0 && !host_allowed(*at, any, &why)) {
+      robots = web::Robots::disallow_all();
+      break;
+    }
+    // No time for our turn isn't an answer from the site: nothing is remembered.
+    if (!take_turn(*at, deadline_ms, INT64_MAX, retry_after_ms)) return std::nullopt;
     int64_t started = base::monotonic_us();
     auto raw = get(*at, {{"User-Agent", user_agent()}}, std::min<int64_t>(10000, deadline_ms - base::now_unix_ms()),
                    512 << 10);
     if (log_) log_(o, at->str(), raw.status, raw.error, base::monotonic_us() - started, raw.body.size());
-    if (!raw.error.empty()) break;
+    if (!raw.error.empty()) {
+      robots = web::Robots::disallow_all();  // unreachable: RFC 9309 says stay out
+      break;
+    }
     if (raw.status >= 300 && raw.status < 400 && raw.headers.count("location")) {
       auto next = web::resolve(*at, raw.headers["location"]);
-      if (!next) break;
+      if (!next) {
+        robots = web::Robots::allow_all();  // a redirect to nowhere is like a 404
+        ttl = kRobotsTtlMs;
+        break;
+      }
       at = next;
       continue;
     }
-    // RFC 9309: a 2xx is the rules, 4xx means none, and 5xx (or nothing) means stay out.
+    // RFC 9309: a 2xx is the rules, 4xx means none, and 5xx means stay out.
     if (raw.status >= 200 && raw.status < 300) {
       robots = web::Robots::parse(raw.body, "goober");
       ttl = kRobotsTtlMs;
     } else if (raw.status >= 400 && raw.status < 500) {
       robots = web::Robots::allow_all();
       ttl = kRobotsTtlMs;
+    } else {
+      robots = web::Robots::disallow_all();
     }
     break;
   }
+  if (!robots) robots = web::Robots::disallow_all();  // too many redirects
   std::lock_guard lock(mu_);
+  forget_idle_origins();
   auto& origin = origins_[u.origin()];
   origin.robots = robots;
   origin.robots_until_ms = base::now_unix_ms() + ttl;
   return robots;
+}
+
+void WebFetcher::forget_idle_origins() {
+  // Many subdomains of one hostile site must not grow this without bound.
+  if (origins_.size() < 10000) return;
+  int64_t now = base::now_unix_ms();
+  for (auto it = origins_.begin(); it != origins_.end();) {
+    bool idle = it->second.next_ms < now && it->second.robots_until_ms < now + kRobotsTtlMs / 2;
+    it = idle ? origins_.erase(it) : std::next(it);
+  }
+  if (origins_.size() >= 10000) origins_.clear();  // still full: start over, re-reading robots.txt
+}
+
+void WebFetcher::prune(int64_t now_ms) {
+  std::lock_guard lock(db_mu_);
+  // Pages read more than 30 days ago go, and the cache never holds more than 20,000 pages.
+  sqlite::Stmt old(*db_, "DELETE FROM pages WHERE fetched_ms < ?");
+  old.bind(1, now_ms - 30LL * 86400000).run();
+  db_->exec("DELETE FROM pages WHERE url IN (SELECT url FROM pages ORDER BY fetched_ms DESC LIMIT -1 OFFSET 20000)");
 }
 
 Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
@@ -391,6 +400,13 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
     return page;
   }
   page.url = u->str();
+  // The caller's own rules come before the cache: a box can't read, from the cache, a page
+  // its manifest wouldn't let it fetch, nor an opted-out site's.
+  std::string why;
+  if (!host_allowed(*u, o, &why)) {
+    page.error = why;
+    return page;
+  }
   // The cache, keyed by the URL as asked.
   struct Cached {
     Page page;
@@ -420,14 +436,18 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
     return page;
   }
   web::Url at = *u;
-  std::string why;
   for (int hop = 0; hop <= kMaxRedirects; ++hop) {
     if (!host_allowed(at, o, &why)) {
       page.error = why;
       return page;
     }
-    auto robots = robots_for(at, deadline, o);
-    if (!robots.allowed(at.target())) {
+    auto robots = robots_for(at, deadline, o, &page.retry_after_ms);
+    if (!robots) {
+      page.error = "the robot is pacing itself on " + at.host + "; ask again in " +
+                   std::to_string((page.retry_after_ms + 999) / 1000) + " s";
+      return page;
+    }
+    if (!robots->allowed(at.target())) {
       page.error = "robots.txt at " + at.origin() + " doesn't allow " + at.target().substr(0, 200);
       return page;
     }
@@ -480,8 +500,8 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
     if (raw.status == 429 || raw.status == 503) {
       int64_t after = 60000;
       if (auto it = raw.headers.find("retry-after"); it != raw.headers.end()) {
-        int64_t s = std::atoll(it->second.c_str());
-        if (s > 0) after = s * 1000;
+        int64_t s = std::atoll(it->second.substr(0, 9).c_str());
+        if (s > 0) after = std::min<int64_t>(s, 3600) * 1000;
       }
       back_off(at, after);
       page.error = "the site asked us to slow down";
@@ -498,7 +518,7 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
     }
     std::string cs = charset_of(page.content_type, raw.body, page.is_html() || page.content_type.empty());
     page.body = (cs == "iso-8859-1" || cs == "latin1" || cs == "windows-1252" || cs == "cp1252") ? from_latin1(raw.body)
-                                                                                              : valid_utf8(raw.body);
+                                                                                              : base::valid_utf8(raw.body);
     {
       std::lock_guard lock(db_mu_);
       sqlite::Stmt s(*db_,

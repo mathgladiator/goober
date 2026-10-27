@@ -161,7 +161,7 @@ def main():
         check(st == 200 and any(o["ranch_slug"] == slug for o in pub), "the public index has it")
         check("notes" not in body and "met at the farmers market" not in body, "notes stay private")
         st, _, body = web.call("GET", "/meat/ranches")
-        check(st == 200 and slug in body and "555-0199" in body, "the public directory")
+        check(st == 200 and slug in body and "555-0199" not in body, "the public directory, without phones")
         op("content_delete", {"tenant": tenant, "path": f"e2e-ranch-{run}.html"})
         tool("ranch_update", {"slug": slug, "status": "declined", "watch": False})
     finally:

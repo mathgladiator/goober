@@ -152,4 +152,33 @@ std::string to_lower(std::string_view text) {
   return out;
 }
 
+std::string valid_utf8(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  while (i < s.size()) {
+    unsigned char c = s[i];
+    int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+    bool ok = n > 0 && i + size_t(n) <= s.size();
+    for (int k = 1; ok && k < n; ++k) ok = (static_cast<unsigned char>(s[i + size_t(k)]) & 0xC0) == 0x80;
+    if (ok && n == 2) ok = c >= 0xC2;
+    if (ok && n == 3) {
+      unsigned char c1 = s[i + 1];
+      ok = !(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0);
+    }
+    if (ok && n == 4) {
+      unsigned char c1 = s[i + 1];
+      ok = c <= 0xF4 && !(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90);
+    }
+    if (!ok) {
+      out += "\xEF\xBF\xBD";
+      ++i;
+      continue;
+    }
+    out.append(s.substr(i, size_t(n)));
+    i += size_t(n);
+  }
+  return out;
+}
+
 }  // namespace goober::base

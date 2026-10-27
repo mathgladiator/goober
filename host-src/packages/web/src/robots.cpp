@@ -25,12 +25,13 @@ std::string_view trim(std::string_view s) {
 
 }  // namespace
 
-bool robots_match(std::string_view pattern, std::string_view target) {
+bool robots_match(std::string_view pattern, std::string_view target, int64_t* steps) {
   bool anchored = !pattern.empty() && pattern.back() == '$';
   if (anchored) pattern.remove_suffix(1);
   // Iterative wildcard matching against a prefix of the target (or all of it, anchored).
   size_t p = 0, t = 0, star = std::string_view::npos, mark = 0;
   while (t < target.size()) {
+    if (steps && --*steps < 0) return false;
     if (p == pattern.size() && !anchored) return true;
     if (p < pattern.size() && pattern[p] == '*') {
       star = p++;
@@ -120,10 +121,16 @@ Robots Robots::parse(std::string_view text, std::string_view product_in) {
 bool Robots::allowed(std::string_view target) const {
   if (target == "/robots.txt") return true;
   if (all_disallowed_) return false;
+  // Wildcards make a match cost pattern times target; a hostile file could spend seconds of
+  // a thread per check. Past the budget, the answer is the safe one: don't fetch.
+  target = target.substr(0, 2048);
+  int64_t budget = 2'000'000;
   size_t best = 0;
   bool allow = true;
   for (const auto& r : rules_) {
-    if (!robots_match(r.pattern, target)) continue;
+    bool hit = robots_match(r.pattern, target, &budget);
+    if (budget < 0) return false;
+    if (!hit) continue;
     // The longest pattern wins; on a tie, allow (RFC 9309 §2.2.2).
     if (r.pattern.size() > best || (r.pattern.size() == best && r.allow)) {
       best = r.pattern.size();

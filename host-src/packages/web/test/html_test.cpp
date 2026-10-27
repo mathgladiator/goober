@@ -168,3 +168,11 @@ TEST(Html, EntitiesAndHostileInput) {
   auto huge = Document::parse(std::string(1 << 20, '<'));
   EXPECT_LE(view_text(huge).size(), size_t(1 << 20));
 }
+
+TEST(Html, SelectorGroupsAreCapped) {
+  std::string sel = "section p";
+  for (int i = 1; i < 64; ++i) sel += ", zz" + std::to_string(i);
+  sel += ", p";
+  std::string err;
+  EXPECT_FALSE(Selector::parse(sel, &err));
+}

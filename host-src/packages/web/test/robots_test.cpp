@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 using namespace goober::web;
 
 TEST(Robots, MatchesPatterns) {
@@ -46,4 +48,14 @@ Sitemap: https://ranch.example/sitemap.xml
   EXPECT_FALSE(Robots::disallow_all().allowed("/x"));
   EXPECT_TRUE(Robots::allow_all().allowed("/x"));
   EXPECT_EQ(Robots::parse("User-agent: *\nCrawl-delay: 9999\n", "goober").crawl_delay_ms(), 60000);
+}
+
+TEST(Robots, HostileWildcardsCostABoundedAmount) {
+  std::string text = "User-agent: *\n";
+  std::string pattern = "/*" + std::string(500, 'a') + "b\n";
+  for (int i = 0; i < 1000; ++i) text += "Disallow: " + pattern;
+  auto r = Robots::parse(text, "goober");
+  auto started = std::chrono::steady_clock::now();
+  EXPECT_FALSE(r.allowed("/" + std::string(8000, 'a')));  // the budget runs out: don't fetch
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(1));
 }

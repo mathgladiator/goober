@@ -330,7 +330,9 @@ TEST_F(WebTest, BoxesFetchThroughTheirWebService) {
   EXPECT_EQ(doc->at("jsonld").at(0).at("name"), "Quarter beef");
   EXPECT_EQ(doc->at("select").at(1).at("text"), "Brisket");
 
-  // A host the manifest doesn't list is refused before anything goes out.
+  // A host the manifest doesn't list is refused before anything goes out, even when an
+  // operator's fetch already put that page in the cache.
+  tool("web_fetch", {{"url", "http://localhost:" + std::to_string(site.port()) + "/beef"}});
   std::string other = box_wat(R"({"url":"http://localhost:)" + std::to_string(site.port()) + R"(/beef"})");
   ASSERT_TRUE(host->boxes().upload(manifest("scout", "scout"), other, &err)) << err;
   r = post(port, "/scout");
