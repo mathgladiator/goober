@@ -43,7 +43,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`, checked by the host (011). | The status vocabulary, CORS, ETags on box GETs, compression, ranges; undeclared routes still see every header and parameter. |
 | 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
-| 039 Internal | none | | Internal routes, callers, context propagation. |
+| 039 Internal | partial | Internal routes with callers, synchronous calls carrying the person and tenant, both sides checked, cycles refused, depth capped, deadlines shrink (016). | Outbox to boxes, idempotent routes, typed generated calls, tenant binding by path, worst-case sums. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
@@ -182,7 +182,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       outbox committed with the request's writes, delivered in order with retries, one
       idempotency key, dead letters, and operator tools; a write-only key store
       (`design/machine/015.Network.md`).
-- [ ] Internal routes (039), so boxes call boxes and a decision can tell the agent's box.
+- [x] Internal routes (039): `routes.internal` with callers, called synchronously through
+      `goober_call` as the same person, both sides checked and cycles refused at upload
+      (`design/machine/016.Internal.md`).
+- [ ] Outbox elements addressed to a box, idempotent internal routes, and timer targets.
 - [ ] Outbox result routes (035), so a box hears how its delivery went.
 - [ ] Push through FCM once decision 7 is made (Q26).
 

@@ -1,6 +1,7 @@
 // Schemas and tenant databases for operators (design/machine/008.Databases.md §7), and
 // the upload check for a manifest's data section.
 
+#include <functional>
 #include <set>
 
 #include "goober/base/files.h"
@@ -23,6 +24,55 @@ std::optional<std::string> arg(const bj::object& args, const char* key) {
 }
 
 }  // namespace
+
+// Both sides of every internal call agree, and no chain of calls comes back around (039).
+bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
+  auto active = boxes_->active();
+  // Every box's manifest as it would be with this version in place.
+  std::map<std::string, const manifest::Manifest*> boxes;
+  for (const auto& [name, box] : active->boxes) boxes[name] = &box->manifest;
+  boxes[m.box] = &m;
+  auto route_for = [&](const manifest::Manifest& callee, const std::string& name) -> const manifest::HttpRoute* {
+    for (const auto& r : callee.internal) {
+      if (r.name == name) return &r;
+    }
+    return nullptr;
+  };
+  for (const auto& [name, man] : boxes) {
+    for (const auto& svc : man->external) {
+      if (svc.box.empty()) continue;
+      std::string where = (name == m.box ? "" : "box " + name + ": ") + "external." + svc.name;
+      if (svc.box == name) return *error = where + " calls its own box", false;
+      auto callee = boxes.find(svc.box);
+      if (callee == boxes.end()) return *error = where + " calls box " + svc.box + ", which isn't deployed", false;
+      for (const auto& [method, _] : svc.methods) {
+        const auto* r = route_for(*callee->second, method);
+        if (!r) return *error = where + " calls " + svc.box + "." + method + ", which isn't an internal route of it", false;
+        if (std::find(r->callers.begin(), r->callers.end(), name) == r->callers.end()) {
+          return *error = where + " calls " + svc.box + "." + method + ", whose callers don't list " + name, false;
+        }
+      }
+    }
+  }
+  // No cycles: walk the call graph from every box.
+  std::map<std::string, int> state;  // 1 visiting, 2 done
+  std::function<bool(const std::string&, std::string)> visit = [&](const std::string& box, std::string path) {
+    if (state[box] == 1) return *error = "internal calls would loop: " + path + " -> " + box, false;
+    if (state[box] == 2) return true;
+    state[box] = 1;
+    if (auto it = boxes.find(box); it != boxes.end()) {
+      for (const auto& svc : it->second->external) {
+        if (!svc.box.empty() && !visit(svc.box, path.empty() ? box : path + " -> " + box)) return false;
+      }
+    }
+    state[box] = 2;
+    return true;
+  };
+  for (const auto& [name, _] : boxes) {
+    if (!visit(name, "")) return false;
+  }
+  return true;
+}
 
 bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
   std::set<std::string> tenants;

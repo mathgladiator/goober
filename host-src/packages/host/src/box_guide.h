@@ -156,6 +156,20 @@ the request later fails. require pins fields to {!email}, {!user_id}, {!tenant},
 literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
 every call without query strings or bodies.
 
+## Calling other boxes
+
+A box offers internal routes, reachable only from the boxes it names:
+"routes": {"internal": {"/jobs/{job_id : int64}/invoices": {"post": {
+  "name": "create_invoice", "callers": ["jobs"], "requirements": [["owner"]],
+  "body": "json:InvoiceRequest"}}}}
+The caller declares the call: "external": {"billing": {"box": "billing",
+"methods": {"create_invoice": {"budget": {"calls": 2}}}}}. Both sides must agree when either is
+deployed, and no chain of calls may loop. goober_call("billing", "create_invoice", {"path":
+{"job_id": "42"}, "body": {...}}) runs the callee now, as the same person in the same tenant
+(its requirements are checked against that person), with what's left of the caller's time,
+and answers {"status", "body", "json"}. The callee sees "caller": {"box", "route"} in its
+request document. Its writes commit on their own, even if the caller later fails.
+
 ## Types
 
 The types document is an OpenAPI 3.x document; only components.schemas is read, in a strict

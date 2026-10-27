@@ -252,8 +252,45 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
       }
-      if (k == "box" || k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
+      if (k == "box") continue;
+      if (k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    svc.box = get_string(def, "box", &err).value_or("");
+    if (!svc.box.empty()) {
+      // Another box: its internal routes are the methods, and the host knows the rest (039).
+      if (!base::is_valid_name(svc.box)) return *error = where + ".box names a box", false;
+      if (def.contains("base") || def.contains("credentials") || def.contains("auth")) {
+        return *error = where + ": a box service has no base or credentials; the host routes it", false;
+      }
+      const auto* methods = get_object(def, "methods", &err);
+      if (!methods || methods->empty()) return *error = where + ": needs methods, the box's internal routes it calls", false;
+      for (const auto& mk : *methods) {
+        std::string mw = where + ".methods." + std::string(mk.key());
+        if (!base::is_valid_name(mk.key())) return *error = mw + ": a method is the route name it calls", false;
+        if (!mk.value().is_object()) return *error = mw + " must be an object", false;
+        ExternalMethod em;
+        em.name = std::string(mk.key());
+        em.effect = "none";
+        for (const auto& f : mk.value().as_object()) {
+          std::string k(f.key());
+          if (k == "budget") {
+            if (const auto* b = get_object(mk.value().as_object(), "budget", &err)) {
+              em.budget_calls = get_int(*b, "calls", &err).value_or(em.budget_calls);
+            }
+          } else if (k == "effect") {
+            em.effect = f.value().is_string() ? std::string(f.value().as_string()) : "";
+            if (em.effect == "outbox") return *error = mw + ".effect outbox to a box isn't built yet; calls are synchronous", false;
+            if (em.effect != "none") return *error = mw + ".effect is none", false;
+          } else {
+            return *error = mw + ": unknown field \"" + k + "\"", false;
+          }
+        }
+        if (em.budget_calls < 1 || em.budget_calls > 100) return *error = mw + ".budget.calls is 1 to 100", false;
+        svc.methods[em.name] = std::move(em);
+      }
+      m->external.push_back(std::move(svc));
+      continue;
     }
     svc.base = get_string(def, "base", &err).value_or("");
     // https, or a loopback http address for local development, which the host calls only
@@ -366,6 +403,65 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
     }
     if (!err.empty()) return *error = where + ": " + err, false;
     m->external.push_back(std::move(svc));
+  }
+  return true;
+}
+
+// routes.internal (039): HTTP-shaped routes that only the boxes in callers can reach.
+bool parse_internal(const bj::value& routes, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!routes.is_object()) return *error = "routes.internal must be an object", false;
+  std::string err;
+  router::RouteTable<int> shapes;
+  for (const auto& path : routes.as_object()) {
+    auto pattern = router::parse_pattern(path.key(), &err);
+    if (!pattern) return *error = "routes.internal: " + err, false;
+    if (!path.value().is_object()) return *error = "routes.internal." + pattern->source + " must be an object", false;
+    for (const auto& verb : path.value().as_object()) {
+      std::string v(verb.key());
+      std::string where = "routes.internal." + pattern->source + "." + v;
+      if (v != "get" && v != "post" && v != "put" && v != "patch" && v != "delete") {
+        return *error = where + ": unknown verb (get, post, put, patch, delete)", false;
+      }
+      if (!verb.value().is_object()) return *error = where + " must be an object", false;
+      const auto& def = verb.value().as_object();
+      for (const auto& f : def) {
+        std::string k(f.key());
+        if (k == "name" || k == "callers" || k == "requirements" || k == "body" || k == "query" || k == "response" ||
+            k == "max-body-bytes") {
+          continue;
+        }
+        if (k == "public") return *error = where + ": nothing outside can reach an internal route, so it isn't public", false;
+        if (k == "idempotent" || k == "timeout-ms") {
+          m->warnings.push_back(where + "." + k + " is accepted but not implemented in v1");
+          continue;
+        }
+        return *error = where + ": unknown field \"" + k + "\"", false;
+      }
+      HttpRoute r;
+      r.verb = v;
+      r.pattern = *pattern;
+      auto name = get_string(def, "name", &err);
+      if (!name || !base::is_valid_name(*name)) return *error = where + ": name is required, matching [a-z][a-z0-9_]*", false;
+      if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+      r.name = *name;
+      if (!shapes.add(*pattern, v, 0)) return *error = where + " conflicts with another internal route", false;
+      const auto* callers = goober::json::get_array(def, "callers", &err);
+      if (!callers || callers->empty()) {
+        return *error = where + ": needs callers, the boxes that may call it; without them nothing can", false;
+      }
+      for (const auto& c : *callers) {
+        if (!c.is_string() || !base::is_valid_name(c.as_string())) return *error = where + ".callers lists box names", false;
+        r.callers.emplace_back(c.as_string());
+      }
+      if (auto* req = def.if_contains("requirements")) {
+        std::string why;
+        if (!parse_requirements(*req, *pattern, &r.requirements, &why)) return *error = where + ": " + why, false;
+      } else {
+        r.is_public = true;  // callers alone gate it; there is no outside to be public to
+      }
+      if (!parse_request_parts(def, v, where, &r, error)) return false;
+      m->internal.push_back(std::move(r));
+    }
   }
   return true;
 }
@@ -667,6 +763,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
         if (!parse_timers(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
+      if (protocol == "internal") {
+        if (!parse_internal(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
       if (protocol != "http") {
         m.warnings.push_back("routes." + protocol + " is accepted but not implemented in v1");
         continue;
@@ -784,6 +884,10 @@ bool check_types(const Manifest& m, const types::Types* t, std::string* error) {
   };
   for (const auto& r : m.routes) {
     std::string where = "routes.http." + r.pattern.source + "." + r.verb;
+    if (!need(r.body, where + ".body") || !need(r.response, where + ".response")) return false;
+  }
+  for (const auto& r : m.internal) {
+    std::string where = "routes.internal." + r.pattern.source + "." + r.verb;
     if (!need(r.body, where + ".body") || !need(r.response, where + ".response")) return false;
   }
   for (const auto& tool : m.tools) {

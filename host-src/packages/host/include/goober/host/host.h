@@ -166,6 +166,7 @@ class Host {
   // The upload check for a manifest's data: schemas stored, grants within them, and
   // every tenant's existing databases able to take them (008 §3).
   bool check_data(const manifest::Manifest& m, std::string* error) const;
+  bool check_calls(const manifest::Manifest& m, std::string* error) const;
   // The operator behind the MCP call running on this thread ("config" or "token:$name").
   static std::string& current_operator();
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
@@ -198,6 +199,8 @@ class Host {
                       db::Session* session, std::string* error);
   std::string external_call(struct CallContext& ctx, std::string_view service, std::string_view method,
                             std::string_view request);
+  std::string internal_call(struct CallContext& ctx, const manifest::ExternalService& svc,
+                            const manifest::ExternalMethod& m, const boost::json::value& request);
   void egress_log(const std::string& tenant, const std::string& box, const std::string& service,
                   const std::string& method, const std::string& verb, const std::string& url, int status,
                   const std::string& error, int64_t us, size_t bytes_out, size_t bytes_in,

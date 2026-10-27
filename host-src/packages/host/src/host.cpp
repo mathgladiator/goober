@@ -138,7 +138,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   databases_ = std::make_unique<db::Databases>(config->storage);
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
-  boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
+  boxes_->set_manifest_check(
+      [this](const manifest::Manifest& m, std::string* error) { return check_data(m, error) && check_calls(m, error); });
   timers_ = std::make_unique<TimerState>();
   keys_ = std::make_unique<KeyStore>(config->storage);
   smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); },
@@ -598,6 +599,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     net.domain = doc.contains("domain") ? std::string(doc.at("domain").as_string()) : "";
     net.request_id = request_id;
     net.user = user_json(who);
+    net.who = who;
+    net.route = ref.route->name;
     input.call = [this, &net](std::string_view service, std::string_view method, std::string_view request) {
       return external_call(net, service, method, request);
     };
@@ -605,6 +608,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(options.timeout_ms ? options.timeout_ms : m.behavior.timeout_ms),
                                    cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
+  net.deadline_us = base::monotonic_us() + limits.timeout_ms * 1000;
   auto result = engine_->call(*ref.box->compiled, ref.route->export_name(), input, limits);
 
   // Logs are side effects, written after the call, never interleaved.

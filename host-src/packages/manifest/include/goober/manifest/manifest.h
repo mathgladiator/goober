@@ -51,6 +51,8 @@ struct HttpRoute {
   std::string at_field;
   std::string missed;  // "once" (a catch-up fire after downtime) or "skip"
   std::optional<int64_t> timeout_ms;
+  // An internal route (039) is reachable only from the boxes it names.
+  std::vector<std::string> callers;
   std::string export_name() const { return "goober_route_" + name; }
 };
 
@@ -120,6 +122,7 @@ struct ExternalMethod {
 
 struct ExternalService {
   std::string name;
+  std::string box;  // another box on this host: methods name its internal routes (039)
   std::string base;         // https://api.example.com[/prefix]
   std::string credentials;  // keys/system/$name or keys/tenant/{!tenant}/$name, or ""
   std::string auth_header = "authorization";
@@ -143,6 +146,7 @@ struct Manifest {
   std::vector<HttpRoute> routes;
   std::vector<HttpRoute> tools;   // routes.mcp.$name.tool, with verb "tool"
   std::vector<HttpRoute> timers;  // routes.timer.$key, with verb "timer"
+  std::vector<HttpRoute> internal;  // routes.internal.$path.$verb, reachable only from callers
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

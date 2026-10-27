@@ -105,6 +105,8 @@ Read these before doing design work:
     per row in each row's zone or once at an at-field, catch-up, and the desk's 6am briefing.
   - `design/machine/015.Network.md`: `external` services through `goober_call`, the outbox
     committed with the request, delivery with retries and idempotency keys, and the key store.
+  - `design/machine/016.Internal.md`: internal routes with callers, synchronous box-to-box calls
+    as the same person, both sides checked at upload, no cycles.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

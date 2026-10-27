@@ -63,6 +63,7 @@ std::vector<std::string> exports_of(const manifest::Manifest& m) {
   for (const auto& r : m.routes) out.push_back(r.export_name());
   for (const auto& t : m.tools) out.push_back(t.export_name());
   for (const auto& t : m.timers) out.push_back(t.export_name());
+  for (const auto& r : m.internal) out.push_back(r.export_name());
   return out;
 }
 
@@ -149,9 +150,10 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   for (const auto& r : candidate->manifest.routes) mine.insert(r.name);
   for (const auto& t : candidate->manifest.tools) mine.insert(t.name);
   for (const auto& t : candidate->manifest.timers) mine.insert(t.name);
+  for (const auto& r : candidate->manifest.internal) mine.insert(r.name);
   for (const auto& [other, box] : current->boxes) {
     if (other == name) continue;
-    for (const auto* list : {&box->manifest.routes, &box->manifest.tools, &box->manifest.timers}) {
+    for (const auto* list : {&box->manifest.routes, &box->manifest.tools, &box->manifest.timers, &box->manifest.internal}) {
       for (const auto& r : *list) {
         if (mine.count(r.name)) {
           *error = "route name \"" + r.name + "\" is already used by box " + other;

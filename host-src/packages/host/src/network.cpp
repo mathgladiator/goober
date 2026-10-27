@@ -19,6 +19,8 @@
 #include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "goober/router/path.h"
+#include "goober/types/types.h"
 #include "keys.h"
 
 namespace goober::host {
@@ -231,6 +233,12 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
   return out;
 }
 
+namespace {
+// How deep a chain of internal calls is on this thread; the host caps it (039).
+thread_local int internal_depth = 0;
+constexpr int kMaxInternalDepth = 4;
+}  // namespace
+
 std::string Host::external_call(CallContext& ctx, std::string_view service, std::string_view method,
                                 std::string_view request_text) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
@@ -252,6 +260,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     if (!parsed) return fail("the call isn't JSON: " + err);
     request = std::move(*parsed);
   }
+  if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
   if (!built) return fail(err);
@@ -299,6 +308,131 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   bj::object result{{"status", reply.status}, {"content_type", reply.content_type}, {"body", reply.body}};
   if (reply.content_type.starts_with("application/json")) {
     if (auto v = json::parse(reply.body, &err)) result["json"] = std::move(*v);
+  }
+  return json::dump(result);
+}
+
+std::string Host::internal_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                                const bj::value& request) {
+  auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
+  auto active = boxes_->active();
+  auto it = active->boxes.find(svc.box);
+  if (it == active->boxes.end()) return fail("box " + svc.box + " isn't running");
+  const manifest::HttpRoute* route = nullptr;
+  for (const auto& r : it->second->manifest.internal) {
+    if (r.name == m.name) route = &r;
+  }
+  // Both sides agree at upload; checked again here, since a box can be promoted back.
+  if (!route || std::find(route->callers.begin(), route->callers.end(), ctx.manifest->box) == route->callers.end()) {
+    return fail(svc.box + "." + m.name + " doesn't take calls from " + ctx.manifest->box);
+  }
+  if (internal_depth >= kMaxInternalDepth) return fail("internal calls nest deeper than " + std::to_string(kMaxInternalDepth));
+  bj::object path_in, query_in;
+  bj::value body = nullptr;
+  if (request.is_object()) {
+    if (auto* p = request.as_object().if_contains("path"); p && p->is_object()) path_in = p->as_object();
+    if (auto* q = request.as_object().if_contains("query"); q && q->is_object()) query_in = q->as_object();
+    if (auto* b = request.as_object().if_contains("body")) body = *b;
+  }
+  // The path, from the route's own pattern: typed parameters, checked like a URL's.
+  std::map<std::string, std::string> params;
+  std::string path;
+  for (const auto& seg : route->pattern.segments) {
+    if (seg.literal) {
+      path += "/" + seg.text;
+      continue;
+    }
+    auto* v = path_in.if_contains(seg.text);
+    if (!v) return fail("the call needs path." + seg.text);
+    std::string text = text_of(*v);
+    if (!router::matches_type(text, seg.type) || text.empty() || text.size() > 1024) {
+      return fail("path." + seg.text + " isn't a valid value for the route");
+    }
+    params[seg.text] = text;
+    path += "/" + base::percent_encode(text);
+  }
+  if (path.empty()) path = "/";
+  // Authority never grows: the callee checks the person the call is made for (039).
+  std::optional<manifest::Caller> caller;
+  if (ctx.who) caller = manifest::Caller{std::to_string(ctx.who->user.user_id), ctx.who->host, ctx.who->roles};
+  if (!route->is_public || !route->requirements.empty()) {
+    if (manifest::check_access(*route, caller ? &*caller : nullptr, params, ctx.tenant) != manifest::Access::kAllowed) {
+      return json::dump(bj::object{{"status", 403}, {"error", "the person this call is for may not use " + m.name}});
+    }
+  }
+  const auto& callee = *it->second;
+  std::string body_text;
+  if (std::string type = types::json_type_name(route->body); !type.empty()) {
+    std::string err;
+    auto checked = callee.types ? callee.types->check(type, body, &err) : std::nullopt;
+    if (!checked) return json::dump(bj::object{{"status", 400}, {"error", type + " " + err}});
+    body_text = json::dump(*checked);
+  } else if (!body.is_null()) {
+    body_text = text_of(body);
+  }
+  bj::object query;
+  if (route->query_declared) {
+    for (const auto& [name, schema] : route->query) {
+      auto* v = query_in.if_contains(name);
+      if (!v) {
+        if (schema->default_value) query[name] = *schema->default_value;
+        continue;
+      }
+      std::string err;
+      auto checked = types::check_text(*schema, text_of(*v), &err);
+      if (!checked) return json::dump(bj::object{{"status", 400}, {"error", "query." + name + " " + err}});
+      query[name] = std::move(*checked);
+    }
+  } else {
+    for (const auto& kv : query_in) query[kv.key()] = text_of(kv.value());
+  }
+  uint8_t rnd[8];
+  base::os_random_fill(rnd);
+  std::string request_id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
+  bj::object params_json;
+  for (const auto& [k, v] : params) params_json[k] = v;
+  bj::object doc{{"request_id", request_id},
+                 {"method", route->verb},
+                 {"path", path},
+                 {"params", params_json},
+                 {"query", query},
+                 {"headers", bj::object{}},
+                 {"body", body_text},
+                 {"domain", ctx.domain},
+                 {"tenant", ctx.tenant},
+                 {"user", ctx.user},
+                 // !caller_box and !caller_route: who made the call (039).
+                 {"caller", bj::object{{"box", ctx.manifest->box}, {"route", ctx.route}, {"request_id", ctx.request_id}}}};
+  // Deadlines only shrink: the callee gets what's left of the caller's time, at most its own.
+  CallOptions options;
+  int64_t left_ms = (ctx.deadline_us - base::monotonic_us()) / 1000;
+  if (left_ms < 10) return fail("no time left for the call");
+  auto cfg = config_.get();
+  options.timeout_ms = std::min(left_ms, cfg->timeout_ms.resolve(callee.manifest.behavior.timeout_ms));
+  ++internal_depth;
+  int64_t started = base::monotonic_us();
+  BoxCall call;
+  try {
+    call = call_box(boxes::RouteRef{it->second, route}, doc, ctx.tenant, request_id, ctx.who, options);
+  } catch (...) {
+    --internal_depth;
+    throw;
+  }
+  --internal_depth;
+  const auto& r = call.result;
+  int status = r.outcome == runtime::wasm::CallResult::Outcome::kOk ? r.status : 500;
+  call.extra["internal"] = ctx.manifest->box + " -> " + svc.box;
+  call.extra["caller_request_id"] = ctx.request_id;
+  server::http::Request pseudo;
+  pseudo.method = route->verb;
+  pseudo.path = "internal:" + svc.box + path;
+  pseudo.headers.emplace_back("goober-request-id", request_id);
+  access_log(pseudo, status, started, ctx.domain, json::dump(call.extra));
+  if (status >= 500) return json::dump(bj::object{{"status", status}, {"error", svc.box + "." + m.name + " failed"}});
+  bj::object result{{"status", status}, {"content_type", r.content_type}, {"body", r.body}};
+  if (r.content_type.starts_with("application/json")) {
+    std::string err;
+    if (auto v = json::parse(r.body, &err)) result["json"] = std::move(*v);
   }
   return json::dump(result);
 }

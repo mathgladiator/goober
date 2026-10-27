@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "goober/json/json.h"
+#include "goober/host/host.h"
 #include "goober/manifest/manifest.h"
 
 namespace goober::host {
@@ -27,7 +28,10 @@ struct OutboxElement {
 struct CallContext {
   const manifest::Manifest* manifest = nullptr;
   std::string tenant, domain, request_id;
+  std::string route;        // the calling route's name, for !caller_route
   boost::json::value user;  // the request's user, or null
+  std::optional<struct SignedIn> who;
+  int64_t deadline_us = 0;  // monotonic: no internal call outlives the request (039)
   std::map<std::string, int64_t> calls;  // per service.method, against its budget
   std::vector<OutboxElement> pending;
 };
