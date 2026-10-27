@@ -182,7 +182,8 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       full fix is a trust-boundary decision for the human.
 - [x] Fuzz the parsers and property-test the SQL authorizer (`just fuzz`, under ASan and
       UBSan): every parser clean; two authorizer holes found and fixed (013 F1, F2).
-- [ ] Fuzz the multipart parser and the HTTP server.
+- [x] Fuzz the multipart parser and the HTTP server (raw mutated requests over sockets; the
+      server stays up and answers afterwards). Multipart boundaries are capped at 70 characters.
 - [x] A second review (2026-10-27): correctness of the network, outbox, scheduler, keys, mail,
       and shutdown code, and product readiness; twelve correctness findings and three deploy
       blockers fixed (013 R1 to R12, P1 to P3), among them a `..` path value walking out of

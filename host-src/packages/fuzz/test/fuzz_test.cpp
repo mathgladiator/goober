@@ -4,6 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio.hpp>
+#include <boost/beast.hpp>
+
 #include "fuzz.h"
 #include "goober/identity/identity.h"
 #include "goober/json/json.h"
@@ -13,6 +16,8 @@
 #include "goober/render/markdown.h"
 #include "goober/render/mustache.h"
 #include "goober/router/path.h"
+#include "goober/server_http/multipart.h"
+#include "goober/server_http/server.h"
 #include "goober/timers/cron.h"
 #include "goober/types/types.h"
 #include "goober/web/html.h"
@@ -193,4 +198,66 @@ TEST(Fuzz, HtmlViewsSelectorsAndRobots) {
               (void)web::parse_url(in);
               (void)web::resolve(base, in);
             });
+}
+
+// The attachment upload form's parser (design/machine/007.Content.md §7).
+TEST(Fuzz, Multipart) {
+  const std::string ct = "multipart/form-data; boundary=XyZ";
+  fuzz::run("multipart",
+            {"--XyZ\r\nContent-Disposition: form-data; name=\"alt\"\r\n\r\na cat\r\n--XyZ\r\nContent-Disposition: "
+             "form-data; name=\"file\"; filename=\"cat.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n--XyZ--\r\n"},
+            {"--XyZ", "\r\n", "\r\n\r\n", "Content-Disposition: form-data; ", "name=", "filename=", "\"", ";", "--"},
+            fuzz::iterations(3000), [&](const std::string& in) {
+              std::string err;
+              (void)server::http::parse_multipart(in, ct, &err);
+              (void)server::http::parse_multipart(in, in.substr(0, 200), &err);
+            });
+}
+
+// The HTTP server itself, over real sockets: malformed requests never take it down, and it
+// still answers a good request afterwards.
+TEST(Fuzz, HttpServer) {
+  namespace asio = boost::asio;
+  namespace beast = boost::beast;
+  server::http::ServerOptions o;
+  o.port = 0;
+  o.threads = 2;
+  o.idle_timeout_seconds = 2;
+  o.body_max_bytes = 4096;
+  server::http::Server server(o, [](server::http::Request req, server::http::Responder respond) {
+    server::http::Response res;
+    res.headers.emplace_back("content-type", "text/plain");
+    res.body = req.method + " " + req.path + " " + std::to_string(req.body.size());
+    respond(std::move(res));
+  });
+  server.start();
+  auto send = [&](const std::string& raw) -> std::string {
+    asio::io_context io;
+    beast::tcp_stream stream(io);
+    beast::error_code ec;
+    stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), server.port()), ec);
+    if (ec) return "connect failed";
+    stream.expires_after(std::chrono::seconds(3));
+    asio::write(stream.socket(), asio::buffer(raw), ec);
+    stream.socket().shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+    std::string out;
+    char buf[4096];
+    while (true) {
+      size_t n = stream.socket().read_some(asio::buffer(buf), ec);
+      if (ec || n == 0) break;
+      out.append(buf, n);
+      if (out.size() > (1 << 20)) break;
+    }
+    return out;
+  };
+  fuzz::run("http-server",
+            {"GET /a?b=c HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+             "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello",
+             "POST /c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
+            {"\r\n", ": ", "Content-Length: ", "Transfer-Encoding: chunked\r\n", "Host: ", "GET ", "POST ", "HTTP/1.1",
+             "HTTP/1.0", "%00", "%", "?", "/", "\0", "ffffffff\r\n", "99999999999999999999", " ", "\t",
+             "Expect: 100-continue\r\n", "Connection: keep-alive\r\n"},
+            fuzz::iterations(300), [&](const std::string& in) { (void)send(in); });
+  auto alive = send("GET /still HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+  EXPECT_NE(alive.find("get /still 0"), std::string::npos) << alive;
 }
