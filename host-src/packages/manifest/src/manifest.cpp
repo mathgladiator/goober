@@ -323,7 +323,9 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           const auto& def = verb.value().get_object();
           for (const auto& f : def) {
             std::string key(f.key());
-            if (key == "name" || key == "public" || key == "requirements" || key == "template") continue;
+            if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents") {
+              continue;
+            }
             if (kLaterRoute.count(key)) {
               m.warnings.push_back(where + "." + key + " is accepted but not implemented in v1");
               continue;
@@ -344,6 +346,8 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             if (!base::is_valid_name(*t)) return *error = where + ": template \"" + *t + "\" must match [a-z][a-z0-9_]*", std::nullopt;
             route.template_name = *t;
           }
+          if (!err.empty()) return *error = where + ": " + err, std::nullopt;
+          route.agents = goober::json::get_bool(def, "agents", &err).value_or(false);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           auto is_public = goober::json::get_bool(def, "public", &err);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;

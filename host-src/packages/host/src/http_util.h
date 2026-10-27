@@ -28,4 +28,11 @@ inline bool same_origin(const server::http::Request& req) {
   return base::to_lower(origin.substr(scheme + 3)) == base::to_lower(req.header("host"));
 }
 
+// For the consent and device screens, where a forged POST would hand out tokens: the
+// browser must say where the form came from, and it must be this host.
+inline bool same_origin_strict(const server::http::Request& req) {
+  if (!req.header("origin").empty()) return same_origin(req);
+  return req.header("sec-fetch-site") == "same-origin";
+}
+
 }  // namespace goober::host

@@ -36,6 +36,14 @@ struct IdentityConfig {
   std::string mailer = "dev";
   // Host identities: an email and the host roles it holds, like "host:owner".
   std::map<std::string, std::vector<std::string>> operators;
+  // OAuth clients registered in every tenant realm, by client_id, like the dumb
+  // terminal (999). The identity service checks the redirect URIs when it registers them.
+  struct Client {
+    std::string name;
+    std::vector<std::string> redirect_uris;
+    bool person = false;  // "acts-as": "person" or "agent"
+  };
+  std::map<std::string, Client> clients;
 };
 
 // The whole host configuration, from one JSON file (see design/machine/005.FirstVersion.md §6).

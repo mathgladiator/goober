@@ -46,6 +46,9 @@ label{display:block;margin:16px 0 4px;font-weight:600}
 input[type=email],input[type=text]{width:100%;padding:10px 12px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
 .check{font-weight:400;display:flex;gap:8px;align-items:center}
 button{margin-top:16px;width:100%;padding:10px;font:inherit;font-weight:600;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+button.secondary{margin-top:8px;background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.small{width:auto;margin:0;padding:4px 10px;font-size:.85rem}
+li form{display:inline}
 .error{color:#c0392b;font-weight:600}.local{border-left:3px solid var(--accent);padding-left:10px}
 code{font-size:.9em}ul{padding-left:20px}a{color:var(--accent)}
 )css";
@@ -57,6 +60,18 @@ std::string Host::session_cookie_name() const {
 }
 
 std::optional<SignedIn> Host::signed_in(const Request& req, const std::string& tenant) {
+  // A bearer token (OAuth, 009) speaks for itself: a bad one is nobody, never the cookie.
+  std::string auth = req.header("authorization");
+  if (auth.size() > 7 && base::to_lower(auth.substr(0, 7)) == "bearer ") {
+    auto b = identity_->bearer(tenant, auth.substr(7), base::now_unix_ms());
+    if (!b) return std::nullopt;
+    auto roles = b->user.roles;
+    return SignedIn{std::move(b->user), false, std::move(roles), b->agent, b->client_id};
+  }
+  return browser_session(req, tenant);
+}
+
+std::optional<SignedIn> Host::browser_session(const Request& req, const std::string& tenant) {
   std::string value = read_cookie(req, session_cookie_name());
   if (value.size() < 3 || value[1] != '.') return std::nullopt;
   std::string token = value.substr(2);
@@ -68,15 +83,37 @@ std::optional<SignedIn> Host::signed_in(const Request& req, const std::string& t
     auto it = cfg->identity.operators.find(user->email);
     // An address removed from identity.operators holds no host roles, so it is signed out.
     if (it == cfg->identity.operators.end() || it->second.empty()) return std::nullopt;
-    return SignedIn{std::move(*user), true, it->second};
+    return SignedIn{std::move(*user), true, it->second, false, ""};
   }
   if (value[0] == 't') {
     auto user = identity_->session(tenant, token, now);
     if (!user) return std::nullopt;
     auto roles = user->roles;
-    return SignedIn{std::move(*user), false, std::move(roles)};
+    return SignedIn{std::move(*user), false, std::move(roles), false, ""};
   }
   return std::nullopt;
+}
+
+Response Host::identity_page(const std::string& tenant, int status, const std::string& title,
+                             const std::string& body, const std::string& form_action_extra) const {
+  Response res;
+  res.status = status;
+  std::string css_link = content_->get(tenant, "sign-in.css") ? "<link rel=\"stylesheet\" href=\"/sign-in.css\">" : "";
+  res.body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" +
+             html_escape(title) + "</title><style>" + kStyle + "</style>" + css_link +
+             "</head><body><main><div class=\"card\">" + body + "</div></main></body></html>\n";
+  res.headers.emplace_back("content-type", "text/html; charset=utf-8");
+  res.headers.emplace_back("cache-control", "no-store");
+  res.headers.emplace_back("x-frame-options", "DENY");
+  // Not no-referrer: under it browsers post forms with "Origin: null", which same_origin refuses.
+  res.headers.emplace_back("referrer-policy", "same-origin");
+  res.headers.emplace_back("x-content-type-options", "nosniff");
+  res.headers.emplace_back("content-security-policy",
+                           "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'" +
+                               (form_action_extra.empty() ? "" : " " + form_action_extra) +
+                               "; frame-ancestors 'none'; base-uri 'none'");
+  return res;
 }
 
 void Host::handle_identity(const Request& req, const Finish& finish, const std::string& path,
@@ -87,23 +124,7 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
   auto form = router::parse_query(req.body);
 
   auto page = [&](int status, const std::string& title, const std::string& body) {
-    Response res;
-    res.status = status;
-    std::string css_link = content_->get(tenant, "sign-in.css") ? "<link rel=\"stylesheet\" href=\"/sign-in.css\">" : "";
-    res.body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-               "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" +
-               html_escape(title) + "</title><style>" + kStyle + "</style>" + css_link +
-               "</head><body><main><div class=\"card\">" + body + "</div></main></body></html>\n";
-    res.headers.emplace_back("content-type", "text/html; charset=utf-8");
-    res.headers.emplace_back("cache-control", "no-store");
-    res.headers.emplace_back("x-frame-options", "DENY");
-    // Not no-referrer: under it browsers post forms with "Origin: null", which same_origin refuses.
-    res.headers.emplace_back("referrer-policy", "same-origin");
-    res.headers.emplace_back("x-content-type-options", "nosniff");
-    res.headers.emplace_back("content-security-policy",
-                             "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; "
-                             "frame-ancestors 'none'; base-uri 'none'");
-    return res;
+    return identity_page(tenant, status, title, body);
   };
   auto redirect = [&](const std::string& to) {
     Response res;
@@ -221,8 +242,13 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     res.headers.emplace_back("set-cookie", cookie("", 0));
     return finish(std::move(res), R"({"identity":"sign_out"})");
   }
+  if (path == "/identity/grants/revoke" && is_post) {
+    auto who = browser_session(req, tenant);
+    if (who && !who->host) identity_->revoke_grant(tenant, who->user.user_id, get(form, "grant"), now);
+    return finish(redirect("/identity/account"), R"({"identity":"grant_revoked"})");
+  }
   if ((path == "/identity/me" || path == "/identity/account") && is_get) {
-    auto who = signed_in(req, tenant);
+    auto who = path == "/identity/me" ? signed_in(req, tenant) : browser_session(req, tenant);
     if (path == "/identity/me") {
       Response res;
       res.headers.emplace_back("content-type", "application/json");
@@ -239,7 +265,9 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
                                          {"realm", who->user.realm},
                                          {"host", who->host},
                                          {"roles", std::move(roles)},
-                                         {"domain", domain}});
+                                         {"domain", domain},
+                                         {"agent", who->agent},
+                                         {"client_id", who->client_id}});
       }
       return finish(std::move(res), "");
     }
@@ -247,13 +275,30 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     std::string roles;
     for (const auto& r : who->roles) roles += "<li><code>" + html_escape(r) + "</code></li>";
     if (roles.empty()) roles = "<li class=\"muted\">none yet</li>";
+    // Apps and agents signed in as this person (013 § Sign-in screen requirements: every
+    // session is visible, with a way to revoke it).
+    std::string apps;
+    if (!who->host) {
+      for (const auto& g : identity_->grants(tenant, who->user.user_id, now)) {
+        const auto& o = g.as_object();
+        bool person = o.at("acts_as") == "person";
+        apps += "<li><strong>" + html_escape(std::string(o.at("name").as_string())) + "</strong> <span class=\"muted\">" +
+                (person ? "acts as you" : "an agent acting for you") +
+                (o.at("source") == "dynamic" ? ", unverified" : "") +
+                "</span> <form method=\"post\" action=\"/identity/grants/revoke\"><input type=\"hidden\" "
+                "name=\"grant\" value=\"" + html_escape(std::string(o.at("grant").as_string())) +
+                "\"><button class=\"small secondary\">Remove</button></form></li>";
+      }
+      apps = "<p><strong>Apps and agents</strong></p><ul>" +
+             (apps.empty() ? std::string("<li class=\"muted\">none signed in</li>") : apps) + "</ul>";
+    }
     return finish(page(200, "Your account",
                        "<h1>" + html_escape(who->user.email) + "</h1><p class=\"muted\">" +
                            (who->host ? "Host operator, acting on " : "Signed in to ") + "<strong>" +
                            html_escape(domain) + "</strong> &middot; user " + std::to_string(who->user.user_id) +
                            " in realm <code>" + html_escape(who->user.realm) + "</code></p><p><strong>Roles</strong></p><ul>" +
-                           roles +
-                           "</ul><form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>"
+                           roles + "</ul>" + apps +
+                           "<form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>"
                            "<p class=\"muted\"><a href=\"/\">Back to the site</a></p>"),
                   "");
   }

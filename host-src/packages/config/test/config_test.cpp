@@ -79,6 +79,20 @@ TEST(Config, ReadsIdentityOwnersAndPublicUrl) {
   EXPECT_FALSE(parse_config(R"({"public-url":"goober.example.com"})", "/", &err));
 }
 
+TEST(Config, ReadsOAuthClients) {
+  std::string err;
+  auto cfg = parse_config(R"({"identity": {"clients": {"dumb-terminal": {"name": "dumb terminal",
+      "redirect-uris": ["com.mathgladiator.dumb:/oauth/callback", "http://127.0.0.1/callback"], "acts-as": "person"}}}})",
+                          "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  const auto& c = cfg->identity.clients.at("dumb-terminal");
+  EXPECT_TRUE(c.person);
+  EXPECT_EQ(c.redirect_uris.size(), 2u);
+  EXPECT_FALSE(parse_config(R"({"identity":{"clients":{"x":{"name":"x","redirect-uris":[],"acts-as":"person"}}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"clients":{"x":{"name":"x","redirect-uris":["a.b:/c"],"acts-as":"robot"}}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"clients":{"x":{"name":"x","redirect-uris":["a.b:/c"],"acts-as":"agent","secret":"s"}}}})", "/", &err));
+}
+
 TEST(Config, LocalModeAliasesDomainsUnderLocalhost) {
   std::string err;
   auto cfg = parse_config(R"({

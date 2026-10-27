@@ -173,7 +173,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     cfg->public_url = *v;
   }
   if (const auto* id = get_object(root, "identity", &err)) {
-    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "operators"}, "identity", &err)) {
+    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "operators", "clients"}, "identity", &err)) {
       return *error = err, nullptr;
     }
     if (auto v = get_bool(*id, "cookie-secure", &err)) cfg->identity.cookie_secure = *v;
@@ -197,6 +197,32 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
           }
           roles.emplace_back(role);
         }
+      }
+    }
+    if (const auto* clients = get_object(*id, "clients", &err)) {
+      for (const auto& kv : *clients) {
+        std::string where = "identity.clients." + std::string(kv.key());
+        if (!kv.value().is_object()) return *error = where + " must be an object", nullptr;
+        const auto& c = kv.value().get_object();
+        if (!check_keys(c, {"name", "redirect-uris", "acts-as"}, where, &err)) return *error = err, nullptr;
+        IdentityConfig::Client client;
+        auto name = get_string(c, "name", &err);
+        if (!name || name->empty()) return *error = where + ".name is required", nullptr;
+        client.name = *name;
+        const auto* uris = c.if_contains("redirect-uris");
+        if (!uris || !uris->is_array() || uris->get_array().empty()) {
+          return *error = where + ".redirect-uris must be a list of URIs", nullptr;
+        }
+        for (const auto& u : uris->get_array()) {
+          if (!u.is_string()) return *error = where + ".redirect-uris must be a list of URIs", nullptr;
+          client.redirect_uris.emplace_back(u.get_string());
+        }
+        auto acts = get_string(c, "acts-as", &err);
+        if (!acts || (*acts != "person" && *acts != "agent")) {
+          return *error = where + ".acts-as must be \"person\" or \"agent\"", nullptr;
+        }
+        client.person = *acts == "person";
+        cfg->identity.clients[std::string(kv.key())] = std::move(client);
       }
     }
   }

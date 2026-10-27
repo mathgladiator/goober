@@ -211,7 +211,7 @@ TEST_F(OAuthTest, ClientsAreChecked) {
   std::string why;
   EXPECT_FALSE(id->put_client("playground", Client{"bad id!", "x", {kAppRedirect}, false, "", 0}, kNow, &why));
   EXPECT_FALSE(id->put_client("playground", Client{"goober-sign-in", "x", {kAppRedirect}, false, "", 0}, kNow, &why));
-  EXPECT_FALSE(id->put_client("playground", Client{"x", "x", {}, false, "", 0}, kNow, &why));
+  EXPECT_FALSE(id->put_client("playground", Client{"x", "x", {}, true, "", 0}, kNow, &why));
   EXPECT_FALSE(id->put_client("playground", Client{"x", "x", {"http://evil.test/cb"}, false, "", 0}, kNow, &why));
   EXPECT_FALSE(id->register_client("playground", "a\nb", {kAppRedirect}, kNow, &why));
   auto list = id->clients("playground");

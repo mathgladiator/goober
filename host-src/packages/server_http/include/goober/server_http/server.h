@@ -28,6 +28,9 @@ struct Response {
   std::vector<std::pair<std::string, std::string>> headers;
   std::string body;
   bool head_only = false;  // send the headers and length, but no body
+  // A host-generated error page, which the host may re-render (as JSON, for an API
+  // caller) before it is sent. The server ignores it.
+  bool host_error = false;
 };
 
 // Called exactly once per request, from any thread.

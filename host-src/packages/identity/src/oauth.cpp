@@ -211,7 +211,9 @@ bool Identity::put_client(std::string_view realm_name, const Client& c, int64_t 
   if (!is_client_id(c.client_id)) return *why = "a client_id is 1 to 64 of [A-Za-z0-9._-]", false;
   if (c.client_id == "goober-sign-in") return *why = "goober-sign-in belongs to the host", false;
   if (!is_client_name(c.name)) return *why = "a client name is 1 to 80 printable characters", false;
-  if (c.redirect_uris.empty() || c.redirect_uris.size() > 10) return *why = "a client needs 1 to 10 redirect URIs", false;
+  // An agent may have none, and use only the device flow; a person client always signs in through a redirect.
+  if (c.redirect_uris.size() > 10) return *why = "a client has at most 10 redirect URIs", false;
+  if (c.person && c.redirect_uris.empty()) return *why = "a person client needs a redirect URI", false;
   for (const auto& u : c.redirect_uris) {
     if (!is_valid_redirect_uri(u)) return *why = "not an allowed redirect URI: " + u, false;
   }

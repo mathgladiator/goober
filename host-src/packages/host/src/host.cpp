@@ -169,6 +169,7 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
 Response Host::error_page(const std::string& tenant, int status, const std::string& request_id) const {
   Response res;
   res.status = status;
+  res.host_error = true;
   std::string file = "error-message/" + std::to_string(status) + ".html";
   std::optional<content::File> page;
   if (!tenant.empty()) page = content_->get(tenant, file);
@@ -214,6 +215,18 @@ void Host::handle(Request req, Responder respond) {
   // Every response is logged and stamped with its request id.
   Finish finish = [this, req, respond, started, domain, request_id](Response res, std::string extra) {
     res.headers.emplace_back("goober-request-id", request_id);
+    bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
+    if (res.status == 401) {
+      // RFC 6750 §3: say how to authenticate, and whether the token sent was the problem.
+      res.headers.emplace_back("www-authenticate", bearer ? "Bearer error=\"invalid_token\"" : "Bearer");
+    }
+    // An API caller gets the host's errors as JSON rather than an HTML page.
+    std::string accept = req.header("accept");
+    if (res.host_error && (bearer || (accept.find("application/json") != std::string::npos && !prefers_html(accept)))) {
+      std::erase_if(res.headers, [](const auto& h) { return h.first == "content-type"; });
+      res.headers.emplace_back("content-type", "application/json");
+      res.body = json::dump(bj::object{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}});
+    }
     access_log(req, res.status, started, domain, extra);
     respond(std::move(res));
   };
@@ -226,6 +239,17 @@ void Host::handle(Request req, Responder respond) {
   if (!resolved) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");
   auto tenant = std::optional<std::string>(resolved->second.tenant);
   if (!path) return finish(error_page(*tenant, 400, request_id), R"({"why":"bad path"})");
+  if (path->path == "/oauth" || path->path.starts_with("/oauth/") || path->path.starts_with("/.well-known/")) {
+    pool_->post([this, req, finish, p = path->path, domain, tenant = *tenant] {
+      try {
+        handle_oauth(req, finish, p, domain, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: oauth: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"oauth failed"})");
+      }
+    });
+    return;
+  }
   if (path->path.starts_with("/identity/")) {
     pool_->post([this, req, finish, p = path->path, domain, tenant = *tenant] {
       try {
@@ -275,16 +299,25 @@ void Host::handle(Request req, Responder respond) {
   });
 }
 
-std::optional<SignedIn> Host::caller(const Request& req, const std::string& tenant) { return signed_in(req, tenant); }
+std::optional<SignedIn> Host::caller(const Request& req, const std::string& tenant) {
+  auto who = signed_in(req, tenant);
+  // Pages and templates aren't routes an agent opted into (050): an agent reads them as nobody.
+  if (who && who->agent) return std::nullopt;
+  return who;
+}
 
 bj::value Host::user_json(const std::optional<SignedIn>& who) {
   if (!who) return nullptr;
   bj::array roles;
   for (const auto& r : who->roles) roles.push_back(bj::value(r));
-  return bj::object{{"user_id", std::to_string(who->user.user_id)},
-                    {"email", who->user.email},
-                    {"roles", std::move(roles)},
-                    {"host", who->host}};
+  bj::object u{{"user_id", std::to_string(who->user.user_id)},
+               {"email", who->user.email},
+               {"roles", std::move(roles)},
+               {"host", who->host},
+               {"agent", who->agent}};
+  // {!client_id}: set only for an agent, so a box can tell who acts for the person (050).
+  if (who->agent) u["client_id"] = who->client_id;
+  return u;
 }
 
 int Host::authorize(const bj::value& requirements, const std::optional<SignedIn>& who, const std::string& tenant) {
@@ -304,7 +337,9 @@ int Host::authorize(const bj::value& requirements, const std::optional<SignedIn>
 }
 
 Response Host::sign_in_or_401(const Request& req, const std::string& tenant) const {
-  if ((req.method == "get" || req.method == "head") && req.header("accept").find("text/html") != std::string::npos) {
+  bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
+  if (!bearer && (req.method == "get" || req.method == "head") &&
+      req.header("accept").find("text/html") != std::string::npos) {
     Response res;
     res.status = 303;
     std::string back = req.path + (req.query.empty() ? "" : "?" + req.query);
@@ -389,6 +424,10 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       return finish(error_page(tenant, 403, request_id), R"({"why":"requirements not met"})");
     case manifest::Access::kBadValue:
       return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
+  }
+  // Agent tokens reach only routes that opted in (050.AgentsMCP.md § Who is calling).
+  if (who && who->agent && !ref.route->agents) {
+    return finish(error_page(tenant, 403, request_id), R"({"why":"agent tokens can't call this route"})");
   }
   // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
   if (req.method != "get" && req.method != "head" && !same_origin(req)) {

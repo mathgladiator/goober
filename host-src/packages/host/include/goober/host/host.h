@@ -30,6 +30,9 @@ struct SignedIn {
   identity::User user;
   bool host = false;
   std::vector<std::string> roles;
+  // A bearer token from an agent client (050): only routes with "agents": true accept it.
+  bool agent = false;
+  std::string client_id;  // the OAuth client behind a bearer token, or ""
 };
 
 // The whole host: config, storage, the WAL, content, boxes, the engine, the
@@ -69,7 +72,21 @@ class Host {
   // The host-owned /identity/ endpoints (identity_routes.cpp).
   void handle_identity(const server::http::Request& req, const Finish& finish, const std::string& path,
                        const std::string& domain, const std::string& tenant);
+  // A bearer access token, or else the browser's session cookie.
   std::optional<SignedIn> signed_in(const server::http::Request& req, const std::string& tenant);
+  // The session cookie only: what the sign-in, consent, and device screens trust.
+  std::optional<SignedIn> browser_session(const server::http::Request& req, const std::string& tenant);
+  // The page shell of every identity and OAuth screen: no framing, no scripts, forms to
+  // this site (plus `form_action_extra`, for the consent screen's redirect).
+  server::http::Response identity_page(const std::string& tenant, int status, const std::string& title,
+                                       const std::string& body, const std::string& form_action_extra = "") const;
+  // The host-owned OAuth endpoints: /.well-known/oauth-authorization-server and /oauth/ (oauth_routes.cpp).
+  void handle_oauth(const server::http::Request& req, const Finish& finish, const std::string& path,
+                    const std::string& domain, const std::string& tenant);
+  // A client from the realm, or from identity.clients in the config (registered on first use).
+  std::optional<identity::Client> oauth_client(const std::string& tenant, const std::string& client_id);
+  // This request's origin, like https://example.com or http://localhost:8080.
+  std::string origin_of(const server::http::Request& req) const;
   std::string session_cookie_name() const;
   void send_mail(const identity::Mail& mail);
   void serve_box(server::http::Request req, Finish finish, boxes::RouteRef ref,

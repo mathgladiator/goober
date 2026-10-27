@@ -150,6 +150,16 @@ TEST(Manifest, TemplatesAreCheckedAndRoutesNameThem) {
   EXPECT_NE(err.find("reserved"), std::string::npos);
 }
 
+TEST(Manifest, AgentsOptIn) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"h","domains":["*"],"routes":{"http":{
+    "/a":{"get":{"name":"a","requirements":[],"agents":true}},"/b":{"get":{"name":"b","requirements":[]}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  EXPECT_TRUE(m->routes[0].agents);
+  EXPECT_FALSE(m->routes[1].agents);
+  EXPECT_FALSE(parse_manifest(R"({"box":"h","domains":["*"],"routes":{"http":{"/a":{"get":{"name":"a","requirements":[],"agents":"yes"}}}}})", &err));
+}
+
 TEST(Manifest, DataStrategies) {
   std::string err;
   auto m = parse_manifest(R"({"box":"g","domains":["*"],"data":{"sqlite3":{

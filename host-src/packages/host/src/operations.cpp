@@ -389,6 +389,72 @@ void Host::register_tools() {
                     int n = identity_->revoke_sessions(*tenant, *email, "operator", base::now_unix_ms());
                     return ToolResult::ok(bj::object{{"ended", n}});
                   }});
+
+  // OAuth clients (design/machine/009.OAuth.md §2). Clients in identity.clients exist in
+  // every realm; these register a client in one realm.
+  auto client_json = [](const identity::Client& c) {
+    bj::array uris;
+    for (const auto& u : c.redirect_uris) uris.push_back(bj::value(u));
+    return bj::object{{"client_id", c.client_id},
+                      {"name", c.name},
+                      {"redirect_uris", std::move(uris)},
+                      {"acts_as", c.person ? "person" : "agent"},
+                      {"source", c.source}};
+  };
+  mcp_->add_tool({"client_list", "The OAuth clients registered in a tenant's realm: apps that act as the person, and agents.",
+                  object_schema({{"tenant", realm_prop}}, {"tenant"}),
+                  [this, known_tenant, client_json](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+                    bj::array out;
+                    for (const auto& c : identity_->clients(*tenant)) out.push_back(client_json(c));
+                    return ToolResult::ok(out);
+                  }});
+  mcp_->add_tool(
+      {"client_put",
+       "Registers or replaces an OAuth client in a tenant's realm. A person client (acts_as person) is the realm's own "
+       "app and acts as the person, so only register one you trust like your own phone. Agents act for the person "
+       "and reach only routes that allow agents.",
+       object_schema({{"tenant", realm_prop},
+                      {"client_id", string_property("1 to 64 of [A-Za-z0-9._-].")},
+                      {"name", string_property("Shown on the consent screen.")},
+                      {"redirect_uris", bj::value(bj::object{{"type", "array"},
+                                                   {"items", bj::object{{"type", "string"}}},
+                                                   {"description", "https URIs, http://127.0.0.1/... loopback (any "
+                                                                   "port matches), or a private-use scheme like "
+                                                                   "com.example.app:/callback."}})},
+                      {"acts_as", mcp::enum_property("Whether the client acts as the person or as an agent.",
+                                                {"person", "agent"})}},
+                     {"tenant", "client_id", "name", "redirect_uris", "acts_as"}),
+       [this, known_tenant, client_json](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+         identity::Client c;
+         c.client_id = arg(args, "client_id").value_or("");
+         c.name = arg(args, "name").value_or("");
+         c.person = arg(args, "acts_as").value_or("") == "person";
+         c.source = "operator";
+         if (auto* u = args.if_contains("redirect_uris"); u && u->is_array()) {
+           for (const auto& v : u->as_array()) {
+             if (v.is_string()) c.redirect_uris.emplace_back(v.as_string());
+           }
+         }
+         std::string why;
+         if (!identity_->put_client(*tenant, c, base::now_unix_ms(), &why)) return ToolResult::fail(why);
+         return ToolResult::ok(client_json(*identity_->client(*tenant, c.client_id)));
+       }});
+  mcp_->add_tool({"client_remove", "Removes an OAuth client from a tenant's realm, ending every token it holds.",
+                  object_schema({{"tenant", realm_prop}, {"client_id", string_property("The client to remove.")}},
+                                {"tenant", "client_id"}),
+                  [this, known_tenant](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    auto id = arg(args, "client_id");
+                    if (!known_tenant(tenant)) return ToolResult::fail("not a tenant in the host config");
+                    if (!id || !identity_->remove_client(*tenant, *id, base::now_unix_ms())) {
+                      return ToolResult::fail("no such client");
+                    }
+                    return ToolResult::ok(bj::object{{"removed", *id}});
+                  }});
 }
 
 }  // namespace goober::host

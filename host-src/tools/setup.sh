@@ -212,6 +212,10 @@ else
   note "Local mode prints each sign-in code in the terminal running the host."
 fi
 
+note "The dumb mobile terminal (999.Mobile.md) signs in as your own app, acting as you, to"
+note "show alarms, dashboards, and approvals on your phone and desktop."
+confirm TERMINAL "Register the dumb terminal as an app in every realm?" y
+
 # ---------------------------------------------------------------- 6. threads
 
 step "Threads"
@@ -262,7 +266,7 @@ fi
 
 export G_ADDRESS="$ADDRESS" G_PORT="$PORT" G_PLATFORM="$PLATFORM" G_PUBLIC_URL="$PUBLIC_URL"
 export G_DOMAINS="$(printf '%s\n' "${DOMAINS[@]}")" G_OPERATORS="$(printf '%s\n' "${OPERATORS[@]}")"
-export G_TOKEN="$CONFIG_TOKEN" G_COOKIE_SECURE="$COOKIE_SECURE" G_SESSION_DAYS="$SESSION_DAYS"
+export G_TOKEN="$CONFIG_TOKEN" G_COOKIE_SECURE="$COOKIE_SECURE" G_SESSION_DAYS="$SESSION_DAYS" G_TERMINAL="$TERMINAL"
 export G_NET="$NET_THREADS" G_BOX="$BOX_THREADS" G_PIN="$PIN" G_BODY="$BODY_MAX"
 export G_T_DEF="$T_DEF" G_T_MAX="$T_MAX" G_F_DEF="$F_DEF" G_F_MAX="$F_MAX" G_M_DEF="$M_DEF" G_M_MAX="$M_MAX"
 JSON="$(python3 - <<'PY'
@@ -284,6 +288,10 @@ cfg = {
         "session-days": int(e["G_SESSION_DAYS"]),
         "mailer": "dev",
         "operators": {o: ["host:owner"] for o in e["G_OPERATORS"].splitlines()},
+        **({"clients": {"dumb-terminal": {
+            "name": "dumb terminal",
+            "redirect-uris": ["com.mathgladiator.dumb:/oauth/callback", "http://127.0.0.1/callback"],
+            "acts-as": "person"}}} if e["G_TERMINAL"] == "1" else {}),
     },
     "threads": {"network": int(e["G_NET"]), "boxes": int(e["G_BOX"]), "pin-boxes": e["G_PIN"] == "1"},
     "limits": {

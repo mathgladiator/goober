@@ -29,7 +29,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 005 Goals | partial | One binary on a laptop; Caddy in front for production (setup writes a Caddyfile); identity from day one. | Mail as a channel, the bus, timers, versions with approvers, the approval queue, worst-case answers from the manifest. |
 | 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `templates`, `data`. Per-route exports (005 §3 supersedes signals). | `signal`, `response` kinds, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, internal routes, 4xx clamping. |
 | 012 Configs | none | | Box-less config manifests, header priority, rewrites. |
-| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. **OAuth is being built now** (below). | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, new-session email. |
+| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, new-session email, rate limits on the token endpoints. |
 | 015 Domains | none | Domains live in the host config (005 §6). | The registry table, primaries and redirects, verification, TLS ask hook. |
 | 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `!` names refused. | `!domain`, `!email`, `!client_id`, and the rest; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload. | Traffic decisions, given-up routes, static and rewrite conflicts. |
@@ -47,7 +47,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | none | | Timer routes, `by_timer`, cron, DST rules. |
-| 050 Agents/MCP | partial | The operator MCP endpoint (host:owner tools). | `/mcp` on every domain, box `mcp` routes, agent tokens, `"agents": true`, filtered discovery, agent audit. |
+| 050 Agents/MCP | partial | The operator MCP endpoint (host:owner tools). Agent tokens (009), refused on HTTP routes unless `"agents": true`. | `/mcp` on every domain, box `mcp` routes, filtered discovery, agent audit, per-agent quotas. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
 | 064 Keys | none | Secrets live in the host config file (mode 0600). | The vault, envelope encryption, `keys/...`. |
 | 070 UI | partial | Markdown, Mustache with layouts, content negotiation for box JSON through templates, strict CSP on templated pages (007). | `static` in manifests, pins, the `/goober/` client script, sign-in through the product layout. |
@@ -101,19 +101,19 @@ Decisions taken provisionally from 999's own recommendations, recorded in
 1 clients say what they are, 2 loopback any port, 3 standard discovery and the fixed
 client_id `dumb-terminal`, 4 `/terminal/v1/me`, 5 `minutes`, 6 product approvals only.
 Decision 7 (push credentials) waits for the human; the terminal works by hourly pull.
-- [ ] OAuth in the identity package: clients with `acts_as`, authorization codes with
+- [x] OAuth in the identity package: clients with `acts_as`, authorization codes with
       PKCE S256, rotating refresh tokens with reuse detection, revocation, grants.
-- [ ] Host endpoints: `/.well-known/oauth-authorization-server`, `/oauth/authorize`
+- [x] Host endpoints: `/.well-known/oauth-authorization-server`, `/oauth/authorize`
       (sign-in, then a consent screen that shows where the client comes from),
       `/oauth/token`, `/oauth/revoke`.
-- [ ] Bearer access tokens on box routes and pages, resolved into the same caller as a
+- [x] Bearer access tokens on box routes and pages, resolved into the same caller as a
       cookie session; 401 with `WWW-Authenticate` and JSON for API callers.
-- [ ] Agent tokens refused on HTTP routes unless the route says `"agents": true` (050).
-- [ ] Clients from the host config (`identity.clients`), and operator tools
+- [x] Agent tokens refused on HTTP routes unless the route says `"agents": true` (050).
+- [x] Clients from the host config (`identity.clients`), and operator tools
       `client_list`, `client_put`, `client_remove`.
-- [ ] Dynamic registration and the device flow (`/oauth/register`, `/oauth/device`,
-      `/oauth/device/verify`), agents only.
-- [ ] The account page lists signed-in apps and agents, with revoke.
+- [x] Dynamic registration and the device flow (`/oauth/register`, `/oauth/device`,
+      `/oauth/device/verify`), agents only. See `design/machine/009.OAuth.md`.
+- [x] The account page lists signed-in apps and agents, with revoke.
 - [ ] The `terminal` box: me, config, sync, dashboards, decisions (idempotent by key,
       409 on a different key), devices, events.
 - [ ] The `desk` box for agents: create approvals, read their outcome, set alarms and
