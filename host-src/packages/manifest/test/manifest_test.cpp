@@ -24,7 +24,7 @@ TEST(Manifest, ParsesTheV1Subset) {
   EXPECT_EQ(m->box, "hello");
   EXPECT_EQ(m->routes.size(), 3u);
   EXPECT_EQ(*m->behavior.timeout_ms, 500);
-  EXPECT_EQ(m->warnings.size(), 4u);
+  EXPECT_EQ(m->warnings.size(), 3u);  // data is read now
   EXPECT_TRUE(m->applies_to("anything.com"));
   EXPECT_EQ(m->routes[0].export_name().substr(0, 13), "goober_route_");
 }
@@ -148,4 +148,37 @@ TEST(Manifest, TemplatesAreCheckedAndRoutesNameThem) {
   EXPECT_NE(err.find("templates.bad"), std::string::npos);
   EXPECT_FALSE(parse_manifest(R"({"box":"h","domains":["*"],"routes":{"http":{"/attachment/x":{"get":{"name":"x","public":true}}}}})", &err));
   EXPECT_NE(err.find("reserved"), std::string::npos);
+}
+
+TEST(Manifest, DataStrategies) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"g","domains":["*"],"data":{"sqlite3":{
+      "book": {"schema": "guestbook1", "database": "guest_{!tenant}", "pattern": "sql",
+               "tables": {"entries": {"read": true, "insert": true, "update": ["approved"], "delete": false}},
+               "row-limit": 50},
+      "later": {"schema": "s1", "database": "d", "pattern": "by_id", "table": "users", "id-is": "{!user_id}"}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->data.size(), 2u);
+  const auto& book = m->data[0];
+  EXPECT_TRUE(book.runnable());
+  EXPECT_EQ(book.database_for("playground"), "guest_playground");
+  EXPECT_TRUE(book.tables.at("entries").read_all);
+  EXPECT_EQ(book.tables.at("entries").update.count("approved"), 1u);
+  EXPECT_EQ(book.row_limit, 50);
+  EXPECT_FALSE(m->data[1].runnable());
+  EXPECT_FALSE(m->warnings.empty());
+
+  auto refuse = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"box":"g","domains":["*"],"data":{"sqlite3":{"b":{"schema":"s","database":"d","pattern":"sql"}}}})",
+         "needs tables");
+  refuse(R"({"box":"g","domains":["*"],"data":{"sqlite3":{"b":{"schema":"s","database":"../x","pattern":"sql","tables":{"t":{}}}}}})",
+         "database must be");
+  refuse(R"({"box":"g","domains":["*"],"data":{"sqlite3":{"b":{"schema":"s","database":"d","pattern":"sql","tables":{"t":{"drop":true}}}}}})",
+         "unknown operation");
+  refuse(R"({"box":"g","domains":["*"],"data":{"sqlite3":{"b":{"schema":"s","database":"d","pattern":"sql","sql":"x","tables":{"t":{}}}}}})",
+         "doesn't apply");
 }

@@ -184,3 +184,40 @@ TEST(Engine, BinaryWasmCompiles) {
   EXPECT_EQ(wasm.substr(0, 4), std::string("\0asm", 4));
   EXPECT_TRUE(engine().compile(wasm, {"goober_route_echo"}, &err)) << err;
 }
+
+TEST(Engine, SqlGoesThroughTheHostAndBack) {
+  const char* wat = R"((module
+    (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+    (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+    (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "application/json")
+    (data (i32.const 16) "book")
+    (data (i32.const 20) "SELECT 1")
+    (data (i32.const 28) "[]")
+    (func (export "goober_route_q") (result i32)
+      (local $n i32)
+      (local.set $n (call $sql (i32.const 16) (i32.const 4) (i32.const 20) (i32.const 8) (i32.const 28) (i32.const 2)))
+      (drop (call $result (i32.const 1024) (local.get $n)))
+      (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 1024) (local.get $n)))
+      (i32.const 0))
+    (func (export "goober_route_bad") (result i32)
+      (if (i32.ne (call $sql (i32.const 65530) (i32.const 100) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))
+                  (i32.const -1))
+        (then (unreachable)))
+      (drop (call $respond (i32.const 204) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+      (i32.const 0))
+  ))";
+  auto box = compile(wat, {"goober_route_q", "goober_route_bad"});
+  CallInput in{"{}", 1, 2};
+  in.sql = [](std::string_view strategy, std::string_view sql, std::string_view params) {
+    return std::string(strategy) + "|" + std::string(sql) + "|" + std::string(params);
+  };
+  auto r = engine().call(*box, "goober_route_q", in, {});
+  ASSERT_EQ(r.outcome, CallResult::Outcome::kOk) << r.error;
+  EXPECT_EQ(r.body, "book|SELECT 1|[]");
+  EXPECT_EQ(engine().call(*box, "goober_route_bad", in, {}).status, 204);
+  CallInput none{"{}", 1, 2};
+  auto n = engine().call(*box, "goober_route_q", none, {});
+  EXPECT_NE(n.body.find("no databases"), std::string::npos);
+}

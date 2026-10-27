@@ -1,0 +1,10 @@
+---
+layout: base
+---
+<article class="post">
+<p class="meta"><a href="/blog">← Blog</a></p>
+<h1>{{title}}</h1>
+<p class="meta"><time datetime="{{date}}">{{date}}</time>{{#tags}} · <a href="/blog?tag={{.}}">#{{.}}</a>{{/tags}}</p>
+{{#image}}<img class="hero" src="{{image}}" alt="">{{/image}}
+{{{body}}}
+</article>

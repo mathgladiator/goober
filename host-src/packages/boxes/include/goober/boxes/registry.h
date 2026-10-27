@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -60,6 +61,11 @@ class BoxRegistry {
  public:
   BoxRegistry(wal::HostWal& wal, runtime::wasm::Engine& engine);
 
+  // A check the host adds for what this package can't see, like a manifest's schemas
+  // and databases. It runs on every upload and promotion, before anything is stored.
+  using ManifestCheck = std::function<bool(const manifest::Manifest&, std::string* error)>;
+  void set_manifest_check(ManifestCheck check) { check_ = std::move(check); }
+
   // Loads every box's active version. Problems are returned as warnings.
   std::vector<std::string> load_all();
 
@@ -81,6 +87,7 @@ class BoxRegistry {
 
   wal::HostWal& wal_;
   runtime::wasm::Engine& engine_;
+  ManifestCheck check_;
   mutable std::mutex mu_;  // serializes uploads and promotions
   mutable std::mutex snapshot_mu_;
   std::shared_ptr<const ActiveSet> active_;

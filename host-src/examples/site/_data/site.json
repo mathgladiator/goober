@@ -1,0 +1,12 @@
+{
+  "title": "goober playground",
+  "nav": [
+    { "label": "Blog", "url": "/blog" },
+    { "label": "Notes", "url": "/notes" },
+    { "label": "Guestbook", "url": "/guestbook" },
+    { "label": "About", "url": "/about" },
+    { "label": "Playground", "url": "/playground" }
+  ],
+  "footer": "Served by goober: content written over MCP, rendered by the host.",
+  "stylesheet": "/css/site.css"
+}

@@ -1,6 +1,7 @@
 #include "goober/render/frontmatter.h"
 
 #include <charconv>
+#include <vector>
 
 namespace goober::render {
 namespace {
@@ -58,6 +59,7 @@ Document split_front_matter(std::string_view text, std::string* error) {
     return doc;
   }
   std::string list_key;
+  std::vector<std::string> bare_keys;  // "key:" lines, which are lists only if items follow
   bool closed = false;
   while (pos < text.size()) {
     std::string_view raw = next_line(text, pos);
@@ -83,6 +85,7 @@ Document split_front_matter(std::string_view text, std::string* error) {
     std::string_view value = trim(line.substr(colon + 1));
     if (value.empty()) {
       list_key = std::string(key);
+      bare_keys.push_back(list_key);
       doc.fields[key] = bj::array();
       continue;
     }
@@ -103,9 +106,10 @@ Document split_front_matter(std::string_view text, std::string* error) {
     doc.body = std::string(text);
     return doc;
   }
-  // An empty "key:" with no items is an empty string, not an empty list.
-  for (auto& [k, v] : doc.fields) {
-    if (v.is_array() && v.as_array().empty()) v = bj::string();
+  // A "key:" with no items is an empty string, not an empty list; "key: []" stays a list.
+  for (const auto& k : bare_keys) {
+    auto* v = doc.fields.if_contains(k);
+    if (v && v->is_array() && v->as_array().empty()) *v = bj::string();
   }
   doc.has_front_matter = true;
   doc.body = std::string(text.substr(pos));

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2457d6"/><stop offset="1" stop-color="#7a2bd6"/></linearGradient></defs>
+  <rect width="640" height="320" fill="url(#g)"/>
+  <text x="320" y="185" font-family="system-ui, sans-serif" font-size="96" font-weight="700" fill="#fff" text-anchor="middle">goober</text>
+</svg>

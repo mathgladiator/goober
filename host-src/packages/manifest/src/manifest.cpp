@@ -33,7 +33,7 @@ const std::vector<std::string>& reserved_prefixes() {
 namespace {
 
 // Fields from 150.DeepManifest.md that v1 accepts with a warning.
-const std::set<std::string> kLaterTopLevel = {"types", "pins",    "policy",   "deployment", "data",
+const std::set<std::string> kLaterTopLevel = {"types", "pins",    "policy",   "deployment",
                                               "external", "keys", "static",   "headers",
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
@@ -114,6 +114,111 @@ namespace {
 
 const std::set<std::string> kVerbs = {"get", "post", "put", "patch", "delete"};
 
+const std::set<std::string> kPatterns = {"by_id", "by_index", "query", "sql", "by_timer"};
+const std::set<std::string> kLaterStrategy = {"table", "id-is", "index", "index-is", "limit", "sql", "params",
+                                              "result", "read", "writes", "timezone-field", "active-field", "publish"};
+
+bool is_sql_name(std::string_view n) {
+  return base::is_valid_name(n) && !n.starts_with("sqlite_");
+}
+
+// A list of column names, or true for all of them.
+bool parse_columns(const bj::value& v, bool* all, std::set<std::string>* cols, const std::string& where,
+                   std::string* error) {
+  if (v.is_bool()) {
+    *all = v.get_bool();
+    return true;
+  }
+  if (!v.is_array()) return *error = where + " must be true, false, or a list of columns", false;
+  for (const auto& c : v.get_array()) {
+    if (!c.is_string() || !is_sql_name(c.get_string())) return *error = where + " must hold column names", false;
+    cols->insert(std::string(c.get_string()));
+  }
+  return true;
+}
+
+bool parse_data(const bj::object& data, Manifest* m, std::string* error) {
+  for (const auto& provider : data) {
+    std::string name(provider.key());
+    if (name != "sqlite3") {
+      m->warnings.push_back("data." + name + " is accepted but not implemented in v1");
+      continue;
+    }
+    if (!provider.value().is_object()) return *error = "data.sqlite3 must be an object", false;
+    for (const auto& entry : provider.value().get_object()) {
+      std::string where = "data.sqlite3." + std::string(entry.key());
+      if (!base::is_valid_name(entry.key())) return *error = where + ": a strategy name must match [a-z][a-z0-9_]*", false;
+      if (!entry.value().is_object()) return *error = where + " must be an object", false;
+      const auto& def = entry.value().get_object();
+      DataStrategy st;
+      st.name = std::string(entry.key());
+      std::string err;
+      auto schema = get_string(def, "schema", &err);
+      auto database = get_string(def, "database", &err);
+      auto pattern = get_string(def, "pattern", &err);
+      if (!err.empty()) return *error = where + ": " + err, false;
+      if (!schema || !database || !pattern) return *error = where + ": schema, database, and pattern are required", false;
+      if (!kPatterns.count(*pattern)) return *error = where + ": pattern must be by_id, by_index, query, sql, or by_timer", false;
+      std::string bare = *database;
+      for (size_t at = bare.find("{!tenant}"); at != std::string::npos; at = bare.find("{!tenant}")) bare.replace(at, 9, "x");
+      if (!is_sql_name(bare) || bare.find('{') != std::string::npos) {
+        return *error = where + ": database must be a name like guestbook, and may hold {!tenant}", false;
+      }
+      st.schema = *schema;
+      st.database = *database;
+      st.pattern = *pattern;
+      for (const auto& f : def) {
+        std::string key(f.key());
+        if (key == "schema" || key == "database" || key == "pattern") continue;
+        if (st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget")) continue;
+        if (kLaterStrategy.count(key) || (!st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget"))) {
+          if (st.runnable()) return *error = where + "." + key + " doesn't apply to pattern sql", false;
+          continue;
+        }
+        return *error = where + ": unknown field \"" + key + "\"", false;
+      }
+      if (!st.runnable()) {
+        m->warnings.push_back(where + ": pattern " + st.pattern + " is accepted but not implemented in v1");
+        m->data.push_back(std::move(st));
+        continue;
+      }
+      const auto* tables = get_object(def, "tables", &err);
+      if (!tables || tables->empty()) return *error = where + ": pattern sql needs tables, saying what it may touch", false;
+      for (const auto& t : *tables) {
+        std::string tw = where + ".tables." + std::string(t.key());
+        if (!is_sql_name(t.key())) return *error = tw + ": a table name must match [a-z][a-z0-9_]*", false;
+        if (!t.value().is_object()) return *error = tw + " must be an object", false;
+        TableGrant g;
+        for (const auto& op : t.value().get_object()) {
+          std::string k(op.key());
+          if (k == "read") {
+            if (!parse_columns(op.value(), &g.read_all, &g.read, tw + ".read", error)) return false;
+          } else if (k == "update") {
+            if (!parse_columns(op.value(), &g.update_all, &g.update, tw + ".update", error)) return false;
+          } else if (k == "insert" || k == "delete") {
+            if (!op.value().is_bool()) return *error = tw + "." + k + " must be true or false", false;
+            (k == "insert" ? g.insert : g.remove) = op.value().get_bool();
+          } else {
+            return *error = tw + ": unknown operation \"" + k + "\" (read, insert, update, delete)", false;
+          }
+        }
+        st.tables[std::string(t.key())] = std::move(g);
+      }
+      for (const char* k : {"row-limit", "step-budget"}) {
+        auto v = get_int(def, k, &err);
+        if (!err.empty()) return *error = where + ": " + err, false;
+        if (!v) continue;
+        if (*v < 1 || (std::string_view(k) == "row-limit" && *v > 100000)) {
+          return *error = where + "." + k + " is out of range", false;
+        }
+        (std::string_view(k) == "row-limit" ? st.row_limit : st.step_budget) = *v;
+      }
+      m->data.push_back(std::move(st));
+    }
+  }
+  return true;
+}
+
 bool under_reserved(const router::RoutePattern& p) {
   std::string first = p.segments.empty() || !p.segments[0].literal ? "" : "/" + p.segments[0].text;
   for (const auto& r : reserved_prefixes()) {
@@ -135,7 +240,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   for (const auto& kv : root) {
     std::string key(kv.key());
     if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
-        key == "templates") {
+        key == "templates" || key == "data") {
       continue;
     }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
@@ -186,6 +291,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
       }
       m.templates[name] = std::string(t.value().get_string());
     }
+  }
+  if (!err.empty()) return *error = err, std::nullopt;
+  if (const auto* data = get_object(root, "data", &err)) {
+    if (!parse_data(*data, &m, error)) return std::nullopt;
   }
   if (!err.empty()) return *error = err, std::nullopt;
 
@@ -261,6 +370,15 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   }
   if (!err.empty()) return *error = err, std::nullopt;
   return m;
+}
+
+std::string DataStrategy::database_for(std::string_view tenant) const {
+  std::string out = database;
+  for (size_t at = out.find("{!tenant}"); at != std::string::npos; at = out.find("{!tenant}", at)) {
+    out.replace(at, 9, tenant);
+    at += tenant.size();
+  }
+  return out;
 }
 
 Access check_access(const HttpRoute& route, const Caller* caller, const std::map<std::string, std::string>& params,

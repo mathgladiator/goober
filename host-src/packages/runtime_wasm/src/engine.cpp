@@ -1,5 +1,6 @@
 #include "goober/runtime_wasm/engine.h"
 
+#include <algorithm>
 #include <any>
 #include <chrono>
 #include <optional>
@@ -31,6 +32,7 @@ struct CallState {
   std::vector<std::pair<std::string, std::string>> headers;
   std::vector<LogLine> logs;
   size_t dropped_logs = 0;
+  std::string result;  // the last goober_sql result
 };
 
 CallState& state_of(wasmtime::Caller& caller) {
@@ -78,7 +80,8 @@ void must(wasmtime::Result<T> r, const char* what) {
 const std::vector<std::string>& abi_imports() {
   static const std::vector<std::string> kImports = {
       "goober_request_size", "goober_request_read", "goober_respond", "goober_header_set",
-      "goober_now_ms",       "goober_random_fill",  "goober_log"};
+      "goober_now_ms",       "goober_random_fill",  "goober_log",        "goober_sql",
+      "goober_result_read"};
   return kImports;
 }
 
@@ -203,6 +206,33 @@ struct Engine::Impl {
                             return 0;
                           }),
          "goober_log");
+    must(linker.func_wrap("goober", "goober_sql",
+                          [](wasmtime::Caller caller, int32_t st_ptr, int32_t st_len, int32_t sql_ptr, int32_t sql_len,
+                             int32_t params_ptr, int32_t params_len) -> int32_t {
+                            auto& st = state_of(caller);
+                            auto mem = memory_of(caller);
+                            auto strategy = view(mem, st_ptr, st_len);
+                            auto sql = view(mem, sql_ptr, sql_len);
+                            auto params = view(mem, params_ptr, params_len);
+                            if (!strategy || !sql || !params) return -1;
+                            if (st.input->sql) {
+                              st.result = st.input->sql(*strategy, *sql, *params);
+                            } else {
+                              st.result = R"({"error":"this box has no databases: declare data.sqlite3 in its manifest"})";
+                            }
+                            return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
+                          }),
+         "goober_sql");
+    must(linker.func_wrap("goober", "goober_result_read",
+                          [](wasmtime::Caller caller, int32_t ptr, int32_t len) -> int32_t {
+                            auto& st = state_of(caller);
+                            auto mem = memory_of(caller);
+                            int32_t n = len < int32_t(st.result.size()) ? len : int32_t(st.result.size());
+                            if (!view(mem, ptr, n)) return -1;
+                            std::copy(st.result.begin(), st.result.begin() + n, mem.data() + ptr);
+                            return n;
+                          }),
+         "goober_result_read");
   }
 
   wasmtime::Engine engine;

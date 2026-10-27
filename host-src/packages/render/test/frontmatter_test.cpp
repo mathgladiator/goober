@@ -24,6 +24,12 @@ TEST(FrontMatter, SplitsFieldsFromBody) {
   EXPECT_EQ(escaped.fields.at("title"), "Say \"hi\"\nthere");
 }
 
+TEST(FrontMatter, EmptyListsStayLists) {
+  auto doc = split_front_matter("---\nrequirements: []\nnothing:\n---\n");
+  EXPECT_TRUE(doc.fields.at("requirements").is_array());
+  EXPECT_EQ(doc.fields.at("nothing"), "");
+}
+
 TEST(FrontMatter, NoneOrUnclosedIsAllBody) {
   auto none = split_front_matter("# Just a page\n");
   EXPECT_FALSE(none.has_front_matter);

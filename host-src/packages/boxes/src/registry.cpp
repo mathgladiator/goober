@@ -126,6 +126,7 @@ std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, 
   std::lock_guard lock(mu_);
   auto m = manifest::parse_manifest(manifest_text, error);
   if (!m) return std::nullopt;
+  if (check_ && !check_(*m, error)) return std::nullopt;
   std::string wasm;
   if (!runtime::wasm::Engine::is_binary(module)) {
     if (!runtime::wasm::Engine::wat_to_wasm(module, &wasm, error)) return std::nullopt;
@@ -158,6 +159,7 @@ bool BoxRegistry::promote(const std::string& box, const std::string& version, st
   }
   auto loaded = load_version(box, version, error);
   if (!loaded) return false;
+  if (check_ && !check_(loaded->manifest, error)) return false;
   wal::Bundle bundle = {{wal::FileChange::Kind::kWrite, "boxes/" + box + "/active", version}};
   return activate(std::make_shared<const ActiveBox>(std::move(*loaded)), bundle, error);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -32,6 +33,9 @@ struct CallInput {
   std::string request_json;
   int64_t now_ms = 0;
   uint64_t seed = 0;
+  // Runs one statement for goober_sql: (strategy, sql, params JSON) to a result JSON.
+  // Without it, goober_sql answers {"error": ...}.
+  std::function<std::string(std::string_view, std::string_view, std::string_view)> sql;
 };
 
 struct LogLine {

@@ -4,7 +4,13 @@
     tools/goober.py tools                         list the operator tools
     tools/goober.py call <tool> [key=value ...]   call a tool (values parse as JSON when they can)
     tools/goober.py deploy <manifest.json> <module.wat|module.wasm>
-    tools/goober.py push <tenant> <directory>     upload a directory as static content
+    tools/goober.py push <tenant> <directory> [KEY=VALUE ...]
+                                                  upload a directory as content, replacing
+                                                  each KEY in text files with VALUE
+    tools/goober.py schema <file.schema.json>     store a database schema
+    tools/goober.py attach <tenant> <url|file> [--name N] [--alt TEXT]
+                                                  store an image and print its URL; an
+                                                  attachment with the same name is reused
 
 The host comes from a config file: GOOBER_CONFIG, or else demo/host.json at the
 repo root. GOOBER_URL overrides the endpoint (default: the config's listen port on
@@ -102,15 +108,35 @@ def main(argv):
         print(call("version_upload", args))
     elif cmd == "push":
         tenant, root = argv[2], pathlib.Path(argv[3])
+        replace = dict(a.split("=", 1) for a in argv[4:])
         for f in sorted(p for p in root.rglob("*") if p.is_file()):
             rel = f.relative_to(root).as_posix()
             data = f.read_bytes()
             try:
-                args = {"tenant": tenant, "path": rel, "text": data.decode("utf-8")}
+                text = data.decode("utf-8")
+                for k, v in replace.items():
+                    text = text.replace(k, v)
+                args = {"tenant": tenant, "path": rel, "text": text}
             except UnicodeDecodeError:
                 args = {"tenant": tenant, "path": rel, "base64": base64.b64encode(data).decode()}
             call("content_put", args)
             print(f"put {tenant}/{rel} ({len(data)} bytes)")
+    elif cmd == "schema":
+        print(call("schema_put", {"schema": json.loads(pathlib.Path(argv[2]).read_text())}))
+    elif cmd == "attach":
+        tenant, source, rest = argv[2], argv[3], argv[4:]
+        opts = {rest[i].lstrip("-"): rest[i + 1] for i in range(0, len(rest) - 1, 2)}
+        name = opts.get("name") or source.rstrip("/").split("/")[-1]
+        for a in json.loads(call("attachment_list", {"tenant": tenant})):
+            if a["name"] == name:
+                print(a["url"])
+                return
+        args = {"tenant": tenant, "name": name, "alt": opts.get("alt", "")}
+        if source.startswith("https://"):
+            args["url"] = source
+        else:
+            args["base64"] = base64.b64encode(pathlib.Path(source).read_bytes()).decode()
+        print(json.loads(call("attachment_put", args))["url"])
     else:
         sys.exit(f"unknown command {cmd}; try --help")
 

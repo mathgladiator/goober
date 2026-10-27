@@ -13,8 +13,10 @@ beyond what the human asks for.
   (Boost, GoogleTest, wasmtime v49.0.4 in `~/.local/opt/`).
 - `cmake --preset dev && cmake --build --preset dev && ctest --preset dev` builds and tests
   everything (`just test` does the same). `host-src/README.md` covers running and playing.
-- The `justfile` at the repo root drives play: `just run`, `just setup`, `just mcp`. The
-  default host directory is `demo/`, which is ignored by git.
+- The `justfile` at the repo root drives play: `just run`, `just setup`, `just mcp`,
+  `just examples`, and `just db` / `just sql`. The default host directory is `demo/`, which
+  is ignored by git. When the human wants it, Claude keeps the demo host running itself
+  (`just run` in the background) and restarts it after host changes.
 - One package per directory under `host-src/packages/`, each with its own library, tests,
   and `QUALITY.md`. The underscore in a package name is a namespace (`server_http` is
   `goober::server::http`). Keep changes siloed per package so each is reviewable.
@@ -80,6 +82,9 @@ Read these before doing design work:
   - `design/machine/007.Content.md`: content as its own vector: pages (markdown, fragments,
     documents), Mustache templates with layouts, listings and feeds, and attachments at
     `/attachment/$id.$ext` with uploads and MCP tools.
+  - `design/machine/008.Databases.md`: tenant databases: JSON schemas that only expand,
+    `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
+    and the operator's db tools and CLI.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

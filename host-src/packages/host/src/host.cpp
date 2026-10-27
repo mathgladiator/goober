@@ -10,6 +10,7 @@
 #include "goober/base/time.h"
 #include "goober/json/json.h"
 #include "goober/router/path.h"
+#include "http_util.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -67,8 +68,11 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   content_ = std::make_unique<content::ContentStore>(*wal_);
   site_ = std::make_unique<site::Site>(*content_);
   attachments_ = std::make_unique<attachments::Store>(*wal_);
+  schemas_ = std::make_unique<db::SchemaStore>(*wal_);
+  databases_ = std::make_unique<db::Databases>(config->storage);
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
+  boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
@@ -80,6 +84,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "(db_list, db_query), and read logs.");
   register_tools();
   register_content_tools();
+  register_data_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
 }
 
@@ -385,6 +390,11 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     case manifest::Access::kBadValue:
       return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
   }
+  // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
+  if (req.method != "get" && req.method != "head" && !same_origin(req)) {
+    return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
+  }
+
   bj::object headers;
   for (const auto& [k, v] : req.headers) {
     if (!hidden_from_box(k)) headers[k] = v;
@@ -398,7 +408,15 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                  {"body", req.body},        {"domain", domain},           {"tenant", tenant},
                  {"user", user_json(who)}};
 
-  runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64()};
+  runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64(), {}};
+  // The box's databases: one transaction each, committed below when the box answers under 500.
+  std::optional<db::Session> session;
+  if (!m.data.empty()) {
+    session.emplace(*databases_, tenant, m.data, *schemas_);
+    input.sql = [&session](std::string_view strategy, std::string_view sql, std::string_view params) {
+      return session->run(strategy, sql, params);
+    };
+  }
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(m.behavior.timeout_ms), cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
   auto result = engine_->call(*ref.box->compiled, ref.route->export_name(), input, limits);
@@ -429,6 +447,23 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                    {"seed", std::to_string(input.seed)},
                    {"now_ms", input.now_ms}};
   if (who) extra["user_id"] = std::to_string(who->user.user_id);
+  bool ok = result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status < 500;
+  if (session && session->statements() > 0) {
+    extra["sql"] = session->statements();
+    std::string err;
+    if (!ok) {
+      session->rollback();
+    } else if (!session->commit(&err)) {
+      result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+      result.error = err;
+      extra["outcome"] = "commit_failed";
+      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+                                                       {"request_id", request_id},
+                                                       {"version", ref.box->version},
+                                                       {"level", "host"},
+                                                       {"text", "commit failed: " + err}}));
+    }
+  }
   std::string extra_text = json::dump(extra);
 
   Response res;

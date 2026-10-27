@@ -1,0 +1,10 @@
+---
+layout: base
+---
+<article class="list">
+<h1>{{title}}</h1>
+<p class="meta">A directory listing: these pages have no index, so the <code>directory</code> template lists them.</p>
+<ul class="entries">
+{{#pages}}<li><h2><a href="{{url}}">{{title}}</a></h2>{{#summary}}<p>{{summary}}</p>{{/summary}}</li>{{/pages}}
+</ul>
+</article>

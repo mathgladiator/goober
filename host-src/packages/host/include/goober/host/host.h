@@ -10,6 +10,7 @@
 #include "goober/boxes/registry.h"
 #include "goober/config/config.h"
 #include "goober/content/content.h"
+#include "goober/db/database.h"
 #include "goober/identity/identity.h"
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
@@ -54,6 +55,8 @@ class Host {
   content::ContentStore& content() { return *content_; }
   site::Site& site() { return *site_; }
   attachments::Store& attachments() { return *attachments_; }
+  db::SchemaStore& schemas() { return *schemas_; }
+  db::Databases& databases() { return *databases_; }
   boxes::BoxRegistry& boxes() { return *boxes_; }
   identity::Identity& identity() { return *identity_; }
   const std::vector<std::string>& startup_notes() const { return startup_notes_; }
@@ -90,6 +93,12 @@ class Host {
   server::http::Response error_page(const std::string& tenant, int status, const std::string& detail) const;
   void register_tools();
   void register_content_tools();
+  void register_data_tools();
+  // The upload check for a manifest's data: schemas stored, grants within them, and
+  // every tenant's existing databases able to take them (008 §3).
+  bool check_data(const manifest::Manifest& m, std::string* error) const;
+  // The operator behind the MCP call running on this thread ("config" or "token:$name").
+  static std::string& current_operator();
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
                   const std::string& extra);
 
@@ -99,6 +108,8 @@ class Host {
   std::unique_ptr<content::ContentStore> content_;
   std::unique_ptr<site::Site> site_;
   std::unique_ptr<attachments::Store> attachments_;
+  std::unique_ptr<db::SchemaStore> schemas_;
+  std::unique_ptr<db::Databases> databases_;
   std::unique_ptr<runtime::wasm::Engine> engine_;
   std::unique_ptr<boxes::BoxRegistry> boxes_;
   std::unique_ptr<identity::Identity> identity_;

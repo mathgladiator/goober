@@ -1,0 +1,16 @@
+{
+  "schema": "guestbook1",
+  "tables": {
+    "entries": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "name": { "type": "string", "max-length": 80 },
+        "message": { "type": "string", "max-length": 2000 },
+        "created_ms": { "type": "int64" }
+      },
+      "indexes": {
+        "entries_by_created": { "columns": ["created_ms"] }
+      }
+    }
+  }
+}

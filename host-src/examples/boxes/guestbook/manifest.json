@@ -1,0 +1,46 @@
+{
+  "box": "guestbook",
+  "mission": "Sign the guestbook: a box that keeps its entries in the tenant's database and renders through the site's layout.",
+  "domains": [
+    "*"
+  ],
+  "behavior": {
+    "timeout-ms": 500,
+    "fuel": 50000000,
+    "memory-max-bytes": 16777216
+  },
+  "data": {
+    "sqlite3": {
+      "book": {
+        "schema": "guestbook1",
+        "database": "guestbook",
+        "pattern": "sql",
+        "tables": {
+          "entries": {
+            "read": true,
+            "insert": true
+          }
+        },
+        "row-limit": 100
+      }
+    }
+  },
+  "templates": {
+    "guestbook": "---\nlayout: base\n---\n<article class=\"page guestbook\">\n<h1>Guestbook</h1>\n<p class=\"meta\">Signatures so far: {{count}}. They're kept in this tenant's own database by a WASM box.</p>\n<form method=\"post\" action=\"/guestbook\" class=\"sign\">\n<label>Name <input name=\"name\" maxlength=\"80\" required{{#user}} value=\"{{email}}\"{{/user}}></label>\n<label>Message <textarea name=\"message\" maxlength=\"2000\" rows=\"3\" required></textarea></label>\n<button>Sign the guestbook</button>\n</form>\n<ul class=\"entries\">\n{{#entries}}\n<li><h2>{{name}}</h2><p class=\"meta\">{{at}}</p><p>{{message}}</p></li>\n{{/entries}}\n</ul>\n{{^entries}}<p class=\"meta\">Nobody has signed yet. Be the first.</p>{{/entries}}\n</article>\n"
+  },
+  "routes": {
+    "http": {
+      "/guestbook": {
+        "get": {
+          "name": "show",
+          "template": "guestbook",
+          "public": true
+        },
+        "post": {
+          "name": "sign",
+          "public": true
+        }
+      }
+    }
+  }
+}

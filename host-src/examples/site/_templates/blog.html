@@ -1,0 +1,27 @@
+---
+layout: base
+---
+<article class="list">
+<h1>{{title}}</h1>
+{{{body}}}
+{{#tag}}<p class="meta">Tagged <strong>{{tag}}</strong> · <a href="/blog">show all</a></p>{{/tag}}
+<div class="cards">
+{{#pages}}
+<a class="card" href="{{url}}">
+{{#image}}<img src="{{image}}" alt="" loading="lazy">{{/image}}
+<span class="card-body">
+<strong>{{title}}</strong>
+<span class="meta">{{date}}{{#tags}} · #{{.}}{{/tags}}</span>
+<span>{{summary}}</span>
+</span>
+</a>
+{{/pages}}
+</div>
+{{#pagination}}
+<nav class="pages">
+<span>{{#has_prev}}<a rel="prev" href="{{prev_url}}">← Newer</a>{{/has_prev}}</span>
+<span class="meta">{{#numbers}}<a href="{{url}}"{{#current}} aria-current="page"{{/current}}>{{n}}</a> {{/numbers}}</span>
+<span>{{#has_next}}<a rel="next" href="{{next_url}}">Older →</a>{{/has_next}}</span>
+</nav>
+{{/pagination}}
+</article>

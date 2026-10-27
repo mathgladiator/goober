@@ -64,6 +64,22 @@ revoke which dir=dir: build
 examples dir=dir: build
     {{host_src}}/tools/examples.sh {{trim_start_match(dir, "dir=")}}/host.json
 
+# List every tenant's databases, their tables, and row counts.
+db dir=dir: build
+    @{{bin}} db list --config {{trim_start_match(dir, "dir=")}}/host.json
+
+# Describe one tenant database: tables, columns, indexes, and applied schemas.
+db-describe tenant database dir=dir: build
+    @{{bin}} db describe {{quote(tenant)}} {{quote(database)}} --config {{trim_start_match(dir, "dir=")}}/host.json
+
+# Run one read-only SQL statement on a tenant database, like: just sql playground guestbook "SELECT * FROM entries"
+sql tenant database query dir=dir: build
+    @{{bin}} db query {{quote(tenant)}} {{quote(database)}} {{quote(query)}} --config {{trim_start_match(dir, "dir=")}}/host.json
+
+# Run one INSERT, UPDATE, or DELETE on a tenant database (logged to logs/db.log).
+sql-exec tenant database query dir=dir: build
+    @{{bin}} db exec {{quote(tenant)}} {{quote(database)}} {{quote(query)}} --config {{trim_start_match(dir, "dir=")}}/host.json
+
 # Check DIR/host.json without starting anything.
 check dir=dir: build
     @{{bin}} check --config {{trim_start_match(dir, "dir=")}}/host.json

@@ -68,6 +68,11 @@ Response json_response(int status, std::string body) {
 
 }  // namespace
 
+std::string& Host::current_operator() {
+  thread_local std::string name;
+  return name;
+}
+
 std::string Host::bearer_operator(const Request& req) const {
   auto cfg = config_.get();
   std::string auth = req.header("authorization");
@@ -91,7 +96,9 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     res.headers.emplace_back("allow", "POST");
     return finish(std::move(res), "");
   }
+  current_operator() = operator_name;
   auto reply = mcp_->handle(req.body);
+  current_operator().clear();
   finish(json_response(reply.status, std::move(reply.body)),
          json::dump(bj::object{{"operations", "mcp"}, {"operator", operator_name}}));
 }

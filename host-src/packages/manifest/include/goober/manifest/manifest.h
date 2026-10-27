@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -45,6 +46,30 @@ enum class Access {
 Access check_access(const HttpRoute& route, const Caller* caller, const std::map<std::string, std::string>& params,
                     std::string_view tenant);
 
+// What a strategy lets a box do with one table (design/machine/008.Databases.md §4).
+struct TableGrant {
+  bool read_all = false;
+  std::set<std::string> read;  // columns, when not read_all
+  bool insert = false;
+  bool update_all = false;
+  std::set<std::string> update;
+  bool remove = false;
+};
+
+// One strategy at data.sqlite3.$name (020.DataFlow.md). Only pattern "sql" runs in v1.
+struct DataStrategy {
+  std::string name;
+  std::string schema;    // a stored schema's name, like guestbook1
+  std::string database;  // a name, possibly holding {!tenant}
+  std::string pattern;   // by_id, by_index, query, sql, or by_timer
+  std::map<std::string, TableGrant> tables;
+  int64_t row_limit = 1000;
+  int64_t step_budget = 1'000'000;
+  bool runnable() const { return pattern == "sql"; }
+  // The database's name for a tenant, with {!tenant} filled in.
+  std::string database_for(std::string_view tenant) const;
+};
+
 struct Behavior {
   std::optional<int64_t> timeout_ms;
   std::optional<int64_t> fuel;
@@ -59,6 +84,7 @@ struct Manifest {
   Behavior behavior;
   std::vector<HttpRoute> routes;
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
+  std::vector<DataStrategy> data;
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
 
   bool applies_to(std::string_view domain) const;

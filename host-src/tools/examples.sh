@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the example boxes and deploys them, with the example site, to a running host.
+# Builds the example boxes and deploys them, with the example site and its images, to a
+# running host.
 #
 #   tools/examples.sh CONFIG [TENANT]
 #
@@ -19,14 +20,26 @@ if [[ -z "${GOOBER_TOKEN:-}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if 
   trap '"$BIN" token revoke examples --config "$CONFIG" >/dev/null' EXIT
 fi
 
+EX="$HOST_SRC/examples"
+"$HERE/goober.py" schema "$EX/boxes/guestbook/guestbook1.schema.json" >/dev/null
+echo "stored schema guestbook1"
 if command -v cargo >/dev/null; then
-  cargo build --quiet --release --target wasm32-unknown-unknown --manifest-path "$HOST_SRC/examples/boxes/dice/Cargo.toml"
-  "$HERE/goober.py" deploy "$HOST_SRC/examples/boxes/dice/manifest.json" \
-    "$HOST_SRC/examples/boxes/dice/target/wasm32-unknown-unknown/release/dice.wasm" >/dev/null
-  echo "deployed dice"
+  for box in dice guestbook; do
+    cargo build --quiet --release --target wasm32-unknown-unknown --manifest-path "$EX/boxes/$box/Cargo.toml"
+    "$HERE/goober.py" deploy "$EX/boxes/$box/manifest.json" "$EX/boxes/$box/target/wasm32-unknown-unknown/release/$box.wasm" >/dev/null
+    echo "deployed $box"
+  done
 else
-  echo "no cargo: skipping the Rust dice box"
+  echo "no cargo: skipping the Rust boxes (dice, guestbook)"
 fi
-"$HERE/goober.py" deploy "$HOST_SRC/examples/boxes/echo/manifest.json" "$HOST_SRC/examples/boxes/echo/echo.wat" >/dev/null
+"$HERE/goober.py" deploy "$EX/boxes/echo/manifest.json" "$EX/boxes/echo/echo.wat" >/dev/null
 echo "deployed echo"
-"$HERE/goober.py" push "$TENANT" "$HOST_SRC/examples/site"
+
+# The site's hero image: imported from jeffrey.io, or the bundled SVG without a network.
+HERO="$("$HERE/goober.py" attach "$TENANT" https://jeffrey.io/attachment/1.png --name jeffrey.io-1.png \
+          --alt "A picture from jeffrey.io" 2>/dev/null)" ||
+  HERO="$("$HERE/goober.py" attach "$TENANT" "$EX/assets/goober.svg" --name goober.svg --alt "goober")"
+echo "hero image at $HERO"
+# The home page moved from index.html to index.md; drop the old one if an earlier run left it.
+"$HERE/goober.py" call content_delete tenant="$TENANT" path=index.html >/dev/null 2>&1 || true
+"$HERE/goober.py" push "$TENANT" "$EX/site" HERO_IMAGE="$HERO"

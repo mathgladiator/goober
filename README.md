@@ -119,12 +119,14 @@ that still hold.
 
 ## Review process
 
-A first host to play with lives in [`host-src/`](host-src/README.md), following the decisions in [`design/machine/005.FirstVersion.md`](design/machine/005.FirstVersion.md) and [`006.LocalIdentity.md`](design/machine/006.LocalIdentity.md). Open questions are collected in [`design/QUESTIONS.md`](design/QUESTIONS.md).
+A first host to play with lives in [`host-src/`](host-src/README.md), following the decisions in [`design/machine/005.FirstVersion.md`](design/machine/005.FirstVersion.md), [`006.LocalIdentity.md`](design/machine/006.LocalIdentity.md), [`007.Content.md`](design/machine/007.Content.md) (sites as a CMS, and attachments), and [`008.Databases.md`](design/machine/008.Databases.md) (tenant databases). Open questions are collected in [`design/QUESTIONS.md`](design/QUESTIONS.md).
 
 ```sh
 just setup   # walk through the decisions; writes demo/host.json (a dev box or production)
 just run     # build and run the host in local mode, at http://localhost:8080/
 just mcp     # mint an operator token and print the claude mcp add command
+just examples  # deploy the example boxes, the demo site, and its images
+just db      # every tenant's databases; just sql TENANT DATABASE "SELECT ..." to look inside
 ```
 
 At the end of a working day, Claude writes a dated design review into `design/machine/`, following [`design/REVIEW.PROCESS.md`](design/REVIEW.PROCESS.md).

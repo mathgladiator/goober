@@ -43,6 +43,9 @@ ul.entries h2{margin:.1rem 0;font-size:1.2rem}
 ul.entries img{max-height:12rem;object-fit:cover;width:100%;margin-bottom:.5rem}
 ul.entries p{margin:.3rem 0 0}
 nav.pages{display:flex;gap:1rem;justify-content:space-between;margin-top:1.5rem}
+form label{display:block;margin:.5rem 0;font-weight:600}
+input,textarea,select{display:block;width:100%;margin-top:.25rem;font:inherit;font-weight:400;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+button{font:inherit;font-weight:600;padding:.5rem 1rem;border:0;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer}
 footer.site{padding-top:1rem;padding-bottom:2rem;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
 </style>
 {{#site.stylesheet}}<link rel="stylesheet" href="{{site.stylesheet}}">{{/site.stylesheet}}
