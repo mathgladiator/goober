@@ -88,6 +88,7 @@ class Session {
   // Opens a strategy's database on first use, applying every schema bound to it.
   Open* open_database(const std::string& database, std::string* error);
   int statements_ = 0;
+  std::string broken_;  // why the request's transaction can't commit, once it can't
 };
 
 }  // namespace goober::db

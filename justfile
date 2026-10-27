@@ -92,6 +92,11 @@ backup dest dir=dir: build
 restore from dir=dir: build
     @{{bin}} restore {{quote(from)}} --config {{trim_start_match(dir, "dir=")}}/host.json
 
+# Fuzz every parser and the SQL authorizer under AddressSanitizer: just fuzz 50000
+fuzz iters="20000":
+    cmake --preset asan >/dev/null && cmake --build --preset asan
+    ASAN_OPTIONS=detect_leaks=0 GOOBER_FUZZ_ITERS={{iters}} {{host_src}}/build/asan/packages/fuzz/goober_fuzz_test
+
 # Check DIR/host.json without starting anything.
 check dir=dir: build
     @{{bin}} check --config {{trim_start_match(dir, "dir=")}}/host.json

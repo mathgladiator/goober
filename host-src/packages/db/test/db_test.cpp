@@ -156,9 +156,33 @@ TEST_F(DbTest, LimitsAndBudgets) {
   std::string buffer = "SELECT 1; DROP TABLE entries";
   auto edge = J(s.run("book", std::string_view(buffer.data(), 8), ""));
   EXPECT_FALSE(edge.as_object().contains("error")) << json::dump(edge);
+  // OR ROLLBACK would end the request's transaction.
+  auto rb = J(s.run("book", "INSERT OR ROLLBACK INTO entries (name, message, created_ms) VALUES ('a', 'b', 1)", ""));
+  EXPECT_NE(std::string(rb.at("error").as_string()).find("ROLLBACK"), std::string::npos) << json::dump(rb);
   // replace() the function, and the word inside a string, are fine.
   auto fn = J(s.run("book", "SELECT replace('a-b', '-', ' '), 'or replace into' AS t", ""));
   EXPECT_FALSE(fn.as_object().contains("error")) << json::dump(fn);
+}
+
+TEST_F(DbTest, ARolledBackTransactionSpoilsTheRequest) {
+  manifest::TableGrant g;
+  g.read_all = g.insert = g.update_all = g.remove = true;
+  auto st = strategy(g);
+  st.step_budget = 5000;
+  std::vector<manifest::DataStrategy> strategies{st};
+  {
+    db::Session s(*dbs, "playground", strategies, *schemas);
+    ASSERT_FALSE(J(s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('a', 'b', 1)", "")).as_object().contains("error"));
+    // A runaway write is interrupted, and SQLite rolls the whole transaction back by itself.
+    J(s.run("book", "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) DELETE FROM entries WHERE id IN r", ""));
+    auto after = J(s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('c', 'd', 2)", ""));
+    EXPECT_NE(std::string(after.at("error").as_string()).find("rolled back"), std::string::npos) << json::dump(after);
+    std::string err;
+    EXPECT_FALSE(s.commit(&err));  // so the request fails, and nothing of it lands
+  }
+  std::string err;
+  auto rows = dbs->operate("playground", "guestbook", "SELECT count(*) FROM entries", nullptr, 10, false, &err);
+  EXPECT_EQ(json::dump(rows->at("rows")), "[[0]]");
 }
 
 TEST_F(DbTest, SchemasOnlyExpand) {

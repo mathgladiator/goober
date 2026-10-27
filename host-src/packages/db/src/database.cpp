@@ -51,6 +51,64 @@ struct Auth {
   std::string denied;
 };
 
+// A second check, independent of the authorizer: the compiled program itself. SQLite's
+// transfer optimization ("INSERT INTO a SELECT * FROM b") copies raw rows without asking
+// the authorizer about the columns it reads, so a box could copy a table it has no grant
+// on into one it can read. Every table or index the program opens (by root page) must
+// belong to a table the strategy grants something on, and a program that copies raw rows
+// (RowData) may only read tables the strategy reads in full. Found by the SQL property
+// test (013.SecurityReview.md).
+// Root page -> the table it belongs to; read before the box's authorizer is set.
+std::map<int64_t, std::string> root_pages(sqlite3* db) {
+  std::map<int64_t, std::string> owner;
+  sqlite3_stmt* q = nullptr;
+  if (sqlite3_prepare_v2(db, "SELECT rootpage, tbl_name FROM sqlite_master WHERE rootpage > 0", -1, &q, nullptr) ==
+      SQLITE_OK) {
+    while (sqlite3_step(q) == SQLITE_ROW) {
+      owner[sqlite3_column_int64(q, 0)] = reinterpret_cast<const char*>(sqlite3_column_text(q, 1));
+    }
+  }
+  sqlite3_finalize(q);
+  return owner;
+}
+
+std::string check_program(sqlite3_stmt* st, const manifest::DataStrategy& strategy,
+                          const std::map<int64_t, std::string>& owner) {
+  if (sqlite3_stmt_explain(st, 1) != SQLITE_OK) return "the statement can't be inspected";
+  std::set<std::string> read_tables;
+  bool raw_copy = false;
+  std::string why;
+  while (sqlite3_step(st) == SQLITE_ROW) {
+    std::string op = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+    int64_t p2 = sqlite3_column_int64(st, 3);
+    int64_t p3 = sqlite3_column_int64(st, 4);
+    if (op == "RowData") raw_copy = true;
+    if (op != "OpenRead" && op != "OpenWrite" && op != "ReopenIdx") continue;
+    if (p3 != 0) {
+      why = "statements may only use the main database";
+      break;
+    }
+    auto it = owner.find(p2);
+    std::string table = it == owner.end() ? "" : it->second;
+    if (table.empty() || host_table(table) || !strategy.tables.count(table)) {
+      why = "strategy " + strategy.name + " can't touch table " + (table.empty() ? std::string("?") : table);
+      break;
+    }
+    if (op != "OpenWrite") read_tables.insert(table);
+  }
+  sqlite3_reset(st);
+  sqlite3_stmt_explain(st, 0);
+  if (!why.empty()) return why;
+  if (raw_copy) {
+    for (const auto& t : read_tables) {
+      if (!strategy.tables.at(t).read_all) {
+        return "copying whole rows needs read on every column of " + t + "; name the columns";
+      }
+    }
+  }
+  return "";
+}
+
 std::set<std::string> real_tables(sqlite3* db) {
   std::set<std::string> out;
   sqlite3_stmt* q = nullptr;
@@ -185,6 +243,8 @@ bool uses_replace_conflict(std::string_view sql) {
     }
   }
   for (size_t k = 0; k < words.size(); ++k) {
+    // OR ROLLBACK would end the host's own transaction for the whole request.
+    if (words[k] == "ROLLBACK" && k > 0 && words[k - 1] == "OR") return true;
     if (words[k] != "REPLACE") continue;
     bool call = k + 1 < words.size() && words[k + 1] == "(";
     bool after_or = k > 0 && words[k - 1] == "OR";
@@ -246,9 +306,11 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   auto fail = [](std::string why) { return bj::object{{"error", std::move(why)}}; };
   if (sql.size() > 100000) return fail("the statement is longer than 100000 bytes");
   if (auth.strategy && uses_replace_conflict(sql)) {
-    return fail("REPLACE conflict resolution deletes rows behind the grants; use INSERT ... ON CONFLICT DO UPDATE");
+    return fail("REPLACE and ROLLBACK conflict resolution are refused (they delete rows behind the grants, or end the "
+                "request's transaction); use INSERT ... ON CONFLICT DO UPDATE or DO NOTHING");
   }
   auth.tables = real_tables(db);
+  auto owner = auth.strategy ? root_pages(db) : std::map<int64_t, std::string>{};
   sqlite3_limit(db, SQLITE_LIMIT_LENGTH, kMaxValueBytes);
   sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, kMaxLikePattern);
   // The authorizer stays on until the statement is finished: SQLite re-prepares a statement
@@ -263,6 +325,9 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   int rc = sqlite3_prepare_v2(db, sql.data(), int(sql.size()), &st.s, &tail);
   if (rc != SQLITE_OK) return fail(!auth.denied.empty() ? auth.denied : std::string(sqlite3_errmsg(db)));
   if (!st.s) return fail("the statement is empty");
+  if (auth.strategy) {
+    if (auto why = check_program(st.s, *auth.strategy, owner); !why.empty()) return fail(why);
+  }
   if (tail && !only_space(tail, sql.data() + sql.size())) return fail("one statement at a time");
   int count = sqlite3_bind_parameter_count(st.s);
   std::string err;
@@ -580,6 +645,7 @@ Session::Open* Session::open_database(const std::string& database, std::string* 
 
 bool Session::host_exec(const manifest::DataStrategy& strategy, std::string_view sql, const bj::value& params,
                         std::string* error) {
+  if (!broken_.empty()) return *error = broken_, false;
   Open* open = open_database(strategy.database_for(tenant_), error);
   if (!open) return false;
   sqlite3* raw = open->db->raw();
@@ -633,6 +699,7 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   Auth auth;
   auth.strategy = st;
   sqlite3* raw = open.db->raw();
+  if (!broken_.empty()) return fail(broken_);
   auto result = run_statement(raw, sql, params, auth, st->row_limit, st->step_budget, [&](bool readonly) {
     if (open.in_transaction) return std::string();
     char* msg = nullptr;
@@ -644,10 +711,23 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
     open.in_transaction = true;
     return std::string();
   });
+  // SQLite rolls a transaction back by itself after some failures (an interrupted write, a
+  // full disk). Everything after that would commit statement by statement, so the request
+  // is spoiled: nothing more runs, and its commit fails.
+  if (open.in_transaction && sqlite3_get_autocommit(raw)) {
+    open.in_transaction = false;
+    broken_ = "the request's transaction on " + database + " was rolled back, so nothing more can be written";
+    return fail(broken_);
+  }
   return json::dump(result);
 }
 
 bool Session::commit(std::string* error) {
+  if (!broken_.empty()) {
+    *error = broken_;
+    rollback();
+    return false;
+  }
   bool ok = true;
   for (auto& [name, open] : open_) {
     if (!open.in_transaction) continue;

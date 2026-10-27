@@ -163,7 +163,9 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       whole host; both are fixed.
 - [ ] A separate origin for the identity and consent screens (Q24), the one finding whose
       full fix is a trust-boundary decision for the human.
-- [ ] Fuzz the parsers (markdown, Mustache, front matter, types, multipart, SQL tokenizer).
+- [x] Fuzz the parsers and property-test the SQL authorizer (`just fuzz`, under ASan and
+      UBSan): every parser clean; two authorizer holes found and fixed (013 F1, F2).
+- [ ] Fuzz the multipart parser and the HTTP server.
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).
