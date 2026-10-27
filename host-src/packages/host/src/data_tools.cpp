@@ -6,6 +6,7 @@
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "box_guide.h"
+#include "keys.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 
@@ -69,6 +70,60 @@ void Host::register_data_tools() {
                   "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, "
                   "databases, and types work on goober, and how to deploy them.",
                   mcp::object_schema({}, {}), [](const bj::object&) { return ToolResult::ok(bj::value(kBoxGuide)); }});
+  // Keys for external services (015 §5): write-only.
+  auto scope_props = [](std::initializer_list<std::pair<std::string, bj::value>> extra) {
+    bj::object props{{"scope", mcp::enum_property("system, for every tenant; or tenant, for one.", {"system", "tenant"})},
+                     {"tenant", mcp::string_property("The tenant, when scope is tenant.")},
+                     {"name", mcp::string_property("The key's name, like stripe or openai.")}};
+    for (const auto& [k, v] : extra) props[k] = v;
+    return bj::object{{"type", "object"}, {"properties", props}, {"required", bj::array{"scope", "name"}}};
+  };
+  mcp_->add_tool({"key_set",
+                  "Sets a credential that boxes name in external.$service.credentials, like keys/system/openai or "
+                  "keys/tenant/{!tenant}/stripe. Write-only: no tool ever reads a value back, and boxes never see it.",
+                  scope_props({{"value", mcp::string_property("The secret, 1 to 8192 printable bytes.")}}),
+                  [this](const bj::object& args) {
+                    std::string err;
+                    if (!keys_->set(arg(args, "scope").value_or(""), arg(args, "tenant").value_or(""),
+                                    arg(args, "name").value_or(""), arg(args, "value").value_or(""), base::now_unix_ms(),
+                                    &err)) {
+                      return ToolResult::fail(err);
+                    }
+                    return ToolResult::ok(bj::object{{"set", true}});
+                  }});
+  mcp_->add_tool({"key_list", "The keys that are set: names, when, and a fingerprint, never values.",
+                  mcp::object_schema({}, {}), [this](const bj::object&) { return ToolResult::ok(keys_->list()); }});
+  mcp_->add_tool({"key_delete", "Removes a key. Calls that name it fail until it is set again.", scope_props({}),
+                  [this](const bj::object& args) {
+                    if (!keys_->remove(arg(args, "scope").value_or(""), arg(args, "tenant").value_or(""),
+                                       arg(args, "name").value_or(""))) {
+                      return ToolResult::fail("no such key");
+                    }
+                    return ToolResult::ok(bj::object{{"removed", true}});
+                  }});
+  // The outbox's dead letters (035): what couldn't be delivered, and what to do about it.
+  mcp_->add_tool({"outbox_dead_letters",
+                  "Effectful calls the outbox gave up on: which box, service, and request, how many attempts, and the "
+                  "last status or error.",
+                  mcp::object_schema({}, {}), [this](const bj::object&) { return ToolResult::ok(outbox_list("dead")); }});
+  auto outbox_ref = mcp::object_schema({{"tenant", mcp::string_property("The tenant.")},
+                                        {"database", mcp::string_property("The database, as outbox_dead_letters shows it.")},
+                                        {"id", mcp::integer_property("The element's id.")}},
+                                       {"tenant", "database", "id"});
+  for (bool retry : {true, false}) {
+    mcp_->add_tool({retry ? "outbox_retry" : "outbox_discard",
+                    retry ? "Tries a dead element again, from the first attempt, for ten more minutes."
+                          : "Deletes a dead element for good.",
+                    outbox_ref, [this, retry](const bj::object& args) {
+                      auto id = args.if_contains("id");
+                      if (!id || !id->is_int64()) return ToolResult::fail("id is required");
+                      if (!outbox_set(arg(args, "tenant").value_or(""), arg(args, "database").value_or(""), id->as_int64(),
+                                      retry)) {
+                        return ToolResult::fail("no such dead element");
+                      }
+                      return ToolResult::ok(bj::object{{retry ? "retrying" : "discarded", id->as_int64()}});
+                    }});
+  }
   mcp_->add_tool({"timers_list",
                   "The timers the host has planned (045): each timer, tenant, and row, with when it is next due.",
                   mcp::object_schema({}, {}),

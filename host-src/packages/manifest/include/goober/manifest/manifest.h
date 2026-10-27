@@ -102,6 +102,32 @@ struct DataStrategy {
   std::string database_for(std::string_view tenant) const;
 };
 
+// One method of an external service (030.TheLargerEnvironment.md, 035.TheOutBox.md;
+// design/machine/015.Network.md): what the box may call, and how the host sends it.
+struct ExternalMethod {
+  std::string name;
+  std::string verb;  // get, post, put, patch, delete
+  std::string path;  // like /v1/messages/{message_id}, appended to the service's base
+  std::string effect;  // "none" (sent now), "outbox" (after commit), or "immediate" (now, effectful)
+  std::string idempotency_header;  // like Idempotency-Key, where the host puts the element's key
+  int64_t attempts = 8;
+  int64_t backoff_ms = 1000;
+  int64_t within_ms = 600000;
+  int64_t budget_calls = 10;  // calls per request
+  // Fields the host pins, removed from the box's say: "body.to" -> "{!email}", or a literal.
+  std::map<std::string, std::string> require;
+};
+
+struct ExternalService {
+  std::string name;
+  std::string base;         // https://api.example.com[/prefix]
+  std::string credentials;  // keys/system/$name or keys/tenant/{!tenant}/$name, or ""
+  std::string auth_header = "authorization";
+  std::string auth_prefix = "Bearer ";
+  std::map<std::string, ExternalMethod> methods;
+  bool has_outbox() const;
+};
+
 struct Behavior {
   std::optional<int64_t> timeout_ms;
   std::optional<int64_t> fuel;
@@ -120,6 +146,7 @@ struct Manifest {
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;
+  std::vector<ExternalService> external;
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
 
   bool applies_to(std::string_view domain) const;

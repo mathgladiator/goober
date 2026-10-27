@@ -17,6 +17,27 @@ unsafe extern "C" {
     fn goober_log(level: i32, ptr: *const u8, len: i32) -> i32;
     fn goober_sql(st_ptr: *const u8, st_len: i32, sql_ptr: *const u8, sql_len: i32, p_ptr: *const u8, p_len: i32) -> i32;
     fn goober_result_read(ptr: *mut u8, len: i32) -> i32;
+    fn goober_call(sv_ptr: *const u8, sv_len: i32, m_ptr: *const u8, m_len: i32, r_ptr: *const u8, r_len: i32) -> i32;
+}
+
+/// Calls a method of a service declared under "external" (design/machine/015.Network.md).
+/// `request` is {"path": {...}, "query": {...}, "body": ...}. A safe call answers
+/// {"status", "content_type", "body", "json"?}; an outbox call answers {"accepted": true,
+/// "key"} and goes out only if the request commits; failures answer {"error"}.
+pub fn call(service: &str, method: &str, request: Value) -> Value {
+    let r = request.to_string();
+    let text = unsafe {
+        let n = goober_call(
+            service.as_ptr(), service.len() as i32,
+            method.as_ptr(), method.len() as i32,
+            r.as_ptr(), r.len() as i32,
+        );
+        let mut buf = vec![0u8; n.max(0) as usize];
+        let got = goober_result_read(buf.as_mut_ptr(), n.max(0));
+        buf.truncate(got.max(0) as usize);
+        buf
+    };
+    serde_json::from_slice(&text).unwrap_or_else(|_| json!({ "error": "unreadable result" }))
 }
 
 /// The request document (005 §3): method, path, params, query, headers, body, user, ...

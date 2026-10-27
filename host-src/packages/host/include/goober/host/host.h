@@ -67,6 +67,14 @@ class Host {
   boost::json::array timers_due();
   std::optional<int> run_timer_now(const std::string& name, const std::string& tenant, std::string* error);
 
+  // The outbox (035; design/machine/015.Network.md): delivers what's due and returns how
+  // many were delivered. A host thread calls it every two seconds; tests call it directly.
+  int outbox_tick(int64_t now_ms);
+  boost::json::array outbox_list(const std::string& state);
+  // Retries (or, with retry false, discards) a dead element.
+  bool outbox_set(const std::string& tenant, const std::string& database, int64_t id, bool retry);
+  class KeyStore& keys() { return *keys_; }
+
   // Waits until queued mail has been handed to the mail server (tests).
   void drain_mail();
 
@@ -181,6 +189,19 @@ class Host {
   int64_t started_ms_ = 0;
   std::atomic<uint64_t> requests_{0};
   RateLimiter limiter_;
+  std::unique_ptr<class KeyStore> keys_;
+  std::thread outbox_thread_;
+  void run_outbox();
+  std::vector<std::pair<std::string, std::string>> outbox_locations();
+  std::unique_ptr<sqlite::Db> open_outbox(const std::string& tenant, const std::string& database);
+  bool enqueue_outbox(const manifest::Manifest& m, const std::string& tenant, std::vector<struct OutboxElement>& pending,
+                      db::Session* session, std::string* error);
+  std::string external_call(struct CallContext& ctx, std::string_view service, std::string_view method,
+                            std::string_view request);
+  void egress_log(const std::string& tenant, const std::string& box, const std::string& service,
+                  const std::string& method, const std::string& verb, const std::string& url, int status,
+                  const std::string& error, int64_t us, size_t bytes_out, size_t bytes_in,
+                  const std::string& request_id, int64_t outbox_id);
   struct TimerState;
   std::unique_ptr<TimerState> timers_;
   std::thread timer_thread_;

@@ -37,7 +37,8 @@ Import only from module "goober":
 | goober_random_fill | (ptr, len) -> i32 | Random bytes from a per-request seed (logged, so replayable). |
 | goober_log | (level, ptr, len) -> i32 | A line for box_logs, written after the call. |
 | goober_sql | (strategy_ptr, strategy_len, sql_ptr, sql_len, params_ptr, params_len) -> i32 | Runs one SQL statement through a data strategy; returns the result's length. |
-| goober_result_read | (ptr, len) -> i32 | Copies the last SQL result into memory. |
+| goober_result_read | (ptr, len) -> i32 | Copies the last SQL or call result into memory. |
+| goober_call | (service_ptr, service_len, method_ptr, method_len, request_ptr, request_len) -> i32 | Calls a declared external service; returns the result's length. |
 
 Export `memory`, and one function per route, tool, and timer: `goober_route_$name`, taking
 nothing and returning i32 (0 means it ran; anything else is a 500 and rolls back). A bad
@@ -132,6 +133,28 @@ timers_list. Fires run once per tenant the box serves.
    INSERT ... ON CONFLICT DO UPDATE); pure functions only; 2 s, 4 MiB per value, 8 MiB per
    result. All of a request's writes commit together if the box answers below 500.
    Operators look with db_list, db_describe, and db_query.
+
+## Calling other services
+
+A box has no sockets. It calls services the manifest declares, through the host:
+"external": {"stripe": {
+  "base": "https://api.stripe.com",            https (or http://127.0.0.1:PORT, local mode only)
+  "credentials": "keys/system/stripe",         or keys/tenant/{!tenant}/stripe; set with key_set
+  "auth": {"header": "Authorization", "prefix": "Bearer "},   the default
+  "methods": {
+    "price": {"verb": "get", "path": "/v1/prices/{price_id}"},             safe: sent now
+    "refund": {"verb": "post", "path": "/v1/refunds", "idempotency": "header/Idempotency-Key",
+               "require": {"body.metadata.tenant": "{!tenant}"},
+               "delivery": {"attempts": 8, "backoff-ms": 1000, "within-ms": 600000},
+               "budget": {"calls": 3}}}}}
+goober_call("stripe", "price", {"path": {"price_id": "p_1"}, "query": {...}}) answers
+{"status", "content_type", "body", "json"} at once. An effectful method (post, put, patch,
+delete; or "effect": "outbox") answers {"accepted": true, "key"} and is delivered only if the
+request commits, retried with the same idempotency key, and dead-lettered if it can't land
+(outbox_dead_letters, outbox_retry). "effect": "immediate" sends an effectful call now, even if
+the request later fails. require pins fields to {!email}, {!user_id}, {!tenant}, {!domain}, or a
+literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
+every call without query strings or bodies.
 
 ## Types
 

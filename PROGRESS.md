@@ -38,8 +38,8 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 023 Sourcing | none | | Sources, `append`, event routes, cursors. |
 | 025 DataShape | none | A SQLite transaction per database per request (008 §6). | Write sets, bundles, layered reads, leases, worst-case checks. |
 | 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets. | `pattern: "query"` iterators, plan checks, pagination cursors. |
-| 030 Larger env. | none | Operators can fetch an https image with curl (Q21). | `external`, OpenAPI clients, `require`, credentials, egress audit. |
-| 035 Outbox | none | | Outbox elements, dispatcher, idempotency keys, dead letters. |
+| 030 Larger env. | partial | `external` services by verb and path, `require` pins from the context, credentials by key name, per-request budgets, an egress log (015). | OpenAPI documents and generated clients, async calls, per-service rate limits, box-to-box calls. |
+| 035 Outbox | partial | Elements committed with the request's writes, a dispatcher with ordered delivery per service, backoff, stable idempotency keys, dead letters and retry (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`, checked by the host (011). | The status vocabulary, CORS, ETags on box GETs, compression, ranges; undeclared routes still see every header and parameter. |
 | 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
@@ -49,7 +49,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
 | 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, the agent history on the account page, a run with a real MCP client. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
-| 064 Keys | none | Secrets live in the host config file (mode 0600). | The vault, envelope encryption, `keys/...`. |
+| 064 Keys | partial | `keys/system/...` and `keys/tenant/{!tenant}/...`, set write-only by operators, attached by the host at call time (015). | The vault, envelope encryption, rotation, user keys, the key screen for people. |
 | 070 UI | partial | Markdown, Mustache with layouts, content negotiation for box JSON through templates, strict CSP on templated pages (007). | `static` in manifests, pins, the `/goober/` client script, sign-in through the product layout. |
 | 099 The system | partial | Plain HTTP behind Caddy; systemd unit from setup. | Litestream, Stalwart, NATS, on-demand TLS ask. |
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
@@ -177,11 +177,14 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       (`design/machine/014.Time.md`).
 - [x] The desk's 6am briefing: in each device's zone, "N approvals are waiting for you."
 
-### Phase 7: effects (035, 039) and push
-- [ ] The outbox: elements captured with the request, delivered after commit, with
-      idempotency keys and dead letters.
-- [ ] Internal routes, so a decision can tell the agent's box.
-- [ ] Push through FCM once decision 7 is made.
+### Phase 7: effects (030, 035, 039) and push
+- [x] External services (`external`, `goober_call`): safe calls now, effectful ones through an
+      outbox committed with the request's writes, delivered in order with retries, one
+      idempotency key, dead letters, and operator tools; a write-only key store
+      (`design/machine/015.Network.md`).
+- [ ] Internal routes (039), so boxes call boxes and a decision can tell the agent's box.
+- [ ] Outbox result routes (035), so a box hears how its delivery went.
+- [ ] Push through FCM once decision 7 is made (Q26).
 
 ### Building products
 - [x] `box_guide` on the operator MCP: the boundary, manifest, routes, tools, timers, data,

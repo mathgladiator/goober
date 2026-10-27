@@ -36,6 +36,9 @@ struct CallInput {
   // Runs one statement for goober_sql: (strategy, sql, params JSON) to a result JSON.
   // Without it, goober_sql answers {"error": ...}.
   std::function<std::string(std::string_view, std::string_view, std::string_view)> sql;
+  // Calls a declared external service for goober_call: (service, method, request JSON) to a
+  // result JSON (design/machine/015.Network.md). Without it, goober_call answers {"error"}.
+  std::function<std::string(std::string_view, std::string_view, std::string_view)> call;
 };
 
 struct LogLine {

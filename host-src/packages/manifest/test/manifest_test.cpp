@@ -269,3 +269,38 @@ TEST(Manifest, TimersAndTimerSources) {
   refuse(R"({"box":"t","domains":["*"],"data":{"sqlite3":{"p":{"schema":"s","database":"d","pattern":"by_timer","table":"t"}}},
             "routes":{"timer":{"x":{"name":"x","source":"p","at-field":"when"}}}})", "active-field");
 }
+
+TEST(Manifest, ExternalServices) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"n","domains":["*"],"external":{"mailer":{
+      "base":"https://mail.example.com/v3/","credentials":"keys/tenant/{!tenant}/ses",
+      "auth":{"header":"X-Api-Key","prefix":""},
+      "methods":{"send":{"verb":"POST","path":"/messages","idempotency":"header/Idempotency-Key",
+                         "require":{"body.to":"{!email}"},"budget":{"calls":3}},
+                 "status":{"verb":"get","path":"/messages/{message_id}"}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  const auto& svc = m->external.at(0);
+  EXPECT_EQ(svc.base, "https://mail.example.com/v3");
+  EXPECT_EQ(svc.auth_header, "x-api-key");
+  EXPECT_EQ(svc.methods.at("send").effect, "outbox");  // effectful verbs wait for the commit
+  EXPECT_EQ(svc.methods.at("status").effect, "none");  // GET is safe
+  EXPECT_EQ(svc.methods.at("send").idempotency_header, "idempotency-key");
+  EXPECT_TRUE(svc.has_outbox());
+
+  auto refuse = [&](const std::string& ext, const char* why) {
+    std::string e;
+    std::string text = R"({"box":"n","domains":["*"],"external":)" + ext + "}";
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"s":{"base":"http://example.com","methods":{"m":{"verb":"get"}}}})", "https");
+  refuse(R"({"s":{"base":"https://example.com?x=1","methods":{"m":{"verb":"get"}}}})", "https");
+  refuse(R"({"s":{"base":"https://example.com"}})", "needs methods");
+  refuse(R"({"s":{"base":"https://example.com","credentials":"sk_live_123","methods":{"m":{"verb":"get"}}}})", "names a key");
+  refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"fetch"}}}})", "verb");
+  refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"get","path":"/a/../b"}}}})", "path");
+  refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"get","require":{"to":"x"}}}}})", "body.to");
+  refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"get","require":{"body.to":"{!password}"}}}}})", "{!email}");
+  refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"post","effect":"later"}}}})", "effect");
+  EXPECT_TRUE(parse_manifest(R"({"box":"n","domains":["*"],"external":{"dev":{"base":"http://127.0.0.1:9000","methods":{"m":{"verb":"get"}}}}})", &err)) << err;
+}

@@ -15,7 +15,9 @@
 #include "goober/json/json.h"
 #include "goober/router/path.h"
 #include "http_util.h"
+#include "keys.h"
 #include "mailer.h"
+#include "network.h"
 #include "timer_state.h"
 
 namespace goober::host {
@@ -138,6 +140,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
   timers_ = std::make_unique<TimerState>();
+  keys_ = std::make_unique<KeyStore>(config->storage);
   smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
@@ -170,6 +173,7 @@ uint16_t Host::start() {
       opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond)); });
   server_->start();
   timer_thread_ = std::thread([this] { run_timers(); });
+  outbox_thread_ = std::thread([this] { run_outbox(); });
   return server_->port();
 }
 
@@ -181,6 +185,7 @@ void Host::stop() {
     }
     timer_cv_.notify_all();
     timer_thread_.join();
+    if (outbox_thread_.joinable()) outbox_thread_.join();
   }
   if (!server_) return;
   // Graceful: stop taking connections, let the requests already here finish (up to ten
@@ -584,6 +589,19 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       return session->run(strategy, sql, params);
     };
   }
+  // External services: calls go out through the host; effectful ones wait in `net.pending`
+  // until the request commits (015).
+  CallContext net;
+  if (!m.external.empty()) {
+    net.manifest = &m;
+    net.tenant = tenant;
+    net.domain = doc.contains("domain") ? std::string(doc.at("domain").as_string()) : "";
+    net.request_id = request_id;
+    net.user = user_json(who);
+    input.call = [this, &net](std::string_view service, std::string_view method, std::string_view request) {
+      return external_call(net, service, method, request);
+    };
+  }
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(options.timeout_ms ? options.timeout_ms : m.behavior.timeout_ms),
                                    cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
@@ -638,6 +656,16 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   }
   bool ok = (result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status < 500) ||
             (options.no_response_ok && result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse);
+  if (ok && !net.pending.empty() && session) {
+    std::string err;
+    if (!enqueue_outbox(m, tenant, net.pending, &*session, &err)) {
+      ok = false;
+      result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+      result.error = "outbox: " + err;
+      extra["outcome"] = "outbox_failed";
+    }
+    extra["outbox"] = int64_t(net.pending.size());
+  }
   if (ok && session && options.before_commit) {
     std::string err;
     if (!options.before_commit(*session, &err)) {
@@ -662,6 +690,14 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                                        {"level", "host"},
                                                        {"text", "commit failed: " + err}}));
     }
+  }
+  if (ok && !net.pending.empty() && !session) {
+    // A box without data has no transaction to join; its elements go in once it succeeded.
+    std::string err;
+    if (!enqueue_outbox(m, tenant, net.pending, nullptr, &err)) {
+      std::cerr << "goober-host: outbox for " << m.box << ": " << err << "\n";
+    }
+    extra["outbox"] = int64_t(net.pending.size());
   }
   return BoxCall{std::move(result), std::move(extra)};
 }

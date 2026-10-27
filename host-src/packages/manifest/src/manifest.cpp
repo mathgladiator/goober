@@ -35,7 +35,7 @@ namespace {
 
 // Fields from 150.DeepManifest.md that v1 accepts with a warning.
 const std::set<std::string> kLaterTopLevel = {"pins",    "policy",   "deployment",
-                                              "external", "keys", "static",   "headers",
+                                              "keys", "static",   "headers",
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
                                               "instances"};
@@ -223,6 +223,149 @@ bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifes
     if (t.missed != "once" && t.missed != "skip") return *error = where + ".missed must be once or skip", false;
     if (t.timeout_ms && (*t.timeout_ms < 1 || *t.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
     m->timers.push_back(std::move(t));
+  }
+  return true;
+}
+
+bool valid_identifier(std::string_view s) {
+  if (s.empty() || s.size() > 64 || (s[0] >= '0' && s[0] <= '9')) return false;
+  for (char c : s) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
+  }
+  return true;
+}
+
+// external.$service (030; 035): an https base, credentials by name, and methods.
+bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
+  std::string err;
+  for (const auto& kv : ext) {
+    std::string where = "external." + std::string(kv.key());
+    if (!base::is_valid_name(kv.key())) return *error = where + ": a service label must match [a-z][a-z0-9_]*", false;
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    const auto& def = kv.value().as_object();
+    ExternalService svc;
+    svc.name = std::string(kv.key());
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "base" || k == "credentials" || k == "methods" || k == "auth") continue;
+      if (k == "openapi" || k == "operation") {
+        m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
+        continue;
+      }
+      if (k == "box" || k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    svc.base = get_string(def, "base", &err).value_or("");
+    // https, or a loopback http address for local development, which the host calls only
+    // in local mode.
+    std::string_view scheme_rest = svc.base.starts_with("https://")                ? std::string_view(svc.base).substr(8)
+                                   : svc.base.starts_with("http://127.0.0.1:") ||
+                                           svc.base.starts_with("http://localhost:") ? std::string_view(svc.base).substr(7)
+                                                                                      : std::string_view();
+    if (scheme_rest.empty() || scheme_rest[0] == '/' || svc.base.size() > 256 ||
+        svc.base.find_first_of("?#@ \\") != std::string::npos) {
+      return *error = where + ".base must be an https URL like https://api.example.com, with no query", false;
+    }
+    while (svc.base.ends_with("/")) svc.base.pop_back();
+    svc.credentials = get_string(def, "credentials", &err).value_or("");
+    if (!svc.credentials.empty()) {
+      std::string_view c = svc.credentials;
+      std::string_view rest = c.starts_with("keys/system/") ? c.substr(12)
+                              : c.starts_with("keys/tenant/{!tenant}/") ? c.substr(22)
+                                                                         : std::string_view();
+      if (!base::is_valid_name(rest)) {
+        return *error = where + ".credentials names a key: keys/system/$name or keys/tenant/{!tenant}/$name", false;
+      }
+    }
+    if (const auto* auth = get_object(def, "auth", &err)) {
+      if (auto h = get_string(*auth, "header", &err)) svc.auth_header = base::to_lower(*h);
+      if (auto p = get_string(*auth, "prefix", &err)) svc.auth_prefix = *p;
+      for (char c : svc.auth_header) {
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return *error = where + ".auth.header is a header name", false;
+      }
+      for (char c : svc.auth_prefix) {
+        if (static_cast<unsigned char>(c) < 0x20) return *error = where + ".auth.prefix holds a control character", false;
+      }
+    }
+    const auto* methods = get_object(def, "methods", &err);
+    if (!methods || methods->empty()) return *error = where + ": needs methods, the calls the box may make", false;
+    for (const auto& mk : *methods) {
+      std::string mw = where + ".methods." + std::string(mk.key());
+      if (!valid_identifier(mk.key())) return *error = mw + ": a method name is an identifier", false;
+      if (!mk.value().is_object()) return *error = mw + " must be an object", false;
+      const auto& md = mk.value().as_object();
+      for (const auto& f : md) {
+        std::string k(f.key());
+        if (k == "verb" || k == "path" || k == "effect" || k == "idempotency" || k == "delivery" || k == "budget" ||
+            k == "require") {
+          continue;
+        }
+        if (k == "result-route") {
+          m->warnings.push_back(mw + ".result-route is accepted but not implemented in v1");
+          continue;
+        }
+        return *error = mw + ": unknown field \"" + k + "\"", false;
+      }
+      ExternalMethod em;
+      em.name = std::string(mk.key());
+      em.verb = base::to_lower(get_string(md, "verb", &err).value_or(""));
+      if (em.verb != "get" && em.verb != "post" && em.verb != "put" && em.verb != "patch" && em.verb != "delete") {
+        return *error = mw + ".verb is get, post, put, patch, or delete", false;
+      }
+      em.path = get_string(md, "path", &err).value_or("/");
+      if (em.path.empty() || em.path[0] != '/' || em.path.find_first_of("?# \\") != std::string::npos ||
+          em.path.find("..") != std::string::npos) {
+        return *error = mw + ".path starts with / and holds no query", false;
+      }
+      for (size_t at = em.path.find('{'); at != std::string::npos; at = em.path.find('{', at + 1)) {
+        auto close = em.path.find('}', at);
+        if (close == std::string::npos || !valid_identifier(em.path.substr(at + 1, close - at - 1))) {
+          return *error = mw + ".path parameters look like {message_id}", false;
+        }
+      }
+      bool safe = em.verb == "get";
+      em.effect = get_string(md, "effect", &err).value_or(safe ? "none" : "outbox");
+      if (em.effect != "none" && em.effect != "outbox" && em.effect != "immediate") {
+        return *error = mw + ".effect is none, outbox, or immediate", false;
+      }
+      if (auto idem = get_string(md, "idempotency", &err)) {
+        if (!idem->starts_with("header/") || idem->size() < 8) return *error = mw + ".idempotency is header/$Name", false;
+        em.idempotency_header = base::to_lower(idem->substr(7));
+      }
+      if (const auto* d = get_object(md, "delivery", &err)) {
+        em.attempts = get_int(*d, "attempts", &err).value_or(em.attempts);
+        em.backoff_ms = get_int(*d, "backoff-ms", &err).value_or(em.backoff_ms);
+        em.within_ms = get_int(*d, "within-ms", &err).value_or(em.within_ms);
+        if (em.attempts < 1 || em.attempts > 50 || em.backoff_ms < 100 || em.backoff_ms > 3'600'000 ||
+            em.within_ms < 1000 || em.within_ms > 7LL * 24 * 3600 * 1000) {
+          return *error = mw + ".delivery: attempts 1-50, backoff-ms 100-3600000, within-ms up to 7 days", false;
+        }
+      }
+      if (const auto* b = get_object(md, "budget", &err)) {
+        em.budget_calls = get_int(*b, "calls", &err).value_or(em.budget_calls);
+        if (em.budget_calls < 1 || em.budget_calls > 100) return *error = mw + ".budget.calls is 1 to 100", false;
+      }
+      if (const auto* r = get_object(md, "require", &err)) {
+        for (const auto& rk : *r) {
+          std::string field(rk.key());
+          auto dot = field.find('.');
+          std::string part = dot == std::string::npos ? "" : field.substr(0, dot);
+          if ((part != "body" && part != "query" && part != "path" && part != "header") || dot + 1 >= field.size()) {
+            return *error = mw + ".require keys look like body.to, query.user, path.id, or header.x-user", false;
+          }
+          if (!rk.value().is_string()) return *error = mw + ".require values are strings", false;
+          std::string v(rk.value().as_string());
+          if (v.starts_with("{!") && v != "{!email}" && v != "{!user_id}" && v != "{!tenant}" && v != "{!domain}") {
+            return *error = mw + ".require may use {!email}, {!user_id}, {!tenant}, or {!domain}", false;
+          }
+          em.require[field] = v;
+        }
+      }
+      if (!err.empty()) return *error = mw + ": " + err, false;
+      svc.methods[em.name] = std::move(em);
+    }
+    if (!err.empty()) return *error = where + ": " + err, false;
+    m->external.push_back(std::move(svc));
   }
   return true;
 }
@@ -442,7 +585,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   for (const auto& kv : root) {
     std::string key(kv.key());
     if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
-        key == "templates" || key == "data" || key == "types") {
+        key == "templates" || key == "data" || key == "types" || key == "external") {
       continue;
     }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
@@ -500,6 +643,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
       return *error = "\"types\" names the types document, a file like orders.openapi.json", std::nullopt;
     }
     m.types = *t;
+  }
+  if (!err.empty()) return *error = err, std::nullopt;
+  if (const auto* ext = get_object(root, "external", &err)) {
+    if (!parse_external(*ext, &m, error)) return std::nullopt;
   }
   if (!err.empty()) return *error = err, std::nullopt;
   if (const auto* data = get_object(root, "data", &err)) {
@@ -560,7 +707,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           if (!shapes.add(*pattern, v, 0)) {
             return *error = where + " conflicts with another route of the same shape", std::nullopt;
           }
-          HttpRoute route{v, *name, *pattern, false, {}, {}};
+          HttpRoute route;
+          route.verb = v;
+          route.name = *name;
+          route.pattern = *pattern;
           if (auto t = get_string(def, "template", &err)) {
             if (!base::is_valid_name(*t)) return *error = where + ": template \"" + *t + "\" must match [a-z][a-z0-9_]*", std::nullopt;
             route.template_name = *t;
@@ -642,6 +792,13 @@ bool check_types(const Manifest& m, const types::Types* t, std::string* error) {
   }
   if (t && m.types.empty()) return *error = "a types document came with a manifest that names none", false;
   return true;
+}
+
+bool ExternalService::has_outbox() const {
+  for (const auto& [_, m] : methods) {
+    if (m.effect == "outbox") return true;
+  }
+  return false;
 }
 
 std::string DataStrategy::database_for(std::string_view tenant) const {

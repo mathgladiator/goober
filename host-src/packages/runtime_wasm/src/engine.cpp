@@ -84,7 +84,7 @@ const std::vector<std::string>& abi_imports() {
   static const std::vector<std::string> kImports = {
       "goober_request_size", "goober_request_read", "goober_respond", "goober_header_set",
       "goober_now_ms",       "goober_random_fill",  "goober_log",        "goober_sql",
-      "goober_result_read"};
+      "goober_result_read",  "goober_call"};
   return kImports;
 }
 
@@ -229,6 +229,25 @@ struct Engine::Impl {
                             return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
                           }),
          "goober_sql");
+    must(linker.func_wrap("goober", "goober_call",
+                          [](wasmtime::Caller caller, int32_t sv_ptr, int32_t sv_len, int32_t m_ptr, int32_t m_len,
+                             int32_t req_ptr, int32_t req_len) -> int32_t {
+                            auto& st = state_of(caller);
+                            auto mem = memory_of(caller);
+                            auto service = view(mem, sv_ptr, sv_len);
+                            auto method = view(mem, m_ptr, m_len);
+                            auto request = view(mem, req_ptr, req_len);
+                            if (!service || !method || !request) return -1;
+                            // Copied out first: the call may take a while, and the views point into box memory.
+                            std::string sv(*service), me(*method), rq(*request);
+                            if (st.input->call) {
+                              st.result = st.input->call(sv, me, rq);
+                            } else {
+                              st.result = R"({"error":"this box declares no external services"})";
+                            }
+                            return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
+                          }),
+         "goober_call");
     must(linker.func_wrap("goober", "goober_result_read",
                           [](wasmtime::Caller caller, int32_t ptr, int32_t len) -> int32_t {
                             auto& st = state_of(caller);

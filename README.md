@@ -121,6 +121,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/012.Agents.md`](design/machine/012.Agents.md) | Agents over MCP: box tools at `/mcp` on every domain, filtered by roles, typed, audited, and discoverable through OAuth. |
 | [`design/machine/013.SecurityReview.md`](design/machine/013.SecurityReview.md) | The first internal security review: findings, fixes, what remains, and what was found sound. |
 | [`design/machine/014.Time.md`](design/machine/014.Time.md) | Time: timer routes on every-ms and cron, data-driven timers per row and zone, one-shot rows, catch-up. |
+| [`design/machine/015.Network.md`](design/machine/015.Network.md) | The network and the outbox: declared services, credentials the box never sees, and effects that happen only if the request commits. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 
