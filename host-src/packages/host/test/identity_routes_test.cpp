@@ -127,6 +127,13 @@ TEST_F(IdentityRoutesTest, SignInPageIsHostOwnedAndUnframeable) {
   EXPECT_NE(r.body.find("Email me a code"), std::string::npos);
   EXPECT_NE(r.body.find("Local mode"), std::string::npos);
   EXPECT_EQ(r.headers["x-frame-options"], "DENY");
+  // The customer page says nothing of host operators; they have their own unlinked page.
+  EXPECT_EQ(r.body.find("operator"), std::string::npos);
+  auto h = fetch(port, bhttp::verb::get, "/identity/sign-in/as-host");
+  EXPECT_EQ(h.status, 200);
+  EXPECT_NE(h.body.find("Host sign-in"), std::string::npos);
+  EXPECT_NE(h.body.find("name=\"as\" value=\"host\""), std::string::npos);
+  EXPECT_EQ(h.headers["x-frame-options"], "DENY");
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/nope").status, 404);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/me").status, 401);
   // A form posted from another origin is refused.

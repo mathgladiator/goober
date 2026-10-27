@@ -38,7 +38,8 @@ configured `$domain`, so a production config can be played on a laptop.
 Sign in at `/identity/sign-in` on any domain with an emailed six-digit code; in local mode
 the code is printed by the host. `/identity/account` shows who you are and your roles. The
 address set as a domain's `owner` becomes `owner` of that tenant's realm at sign-in, and the
-addresses in `identity.operators` can sign in as host operators. Every route declares
+addresses in `identity.operators` can sign in as host operators at `/identity/sign-in/as-host`,
+which nothing links to. Every route declares
 `"public": true` or `"requirements"`, and the box receives `user` in its request document.
 See [`006.LocalIdentity.md`](../design/machine/006.LocalIdentity.md).
 

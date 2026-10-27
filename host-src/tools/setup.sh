@@ -392,7 +392,7 @@ Next:
   ${B}just mcp $DIR${N}             mint an operator token and print the claude command
   ${B}just serve $DIR${N}           run it in the foreground to try it (no --local)
   install ${B}$DIR/deploy/${N} for systemd and Caddy, and point DNS at this server
-  sign in at ${B}$PUBLIC_URL/identity/sign-in${N} with "host operator" ticked; the code is
+  sign in as an operator at ${B}$PUBLIC_URL/identity/sign-in/as-host${N}; the code is
   in ${B}$DIR/storage/mail/outbox/${N} until a real mailer lands
 EOF
 else

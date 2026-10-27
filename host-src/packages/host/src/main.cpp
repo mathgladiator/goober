@@ -138,7 +138,8 @@ int main(int argc, char** argv) {
               << (local ? " (local mode)" : "") << "\n"
               << "  storage:    " << config->storage.string() << "\n"
               << "  operations: " << base << goober::host::kOperationsMcpPath << " (MCP, bearer token)\n"
-              << "  sign in:    /identity/sign-in on any domain; account at /identity/account\n";
+              << "  sign in:    /identity/sign-in on any domain (operators: /identity/sign-in/as-host); "
+                 "account at /identity/account\n";
     for (const auto& [domain, entry] : config->domains) {
       std::cerr << "  domain:     " << domain << " -> tenant " << entry.tenant;
       if (local && domain != "localhost" && domain != "127.0.0.1" && !domain.ends_with(".localhost")) {

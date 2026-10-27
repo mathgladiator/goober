@@ -139,14 +139,16 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     return "<p class=\"muted local\">Local mode: no mail leaves this machine. The code is printed in the terminal "
            "running goober-host, and saved under <code>storage/mail/outbox/</code>.</p>";
   };
+  // Host operators sign in at /identity/sign-in/as-host, which nothing links to, so a
+  // tenant's customers never see a way in to the host.
   auto sign_in_form = [&](const std::string& ret, bool as_host, const std::string& error) {
-    return "<h1>Sign in</h1><p class=\"muted\">to <strong>" + html_escape(domain) + "</strong></p>" +
-           (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
+    return std::string(as_host ? "<h1>Host sign-in</h1>" : "<h1>Sign in</h1>") + "<p class=\"muted\">" +
+           (as_host ? "as a host operator, acting on <strong>" : "to <strong>") + html_escape(domain) +
+           "</strong></p>" + (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
            "<form method=\"post\" action=\"/identity/email/start\"><label for=\"email\">Email</label>"
            "<input id=\"email\" type=\"email\" name=\"email\" required autofocus autocomplete=\"email\">"
-           "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">"
-           "<label class=\"check\"><input type=\"checkbox\" name=\"as\" value=\"host\"" +
-           (as_host ? " checked" : "") + "> Sign in as a host operator</label>"
+           "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">" +
+           (as_host ? "<input type=\"hidden\" name=\"as\" value=\"host\">" : "") +
            "<button>Email me a code</button></form>"
            "<p class=\"muted\">We'll email you a six-digit code to type here. Nothing to remember.</p>" +
            local_note();
@@ -163,7 +165,8 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
            "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">" +
            (as_host ? "<input type=\"hidden\" name=\"as\" value=\"host\">" : "") +
            "<button>Sign in</button></form><p class=\"muted\">Only continue if you started this sign-in yourself. "
-           "<a href=\"/identity/sign-in?return=" + base::percent_encode(ret) + "\">Use a different address</a>.</p>" +
+           "<a href=\"/identity/sign-in" + (as_host ? "/as-host" : "") + "?return=" + base::percent_encode(ret) +
+           "\">Use a different address</a>.</p>" +
            local_note();
   };
   auto get = [](const std::map<std::string, std::string>& m, const char* k) {
@@ -178,9 +181,11 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
   }
   int64_t now = base::now_unix_ms();
 
-  if (path == "/identity/sign-in" && is_get) {
-    return finish(page(200, "Sign in", sign_in_form(safe_return(get(query, "return")), get(query, "as") == "host", "")),
-                  R"({"identity":"sign_in_page"})");
+  if ((path == "/identity/sign-in" || path == "/identity/sign-in/as-host") && is_get) {
+    bool as_host = path == "/identity/sign-in/as-host";
+    return finish(page(200, as_host ? "Host sign-in" : "Sign in",
+                       sign_in_form(safe_return(get(query, "return")), as_host, "")),
+                  as_host ? R"({"identity":"host_sign_in_page"})" : R"({"identity":"sign_in_page"})");
   }
   if (path == "/identity/email/start" && is_post) {
     std::string email = base::to_lower(get(form, "email"));
