@@ -2,8 +2,9 @@
 
 **The SlopBox Orchestration Service.**
 
-> Status: **design phase.** There is no code yet. The design is being written in
-> [`design/`](design/), and implementation choices are made deliberately, one at a time.
+> Status: **design phase, with a first host to play with.** The design is written in
+> [`design/`](design/). A first host lives in [`host-src/`](host-src/README.md), and
+> [`PROGRESS.md`](PROGRESS.md) is the honest account of what it does and doesn't do yet.
 
 ## The bet
 
@@ -103,6 +104,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/400.Cluster.Service.md`](design/human/400.Cluster.Service.md) | Cluster, routing, and services: service mode, one ownership registry, leases with fencing epochs, routing, and recovery. |
 | [`design/human/410.API.md`](design/human/410.API.md) | The operator API: every operation as HTTP and MCP, by area, with approval as the only UI-only action. |
 | [`design/human/420.Migration.md`](design/human/420.Migration.md) | Migration: schemas as partial table sets, immediate expansion/contraction/indexing, refused changes, upgrade boxes that force a change, data migrations through boxes. |
+| [`design/human/999.Mobile.md`](design/human/999.Mobile.md) | The mobile terminal: the dumb app's contract with goober (OAuth as a person client, /terminal/v1 routes, alarms as rules, idempotent approvals, a linted markdown dialect, push as a nudge). |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
 | [`design/machine/PHILOSOPHY.md`](design/machine/PHILOSOPHY.md) | Engineering philosophy carried over from an earlier project. Not yet ratified. |
 | [`design/machine/feedback-2026-10-04.md`](design/machine/feedback-2026-10-04.md) | Long-form outside review: what is unique, what can be bought, limits and proposals, security, the Hearth rebuild, and the blue-collar OS goal. |
@@ -111,6 +113,8 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/feedback-2026-10-08.md`](design/machine/feedback-2026-10-08.md) | Daily review: P0s are the tenant-scoped role sweep, the missing `.schema` format, and the tenant-from-path contradiction; a careful look at 420. |
 | [`design/machine/005.FirstVersion.md`](design/machine/005.FirstVersion.md) | The first version: decisions from the human's answers, and the contract `host-src/` follows. |
 | [`design/machine/006.LocalIdentity.md`](design/machine/006.LocalIdentity.md) | v1 identity, local mode, operator tokens, setup, and the justfile. |
+| [`design/machine/007.Content.md`](design/machine/007.Content.md) | Content as its own vector: markdown, fragments, and documents, Mustache templates, listings and feeds, and attachments. |
+| [`design/machine/008.Databases.md`](design/machine/008.Databases.md) | Tenant databases: expand-only JSON schemas, direct SQL under SQLite's authorizer, request transactions, operator db tools. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 

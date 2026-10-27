@@ -4,8 +4,11 @@
 
 Goober is still mostly in the **design and context-building phase**. A first host (v1)
 lives in `host-src/`, built at the human's request so they can play with the design. Its
-decisions are recorded in `design/machine/005.FirstVersion.md`. Don't grow the code
-beyond what the human asks for.
+decisions are recorded in `design/machine/005.FirstVersion.md`. On 2026-10-26 the human
+asked Claude to keep executing the whole design, toward software they run for themselves
+and can build products on. `PROGRESS.md` at the repo root is the plan and the honest
+account: every human doc's status, what is faked or missing, and a checklist Claude works
+through. Keep it true with every change, and grow the code along that plan, not beyond it.
 
 ## The host (`host-src/`)
 
@@ -73,6 +76,7 @@ Read these before doing design work:
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
   - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, upgrade boxes that force a change, data migrations via boxes.
+  - `design/human/999.Mobile.md`: the dumb mobile terminal: a person OAuth client (PKCE, loopback any port), `/terminal/v1/` routes on a box, alarms as rules, idempotent decisions, linted markdown, push as a nudge; eight open decisions.
 - `design/QUESTIONS.md`: questions still open after the first round, plus new ones from building v1.
 - `design/machine/`: drafted by Claude. Proposals until a human ratifies them.
   - `design/machine/005.FirstVersion.md`: the v1 decisions from the human's answers: wasmtime,
