@@ -9,14 +9,18 @@
 
 ## In one paragraph
 
-Goober today is a **single-machine host you can play with and run a personal site on**.
-It serves a CMS (markdown, HTML, templates, listings, feeds, image attachments), runs
-WASM boxes behind HTTP routes with grant-role requirements, gives boxes per-tenant
-SQLite databases through checked SQL, signs people in with emailed codes, and is
-operated by an agent over MCP. It is **not yet** the system the human docs describe:
-there are no approvals, no write sets or outbox, no timers, no bus, no generated code,
-no types, no domain registry, and no cluster. The mobile terminal (999) is the current
-push, because it turns goober into something the human uses every day.
+Goober today is a **single-machine host you can run your own life and products on**,
+alone or with a few people. It serves a CMS (markdown, HTML, templates, listings, feeds,
+attachments); runs WASM boxes behind HTTP routes, MCP tools for agents, timers, and
+internal routes; gives boxes per-tenant SQLite through checked SQL and typed requests;
+lets boxes call outside services with keys they never see, through an outbox that only
+fires if the request commits; signs people in with emailed codes or OAuth (the dumb
+terminal, agents through the device flow or MCP clients); and is operated by an agent
+over MCP with 47 tools. It has had an internal security review and fuzzing, and it backs
+itself up while running. It is **not yet** the system the human docs describe: there are
+no approvals, no host write sets, no bus, no generated code, no domain registry, no
+mail routes, and no cluster, and a few things only the human can do: run the real dumb app,
+connect a real MCP client, and decide the open questions (Q17 to Q28).
 
 ## Status by design document
 
@@ -27,11 +31,11 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | --- | --- | --- | --- |
 | 000 Introduction | partial | WASM boxes with no POSIX, manifests as perimeter, fuel and timeouts, SQLite storage, ephemeral solo boxes. | Shadow traffic, A/B, forking, per-box cost. |
 | 005 Goals | partial | One binary on a laptop; Caddy in front for production (setup writes a Caddyfile); identity from day one. | Mail as a channel, the bus, timers, versions with approvers, the approval queue, worst-case answers from the manifest. |
-| 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `templates`, `data`. Per-route exports (005 §3 supersedes signals). | `signal`, `response` kinds, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, internal routes, 4xx clamping. |
+| 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `routes.mcp`, `routes.timer`, `routes.internal`, `templates`, `types`, `data`, `external`. Per-route exports (005 §3 supersedes signals). 5xx is the host's (011). | `signal`, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, 4xx clamping. |
 | 012 Configs | none | | Box-less config manifests, header priority, rewrites. |
-| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, new-session email, rate limits on the token endpoints. |
+| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, a separate origin for the screens (Q24). Rate limits, new-grant email, and browser sessions on the account page are built (013 review). |
 | 015 Domains | none | Domains live in the host config (005 §6). | The registry table, primaries and redirects, verification, TLS ask hook. |
-| 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `!` names refused. | `!domain`, `!email`, `!client_id`, and the rest; one-setter enforcement across protocols. |
+| 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `{!email}`, `{!user_id}`, `{!tenant}`, `{!domain}` in `require`; `client_id` for agents and a `caller` block for internal calls in the request document; `!` names refused. | Substituting `!client_id` and the rest in requirements; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload. | Traffic decisions, given-up routes, static and rewrite conflicts. |
 | 020 DataFlow | partial | `data.sqlite3.$strategy` with `pattern: "sql"`, `{!tenant}` database names. | `by_id`, `by_index`, named writes, generated row structs, data signatures. |
 | 021 PrimaryKeys | none | SQLite rowids (008 §9). | Host-minted ids, range leases. |
@@ -64,9 +68,9 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 330 Stability | none | | Capabilities, providers, pins, replay. |
 | 390 Quotas | none | | |
 | 400 Cluster | none | Single machine only. | |
-| 410 API | partial | ~40 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
+| 410 API | partial | 47 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients, timers, keys, the outbox, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | partial | Expand-only schema application, refused changes named per tenant (008 §3). | Contraction, emulated type changes, upgrade boxes. |
-| 999 Mobile | partial | OAuth as a person client (009); the `terminal` and `desk` boxes (010): me, config, sync, dashboards, idempotent decisions, devices, events; approvals, alarms, dashboards, and settings from agents, with no write path to decisions; checked end to end. Local mode answers the emulator's 10.0.2.2. | Push (decision 7), the outbox to tell agents, the 6am timer, MCP tools for agents, host-validated types, ETags on the snapshot, a run with the real app. |
+| 999 Mobile | partial | OAuth as a person client (009); the `terminal` and `desk` boxes (010): me, config, sync, dashboards, idempotent decisions, devices, events; approvals, alarms, dashboards, and settings from agents over HTTP or ten MCP tools, typed by the host, with no write path to decisions; a 6am briefing timer in each device's zone (014); ETags on the snapshot; 57 end-to-end checks. Local mode answers the emulator's 10.0.2.2. | Push (decision 7), telling an agent's box about a decision (agents poll), a run with the real app. |
 
 ## Production readiness, honestly
 
@@ -86,9 +90,10 @@ caveats, which Phase 3 works through:
   hold user data (300 wants none).
 - **No approvals**: whoever holds an operator token ships code live (005 §9).
 - **Box isolation is wasmtime's** (fuel, epoch deadlines, one memory and one bounded table,
-  no imports beyond `goober`). The host around it has had one internal review
-  (`013.SecurityReview.md`) and no outside one. The identity screens still share an origin
-  with box pages (Q24).
+  no imports beyond `goober`). The host around it has had one internal review, fuzzing,
+  and a sanitizer run (`013.SecurityReview.md`), and no outside review. The identity screens
+  still share an origin with box pages (Q24).
+- **Keys** for outside services are plain 0600 files, write-only through the tools.
 
 ## The plan
 
@@ -123,7 +128,7 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] The `desk` box for agents: create approvals, read their outcome, set alarms and
       dashboards; no write path to an approval's status.
 - [x] An end-to-end script that plays the app against a running host (`just terminal-e2e`,
-      48 checks). See `design/machine/010.Terminal.md`.
+      now 57 checks with MCP and the briefing). See `design/machine/010.Terminal.md`.
 - [ ] Try the real dumb app against the demo host. This needs the human: sign-in happens in a
       real browser. The app's own e2e test is tied to its dev server's `/oauth/consent`
       shortcut, so it can't drive goober's consent screen unchanged.
@@ -200,6 +205,6 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),
-mail routes (038), the upload verb (060), keys (064), the panel, approvals, deployments,
+mail routes (038), the upload verb (060), the key vault (064), the panel, approvals, deployments,
 bundles, working sets (300 to 320), stability (330), quotas (390), the cluster (400),
 and contraction (420). Each waits for the human to pull it forward.
