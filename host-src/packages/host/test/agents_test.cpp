@@ -211,6 +211,20 @@ TEST_F(AgentsTest, AgentsCallBoxToolsOverMcp) {
   auto hidden = rpc("tools/call", {{"name", "admin_only"}, {"arguments", bj::object{}}});
   EXPECT_NE(json::dump(hidden).find("unknown tool"), std::string::npos);  // not found, never forbidden
 
+  // The person sees it on their account page.
+  fetch(port, bhttp::verb::post, "/identity/email/start", {{"content-type", "application/x-www-form-urlencoded"}},
+        "email=exec%40example.com");
+  host->drain_mail();
+  auto files = base::list_files(root / "storage/mail/outbox");
+  std::sort(files.begin(), files.end());
+  auto mail = *base::read_file(root / "storage/mail/outbox" / files.back());
+  std::string code = mail.substr(mail.find(" is ") + 4, 6);
+  auto verify = fetch(port, bhttp::verb::post, "/identity/email/verify",
+                      {{"content-type", "application/x-www-form-urlencoded"}}, "email=exec%40example.com&code=" + code);
+  std::string cookie = verify.headers["set-cookie"].substr(0, verify.headers["set-cookie"].find(';'));
+  auto account = fetch(port, bhttp::verb::get, "/identity/account", {{"cookie", cookie}});
+  EXPECT_NE(account.body.find("What your agents did"), std::string::npos) << account.body.substr(0, 400);
+  EXPECT_NE(account.body.find("<code>add_order</code> by Grok"), std::string::npos);
   auto audit = base::read_file(root / "storage/logs/agents.log");
   ASSERT_TRUE(audit);
   EXPECT_NE(audit->find(R"("tool":"add_order")"), std::string::npos);

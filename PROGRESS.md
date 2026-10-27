@@ -47,7 +47,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
-| 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, the agent history on the account page, a run with a real MCP client. |
+| 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, a run with a real MCP client. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
 | 064 Keys | partial | `keys/system/...` and `keys/tenant/{!tenant}/...`, set write-only by operators, attached by the host at call time (015). | The vault, envelope encryption, rotation, user keys, the key screen for people. |
 | 070 UI | partial | Markdown, Mustache with layouts, content negotiation for box JSON through templates, strict CSP on templated pages (007). | `static` in manifests, pins, the `/goober/` client script, sign-in through the product layout. |
@@ -139,6 +139,7 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       (`design/machine/012.Agents.md`).
 - [x] The desk box offers ten MCP tools and typed HTTP bodies; the end-to-end script asks
       over MCP and answers on the terminal (55 checks).
+- [x] The account page shows what the person's agents did (the newest 20 tool calls).
 - [ ] Connect a real MCP client (Claude Code or Grok) to `/mcp` through OAuth.
 
 ### Phase 3: production readiness

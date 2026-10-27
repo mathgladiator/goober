@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "goober/base/encoding.h"
+#include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "http_util.h"
@@ -318,6 +319,33 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
       }
       apps += "<p><strong>Browser sessions</strong> <span class=\"muted\">(including this one)</span></p><ul>" +
               sessions + "</ul>";
+      // What agents did for this person, newest first (050 § The audit).
+      std::string history;
+      int shown = 0;
+      auto lines = base::tail_lines(cfg->storage / "logs" / "agents.log", 2000);
+      for (auto it = lines.rbegin(); it != lines.rend() && shown < 20; ++it) {
+        std::string e;
+        auto v = json::parse(*it, &e);
+        if (!v || !v->is_object()) continue;
+        const auto& o = v->as_object();
+        auto text = [&](const char* k) {
+          auto* f = o.if_contains(k);
+          return f && f->is_string() ? std::string(f->as_string()) : std::string();
+        };
+        auto* agent = o.if_contains("agent");
+        if (text("tenant") != tenant || text("user_id") != std::to_string(who->user.user_id) || !agent ||
+            !agent->is_bool() || !agent->as_bool() || text("tool").empty()) {
+          continue;
+        }
+        std::string client = text("client_id");
+        if (auto c = identity_->client(tenant, client)) client = c->name;
+        int64_t status = o.contains("status") && o.at("status").is_int64() ? o.at("status").as_int64() : 0;
+        history += "<li><code>" + html_escape(text("tool")) + "</code> by " + html_escape(client) +
+                   " <span class=\"muted\">" + html_escape(text("at").substr(0, 16)) +
+                   (status >= 400 ? " · refused" : "") + "</span></li>";
+        ++shown;
+      }
+      if (!history.empty()) apps += "<p><strong>What your agents did</strong></p><ul>" + history + "</ul>";
     }
     return finish(page(200, "Your account",
                        "<h1>" + html_escape(who->user.email) + "</h1><p class=\"muted\">" +
