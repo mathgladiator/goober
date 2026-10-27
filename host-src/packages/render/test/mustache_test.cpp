@@ -74,3 +74,17 @@ TEST(Mustache, MalformedTemplatesAreErrors) {
   EXPECT_FALSE(check_mustache("{{=<% %>=}}", &err));
   EXPECT_TRUE(check_mustache("plain {{x}} {{{y}}} {{#s}}{{/s}}", &err)) << err;
 }
+
+TEST(Mustache, OutputAndPartialsAreBounded) {
+  TemplateOptions o;
+  // Each partial includes the next twice: 2^16 copies without a bound.
+  o.partial = [](std::string_view name) -> std::optional<std::string> {
+    int n = std::stoi(std::string(name.substr(1)));
+    if (n >= 16) return std::string(1000, 'x');
+    std::string next = "p" + std::to_string(n + 1);
+    return "{{> " + next + "}}{{> " + next + "}}";
+  };
+  std::string err;
+  EXPECT_FALSE(render_mustache("{{> p0}}", boost::json::object{}, o, &err));
+  EXPECT_FALSE(err.empty());
+}

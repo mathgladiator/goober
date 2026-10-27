@@ -169,3 +169,25 @@ TEST_F(SiteTest, RedirectsStaticFilesAndRenderNamed) {
   ASSERT_TRUE(html) << err;
   EXPECT_EQ(*html, "<b>&lt;7&gt;</b>");
 }
+
+TEST_F(SiteTest, BrokenFrontMatterFailsClosed) {
+  allow = 200;
+  // Each of these meant to be private, and none may be served or listed as a public page.
+  put("a.md", "---\ntitle: A\nrequirements: [[\"owner\"]\n---\nsecret");  // bad JSON
+  put("b.md", "---\ntitle: B\nrequirements: [[\"owner\"]]\nsecret, never closed");
+  put("c.md", "---\ntitle: C\ndraft: True\n---\nwip");
+  put("d.html", "--- \ntitle: D\nrequirements: []\n---\n<p>secret</p>");  // trailing space: still front matter
+  put("notes/index.md", "---\ntitle: Notes\nlist: notes\n---\n");
+  put("notes/hidden.md", "---\ntitle: Hidden\nrequirements: [[\"owner\"]\n---\nsecret");
+  for (const char* path : {"/a", "/b", "/c"}) {
+    auto r = get(path);
+    EXPECT_EQ(r.status, 500) << path;
+    EXPECT_FALSE(r.error.empty()) << path;
+  }
+  allow = 401;
+  EXPECT_EQ(get("/d").status, 401);  // its requirements hold
+  allow = 200;
+  auto notes = get("/notes");
+  EXPECT_EQ(notes.status, 200);
+  EXPECT_EQ(notes.body.find("Hidden"), std::string::npos);  // a broken page isn't listed
+}

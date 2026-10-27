@@ -130,3 +130,20 @@ TEST(IdentityNames, RolesAndRealms) {
   EXPECT_TRUE(is_valid_realm("playground"));
   EXPECT_FALSE(is_valid_realm("../etc"));
 }
+
+TEST_F(IdentityTest, WrongGuessesAreCountedAcrossCodesForADay) {
+  std::string why;
+  int64_t t = kNow;
+  for (int round = 0; round < 4; ++round) {
+    id->start_email("playground", "eve@example.com", "localhost", true, t);
+    for (int i = 0; i < 5; ++i) EXPECT_FALSE(id->verify_email("playground", "eve@example.com", "000000", true, t, kDay, &why));
+    t += 11 * 60 * 1000;  // past the code window, so a new code can be mailed
+  }
+  // Twenty wrong guesses: even the right code is refused until the day has passed.
+  id->start_email("playground", "eve@example.com", "localhost", true, t);
+  EXPECT_FALSE(id->verify_email("playground", "eve@example.com", last_code(), true, t, kDay, &why));
+  EXPECT_NE(why.find("today"), std::string::npos) << why;
+  t += kDay + 1;
+  id->start_email("playground", "eve@example.com", "localhost", true, t);
+  EXPECT_TRUE(id->verify_email("playground", "eve@example.com", last_code(), true, t, kDay, &why)) << why;
+}

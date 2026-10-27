@@ -250,9 +250,28 @@ bool Identity::put_client(std::string_view realm_name, const Client& c, int64_t 
   return true;
 }
 
+void Identity::prune(std::string_view realm_name, int64_t now_ms) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  constexpr int64_t kDay = 24LL * 3600 * 1000;
+  // Codes long past use, and agents that registered a week ago and never signed anyone in.
+  sqlite::Stmt codes(r.db, "DELETE FROM authorization_codes WHERE expires_at < ?");
+  codes.bind(1, now_ms - kDay).run();
+  sqlite::Stmt devices(r.db, "DELETE FROM device_codes WHERE expires_at < ?");
+  devices.bind(1, now_ms - kDay).run();
+  sqlite::Stmt email(r.db, "DELETE FROM email_codes WHERE expires_at < ?");
+  email.bind(1, now_ms - kDay).run();
+  sqlite::Stmt idle(r.db,
+                    "DELETE FROM clients WHERE source = 'dynamic' AND created_at < ? AND client_id NOT IN "
+                    "(SELECT client_id FROM tokens) AND client_id NOT IN (SELECT client_id FROM authorization_codes) "
+                    "AND client_id NOT IN (SELECT client_id FROM device_codes)");
+  idle.bind(1, now_ms - 7 * kDay).run();
+}
+
 std::optional<Client> Identity::register_client(std::string_view realm_name, std::string_view name,
                                                 const std::vector<std::string>& redirect_uris, int64_t now_ms,
                                                 std::string* why) {
+  prune(realm_name, now_ms);
   Client c;
   c.client_id = "dyn_" + random_hex(12);
   c.name = std::string(name);
@@ -437,8 +456,12 @@ std::optional<Tokens> Identity::refresh(std::string_view realm_name, std::string
     return fail("invalid_grant", "refresh token already used; the grant is revoked");
   }
   if (expires <= now_ms) return fail("invalid_grant", "refresh token expired");
-  if (!find_client(r.db, client_id)) return fail("invalid_client", "unknown client");
+  auto c = find_client(r.db, client_id);
+  if (!c) return fail("invalid_client", "unknown client");
   if (!user_active(r.db, user_id)) return fail("invalid_grant", "the account is disabled");
+  // What the client is now decides, so turning a person client into an agent takes effect
+  // at its next refresh rather than never.
+  agent = agent || !c->person;
   auto t = issue_tokens(r, client_id, user_id, agent, family, now_ms, refresh_ms);
   sqlite::Stmt mark(r.db, "UPDATE tokens SET rotated_to = ? WHERE token_hash = ?");
   mark.bind(1, hash_secret(t->refresh_token)).bind(2, hash).run();

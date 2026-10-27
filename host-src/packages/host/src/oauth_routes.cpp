@@ -194,11 +194,17 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     if (redirect_uri.empty() || !identity::redirect_allowed(*client, redirect_uri)) {
       return bad("The app asked to return somewhere it isn't registered to go.");
     }
+    // A client that registered itself gets errors on a page, not a redirect: otherwise any
+    // stranger could register evil.example and use this host as an open redirector
+    // (RFC 9700 §4.11.2).
+    bool redirect_errors = client->source != "dynamic";
     if (get(p, "response_type") != "code") {
+      if (!redirect_errors) return bad("The app asked for something other than a sign-in code.");
       return finish(to_client({{"error", "unsupported_response_type"}}), log("authorize_error"));
     }
     std::string challenge = get(p, "code_challenge");
     if (get(p, "code_challenge_method") != "S256" || !is_s256_challenge(challenge)) {
+      if (!redirect_errors) return bad("The app didn't use PKCE with S256.");
       return finish(to_client({{"error", "invalid_request"}, {"error_description", "PKCE with S256 is required"}}),
                     log("authorize_error"));
     }
@@ -219,6 +225,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         return finish(to_client({{"error", "access_denied"}}), log("authorize_denied"));
       }
       std::string code = identity_->issue_code(tenant, client_id, who->user.user_id, redirect_uri, challenge, now);
+      mail_new_grant(*who, *client, domain, where_from(redirect_uri));
       return finish(to_client({{"code", code}}),
                     json::dump(bj::object{{"oauth", "authorize_allowed"},
                                           {"client_id", client_id},
@@ -244,7 +251,10 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         "<p class=\"muted\">Signing in to <strong>" + html_escape(domain) + "</strong> as <strong>" +
         html_escape(who->user.email) + "</strong></p>" + kind + "<p>It comes from <strong>" +
         html_escape(where_from(redirect_uri)) + "</strong>" +
-        (client->source == "dynamic" ? " <span class=\"error\">(unverified)</span>" : "") + ".</p><p>" +
+        (client->source == "dynamic" ? " <span class=\"error\">(unverified; it registered itself on " +
+                                           base::format_utc_ms(client->created_at).substr(0, 16) + " UTC)</span>"
+                                     : "") +
+        ".</p><p>" +
         roles_sentence(who->roles) +
         "</p><p class=\"muted\">Only allow it if you just started this sign-in yourself. You can remove it later "
         "from <a href=\"/identity/account\">your account</a>.</p>"
@@ -252,7 +262,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         hidden +
         "<button name=\"decision\" value=\"allow\">Allow</button>"
         "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
-    return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, form_action_for(redirect_uri)),
+    return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, form_action_for(redirect_uri), false),
                   log("consent"));
   }
 
@@ -394,13 +404,14 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
           "value=\"" + html_escape(user_code) + "\"><input type=\"hidden\" name=\"step\" value=\"decide\">"
           "<button name=\"decision\" value=\"allow\">Allow</button>"
           "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
-      return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body), log("device_consent"));
+      return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, "", false), log("device_consent"));
     }
     bool allow = get(form, "decision") == "allow";
     std::string why;
     if (!identity_->decide_device(tenant, user_code, who->user.user_id, allow, now, &why)) {
       return finish(enter(why), log("device_bad_code"));
     }
+    if (allow && client) mail_new_grant(*who, *client, domain, "a device without a browser");
     return finish(identity_page(tenant, 200, allow ? "Device connected" : "Device refused",
                                 allow ? "<h1>Done</h1><p>The device is connected. You can close this page, and remove "
                                         "it any time from <a href=\"/identity/account\">your account</a>.</p>"
@@ -410,6 +421,18 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
   }
 
   finish(error_page(tenant, is_get || is_post ? 404 : 405, request_id), log("no_such_endpoint"));
+}
+
+void Host::mail_new_grant(const SignedIn& who, const identity::Client& client, const std::string& domain,
+                          const std::string& from) {
+  // No link in it: a link in an email is exactly what a phisher would send (013).
+  send_mail(identity::Mail{
+      who.user.email, "A new " + std::string(client.person ? "app" : "agent") + " can act for you on " + domain,
+      std::string(client.person ? "An app" : "An agent") + " was just allowed to act " +
+          (client.person ? "as you" : "for you") + " on " + domain + ": " + client.name + ", from " + from +
+          (client.source == "dynamic" ? " (it registered itself, so nobody has checked it)" : "") +
+          ".\n\nIf that was you, there is nothing to do. If it wasn't, open " + domain +
+          " yourself, go to your account page, and remove it.\n"});
 }
 
 }  // namespace goober::host

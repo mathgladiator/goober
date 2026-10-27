@@ -101,7 +101,9 @@ Document split_front_matter(std::string_view text, std::string* error) {
     doc.fields[key] = scalar(value);
   }
   if (!closed) {
-    // An unclosed block isn't front matter; the "---" was the body's own.
+    // An unclosed block isn't front matter. Say so: a page that meant to have front
+    // matter, and maybe requirements, must not quietly become a public page.
+    if (error) *error = "front matter opens with --- but never closes";
     doc.fields.clear();
     doc.body = std::string(text);
     return doc;

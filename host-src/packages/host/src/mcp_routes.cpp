@@ -49,6 +49,15 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   }
   if (who->host) return finish(error_page(tenant, 403, request_id), R"({"mcp":"host identities have no tools here"})");
 
+  // One call per POST: MCP dropped JSON-RPC batches, and a batch would also slip past the
+  // rate limit and the one-line-per-call audit.
+  if (auto first = req.body.find_first_not_of(" \t\r\n"); first != std::string::npos && req.body[first] == '[') {
+    Response res;
+    res.status = 400;
+    res.headers.emplace_back("content-type", "application/json");
+    res.body = R"({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batches aren't accepted; send one request per POST"}})";
+    return finish(std::move(res), R"({"mcp":"batch refused"})");
+  }
   auto active = boxes_->active();
   std::optional<manifest::Caller> caller = manifest::Caller{std::to_string(who->user.user_id), false, who->roles};
   mcp::McpServer server(
@@ -117,7 +126,7 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   bj::object extra{{"mcp", audit_tool.empty() ? "rpc" : "tool"}, {"user_id", std::to_string(who->user.user_id)}};
   if (!audit_tool.empty()) {
     extra["tool"] = audit_tool;
-    extra["status"] = audit_status;
+    extra["tool_status"] = audit_status;
     // Every tool call is written down: the agent, the person, the input, and the result (050).
     base::append_line(config_.get()->storage / "logs" / "agents.log",
                       json::dump(bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},

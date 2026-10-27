@@ -83,10 +83,14 @@ class Host {
   // The page shell of every identity and OAuth screen: no framing, no scripts, forms to
   // this site (plus `form_action_extra`, for the consent screen's redirect).
   server::http::Response identity_page(const std::string& tenant, int status, const std::string& title,
-                                       const std::string& body, const std::string& form_action_extra = "") const;
+                                       const std::string& body, const std::string& form_action_extra = "",
+                                       bool tenant_css = true) const;
   // The host-owned OAuth endpoints: /.well-known/oauth-authorization-server and /oauth/ (oauth_routes.cpp).
   void handle_oauth(const server::http::Request& req, const Finish& finish, const std::string& path,
                     const std::string& domain, const std::string& tenant);
+  // Mails the person that an app or agent was just allowed to act for them (013).
+  void mail_new_grant(const SignedIn& who, const identity::Client& client, const std::string& domain,
+                      const std::string& from);
   // A client from the realm, or from identity.clients in the config (registered on first use).
   std::optional<identity::Client> oauth_client(const std::string& tenant, const std::string& client_id);
   // The client's address: the peer, or the last X-Forwarded-For entry behind a proxy.

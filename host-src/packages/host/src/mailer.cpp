@@ -123,7 +123,7 @@ bool SmtpQueue::deliver(const config::HostConfig& cfg, const identity::Mail& mai
   base::os_random_fill(rnd);
   std::string id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
   std::string message = mime_message(smtp.from, mail, base::now_unix_ms(), id);
-  std::vector<std::string> argv = {"curl", "-sS", "--max-time", "30", "--url", smtp.url, "--mail-from", smtp.from,
+  std::vector<std::string> argv = {"curl", "-q", "-g", "-sS", "--max-time", "30", "--url", smtp.url, "--mail-from", smtp.from,
                                    "--mail-rcpt", mail.to, "--upload-file", "-"};
   // STARTTLS is required on smtp://; smtps:// is TLS from the first byte.
   if (smtp.url.starts_with("smtp://")) argv.push_back("--ssl-reqd");

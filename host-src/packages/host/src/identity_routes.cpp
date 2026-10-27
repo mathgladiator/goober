@@ -95,10 +95,14 @@ std::optional<SignedIn> Host::browser_session(const Request& req, const std::str
 }
 
 Response Host::identity_page(const std::string& tenant, int status, const std::string& title,
-                             const std::string& body, const std::string& form_action_extra) const {
+                             const std::string& body, const std::string& form_action_extra, bool tenant_css) const {
   Response res;
   res.status = status;
-  std::string css_link = content_->get(tenant, "sign-in.css") ? "<link rel=\"stylesheet\" href=\"/sign-in.css\">" : "";
+  // A tenant may restyle sign-in (Q47), but not the consent screens, where its stylesheet
+  // could hide "unverified" or swap the buttons (013 § Sign-in screen requirements).
+  std::string css_link = tenant_css && content_->get(tenant, "sign-in.css")
+                             ? "<link rel=\"stylesheet\" href=\"/sign-in.css\">"
+                             : "";
   res.body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
              "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" +
              html_escape(title) + "</title><style>" + kStyle + "</style>" + css_link +
@@ -110,7 +114,9 @@ Response Host::identity_page(const std::string& tenant, int status, const std::s
   res.headers.emplace_back("referrer-policy", "same-origin");
   res.headers.emplace_back("x-content-type-options", "nosniff");
   res.headers.emplace_back("content-security-policy",
-                           "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'" +
+                           std::string(tenant_css ? "default-src 'none'; style-src 'self' 'unsafe-inline'"
+                                                  : "default-src 'none'; style-src 'unsafe-inline'") +
+                               "; form-action 'self'" +
                                (form_action_extra.empty() ? "" : " " + form_action_extra) +
                                "; frame-ancestors 'none'; base-uri 'none'");
   return res;
@@ -242,6 +248,16 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     res.headers.emplace_back("set-cookie", cookie("", 0));
     return finish(std::move(res), R"({"identity":"sign_out"})");
   }
+  if (path == "/identity/sessions/end" && is_post) {
+    auto who = browser_session(req, tenant);
+    if (who && !who->host) {
+      try {
+        identity_->end_session_by_id(tenant, who->user.user_id, std::stoll(get(form, "id")), now);
+      } catch (...) {
+      }
+    }
+    return finish(redirect("/identity/account"), R"({"identity":"session_ended"})");
+  }
   if (path == "/identity/grants/revoke" && is_post) {
     auto who = browser_session(req, tenant);
     if (who && !who->host) identity_->revoke_grant(tenant, who->user.user_id, get(form, "grant"), now);
@@ -291,6 +307,17 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
       }
       apps = "<p><strong>Apps and agents</strong></p><ul>" +
              (apps.empty() ? std::string("<li class=\"muted\">none signed in</li>") : apps) + "</ul>";
+      // Browser sessions too, so a stolen cookie can be ended from here.
+      std::string sessions;
+      for (const auto& sv : identity_->sessions(tenant, who->user.user_id, now)) {
+        const auto& o = sv.as_object();
+        sessions += "<li>A browser, signed in until " + base::format_utc_ms(o.at("expires_at").as_int64()).substr(0, 10) +
+                    " <form method=\"post\" action=\"/identity/sessions/end\"><input type=\"hidden\" name=\"id\" "
+                    "value=\"" + std::to_string(o.at("id").as_int64()) +
+                    "\"><button class=\"small secondary\">End</button></form></li>";
+      }
+      apps += "<p><strong>Browser sessions</strong> <span class=\"muted\">(including this one)</span></p><ul>" +
+              sessions + "</ul>";
     }
     return finish(page(200, "Your account",
                        "<h1>" + html_escape(who->user.email) + "</h1><p class=\"muted\">" +

@@ -277,10 +277,20 @@ struct Ref {
   std::string title;
 };
 
+// Bounds on one document, so no input can exhaust the stack or the clock: blocks nest at
+// most kMaxNesting deep (deeper markers are text), and the inline scans that can go
+// quadratic (emphasis, brackets, link destinations) share one budget of steps, past which
+// what remains is left as literal text.
+constexpr int kMaxNesting = 32;
+constexpr int64_t kWorkBudget = 20'000'000;
+
 struct Ctx {
   const MarkdownOptions& o;
   std::map<std::string, Ref> refs;
   std::map<std::string, int> ids;
+  int depth = 0;
+  int64_t work = 0;
+  bool spent() { return ++work > kWorkBudget; }
 };
 
 // --- Inlines ---
@@ -448,7 +458,7 @@ class Inline {
   // Parses "(dest "title")" at i; returns the index after ")" or npos.
   size_t inline_link(size_t i, std::string* url, std::string* title) {
     size_t n = t_.size();
-    if (i >= n || t_[i] != '(') return std::string::npos;
+    if (i >= n || t_[i] != '(' || ctx_.work > kWorkBudget) return std::string::npos;
     size_t j = i + 1;
     while (j < n && is_space(t_[j])) ++j;
     if (j < n && t_[j] == '<') {
@@ -460,6 +470,7 @@ class Inline {
       int depth = 0;
       size_t s = j;
       while (j < n && !is_space(t_[j])) {
+        if (ctx_.spent()) return std::string::npos;
         if (t_[j] == '\\' && j + 1 < n) {
           j += 2;
           continue;
@@ -477,7 +488,10 @@ class Inline {
     if (j < n && (t_[j] == '"' || t_[j] == '\'' || t_[j] == '(')) {
       char closer = t_[j] == '(' ? ')' : t_[j];
       size_t e = j + 1;
-      while (e < n && t_[e] != closer) e += (t_[e] == '\\' && e + 1 < n) ? 2 : 1;
+      while (e < n && t_[e] != closer) {
+        if (ctx_.spent()) return std::string::npos;
+        e += (t_[e] == '\\' && e + 1 < n) ? 2 : 1;
+      }
       if (e >= n) return std::string::npos;
       *title = unescape(t_.substr(j + 1, e - j - 1));
       j = e + 1;
@@ -501,6 +515,7 @@ class Inline {
     auto opener = nodes_.end();
     for (auto it = nodes_.end(); it != nodes_.begin();) {
       --it;
+      if (ctx_.spent()) break;
       if (it->k == Inl::kOpen) {
         opener = it;
         break;
@@ -635,6 +650,7 @@ class Inline {
       auto opener = nodes_.end();
       for (auto it = closer; it != bottom;) {
         --it;
+        if (ctx_.spent()) return;  // what's left stays literal text
         if (it->k != Inl::kDelim || it->ch != closer->ch || !it->can_open || it->count == 0) continue;
         if (closer->ch == '~' && it->count != closer->count) continue;
         bool both = it->can_close || closer->can_open;
@@ -672,7 +688,10 @@ class Inline {
   std::string buf_;
 };
 
-std::string inlines(Ctx& ctx, std::string_view text) { return Inline(ctx, trim(text)).render(); }
+std::string inlines(Ctx& ctx, std::string_view text) {
+  if (ctx.work > kWorkBudget) return esc(trim(text));
+  return Inline(ctx, trim(text)).render();
+}
 
 std::string slug(std::string_view text) {
   std::string out;
@@ -830,6 +849,17 @@ std::string list(Ctx& ctx, const Lines& lines, size_t& i) {
 }
 
 std::string blocks(Ctx& ctx, const Lines& lines, bool tight, bool* starts_with_paragraph) {
+  // Past kMaxNesting, the rest is one paragraph of plain text: no more recursion.
+  if (ctx.depth >= kMaxNesting) {
+    std::string text;
+    for (const auto& l : lines) text += (text.empty() ? "" : "\n") + l;
+    return "<p>" + esc(text) + "</p>\n";
+  }
+  struct Deeper {
+    Ctx& c;
+    explicit Deeper(Ctx& ctx) : c(ctx) { ++c.depth; }
+    ~Deeper() { --c.depth; }
+  } deeper(ctx);
   std::string out;
   if (starts_with_paragraph) *starts_with_paragraph = false;
   size_t i = 0;

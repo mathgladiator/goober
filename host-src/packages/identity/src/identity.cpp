@@ -174,6 +174,13 @@ std::optional<SignIn> Identity::verify_email(std::string_view realm_name, std::s
   auto& r = realm(realm_name);
   std::lock_guard lock(r.mu);
   Transaction tx(r.db);
+  // Wrong guesses are counted across codes for a day, so asking for fresh codes doesn't buy
+  // fresh guesses: about one chance in fifty thousand a day, from any number of machines.
+  sqlite::Stmt failures(r.db, "SELECT coalesce(sum(attempts), 0) FROM email_codes WHERE email = ? AND expires_at > ?");
+  failures.bind(1, email).bind(2, now_ms - kFailureWindowMs);
+  if (failures.step() && failures.int64(0) >= kFailuresPerDay) {
+    return *why = "Too many wrong codes for this address today. Try again tomorrow.", std::nullopt;
+  }
   sqlite::Stmt find(r.db,
                     "SELECT id, code_hash, attempts FROM email_codes WHERE email = ? AND consumed_at IS NULL "
                     "AND expires_at > ? ORDER BY id DESC LIMIT 1");
@@ -295,6 +302,28 @@ int Identity::revoke_sessions(std::string_view realm_name, std::string_view emai
   audit(r.db, now_ms, std::nullopt, "token_revoked", *id, bj::object{{"count", n}, {"by", by}});
   tx.commit();
   return n;
+}
+
+bj::array Identity::sessions(std::string_view realm_name, int64_t user_id, int64_t now_ms) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  sqlite::Stmt s(r.db,
+                 "SELECT rowid, expires_at FROM tokens WHERE user_id = ? AND kind = 'session' AND revoked_at IS NULL "
+                 "AND expires_at > ? ORDER BY expires_at DESC LIMIT 50");
+  s.bind(1, user_id).bind(2, now_ms);
+  bj::array out;
+  while (s.step()) out.push_back(bj::object{{"id", s.int64(0)}, {"expires_at", s.int64(1)}});
+  return out;
+}
+
+bool Identity::end_session_by_id(std::string_view realm_name, int64_t user_id, int64_t id, int64_t now_ms) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  sqlite::Stmt s(r.db,
+                 "UPDATE tokens SET revoked_at = ? WHERE rowid = ? AND user_id = ? AND kind = 'session' AND "
+                 "revoked_at IS NULL");
+  s.bind(1, now_ms).bind(2, id).bind(3, user_id).run();
+  return r.db.changes() > 0;
 }
 
 int Identity::holders(std::string_view realm_name, std::string_view role) {

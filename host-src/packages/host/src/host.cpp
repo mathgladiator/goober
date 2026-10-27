@@ -69,6 +69,35 @@ std::optional<std::pair<const char*, RateRule>> sensitive(const std::string& pat
   return std::nullopt;
 }
 
+// A Host header is a name or address and an optional port, nothing else: "site.com:443@evil.com"
+// must not resolve to site.com and then lend its text to an absolute URL.
+bool valid_host_header(std::string_view h) {
+  if (h.empty() || h.size() > 260) return false;
+  size_t end = h.size();
+  if (h.front() == '[') {
+    auto close = h.find(']');
+    if (close == std::string_view::npos) return false;
+    for (char c : h.substr(1, close - 1)) {
+      if (!std::isxdigit(static_cast<unsigned char>(c)) && c != ':' && c != '.') return false;
+    }
+    end = close + 1;
+  } else {
+    auto colon = h.find(':');
+    end = colon == std::string_view::npos ? h.size() : colon;
+    if (end == 0) return false;
+    for (char c : h.substr(0, end)) {
+      bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-';
+      if (!ok) return false;
+    }
+  }
+  if (end == h.size()) return true;
+  if (h[end] != ':' || end + 1 == h.size() || h.size() - end - 1 > 5) return false;
+  for (char c : h.substr(end + 1)) {
+    if (c < '0' || c > '9') return false;
+  }
+  return true;
+}
+
 // Request headers a box never sees: credentials belong to the host.
 bool hidden_from_box(std::string_view name) { return name == "authorization" || name == "cookie"; }
 
@@ -182,13 +211,16 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
                   {"request_id", req.header("goober-request-id")},
                   {"domain", domain},
                   {"method", req.method},
-                  {"path", req.path},
+                  {"path", req.path.size() > 512 ? req.path.substr(0, 512) + "..." : req.path},
                   {"status", status},
                   {"us", base::monotonic_us() - started_us}};
   if (!extra.empty()) {
     std::string err;
     if (auto v = json::parse(extra, &err); v && v->is_object()) {
-      for (auto& kv : v->get_object()) line[kv.key()] = kv.value();
+      // Extra fields never overwrite the line's own (status, path, and the rest).
+      for (auto& kv : v->get_object()) {
+        if (!line.contains(kv.key())) line[kv.key()] = kv.value();
+      }
     }
   }
   base::append_line(config_.get()->storage / "logs" / "access.log", json::dump(line));
@@ -233,6 +265,15 @@ void Host::handle(Request req, Responder respond) {
   req.headers.emplace_back("goober-request-id", request_id);
   auto cfg = config_.get();
   std::string host_header = base::to_lower(req.header("host"));
+  if (!valid_host_header(host_header)) {
+    Response bad;
+    bad.status = 400;
+    bad.headers.emplace_back("content-type", "text/plain; charset=utf-8");
+    bad.body = "Bad Request: the Host header is malformed\n";
+    access_log(req, 400, started, "", R"({"why":"bad host header"})");
+    bad.headers.emplace_back("goober-request-id", request_id);
+    return respond(std::move(bad));
+  }
   auto resolved = cfg->resolve_host(host_header);
   // The configured domain (local aliases resolve to it), or the raw host for the log.
   std::string domain = resolved ? resolved->first
@@ -241,9 +282,12 @@ void Host::handle(Request req, Responder respond) {
                                                             : host_header.rfind(':'));
 
   // Every response is logged and stamped with its request id.
-  Finish finish = [this, req, respond, started, domain, request_id](Response res, std::string extra) {
+  bool secure_transport = cfg->identity.cookie_secure && !cfg->local;
+  Finish finish = [this, req, respond, started, domain, request_id, secure_transport](Response res, std::string extra) {
     res.headers.emplace_back("goober-request-id", request_id);
     bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
+    // HSTS once the host is served over TLS: a person's browser never tries plain HTTP again.
+    if (secure_transport) res.headers.emplace_back("strict-transport-security", "max-age=31536000");
     bool has_challenge = std::any_of(res.headers.begin(), res.headers.end(),
                                      [](const auto& h) { return h.first == "www-authenticate"; });
     if (res.status == 401 && !has_challenge) {
@@ -699,7 +743,15 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       if (html) {
         std::erase_if(res.headers, [](const auto& h) { return h.first == "content-type"; });
         res.headers.emplace_back("content-type", "text/html; charset=utf-8");
-        res.headers.emplace_back("vary", "accept");
+        // The page carries the person's data and runs in a browser: the templated CSP, and
+        // never a shared cache when someone is signed in, whatever the box said (007 §8).
+        std::erase_if(res.headers, [&](const auto& h) {
+          return h.first == "content-security-policy" || (who && h.first == "cache-control");
+        });
+        res.headers.emplace_back("content-security-policy", site::templated_csp());
+        res.headers.emplace_back("referrer-policy", "same-origin");
+        res.headers.emplace_back("vary", "accept, cookie");
+        if (who) res.headers.emplace_back("cache-control", "private, no-cache");
         res.body = std::move(*html);
       } else {
         base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},

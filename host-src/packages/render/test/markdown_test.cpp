@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "goober/render/markdown.h"
 
 using namespace goober::render;
@@ -83,4 +85,28 @@ TEST(Markdown, HeadingIdsTitleAndSummary) {
             "First para & more.");
   EXPECT_EQ(markdown_summary("one two three four five", 12), "one two\xE2\x80\xA6");
   EXPECT_EQ(html_to_text("<p>a&lt;b</p>\n<p>c</p>"), "a<b c");
+}
+
+TEST(Markdown, HostileInputIsBoundedInDepthAndTime) {
+  auto timed = [](const std::string& md) {
+    auto start = std::chrono::steady_clock::now();
+    auto html = markdown_to_html(md);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    EXPECT_LT(ms, 3000) << md.substr(0, 20) << "... took " << ms << " ms";
+    return html;
+  };
+  // Nesting past 32 becomes text instead of recursion that would overflow the stack.
+  auto quotes = timed(std::string(8000, '>') + " deep");
+  EXPECT_NE(quotes.find("deep"), std::string::npos);
+  std::string items;
+  for (int i = 0; i < 8000; ++i) items += "- ";
+  timed(items + "x");
+  // Inputs that make the inline scans quadratic stop at the work budget.
+  std::string links, emph;
+  for (int i = 0; i < 20000; ++i) links += "[a](";
+  for (int i = 0; i < 80000; ++i) emph += "*a_";
+  timed(links);
+  timed(emph);
+  // Ordinary documents are untouched by the limits.
+  EXPECT_EQ(markdown_to_html("> > *hi*"), "<blockquote>\n<blockquote>\n<p><em>hi</em></p>\n</blockquote>\n</blockquote>\n");
 }

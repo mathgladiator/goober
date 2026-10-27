@@ -105,6 +105,12 @@ class Session : public std::enable_shared_from_this<Session> {
   }
 
   void frame_and_send(Response res) {
+    // No header value may carry CR, LF, or NUL, wherever it came from: no response splitting.
+    for (const auto& [k, v] : res.headers) {
+      if (k.find_first_of("\r\n\0:", 0, 4) != std::string::npos || v.find_first_of("\r\n\0", 0, 3) != std::string::npos) {
+        throw std::invalid_argument("a header holds a control character");
+      }
+    }
     auto status = static_cast<bhttp::status>(res.status);
     std::optional<bhttp::message_generator> gen;
     if (res.head_only) {

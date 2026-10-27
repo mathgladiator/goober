@@ -21,6 +21,10 @@ enum class Kind { kStatic, kMarkdown, kFragment, kDocument, kListing, kDirectory
 const char* kind_name(Kind kind);
 
 // A page file, parsed.
+// The Content-Security-Policy of templated pages (007 §10), shared with box responses the
+// host renders through a template.
+const char* templated_csp();
+
 struct Page {
   std::string path;  // in the content tree, like "blog/hello.md"
   std::string url;   // like "/blog/hello"
@@ -28,6 +32,9 @@ struct Page {
   bj::object fields;  // front matter
   std::string body;   // without front matter
   std::string raw;    // the whole file
+  // Why the front matter couldn't be trusted, or "". Such a page is never served or
+  // listed, since a malformed requirements line must not make a private page public.
+  std::string broken;
 };
 
 // One request for content.

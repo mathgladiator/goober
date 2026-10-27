@@ -29,6 +29,12 @@ constexpr const char* kTemplatedCsp =
     "media-src 'self' https:; font-src 'self' https: data:; connect-src 'self'; form-action 'self'; "
     "frame-ancestors 'self'; base-uri 'self'; object-src 'none'";
 
+}  // namespace
+
+const char* templated_csp() { return kTemplatedCsp; }
+
+namespace {
+
 // Keys the host sets in template data, which front matter can't shadow.
 bool reserved_key(std::string_view k) {
   return k == "body" || k == "page" || k == "site" || k == "data" || k == "user" || k == "pages" ||
@@ -192,7 +198,12 @@ Kind kind_of(std::string_view path, std::string_view data) {
   if (path.ends_with(".md")) return Kind::kMarkdown;
   if (path.ends_with(".html")) {
     if (data.starts_with("\xEF\xBB\xBF")) data.remove_prefix(3);
-    return data.starts_with("---\n") || data.starts_with("---\r\n") ? Kind::kFragment : Kind::kDocument;
+    // The same rule split_front_matter uses: the first line, trimmed, is "---".
+    auto end = data.find('\n');
+    std::string_view first = data.substr(0, end);
+    while (!first.empty() && (first.back() == ' ' || first.back() == '\t' || first.back() == '\r')) first.remove_suffix(1);
+    while (!first.empty() && (first.front() == ' ' || first.front() == '\t')) first.remove_prefix(1);
+    return first == "---" ? Kind::kFragment : Kind::kDocument;
   }
   return Kind::kStatic;
 }
@@ -216,9 +227,14 @@ std::optional<Page> Site::load(std::string_view tenant, std::string_view path) c
   if (p.kind == Kind::kDocument) {
     p.body = p.raw;
   } else {
-    auto doc = render::split_front_matter(p.raw);
+    std::string err;
+    auto doc = render::split_front_matter(p.raw, &err);
     p.fields = std::move(doc.fields);
     p.body = std::move(doc.body);
+    p.broken = err;
+    if (auto* d = p.fields.if_contains("draft"); d && !d->is_bool()) {
+      p.broken = "draft must be true or false";
+    }
   }
   return p;
 }
@@ -334,7 +350,7 @@ std::vector<bj::object> Site::entries(const Visit& v, const std::string& dir) co
                                                   strip_ext(rest.substr(slash + 1)) == "index";
     if (!child) continue;
     auto p = load(v.tenant, f);
-    if (!p) continue;
+    if (!p || !p->broken.empty()) continue;
     if (flag(p->fields, "draft") && !v.drafts) continue;
     if (p->fields.contains("redirect")) continue;
     if (auto* req = p->fields.if_contains("requirements")) {
@@ -361,6 +377,11 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   Result r;
   r.file = page.path;
   r.kind = page.kind;
+  if (!page.broken.empty()) {
+    Result broken = fail(500);
+    broken.error = page.path + ": " + page.broken;
+    return broken;
+  }
   if (flag(page.fields, "draft") && !v.drafts) return fail(404);
   if (auto* req = page.fields.if_contains("requirements")) {
     int status = v.authorize ? v.authorize(*req) : 403;
@@ -380,7 +401,8 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   if (wants_source && !feed) {
     r.kind = Kind::kSource;
     r.status = 200;
-    r.content_type = page.kind == Kind::kMarkdown ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8";
+    // A fragment's source is shown as text, never as a page: it would run with no CSP.
+    r.content_type = page.kind == Kind::kMarkdown ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
     r.body = page.raw;
     r.etag = etag_of(r.body);
     return r;

@@ -139,7 +139,9 @@ std::optional<std::string> fetch_https(const std::string& url, size_t max_bytes,
     if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) return *error = "the URL holds a space or control character", std::nullopt;
   }
   std::string limit = std::to_string(max_bytes);
-  auto r = base::run_process({"curl", "-sS", "-f", "-L", "--max-redirs", "3", "--proto", "=https", "--proto-redir",
+  // -q first: no ~/.curlrc. -g: no URL globbing, so one URL is one request. --noproxy:
+  // the environment's proxy settings don't apply.
+  auto r = base::run_process({"curl", "-q", "-g", "--noproxy", "*", "-sS", "-f", "-L", "--max-redirs", "3", "--proto", "=https", "--proto-redir",
                               "=https", "--max-time", "20", "--max-filesize", limit, "-A", "goober-host", "--", url},
                              "", max_bytes, 25000);
   if (!r.started) return *error = "could not run curl", std::nullopt;

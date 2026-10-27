@@ -174,6 +174,18 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
                   authorize_query() + "&decision=allow")
                 .status,
             403);
+  // A script on this very origin can't consent with fetch(): the browser marks it as such.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
+                  {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
+                   {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "cors"}, {"sec-fetch-dest", "empty"}},
+                  authorize_query() + "&decision=allow")
+                .status,
+            403);
+  // The consent screen ignores the tenant's sign-in stylesheet.
+  host->content().put("playground", "sign-in.css", "button{display:none}", nullptr);
+  auto styled = fetch(port, bhttp::verb::get, "/oauth/authorize?" + authorize_query(), {{"cookie", cookie}});
+  EXPECT_EQ(styled.body.find("sign-in.css"), std::string::npos);
+  EXPECT_NE(fetch(port, bhttp::verb::get, "/identity/sign-in").body.find("sign-in.css"), std::string::npos);
 
   auto t = token("grant_type=authorization_code&client_id=dumb-terminal&code=" + consent() +
                  "&redirect_uri=" + q(kApp) + "&code_verifier=" + kVerifier);
@@ -232,6 +244,15 @@ TEST_F(OAuthRoutesTest, BrokenRequestsAreRefusedWithoutRedirecting) {
                      "/oauth/authorize?response_type=code&client_id=dumb-terminal&redirect_uri=" + q(kApp) + "&state=s");
   EXPECT_EQ(plain.status, 303);
   EXPECT_NE(plain.headers["location"].find("error=invalid_request"), std::string::npos);
+  // A self-registered client never gets an error redirect before consent: no open redirector.
+  auto reg = fetch(port, bhttp::verb::post, "/oauth/register", {{"content-type", "application/json"}},
+                   R"({"client_name":"x","redirect_uris":["https://evil.example/"]})");
+  std::string err;
+  std::string dyn(json::parse(reg.body, &err)->at("client_id").as_string());
+  auto bounce = fetch(port, bhttp::verb::get,
+                      "/oauth/authorize?response_type=x&client_id=" + dyn + "&redirect_uri=" + q("https://evil.example/"));
+  EXPECT_EQ(bounce.status, 400);
+  EXPECT_TRUE(bounce.headers["location"].empty());
   auto t = token("grant_type=password&client_id=dumb-terminal");
   EXPECT_EQ(t["error"], "unsupported_grant_type");
   auto who = token("grant_type=authorization_code&client_id=ghost&code=x");

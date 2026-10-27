@@ -165,6 +165,10 @@ class Renderer {
   bool render(const std::vector<Node>& nodes, std::vector<const bj::value*>& stack, std::string& out,
               const std::string& indent, int depth) {
     for (const auto& n : nodes) {
+      if (out.size() > o_.max_output_bytes) {
+        if (error_) *error_ = "the page is larger than " + std::to_string(o_.max_output_bytes) + " bytes";
+        return false;
+      }
       switch (n.kind) {
         case Node::Kind::kText:
           append(out, n.text, indent);
@@ -203,6 +207,10 @@ class Renderer {
           if (!o_.partial) break;
           if (depth >= o_.max_partial_depth) {
             if (error_) *error_ = "partials nest deeper than " + std::to_string(o_.max_partial_depth) + " at " + n.text;
+            return false;
+          }
+          if (++partials_ > o_.max_partials) {
+            if (error_) *error_ = "more than " + std::to_string(o_.max_partials) + " partials in one page";
             return false;
           }
           auto text = o_.partial(n.text);
@@ -266,6 +274,7 @@ class Renderer {
 
   const TemplateOptions& o_;
   std::string* error_;
+  int partials_ = 0;
 };
 
 }  // namespace

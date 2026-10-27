@@ -30,6 +30,9 @@ inline constexpr int64_t kCodeTtlMs = 10 * 60 * 1000;
 inline constexpr int kCodeMaxAttempts = 5;
 // Codes mailed to one address within one code lifetime, after which starts are quietly dropped.
 inline constexpr int kCodesPerWindow = 5;
+// Wrong codes allowed per address per day, across all its codes.
+inline constexpr int kFailuresPerDay = 20;
+inline constexpr int64_t kFailureWindowMs = 24LL * 3600 * 1000;
 
 struct Mail {
   std::string to;
@@ -182,6 +185,13 @@ class Identity {
   std::optional<Tokens> poll_device(std::string_view realm, std::string_view client_id,
                                     std::string_view device_code, int64_t now_ms, int64_t refresh_ms,
                                     OAuthError* error);
+
+  // Deletes expired codes and week-old dynamic clients that never signed anyone in.
+  void prune(std::string_view realm, int64_t now_ms);
+
+  // A user's browser sessions, for the account page: {id, expires_at}, and ending one.
+  bj::array sessions(std::string_view realm, int64_t user_id, int64_t now_ms);
+  bool end_session_by_id(std::string_view realm, int64_t user_id, int64_t id, int64_t now_ms);
 
   // A user's live grants (one per signed-in client), for the account page, and revoking one.
   bj::array grants(std::string_view realm, int64_t user_id, int64_t now_ms);

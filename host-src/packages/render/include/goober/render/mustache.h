@@ -21,6 +21,10 @@ struct TemplateOptions {
   // talked into emitting a raw string a person typed (070.UI.md § Templates).
   std::set<std::string, std::less<>> trusted_html;
   int max_partial_depth = 16;
+  // Rendering stops with an error past this much output, or this many partials, so
+  // branching partials or a huge array can't grow a page without bound.
+  size_t max_output_bytes = 8 << 20;
+  int max_partials = 2000;
 };
 
 // Renders a Mustache template (variables, sections, inverted sections, comments,
