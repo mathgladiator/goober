@@ -9,6 +9,8 @@ asked Claude to keep executing the whole design, toward software they run for th
 and can build products on. `PROGRESS.md` at the repo root is the plan and the honest
 account: every human doc's status, what is faked or missing, and a checklist Claude works
 through. Keep it true with every change, and grow the code along that plan, not beyond it.
+`READINESS.md` answers, briefly, how ready goober is for the human's experiments (static
+hosting, Grok deploying boxes, agent outreach, the meat index); keep it true too.
 
 ## The host (`host-src/`)
 

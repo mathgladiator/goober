@@ -14,10 +14,14 @@ alone or with a few people. It serves a CMS (markdown, HTML, templates, listings
 attachments); runs WASM boxes behind HTTP routes, MCP tools for agents, timers, and
 internal routes; gives boxes per-tenant SQLite through checked SQL and typed requests;
 lets boxes call outside services with keys they never see, through an outbox that only
-fires if the request commits; signs people in with emailed codes or OAuth (the dumb
-terminal, agents through the device flow or MCP clients); and is operated by an agent
-over MCP with 47 tools. It has had an internal security review and fuzzing, and it backs
-itself up while running. It is **not yet** the system the human docs describe: there are
+fires if the request commits; reads the web politely for operators, crawls, and boxes,
+turning pages into text, markdown, links, schema.org data, and scraped records; signs
+people in with emailed codes or OAuth (the dumb terminal, agents through the device flow,
+MCP clients, or long-lived minted tokens); and is operated by an agent over MCP with 57
+tools. It deploys to a fresh server with one command and backs itself up nightly. It has
+had two rounds of internal review and fuzzing. Two example products run on it end to end:
+an ad landing page that collects emails and surveys, and a ranch CRM and meat index fed by
+the crawler. `READINESS.md` says what that means for the human's experiments. It is **not yet** the system the human docs describe: there are
 no approvals, no host write sets, no bus, no generated code, no domain registry, no
 mail routes, and no cluster, and a few things only the human can do: run the real dumb app,
 connect a real MCP client, and decide the open questions (Q17 to Q28).
@@ -37,13 +41,13 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 015 Domains | none | Domains live in the host config (005 §6). | The registry table, primaries and redirects, verification, TLS ask hook. |
 | 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `{!email}`, `{!user_id}`, `{!tenant}`, `{!domain}` in `require`; `client_id` for agents and a `caller` block for internal calls in the request document; `!` names refused. | Substituting `!client_id` and the rest in requirements; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload. | Traffic decisions, given-up routes, static and rewrite conflicts. |
-| 020 DataFlow | partial | `data.sqlite3.$strategy` with `pattern: "sql"`, `{!tenant}` database names. | `by_id`, `by_index`, named writes, generated row structs, data signatures. |
+| 020 DataFlow | partial | `data.sqlite3.$strategy` with `pattern: "sql"`, `{!tenant}` database names, a fixed `tenant` per strategy so one database spans domains, and boxes sharing databases with their own grants, their schemas checked to fit (008 §4). | `by_id`, `by_index`, named writes, generated row structs, data signatures. |
 | 021 PrimaryKeys | none | SQLite rowids (008 §9). | Host-minted ids, range leases. |
 | 023 Sourcing | none | | Sources, `append`, event routes, cursors. |
 | 025 DataShape | none | A SQLite transaction per database per request (008 §6). | Write sets, bundles, layered reads, leases, worst-case checks. |
 | 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets. | `pattern: "query"` iterators, plan checks, pagination cursors. |
-| 030 Larger env. | partial | `external` services by verb and path, `require` pins from the context, credentials by key name, per-request budgets, an egress log (015). | OpenAPI documents and generated clients, async calls, per-service rate limits, box-to-box calls. |
-| 035 Outbox | partial | Elements committed with the request's writes, a dispatcher with ordered delivery per service, backoff, stable idempotency keys, dead letters and retry (015). | Result routes, delivery to internal routes. |
+| 030 Larger env. | partial | `external` services by verb and path, `require` pins from the context, credentials by key name, per-request budgets, never past the request's deadline, an egress log (015); box-to-box calls (016); the web as a service through the host's robot (017). | OpenAPI documents and generated clients, async calls, per-service rate limits. |
+| 035 Outbox | partial | Elements committed with the request's writes, a dispatcher delivering each service from its own oldest element (one stuck service never blocks another), backoff, stable idempotency keys, dead letters and retry, and stranded outboxes found by scanning storage (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content and box GETs; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`; the status vocabulary; CORS per route (011). | ETags that skip the box, compression, ranges, declared redirect targets; undeclared routes still see every header and parameter. |
 | 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
@@ -68,14 +72,17 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 330 Stability | none | | Capabilities, providers, pins, replay. |
 | 390 Quotas | none | | |
 | 400 Cluster | none | Single machine only. | |
-| 410 API | partial | 47 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients, timers, keys, the outbox, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
+| 410 API | partial | 57 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | partial | Expand-only schema application, refused changes named per tenant (008 §3). | Contraction, emulated type changes, upgrade boxes. |
+| 800 Crawl | partial | Drafted by Claude at the human's request, uncommitted for the human (Q32). The robot: robots.txt, pacing per site, public addresses only (pinned through redirects), a cache with conditional refetches, opt-out; views (html, text, markdown, links, meta with the shop platform, JSON-LD, tables, select, extract); operator crawls with scope, sitemaps, and records; a `web` service for boxes; the ranches example (017). | JavaScript rendering, a public opt-out page, sharing crawl results between boxes, robots and pacing state across restarts. |
 | 999 Mobile | partial | OAuth as a person client (009); the `terminal` and `desk` boxes (010): me, config, sync, dashboards, idempotent decisions, devices, events; approvals, alarms, dashboards, and settings from agents over HTTP or ten MCP tools, typed by the host, with no write path to decisions; a 6am briefing timer in each device's zone (014); ETags on the snapshot; 57 end-to-end checks. Local mode answers the emulator's 10.0.2.2. | Push (decision 7), telling an agent's box about a decision (agents poll), a run with the real app. |
 
 ## Production readiness, honestly
 
-Fine for **one person on a laptop**, and for a **personal VPS behind Caddy** with these
-caveats, which Phase 3 works through:
+Fine for **one person on a laptop**, and for a **personal VPS behind Caddy**
+(`just deploy you@server`: Ubuntu 24.04+ or Debian 13+, a `goober` user, systemd, nightly
+backups kept two weeks; written and dry-run here, not yet run against a real server), with
+these caveats:
 
 - **Sign-in mail** goes through SMTP when `identity.mailer` is `smtp`; otherwise the dev
   mailer writes `.eml` files and nobody else can sign in. The SMTP path is tested against
@@ -84,8 +91,8 @@ caveats, which Phase 3 works through:
   client with many addresses gets many budgets.
 - **Secrets sit in files** protected only by mode 0600: the operator token in the config,
   the SMTP password in its own file. There is no vault (064).
-- **Backups are on demand**: `just backup DEST` takes a consistent copy while the host runs,
-  and restore is tested, but nothing schedules them and there is no Litestream yet.
+- **Backups are nightly on a deployed server** (a systemd timer, two weeks kept, on the same
+  disk): copy them off the machine yourself. Restore is tested. No Litestream yet.
 - **Logs rotate** at 64 MiB (three kept), but the access log still records paths, which can
   hold user data (300 wants none).
 - **No approvals**: whoever holds an operator token ships code live (005 §9).
@@ -94,6 +101,10 @@ caveats, which Phase 3 works through:
   and a sanitizer run (`013.SecurityReview.md`), and no outside review. The identity screens
   still share an origin with box pages (Q24).
 - **Keys** for outside services are plain 0600 files, write-only through the tools.
+- **Minted agent tokens** live up to a year (Q31): treat one like a password, and revoke it
+  from the account page when an agent is done.
+- **The robot** reads only public addresses, obeys robots.txt, and paces itself, but what a
+  product republishes from other sites is the human's call (Q33).
 
 ## The plan
 
@@ -172,6 +183,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] Fuzz the parsers and property-test the SQL authorizer (`just fuzz`, under ASan and
       UBSan): every parser clean; two authorizer holes found and fixed (013 F1, F2).
 - [ ] Fuzz the multipart parser and the HTTP server.
+- [x] A second review (2026-10-27): correctness of the network, outbox, scheduler, keys, mail,
+      and shutdown code, and product readiness; twelve correctness findings and three deploy
+      blockers fixed (013 R1 to R12, P1 to P3), among them a `..` path value walking out of
+      an external call's declared path with its credential attached.
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).
@@ -201,6 +216,31 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 ### Building products
 - [x] `box_guide` on the operator MCP: the boundary, manifest, routes, tools, timers, data,
       and types in one read, so an agent can build and deploy a product from it.
+- [x] Landing pages and forms: plain HTML forms arrive decoded as `form`, every request has
+      a pseudonymous `client_key`, anonymous writes have their own budget, and static site
+      generator output (`_astro/`, `_next/`) is served.
+- [x] Agents that can't do OAuth: `agent_token_mint` (Q31); `rust_binding` hands a remote
+      agent the Rust binding; operators may push 64 MiB bodies once their token checks out.
+- [x] Boxes share databases, across domains with a fixed `tenant` (008 §4, Q29, Q30).
+- [x] The `leads` example: an ad's landing page collecting emails, consent, surveys, and UTM
+      tags; optional confirmation mail through the outbox; tools to count, tally, and export.
+- [x] The `ranches` example: a ranch CRM with an outreach log and a meat index read by the
+      robot; public `/meat/offerings`. `just products-e2e` plays both as GrokBot (30 checks).
+- [ ] Run a real experiment: a real domain, a real mail provider, a real ad, and Grok
+      connected over its remote MCP tool. This needs the human.
+
+### Phase 8: deploying (099)
+- [x] A `server` build preset: one binary, libstdc++ linked in, needing only glibc 2.38.
+- [x] `just deploy you@server`: build here, install there (Caddy, a `goober` user, setup,
+      systemd, nightly backups), and upgrade on later runs. Caddy's health check works on
+      any Host. Dry-run here; not yet run against a real server.
+- [ ] Run it against the human's new machine.
+
+### Phase 9: the robot (800)
+- [x] The `web` package: URLs, robots.txt, a tolerant HTML parser, and the views, fuzzed.
+- [x] The robot in the host, operator `web_fetch` and crawls, and the `web` service for boxes
+      (`design/machine/017.Crawl.md`).
+- [ ] Robots and pacing state that survives a restart; a public opt-out page (Q32).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
