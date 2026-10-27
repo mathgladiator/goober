@@ -32,6 +32,10 @@ class Databases {
   // A database that doesn't exist yet always passes.
   bool check(std::string_view tenant, std::string_view database, const Schema& schema, std::string* error) const;
 
+  // Whether `schemas` can all apply to one database, as when boxes share it: each is
+  // applied in turn to an empty one, and the first that would change another is named.
+  static bool compatible(const std::vector<const Schema*>& schemas, std::string* error);
+
   // The tenants that have a databases directory, and the databases each one holds.
   std::vector<std::string> tenants() const;
   std::vector<std::string> databases(std::string_view tenant) const;
@@ -84,9 +88,9 @@ class Session {
   std::string tenant_;
   const std::vector<manifest::DataStrategy>& strategies_;
   const SchemaStore& schemas_;
-  std::map<std::string, Open> open_;
+  std::map<std::string, Open> open_;  // by "$tenant/$database"
   // Opens a strategy's database on first use, applying every schema bound to it.
-  Open* open_database(const std::string& database, std::string* error);
+  Open* open_database(const std::string& tenant, const std::string& database, std::string* error);
   int statements_ = 0;
   std::string broken_;  // why the request's transaction can't commit, once it can't
 };

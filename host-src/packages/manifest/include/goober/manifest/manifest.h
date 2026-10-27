@@ -92,6 +92,9 @@ struct DataStrategy {
   std::string name;
   std::string schema;    // a stored schema's name, like guestbook1
   std::string database;  // a name, possibly holding {!tenant}
+  // A fixed tenant whose database this is, shared by every domain and box that names it;
+  // empty for the request's own tenant ({!tenant}, the default).
+  std::string tenant;
   std::string pattern;   // by_id, by_index, query, sql, or by_timer
   std::map<std::string, TableGrant> tables;
   int64_t row_limit = 1000;
@@ -105,6 +108,8 @@ struct DataStrategy {
   bool applies_schema() const { return pattern == "sql" || pattern == "by_timer"; }
   // The database's name for a tenant, with {!tenant} filled in.
   std::string database_for(std::string_view tenant) const;
+  // The tenant whose database a request for `tenant` reaches: the fixed one, or its own.
+  std::string tenant_for(std::string_view tenant) const { return this->tenant.empty() ? std::string(tenant) : this->tenant; }
 };
 
 // One method of an external service (030.TheLargerEnvironment.md, 035.TheOutBox.md;

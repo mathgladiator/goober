@@ -107,7 +107,7 @@ std::vector<std::pair<std::string, std::string>> Host::outbox_locations() {
     if (!any) continue;
     const auto* st = outbox_strategy(box->manifest);
     for (const auto& [domain, entry] : cfg->domains) {
-      if (box->manifest.applies_to(domain)) out.emplace(entry.tenant, st ? st->database_for(entry.tenant) : "");
+      if (box->manifest.applies_to(domain)) out.emplace(st ? st->tenant_for(entry.tenant) : entry.tenant, st ? st->database_for(entry.tenant) : "");
     }
   }
   return {out.begin(), out.end()};

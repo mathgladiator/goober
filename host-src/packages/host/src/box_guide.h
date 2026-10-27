@@ -128,6 +128,9 @@ timers_list. Fires run once per tenant the box serves.
    Each tenant gets its own file for "orders". Grants are per table and column; nothing else
    can be read or written. Two boxes may share a database with different grants: give an
    agents' box insert-only access and keep the deciding writes in a box people call.
+   "tenant": "shared" (any name) makes one database for every domain and box that names it,
+   instead of one per tenant: use it for data that spans sites, like a public index. Boxes
+   sharing a database must bring schemas that fit together; upload checks.
    by_timer strategies: {"schema", "database", "pattern": "by_timer", "table",
    "timezone-field"?, "active-field"?} are read only by the scheduler.
 3. goober_sql(strategy, sql, params): params is a JSON array for ? or an object for :name.

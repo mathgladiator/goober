@@ -1,6 +1,7 @@
 // Schemas and tenant databases for operators (design/machine/008.Databases.md §7), and
 // the upload check for a manifest's data section.
 
+#include <deque>
 #include <functional>
 #include <set>
 
@@ -104,7 +105,26 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
         }
       }
     }
-    for (const auto& tenant : tenants) {
+    // Boxes that name the same database share it, so their schemas must fit together.
+    std::vector<const db::Schema*> together;
+    std::deque<db::Schema> held;  // stable addresses for `together`
+    auto active = boxes_->active();
+    for (const auto& [name, box] : active->boxes) {
+      if (name == m.box) continue;
+      for (const auto& other : box->manifest.data) {
+        if (!other.applies_schema() || other.database != st.database) continue;
+        if (!other.tenant.empty() && !st.tenant.empty() && other.tenant != st.tenant) continue;
+        if (auto s = schemas_->get(other.schema)) together.push_back(&held.emplace_back(std::move(*s)));
+      }
+    }
+    if (!together.empty()) {
+      together.push_back(&*schema);
+      if (!db::Databases::compatible(together, error)) {
+        *error = where + ": database " + st.database + " is shared with other boxes, and " + *error;
+        return false;
+      }
+    }
+    for (const auto& tenant : st.tenant.empty() ? tenants : std::set<std::string>{st.tenant}) {
       if (!databases_->check(tenant, st.database_for(tenant), *schema, error)) {
         *error = where + ": " + *error;
         return false;
@@ -252,6 +272,7 @@ void Host::register_data_tools() {
            for (const auto& [name, box] : active->boxes) {
              for (const auto& st : box->manifest.data) {
                if (!st.applies_schema()) continue;
+               if (st.tenant_for(tenant) != tenant) continue;
                users[st.database_for(tenant)].push_back(
                    bj::object{{"box", name}, {"strategy", st.name}, {"schema", st.schema}});
              }

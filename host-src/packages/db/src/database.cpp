@@ -520,6 +520,18 @@ bool Databases::check(std::string_view tenant, std::string_view database, const 
   return false;
 }
 
+bool Databases::compatible(const std::vector<const Schema*>& schemas, std::string* error) {
+  sqlite::Db db(":memory:");
+  for (const auto* schema : schemas) {
+    std::string why;
+    if (!apply_schema(db, *schema, false, &why)) {
+      *error = "schema " + schema->name + " doesn't fit with the others on the same database: " + why;
+      return false;
+    }
+  }
+  return true;
+}
+
 std::vector<std::string> Databases::tenants() const {
   std::vector<std::string> out;
   std::error_code ec;
@@ -615,28 +627,29 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
 
 Session::~Session() { rollback(); }
 
-Session::Open* Session::open_database(const std::string& database, std::string* error) {
-  auto& open = open_[database];
+Session::Open* Session::open_database(const std::string& tenant, const std::string& database, std::string* error) {
+  std::string key = tenant + "/" + database;
+  auto& open = open_[key];
   if (open.db) return &open;
   // On first use, every schema that any strategy brings to this database is applied,
   // before the request's transaction begins.
   std::string err;
   try {
     for (const auto& other : strategies_) {
-      if (!other.applies_schema() || other.database_for(tenant_) != database) continue;
+      if (!other.applies_schema() || other.tenant_for(tenant_) != tenant || other.database_for(tenant_) != database) continue;
       auto schema = schemas_.get(other.schema);
       if (!schema) {
         err = "schema " + other.schema + " isn't stored on this host";
         break;
       }
-      if (!dbs_.open(tenant_, database, &*schema, &err)) break;
+      if (!dbs_.open(tenant, database, &*schema, &err)) break;
     }
-    if (err.empty()) open.db = dbs_.open(tenant_, database, nullptr, &err);
+    if (err.empty()) open.db = dbs_.open(tenant, database, nullptr, &err);
   } catch (const std::exception& e) {
     err = e.what();
   }
   if (!open.db) {
-    open_.erase(database);
+    open_.erase(key);
     *error = err;
     return nullptr;
   }
@@ -646,7 +659,7 @@ Session::Open* Session::open_database(const std::string& database, std::string* 
 bool Session::host_exec(const manifest::DataStrategy& strategy, std::string_view sql, const bj::value& params,
                         std::string* error) {
   if (!broken_.empty()) return *error = broken_, false;
-  Open* open = open_database(strategy.database_for(tenant_), error);
+  Open* open = open_database(strategy.tenant_for(tenant_), strategy.database_for(tenant_), error);
   if (!open) return false;
   sqlite3* raw = open->db->raw();
   if (!open->in_transaction) {
@@ -693,7 +706,7 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   }
   std::string database = st->database_for(tenant_);
   std::string open_err;
-  Open* opened = open_database(database, &open_err);
+  Open* opened = open_database(st->tenant_for(tenant_), database, &open_err);
   if (!opened) return fail("opening database " + database + ": " + open_err);
   auto& open = *opened;
   Auth auth;

@@ -604,9 +604,24 @@ bool parse_data(const bj::object& data, Manifest* m, std::string* error) {
       st.schema = *schema;
       st.database = *database;
       st.pattern = *pattern;
+      // "tenant": "{!tenant}" is the default; a fixed name shares one database across domains.
+      if (auto tenant = get_string(def, "tenant", &err)) {
+        if (*tenant != "{!tenant}") {
+          if (!base::is_valid_name(*tenant)) {
+            return *error = where + ".tenant must be {!tenant} or a tenant name like shared", false;
+          }
+          if (database->find("{!tenant}") != std::string::npos) {
+            return *error = where + ": a database with a fixed tenant can't also hold {!tenant}", false;
+          }
+          st.tenant = *tenant;
+          m->warnings.push_back(where + " reaches tenant " + *tenant +
+                                "'s database " + *database + " whatever domain the request came to");
+        }
+      }
+      if (!err.empty()) return *error = where + ": " + err, false;
       for (const auto& f : def) {
         std::string key(f.key());
-        if (key == "schema" || key == "database" || key == "pattern") continue;
+        if (key == "schema" || key == "database" || key == "pattern" || key == "tenant") continue;
         if (st.pattern == "by_timer" && (key == "table" || key == "timezone-field" || key == "active-field")) continue;
         if (st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget")) continue;
         if (kLaterStrategy.count(key) || (!st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget"))) {

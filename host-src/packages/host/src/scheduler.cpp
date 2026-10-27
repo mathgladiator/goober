@@ -96,7 +96,9 @@ void Host::timer_tick(int64_t now_ms) {
         for (const auto& d : box->manifest.data) {
           if (d.name == t.source) source = &d;
         }
-        for (const auto& [tenant, domain] : tenants_of(*cfg, box->manifest)) {
+        for (const auto& [own_tenant, domain] : tenants_of(*cfg, box->manifest)) {
+          // A source with a fixed tenant fires once for it, however many domains the box has.
+          const std::string tenant = source ? source->tenant_for(own_tenant) : own_tenant;
           // A cron fire: due at `next`, computed once and kept until it fires.
           auto plan_cron = [&](const std::string& key, const std::string& row_key, const std::chrono::time_zone* zone,
                                bj::value row) {
@@ -296,6 +298,7 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
       if (t.name != name) continue;
       bool serves = false;
       for (const auto& [tn, domain] : tenants_of(*config_.get(), box->manifest)) serves |= tn == tenant;
+      for (const auto& d : box->manifest.data) serves |= d.name == t.source && d.tenant == tenant;
       if (!serves) return *error = "box " + box_name + " doesn't serve tenant " + tenant, std::nullopt;
       // Fire as the schedule would, but now: the next tick's plan for this timer is
       // forgotten so it can fire the rows again.

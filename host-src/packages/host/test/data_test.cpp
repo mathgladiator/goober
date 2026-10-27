@@ -184,3 +184,51 @@ TEST_F(DataRoutesTest, BoxesWriteInATransactionAndOperatorsPoke) {
   EXPECT_FALSE(host->boxes().upload(changed, kNotesWat, &err));
   EXPECT_NE(err.find("tenant playground"), std::string::npos) << err;
 }
+
+TEST_F(DataRoutesTest, BoxesShareADatabaseAcrossTenants) {
+  std::string err;
+  auto put = [&](const char* name, const char* type) {
+    return tool("schema_put", {{"schema", bj::object{{"schema", name},
+                                                     {"tables", bj::object{{"notes", bj::object{{"columns", bj::object{
+                                                         {"text", bj::object{{"type", type}}}}}}}}}}}});
+  };
+  ASSERT_FALSE(put("notes1", "string").as_object().contains("error"));
+  ASSERT_FALSE(put("notes_bad", "int64").as_object().contains("error"));
+  // Route names are unique across boxes, so each box's exports carry its name.
+  auto wat = [](const std::string& box) {
+    std::string w = kNotesWat;
+    for (const char* r : {"add", "list", "boom"}) {
+      std::string from = std::string("goober_route_") + r + "\"";
+      w.replace(w.find(from), from.size(), std::string("goober_route_") + r + "_" + box + "\"");
+    }
+    return w;
+  };
+  auto manifest = [](const std::string& box, const std::string& domain, const std::string& schema) {
+    return R"({"box":")" + box + R"(","domains":[")" + domain + R"("],
+      "data":{"sqlite3":{"notes":{"schema":")" + schema + R"(","database":"notes","tenant":"shared","pattern":"sql",
+        "tables":{"notes":{"read":true,"insert":true}}}}},
+      "routes":{"http":{"/notes":{"post":{"name":"add_)" + box + R"(","public":true},"get":{"name":"list_)" + box + R"(","public":true}}}}})";
+  };
+  // A fixed tenant can't be combined with {!tenant} in the name, and must be a name.
+  std::string bad = manifest("x", "localhost", "notes1");
+  bad.replace(bad.find("\"shared\""), 8, "\"Not A Name\"");
+  EXPECT_FALSE(host->boxes().upload(bad, wat("x"), &err));
+  EXPECT_NE(err.find(".tenant"), std::string::npos) << err;
+
+  ASSERT_TRUE(host->boxes().upload(manifest("notes", "localhost", "notes1"), wat("notes"), &err)) << err;
+  ASSERT_TRUE(host->boxes().upload(manifest("notes_b", "second.example", "notes1"), wat("notes_b"), &err)) << err;
+  // Two domains in two tenants write to one database.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/notes").status, 201);
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/notes", {{"host", "second.example"}}).status, 201);
+  auto list = fetch(port, bhttp::verb::get, "/notes", {{"host", "second.example"}});
+  EXPECT_NE(list.body.find(R"([\"hi\",\"hi\"])"), std::string::npos) << list.body;
+  EXPECT_TRUE(fs::exists(root / "storage" / "sqlite3" / "shared" / "databases" / "notes.db"));
+  EXPECT_FALSE(fs::exists(root / "storage" / "sqlite3" / "playground" / "databases" / "notes.db"));
+
+  // A third box bringing a schema that doesn't fit the shared database is refused.
+  EXPECT_FALSE(host->boxes().upload(manifest("notes_c", "localhost", "notes_bad"), wat("notes_c"), &err));
+  EXPECT_NE(err.find("notes"), std::string::npos) << err;
+  // db_list shows the database under its own tenant, used by both boxes.
+  auto dbs = tool("db_list", {{"tenant", "shared"}});
+  EXPECT_NE(json::dump(dbs).find("notes_b"), std::string::npos) << json::dump(dbs);
+}
