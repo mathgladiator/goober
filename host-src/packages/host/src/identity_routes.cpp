@@ -114,7 +114,8 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     res.headers.emplace_back("content-type", "text/html; charset=utf-8");
     res.headers.emplace_back("cache-control", "no-store");
     res.headers.emplace_back("x-frame-options", "DENY");
-    res.headers.emplace_back("referrer-policy", "no-referrer");
+    // Not no-referrer: under it browsers post forms with "Origin: null", which same_origin refuses.
+    res.headers.emplace_back("referrer-policy", "same-origin");
     res.headers.emplace_back("x-content-type-options", "nosniff");
     res.headers.emplace_back("content-security-policy",
                              "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; "

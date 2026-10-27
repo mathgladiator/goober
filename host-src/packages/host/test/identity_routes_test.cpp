@@ -134,12 +134,23 @@ TEST_F(IdentityRoutesTest, SignInPageIsHostOwnedAndUnframeable) {
   EXPECT_NE(h.body.find("Host sign-in"), std::string::npos);
   EXPECT_NE(h.body.find("name=\"as\" value=\"host\""), std::string::npos);
   EXPECT_EQ(h.headers["x-frame-options"], "DENY");
+  // The browser must send a real Origin with the form, so it can pass same_origin.
+  EXPECT_EQ(h.headers["referrer-policy"], "same-origin");
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/nope").status, 404);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/me").status, 401);
   // A form posted from another origin is refused.
   auto cross = fetch(port, bhttp::verb::post, "/identity/email/start", {{"origin", "https://evil.example"}},
                      "email=boss@example.com");
   EXPECT_EQ(cross.status, 403);
+  // An opaque origin (a sandboxed frame, a data: page) is refused too.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/email/start", {{"origin", "null"}}, "email=boss@example.com")
+                .status,
+            403);
+  // A same-origin form gets through.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/email/start",
+                  {{"origin", "http://localhost"}}, "email=boss@example.com")
+                .status,
+            200);
 }
 
 TEST_F(IdentityRoutesTest, RequirementsGateRoutesAndTheFirstOwnerIsBootstrapped) {
