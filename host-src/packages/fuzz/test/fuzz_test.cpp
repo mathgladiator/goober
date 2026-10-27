@@ -15,6 +15,8 @@
 #include "goober/router/path.h"
 #include "goober/timers/cron.h"
 #include "goober/types/types.h"
+#include "goober/web/html.h"
+#include "goober/web/robots.h"
 
 using namespace goober;
 namespace bj = boost::json;
@@ -145,4 +147,50 @@ TEST(Fuzz, McpJsonRpc) {
              R"([{"jsonrpc":"2.0","method":"notifications/initialized"}])"},
             {"{", "}", "[", "]", "\"", ",", ":", "\"id\"", "\"method\"", "\"params\"", "null", "true"},
             fuzz::iterations(3000), [&](const std::string& in) { (void)server.handle(in); });
+}
+
+// The crawler reads pages anyone on the web wrote (design/machine/017.Crawl.md).
+TEST(Fuzz, HtmlViewsSelectorsAndRobots) {
+  auto base = *web::parse_url("https://ranch.example/shop/");
+  std::string err;
+  auto spec = *json::parse(R"({"items":"li","fields":{"t":"","h":"a@href","c":"@class"}})", &err);
+  fuzz::run("html",
+            {"<!doctype html><html><head><title>T &amp; U</title><meta name=description content=d>"
+             "<script type=application/ld+json>{\"@graph\":[{\"@type\":\"Product\"}]}</script></head>"
+             "<body><h1>H</h1><p>a<b>b</b><ul><li class=x><a href=../p>l</a><li>m</ul><table><tr><th>a<td>b</table>"
+             "<pre> x </pre><blockquote><p>q</blockquote></body></html>"},
+            {"<", ">", "</", "<p>", "<li>", "<table>", "<tr>", "<td>", "</table>", "<script>", "</script>", "<!--",
+             "-->", "&", "&#x", ";", "\"", "'", "=", "<a href=", "<img src=", "<pre>", "<base href=//x/>", "<ul>",
+             "<blockquote>", "<h1>", "\xEF\xBB\xBF", "<!", "<?", "/>", "<style>"},
+            fuzz::iterations(2000), [&](const std::string& in) {
+              auto doc = web::Document::parse(in);
+              auto b = doc.base_for(base);
+              (void)web::view_text(doc);
+              (void)web::view_markdown(doc, b);
+              (void)web::view_links(doc, b);
+              (void)web::view_meta(doc, b);
+              (void)web::view_jsonld(doc);
+              (void)web::view_tables(doc);
+              std::string e;
+              (void)web::view_select(doc, "ul > li a, .x", &e);
+              (void)web::view_extract(doc, b, spec, &e);
+            });
+  fuzz::run("selectors", {"div.a > p#b [x^=y]:first-child, li:nth-child(2)"},
+            {" ", ">", ",", ".", "#", "[", "]", "=", "^=", "*", ":", "(", ")", "\"", "a", "-"}, fuzz::iterations(3000),
+            [&](const std::string& in) {
+              std::string e;
+              auto doc = web::Document::parse("<div class=a><p id=b x=yz>t</p></div>");
+              if (auto s = web::Selector::parse(in, &e)) (void)s->select(doc, doc.root(), 10);
+            });
+  fuzz::run("robots", {"User-agent: *\nDisallow: /a*b$\nAllow: /a\nCrawl-delay: 1\nSitemap: https://x/s.xml\n"},
+            {"User-agent:", "Disallow:", "Allow:", "*", "$", "/", "\n", "#", "Crawl-delay:", "goober"},
+            fuzz::iterations(3000), [](const std::string& in) {
+              auto r = web::Robots::parse(in, "goober");
+              (void)r.allowed("/a/b/c?d=e");
+            });
+  fuzz::run("urls", {"https://a.example:8080/x/../y?q=1#f"}, {"/", "..", ".", "?", "#", "%", "@", ":", "[", "]", " ", "//"},
+            fuzz::iterations(3000), [&](const std::string& in) {
+              (void)web::parse_url(in);
+              (void)web::resolve(base, in);
+            });
 }
