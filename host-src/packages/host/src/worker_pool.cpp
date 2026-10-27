@@ -3,6 +3,9 @@
 #include <pthread.h>
 #include <sched.h>
 
+#include <cstdio>
+#include <exception>
+
 namespace goober::host {
 
 WorkerPool::WorkerPool(int threads, bool pin) {
@@ -27,12 +30,14 @@ WorkerPool::~WorkerPool() {
   for (auto& t : threads_) t.join();
 }
 
-void WorkerPool::post(std::function<void()> job) {
+bool WorkerPool::post(std::function<void()> job, size_t max_queued) {
   {
     std::lock_guard lock(mu_);
+    if (jobs_.size() >= max_queued) return false;
     jobs_.push_back(std::move(job));
   }
   cv_.notify_one();
+  return true;
 }
 
 size_t WorkerPool::queued() const {
@@ -50,7 +55,14 @@ void WorkerPool::run() {
       job = std::move(jobs_.front());
       jobs_.pop_front();
     }
-    job();
+    // A job that throws must not take the thread, or the process, with it.
+    try {
+      job();
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "goober-host: a job failed: %s\n", e.what());
+    } catch (...) {
+      std::fprintf(stderr, "goober-host: a job failed\n");
+    }
   }
 }
 

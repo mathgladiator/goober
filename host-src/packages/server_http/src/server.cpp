@@ -89,7 +89,22 @@ class Session : public std::enable_shared_from_this<Session> {
     write(std::move(res));
   }
 
+  // Never lets an exception out onto the network thread, where it would end the process:
+  // a response that can't be framed becomes a plain 500.
   void write(Response res) {
+    try {
+      frame_and_send(std::move(res));
+    } catch (const std::exception&) {
+      keep_alive_ = false;
+      Response fallback;
+      fallback.status = 500;
+      fallback.headers.emplace_back("content-type", "text/plain; charset=utf-8");
+      fallback.body = "Internal Server Error\n";
+      frame_and_send(std::move(fallback));
+    }
+  }
+
+  void frame_and_send(Response res) {
     auto status = static_cast<bhttp::status>(res.status);
     std::optional<bhttp::message_generator> gen;
     if (res.head_only) {
@@ -100,6 +115,9 @@ class Session : public std::enable_shared_from_this<Session> {
       out.keep_alive(keep_alive_);
       gen.emplace(std::move(out));
     } else {
+      // 1xx, 204, and 304 carry no body; Beast refuses to frame one, and so do we.
+      unsigned code = unsigned(res.status);
+      if (code < 200 || code == 204 || code == 304) res.body.clear();
       bhttp::response<bhttp::string_body> out(status, 11);
       for (const auto& [k, v] : res.headers) out.insert(k, v);
       out.set(bhttp::field::server, "goober");

@@ -182,7 +182,11 @@ TEST_F(IdentityRoutesTest, RequirementsGateRoutesAndTheFirstOwnerIsBootstrapped)
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/staff", {{"cookie", boss}}).status, 403);
 
   // Sign out ends the session.
-  auto out = fetch(port, bhttp::verb::post, "/identity/sign-out", {{"cookie", boss}}, "");
+  // A cookie-bearing POST that doesn't say where it came from is refused (CSRF).
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/sign-out", {{"cookie", boss}}, "").status, 403);
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/sign-out", {{"cookie", boss}, {"origin", "https://localhost"}}, "").status,
+            403);  // the scheme counts
+  auto out = fetch(port, bhttp::verb::post, "/identity/sign-out", {{"cookie", boss}, {"origin", "http://localhost"}}, "");
   EXPECT_EQ(out.status, 303);
   EXPECT_NE(out.headers["set-cookie"].find("Max-Age=0"), std::string::npos);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/owners", {{"cookie", boss}}).status, 401);

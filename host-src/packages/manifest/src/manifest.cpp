@@ -336,7 +336,10 @@ bool parse_data(const bj::object& data, Manifest* m, std::string* error) {
         auto v = get_int(def, k, &err);
         if (!err.empty()) return *error = where + ": " + err, false;
         if (!v) continue;
-        if (*v < 1 || (std::string_view(k) == "row-limit" && *v > 100000)) {
+        // A step budget is capped too: SQL runs inside a host call, where the request's own
+        // deadline can't reach it (the host also stops any statement after two seconds).
+        if (*v < 1 || (std::string_view(k) == "row-limit" && *v > 100000) ||
+            (std::string_view(k) == "step-budget" && *v > 100'000'000)) {
           return *error = where + "." + k + " is out of range", false;
         }
         (std::string_view(k) == "row-limit" ? st.row_limit : st.step_budget) = *v;

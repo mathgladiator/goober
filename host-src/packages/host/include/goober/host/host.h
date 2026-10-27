@@ -152,6 +152,7 @@ class Host {
   int64_t started_ms_ = 0;
   std::atomic<uint64_t> requests_{0};
   RateLimiter limiter_;
+  size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class SmtpQueue> smtp_;
 };
 

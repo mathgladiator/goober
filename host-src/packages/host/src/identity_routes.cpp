@@ -181,7 +181,7 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
 
   bool is_post = req.method == "post";
   bool is_get = req.method == "get" || req.method == "head";
-  if (is_post && !same_origin(req)) {
+  if (is_post && !same_origin(req, origin_of(req))) {
     return finish(error_page(tenant, 403, request_id), R"({"identity":"cross-origin post"})");
   }
   int64_t now = base::now_unix_ms();

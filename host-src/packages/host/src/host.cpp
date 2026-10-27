@@ -106,6 +106,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_content_tools();
   register_data_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
+  max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
 
 Host::~Host() { stop(); }
@@ -339,10 +340,18 @@ void Host::handle(Request req, Responder respond) {
   auto match = table.match(path->segments, verb);
   if (match.value) {
     auto ref = *match.value;
-    pool_->post([this, req = std::move(req), finish, ref, params = std::move(match.params), domain,
-                 tenant = *tenant, active]() mutable {
-      serve_box(std::move(req), finish, ref, std::move(params), domain, tenant, active);
-    });
+    // The queue holds a bounded amount of work; past it, the host says so rather than swell.
+    bool queued = pool_->post(
+        [this, req, finish, ref, params = std::move(match.params), domain, tenant = *tenant, active]() mutable {
+          try {
+            serve_box(req, finish, ref, std::move(params), domain, tenant, active);
+          } catch (const std::exception& e) {
+            std::cerr << "goober-host: box " << ref.box->manifest.box << ": " << e.what() << "\n";
+            finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"box call failed"})");
+          }
+        },
+        max_queued_);
+    if (!queued) return finish(error_page(*tenant, 503, request_id), R"({"why":"queue full"})");
     return;
   }
   if (match.method_not_allowed || (req.method != "get" && req.method != "head")) {
@@ -589,7 +598,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     return finish(error_page(tenant, 403, request_id), R"({"why":"agent tokens can't call this route"})");
   }
   // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
-  if (req.method != "get" && req.method != "head" && !same_origin(req)) {
+  // A bearer token isn't sent by a browser on its own, so only cookie callers are checked.
+  bool bearer_call = base::to_lower(req.header("authorization")).starts_with("bearer ");
+  if (req.method != "get" && req.method != "head" && !bearer_call && !same_origin(req, origin_of(req))) {
     return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
   }
 

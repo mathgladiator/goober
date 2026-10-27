@@ -202,7 +202,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       return finish(to_client({{"error", "invalid_request"}, {"error_description", "PKCE with S256 is required"}}),
                     log("authorize_error"));
     }
-    if (is_post && !same_origin_strict(req)) {
+    if (is_post && !user_submitted(req, origin)) {
       return finish(error_page(tenant, 403, request_id), log("authorize_cross_origin"));
     }
     auto who = browser_session(req, tenant);
@@ -355,7 +355,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
   }
 
   if (path == "/oauth/device/verify" && (is_get || is_post)) {
-    if (is_post && !same_origin_strict(req)) return finish(error_page(tenant, 403, request_id), log("device_cross_origin"));
+    if (is_post && !user_submitted(req, origin)) return finish(error_page(tenant, 403, request_id), log("device_cross_origin"));
     auto who = browser_session(req, tenant);
     if (!who || who->host) {
       Response res;

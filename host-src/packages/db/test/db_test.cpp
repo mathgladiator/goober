@@ -139,6 +139,26 @@ TEST_F(DbTest, LimitsAndBudgets) {
   EXPECT_NE(std::string(many.at("error").as_string()).find("more than 10 rows"), std::string::npos);
   auto slow = J(s.run("book", "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000000) SELECT count(*) FROM n", ""));
   EXPECT_NE(std::string(slow.at("error").as_string()).find("step budget"), std::string::npos) << json::dump(slow);
+  // A value that doubles itself 29 times would be a gigabyte; it stops at the length limit.
+  auto huge = J(s.run("book", "WITH RECURSIVE c(s, n) AS (SELECT 'x', 0 UNION ALL SELECT s || s, n + 1 FROM c WHERE n < 29) "
+                              "SELECT length(s) FROM c ORDER BY n DESC LIMIT 1", ""));
+  ASSERT_TRUE(huge.as_object().contains("error")) << json::dump(huge);
+  EXPECT_NE(std::string(huge.at("error").as_string()).find("too big"), std::string::npos) << json::dump(huge);
+  // REPLACE would delete the row it collides with, behind the grants.
+  for (const char* sql : {"REPLACE INTO entries (id, name, message, created_ms) VALUES (1, 'x', 'y', 1)",
+                          "INSERT OR REPLACE INTO entries (id, name, message, created_ms) VALUES (1, 'x', 'y', 1)",
+                          "INSERT /* hi */ OR\nreplace INTO entries (id, name, message, created_ms) VALUES (1, 'x', 'y', 1)"}) {
+    auto r = J(s.run("book", sql, ""));
+    ASSERT_TRUE(r.as_object().contains("error")) << sql;
+    EXPECT_NE(std::string(r.at("error").as_string()).find("REPLACE"), std::string::npos) << sql;
+  }
+  // SQL is a view into box memory with nothing after it: the host never reads past its end.
+  std::string buffer = "SELECT 1; DROP TABLE entries";
+  auto edge = J(s.run("book", std::string_view(buffer.data(), 8), ""));
+  EXPECT_FALSE(edge.as_object().contains("error")) << json::dump(edge);
+  // replace() the function, and the word inside a string, are fine.
+  auto fn = J(s.run("book", "SELECT replace('a-b', '-', ' '), 'or replace into' AS t", ""));
+  EXPECT_FALSE(fn.as_object().contains("error")) << json::dump(fn);
 }
 
 TEST_F(DbTest, SchemasOnlyExpand) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -18,7 +19,9 @@ class WorkerPool {
   WorkerPool(const WorkerPool&) = delete;
   WorkerPool& operator=(const WorkerPool&) = delete;
 
-  void post(std::function<void()> job);
+  // Queues a job, unless `max_queued` jobs are already waiting; then returns false, so the
+  // caller can answer 503 rather than let a flood grow the queue without bound.
+  bool post(std::function<void()> job, size_t max_queued = SIZE_MAX);
   size_t queued() const;
 
  private:

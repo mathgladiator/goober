@@ -1,5 +1,6 @@
 #include "goober/db/database.h"
 
+#include <chrono>
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -119,22 +120,78 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
   }
 }
 
+// Limits on one statement that no manifest can raise: its wall time, the size of any one
+// value it builds, the size of its whole result, and LIKE patterns. Each keeps one box from
+// pinning a thread or the host's memory.
+constexpr int64_t kStatementMs = 2000;
+constexpr int kMaxValueBytes = 4 << 20;
+constexpr size_t kMaxResultBytes = 8 << 20;
+constexpr int kMaxLikePattern = 1000;
+
 struct Progress {
   int64_t steps = 0;
   int64_t budget = 0;
+  std::chrono::steady_clock::time_point deadline;
+  bool late = false;
 };
 
 int on_progress(void* p) {
   auto& pr = *static_cast<Progress*>(p);
   pr.steps += kProgressSteps;
-  return pr.steps > pr.budget ? 1 : 0;
+  if (std::chrono::steady_clock::now() > pr.deadline) pr.late = true;
+  return pr.steps > pr.budget || pr.late ? 1 : 0;
 }
 
-bool only_space(const char* tail) {
-  for (; tail && *tail; ++tail) {
+// Only spaces and semicolons in [tail, end): the text after the one statement. The SQL
+// is a view into box memory with no terminator, so the scan must stop at `end`.
+bool only_space(const char* tail, const char* end) {
+  for (; tail && tail < end; ++tail) {
     if (*tail != ' ' && *tail != '\n' && *tail != '\t' && *tail != '\r' && *tail != ';') return false;
   }
   return true;
+}
+
+// REPLACE conflict resolution deletes the row it collides with, and SQLite's authorizer
+// reports only an insert or an update, so a box could overwrite or delete rows it was
+// never granted. "REPLACE INTO" and "OR REPLACE" are refused; replace(...) the function
+// is fine. Strings, quoted names, and comments are skipped.
+bool uses_replace_conflict(std::string_view sql) {
+  std::vector<std::string> words;
+  size_t i = 0;
+  while (i < sql.size()) {
+    char c = sql[i];
+    if (c == '\'' || c == '"' || c == '`' || c == '[') {
+      char close = c == '[' ? ']' : c;
+      for (++i; i < sql.size() && sql[i] != close; ++i) {
+      }
+      ++i;
+      words.emplace_back("\x01");  // a literal or a quoted name
+    } else if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+      while (i < sql.size() && sql[i] != '\n') ++i;
+    } else if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+      auto end = sql.find("*/", i + 2);
+      i = end == std::string_view::npos ? sql.size() : end + 2;
+    } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+      size_t start = i;
+      while (i < sql.size() && (std::isalnum(static_cast<unsigned char>(sql[i])) || sql[i] == '_')) ++i;
+      std::string w(sql.substr(start, i - start));
+      for (auto& ch : w) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+      words.push_back(std::move(w));
+    } else if (std::isspace(static_cast<unsigned char>(c))) {
+      ++i;
+    } else {
+      words.emplace_back(1, c);
+      ++i;
+    }
+  }
+  for (size_t k = 0; k < words.size(); ++k) {
+    if (words[k] != "REPLACE") continue;
+    bool call = k + 1 < words.size() && words[k + 1] == "(";
+    bool after_or = k > 0 && words[k - 1] == "OR";
+    bool into = k + 1 < words.size() && words[k + 1] == "INTO";
+    if (into || (after_or && !call)) return true;
+  }
+  return false;
 }
 
 bj::value column_value(sqlite3_stmt* s, int i) {
@@ -188,15 +245,25 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
                          int64_t step_budget, const std::function<std::string(bool readonly)>& before_step) {
   auto fail = [](std::string why) { return bj::object{{"error", std::move(why)}}; };
   if (sql.size() > 100000) return fail("the statement is longer than 100000 bytes");
+  if (auth.strategy && uses_replace_conflict(sql)) {
+    return fail("REPLACE conflict resolution deletes rows behind the grants; use INSERT ... ON CONFLICT DO UPDATE");
+  }
   auth.tables = real_tables(db);
+  sqlite3_limit(db, SQLITE_LIMIT_LENGTH, kMaxValueBytes);
+  sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, kMaxLikePattern);
+  // The authorizer stays on until the statement is finished: SQLite re-prepares a statement
+  // whose schema changed underneath it, and that must be checked too.
   sqlite3_set_authorizer(db, authorize, &auth);
+  struct AuthorizerOff {
+    sqlite3* db;
+    ~AuthorizerOff() { sqlite3_set_authorizer(db, nullptr, nullptr); }
+  } authorizer_off{db};
   Stmt st;
   const char* tail = nullptr;
   int rc = sqlite3_prepare_v2(db, sql.data(), int(sql.size()), &st.s, &tail);
-  sqlite3_set_authorizer(db, nullptr, nullptr);
   if (rc != SQLITE_OK) return fail(!auth.denied.empty() ? auth.denied : std::string(sqlite3_errmsg(db)));
   if (!st.s) return fail("the statement is empty");
-  if (tail && !only_space(tail) && size_t(tail - sql.data()) < sql.size()) return fail("one statement at a time");
+  if (tail && !only_space(tail, sql.data() + sql.size())) return fail("one statement at a time");
   int count = sqlite3_bind_parameter_count(st.s);
   std::string err;
   if (params.is_array()) {
@@ -221,25 +288,40 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   }
   bool readonly = sqlite3_stmt_readonly(st.s) != 0;
   if (before_step) {
-    if (auto why = before_step(readonly); !why.empty()) return fail(why);
+    // The host's own BEGIN runs here, outside the box's authorizer.
+    sqlite3_set_authorizer(db, nullptr, nullptr);
+    auto why = before_step(readonly);
+    sqlite3_set_authorizer(db, authorize, &auth);
+    if (!why.empty()) return fail(why);
   }
-  Progress progress{0, step_budget};
+  Progress progress{0, step_budget, std::chrono::steady_clock::now() + std::chrono::milliseconds(kStatementMs), false};
   sqlite3_progress_handler(db, kProgressSteps, on_progress, &progress);
   bj::array columns;
   int ncol = sqlite3_column_count(st.s);
   for (int i = 0; i < ncol; ++i) columns.push_back(bj::value(sqlite3_column_name(st.s, i)));
   bj::array rows;
   int64_t n = 0;
+  size_t result_bytes = 0;
   while ((rc = sqlite3_step(st.s)) == SQLITE_ROW) {
     if (++n > row_limit) {
       sqlite3_progress_handler(db, 0, nullptr, nullptr);
       return fail("more than " + std::to_string(row_limit) + " rows; add a LIMIT, or raise row-limit");
     }
     bj::array row;
-    for (int i = 0; i < ncol; ++i) row.push_back(column_value(st.s, i));
+    for (int i = 0; i < ncol; ++i) {
+      result_bytes += size_t(sqlite3_column_bytes(st.s, i)) + 16;
+      row.push_back(column_value(st.s, i));
+    }
+    if (result_bytes > kMaxResultBytes) {
+      sqlite3_progress_handler(db, 0, nullptr, nullptr);
+      return fail("the result is larger than " + std::to_string(kMaxResultBytes) + " bytes; select less");
+    }
     rows.push_back(std::move(row));
   }
   sqlite3_progress_handler(db, 0, nullptr, nullptr);
+  if (rc == SQLITE_INTERRUPT && progress.late) {
+    return fail("the statement ran longer than " + std::to_string(kStatementMs) + " ms");
+  }
   if (rc == SQLITE_INTERRUPT && progress.steps > progress.budget) {
     return fail("the statement used more than its step budget of " + std::to_string(step_budget));
   }

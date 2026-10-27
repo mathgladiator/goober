@@ -221,3 +221,25 @@ TEST(Engine, SqlGoesThroughTheHostAndBack) {
   auto n = engine().call(*box, "goober_route_q", none, {});
   EXPECT_NE(n.body.find("no databases"), std::string::npos);
 }
+
+TEST(Engine, TablesInstancesAndStatusesAreBounded) {
+  // A table grown past 10,000 elements, or an interim 1xx status, is refused without harm.
+  const char* wat = R"((module
+    (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (table 1 funcref)
+    (data (i32.const 0) "text/plain")
+    (func (export "goober_route_grow_table") (result i32)
+      (if (i32.ne (table.grow (ref.null func) (i32.const 100000)) (i32.const -1)) (then (unreachable)))
+      (if (i32.ne (call $respond (i32.const 101) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 0)) (i32.const -1))
+        (then (unreachable)))
+      (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 0)))
+      (i32.const 0))
+  ))";
+  auto box = compile(wat, {"goober_route_grow_table"});
+  auto r = engine().call(*box, "goober_route_grow_table", {}, {});
+  EXPECT_EQ(r.outcome, CallResult::Outcome::kOk) << r.error;
+  EXPECT_EQ(r.status, 200);
+  std::string err;
+  EXPECT_FALSE(engine().compile(R"((module (memory (export "memory") 1) (table 200000 funcref)))", {}, &err));
+}

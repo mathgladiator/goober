@@ -127,7 +127,7 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
   bool is_get = req.method == "get" || req.method == "head";
   bool is_post = req.method == "post";
   // Cookies ride every request, so a POST that relies on one must come from this site.
-  if (is_post && op.empty() && !same_origin(req)) {
+  if (is_post && op.empty() && !same_origin(req, origin_of(req))) {
     return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin post"})");
   }
 

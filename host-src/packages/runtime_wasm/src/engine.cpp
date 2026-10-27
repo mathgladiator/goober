@@ -19,6 +19,9 @@ constexpr size_t kMaxLogLines = 1000;
 constexpr size_t kMaxLogLineBytes = 4096;
 constexpr size_t kMaxHeaders = 32;
 constexpr size_t kMaxResponseBytes = 16 << 20;
+constexpr int64_t kMaxTableElements = 10000;
+// The dry instantiation at upload: no box may start with more memory than any box may have.
+constexpr int64_t kDryMemoryBytes = int64_t(512) << 20;
 
 // Everything one call can see and change, reached from host functions through
 // the store's data.
@@ -126,6 +129,8 @@ struct Engine::Impl {
   static wasmtime::Config make_config(const EngineOptions& options) {
     wasmtime::Config config;
     config.consume_fuel(true);
+    // One memory per box, so memory-max-bytes is the whole of what a box can hold.
+    config.wasm_multi_memory(false);
     config.epoch_interruption(true);
     config.max_wasm_stack(options.max_wasm_stack);
     return config;
@@ -155,7 +160,8 @@ struct Engine::Impl {
                             auto mem = memory_of(caller);
                             auto type = view(mem, type_ptr, type_len);
                             auto body = view(mem, body_ptr, body_len);
-                            if (!type || !body || status < 100 || status > 599) return -1;
+                            // No 1xx: a box can't send an interim response, which would desync the connection.
+                            if (!type || !body || status < 200 || status > 599) return -1;
                             if (body->size() > kMaxResponseBytes || !valid_header_text(*type, false)) return -1;
                             st.responded = true;
                             st.status = status;
@@ -286,6 +292,7 @@ std::shared_ptr<const CompiledBox> Engine::compile(std::string_view wasm_or_wat,
 
   // A dry instantiation checks every import's type and every export's shape.
   wasmtime::Store store(impl_->engine);
+  store.limiter(kDryMemoryBytes, kMaxTableElements, 1, 1, 1);
   must(store.context().set_fuel(1'000'000), "set_fuel");
   store.context().set_epoch_deadline(1000);
   CallState dry;
@@ -333,7 +340,9 @@ CallResult Engine::call(const CompiledBox& box, const std::string& export_name, 
   st.random = base::SeededRandom(input.seed);
 
   wasmtime::Store store(impl_->engine);
-  store.limiter(limits.memory_max_bytes, -1, 1, -1, -1);
+  // One instance, one memory, one table of at most 10,000 elements: a box can't make the
+  // host allocate past its memory limit through tables or extra instances.
+  store.limiter(limits.memory_max_bytes, kMaxTableElements, 1, 1, 1);
   auto ctx = store.context();
   ctx.set_data(&st);
   uint64_t fuel = uint64_t(limits.fuel);
