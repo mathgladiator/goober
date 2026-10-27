@@ -1,0 +1,52 @@
+{
+  "box": "desk",
+  "mission": "Let the executive's agents ask for approvals and read the answers, and set the alarms and dashboards the terminal shows. Agents can never decide an approval: this box has no write path to decisions.",
+  "domains": ["*"],
+  "behavior": { "timeout-ms": 1000, "fuel": 100000000, "memory-max-bytes": 33554432 },
+  "data": {
+    "sqlite3": {
+      "desk": {
+        "schema": "terminal1",
+        "database": "terminal",
+        "pattern": "sql",
+        "tables": {
+          "approvals": { "read": true, "insert": true },
+          "decisions": { "read": true },
+          "alarms": { "read": true, "insert": true, "update": ["spec", "updated_ms"], "delete": true },
+          "dashboards": { "read": true, "insert": true, "update": ["title", "subtitle", "spec", "updated_ms"], "delete": true },
+          "settings": { "read": true, "insert": true, "update": ["name", "lat", "lon", "label"] },
+          "devices": { "read": ["user_id", "device_name", "platform", "timezone", "updated_ms"] }
+        },
+        "row-limit": 200
+      }
+    }
+  },
+  "routes": {
+    "http": {
+      "/desk/v1/approvals": {
+        "post": { "name": "desk_approval_create", "requirements": [["owner"]], "agents": true },
+        "get": { "name": "desk_approvals", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/approvals/{approval_id : int64}": {
+        "get": { "name": "desk_approval_get", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/alarms": {
+        "get": { "name": "desk_alarms", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/alarms/{alarm_id : string}": {
+        "put": { "name": "desk_alarm_put", "requirements": [["owner"]], "agents": true },
+        "delete": { "name": "desk_alarm_delete", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/dashboards/{dashboard_id : string}": {
+        "put": { "name": "desk_dashboard_put", "requirements": [["owner"]], "agents": true },
+        "delete": { "name": "desk_dashboard_delete", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/settings": {
+        "put": { "name": "desk_settings_put", "requirements": [["owner"]], "agents": true }
+      },
+      "/desk/v1/devices": {
+        "get": { "name": "desk_devices", "requirements": [["owner"]], "agents": true }
+      }
+    }
+  }
+}

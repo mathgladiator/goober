@@ -112,6 +112,9 @@ TEST(Config, LocalModeAliasesDomainsUnderLocalhost) {
   EXPECT_EQ(local->resolve_host("bobs.example.localhost")->first, "bobs.example");
   EXPECT_EQ(*local->tenant_for_host("localhost:9090"), "home");
   EXPECT_EQ(*local->tenant_for_host("127.0.0.1"), "home");
+  EXPECT_EQ(*local->tenant_for_host("10.0.2.2:9090"), "home");  // the Android emulator
+  EXPECT_EQ(*local->tenant_for_host("[::1]:9090"), "home");
+  EXPECT_FALSE(cfg->tenant_for_host("10.0.2.2").has_value());
   EXPECT_FALSE(local->tenant_for_host("nope.localhost").has_value());
   EXPECT_FALSE(local->tenant_for_host("other.example").has_value());
 }

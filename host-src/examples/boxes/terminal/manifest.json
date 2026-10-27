@@ -1,0 +1,36 @@
+{
+  "box": "terminal",
+  "mission": "Let the executive's own devices read alarms, dashboards, and pending approvals, and record the executive's decisions.",
+  "domains": ["*"],
+  "behavior": { "timeout-ms": 1000, "fuel": 100000000, "memory-max-bytes": 33554432 },
+  "data": {
+    "sqlite3": {
+      "terminal": {
+        "schema": "terminal1",
+        "database": "terminal",
+        "pattern": "sql",
+        "tables": {
+          "approvals": { "read": true },
+          "decisions": { "read": true, "insert": true },
+          "alarms": { "read": true },
+          "dashboards": { "read": true },
+          "settings": { "read": true },
+          "devices": { "read": true, "insert": true, "update": ["platform", "app_version", "timezone", "push_token", "updated_ms"] },
+          "events": { "read": true, "insert": true }
+        },
+        "row-limit": 200
+      }
+    }
+  },
+  "routes": {
+    "http": {
+      "/terminal/v1/me": { "get": { "name": "terminal_me", "requirements": [["owner"]] } },
+      "/terminal/v1/config": { "get": { "name": "terminal_config", "requirements": [["owner"]] } },
+      "/terminal/v1/sync": { "get": { "name": "terminal_sync", "requirements": [["owner"]] } },
+      "/terminal/v1/dashboards/{dashboard_id : string}": { "get": { "name": "terminal_dashboard", "requirements": [["owner"]] } },
+      "/terminal/v1/approvals/{approval_id : int64}/decision": { "post": { "name": "terminal_decide", "requirements": [["owner"]] } },
+      "/terminal/v1/devices": { "post": { "name": "terminal_devices", "requirements": [["owner"]] } },
+      "/terminal/v1/events": { "post": { "name": "terminal_events", "requirements": [["owner"]] } }
+    }
+  }
+}

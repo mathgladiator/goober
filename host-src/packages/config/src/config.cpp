@@ -37,7 +37,7 @@ std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std:
     if (auto it = domains.find(h.substr(0, h.size() - kSuffix.size())); it != domains.end()) return *it;
     return std::nullopt;
   }
-  if (h == "localhost" || h == "127.0.0.1") {
+  if (h == "localhost" || h == "127.0.0.1" || h == "[::1]" || h == "10.0.2.2") {  // 10.0.2.2: the Android emulator's name for this machine
     if (auto it = domains.find(platform_domain); it != domains.end()) return *it;
     return *domains.begin();
   }

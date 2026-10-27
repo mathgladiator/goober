@@ -92,6 +92,9 @@ Read these before doing design work:
   - `design/machine/009.OAuth.md`: OAuth 2.1 for the terminal and agents: person and agent
     clients, PKCE codes with consent, rotating refresh tokens, the device flow, bearer tokens,
     and `"agents": true`.
+  - `design/machine/010.Terminal.md`: the dumb terminal's backend as two example boxes,
+    `terminal` (the person) and `desk` (agents), with decisions in their own table so no agent
+    can decide; checked by `just terminal-e2e`.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

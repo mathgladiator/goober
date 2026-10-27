@@ -116,6 +116,7 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/007.Content.md`](design/machine/007.Content.md) | Content as its own vector: markdown, fragments, and documents, Mustache templates, listings and feeds, and attachments. |
 | [`design/machine/008.Databases.md`](design/machine/008.Databases.md) | Tenant databases: expand-only JSON schemas, direct SQL under SQLite's authorizer, request transactions, operator db tools. |
 | [`design/machine/009.OAuth.md`](design/machine/009.OAuth.md) | OAuth 2.1: person and agent clients, PKCE with consent, rotating refresh tokens, the device flow, bearer tokens on routes. |
+| [`design/machine/010.Terminal.md`](design/machine/010.Terminal.md) | The terminal's backend: a `terminal` box for the person and a `desk` box for agents, with no write path from agents to decisions. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 

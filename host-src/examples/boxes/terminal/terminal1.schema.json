@@ -1,0 +1,86 @@
+{
+  "schema": "terminal1",
+  "tables": {
+    "approvals": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "task": { "type": "string", "max-length": 200 },
+        "description": { "type": "string", "max-length": 64000 },
+        "requester": { "type": "string", "max-length": 120 },
+        "risk": { "type": "string", "max-length": 16, "default": "unknown" },
+        "actions": { "type": "string", "max-length": 200, "default": "" },
+        "created_ms": { "type": "int64" },
+        "expires_ms": { "type": "int64", "nullable": true },
+        "requested_by": { "type": "string", "max-length": 120, "nullable": true }
+      },
+      "indexes": { "approvals_by_created": { "columns": ["created_ms"] } }
+    },
+    "decisions": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "approval_id": { "type": "int64" },
+        "decision": { "type": "string", "max-length": 32 },
+        "feedback": { "type": "string", "max-length": 4000, "nullable": true },
+        "decided_ms": { "type": "int64" },
+        "user_id": { "type": "int64" },
+        "idempotency_key": { "type": "string", "max-length": 200 }
+      },
+      "indexes": { "decisions_by_approval": { "columns": ["approval_id"], "unique": true } }
+    },
+    "alarms": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "alarm_key": { "type": "string", "max-length": 200 },
+        "spec": { "type": "string", "max-length": 16000 },
+        "updated_ms": { "type": "int64" }
+      },
+      "indexes": { "alarms_by_key": { "columns": ["alarm_key"], "unique": true } }
+    },
+    "dashboards": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "dashboard_key": { "type": "string", "max-length": 64 },
+        "title": { "type": "string", "max-length": 200 },
+        "subtitle": { "type": "string", "max-length": 200, "nullable": true },
+        "spec": { "type": "string", "max-length": 500000 },
+        "updated_ms": { "type": "int64" }
+      },
+      "indexes": { "dashboards_by_key": { "columns": ["dashboard_key"], "unique": true } }
+    },
+    "devices": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "user_id": { "type": "int64" },
+        "device_name": { "type": "string", "max-length": 120 },
+        "platform": { "type": "string", "max-length": 20 },
+        "app_version": { "type": "string", "max-length": 40 },
+        "timezone": { "type": "string", "max-length": 64 },
+        "push_token": { "type": "string", "max-length": 4096, "nullable": true },
+        "updated_ms": { "type": "int64" }
+      },
+      "indexes": { "devices_by_user": { "columns": ["user_id", "device_name"], "unique": true } }
+    },
+    "events": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "user_id": { "type": "int64" },
+        "type": { "type": "string", "max-length": 32 },
+        "at_ms": { "type": "int64" },
+        "alarm_id": { "type": "string", "max-length": 200, "nullable": true },
+        "minutes": { "type": "int32", "nullable": true },
+        "idempotency_key": { "type": "string", "max-length": 200 },
+        "received_ms": { "type": "int64" }
+      },
+      "indexes": { "events_by_key": { "columns": ["user_id", "idempotency_key"], "unique": true } }
+    },
+    "settings": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "name": { "type": "string", "max-length": 120 },
+        "lat": { "type": "double", "nullable": true },
+        "lon": { "type": "double", "nullable": true },
+        "label": { "type": "string", "max-length": 120, "nullable": true }
+      }
+    }
+  }
+}

@@ -64,6 +64,10 @@ revoke which dir=dir: build
 examples dir=dir: build
     {{host_src}}/tools/examples.sh {{trim_start_match(dir, "dir=")}}/host.json
 
+# Play the dumb terminal and an agent against the running host for DIR, end to end (999).
+terminal-e2e dir=dir url="http://localhost:8080":
+    python3 -I {{host_src}}/tools/terminal_e2e.py --config {{trim_start_match(dir, "dir=")}}/host.json --url {{trim_start_match(url, "url=")}}
+
 # List every tenant's databases, their tables, and row counts.
 db dir=dir: build
     @{{bin}} db list --config {{trim_start_match(dir, "dir=")}}/host.json

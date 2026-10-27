@@ -66,7 +66,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 400 Cluster | none | Single machine only. | |
 | 410 API | partial | ~40 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | partial | Expand-only schema application, refused changes named per tenant (008 §3). | Contraction, emulated type changes, upgrade boxes. |
-| 999 Mobile | partial | **In progress**: see the plan. | Everything below the line in Phase 1. |
+| 999 Mobile | partial | OAuth as a person client (009); the `terminal` and `desk` boxes (010): me, config, sync, dashboards, idempotent decisions, devices, events; approvals, alarms, dashboards, and settings from agents, with no write path to decisions; checked end to end. Local mode answers the emulator's 10.0.2.2. | Push (decision 7), the outbox to tell agents, the 6am timer, MCP tools for agents, host-validated types, ETags on the snapshot, a run with the real app. |
 
 ## Production readiness, honestly
 
@@ -114,12 +114,15 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] Dynamic registration and the device flow (`/oauth/register`, `/oauth/device`,
       `/oauth/device/verify`), agents only. See `design/machine/009.OAuth.md`.
 - [x] The account page lists signed-in apps and agents, with revoke.
-- [ ] The `terminal` box: me, config, sync, dashboards, decisions (idempotent by key,
+- [x] The `terminal` box: me, config, sync, dashboards, decisions (idempotent by key,
       409 on a different key), devices, events.
-- [ ] The `desk` box for agents: create approvals, read their outcome, set alarms and
+- [x] The `desk` box for agents: create approvals, read their outcome, set alarms and
       dashboards; no write path to an approval's status.
-- [ ] An end-to-end script that plays the app against a running host.
-- [ ] Try the real dumb app (desktop) against the demo host.
+- [x] An end-to-end script that plays the app against a running host (`just terminal-e2e`,
+      48 checks). See `design/machine/010.Terminal.md`.
+- [ ] Try the real dumb app against the demo host. This needs the human: sign-in happens in a
+      real browser. The app's own e2e test is tied to its dev server's `/oauth/consent`
+      shortcut, so it can't drive goober's consent screen unchanged.
 
 ### Phase 2: agents as first-class callers (050)
 - [ ] `/mcp` on every domain for agent tokens, serving box `routes.mcp` tools,

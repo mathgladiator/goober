@@ -28,6 +28,7 @@ just run     # build, then run demo/ in local mode (dev defaults if there is no 
 just mcp     # mint an operator token and print the `claude mcp add` command
 just examples  # deploy the example boxes, the demo site, and its images to the running host
 just db        # every tenant's databases; just sql playground guestbook "SELECT * FROM entries"
+just terminal-e2e  # play the dumb mobile terminal and an agent against the running host
 ```
 
 Then open http://localhost:8080/. `just reload` rereads the config; Ctrl-C stops the host.
@@ -143,6 +144,9 @@ The request document is JSON: `request_id`, `method`, `path`, `params`, `query`,
   with a small binding in `src/goober.rs`.
 - `examples/boxes/guestbook` is Rust with a database: SQLite builds its JSON response, and
   the route's template renders it inside the site's layout for a browser.
+- `examples/boxes/terminal` and `examples/boxes/desk` are the backend of the dumb mobile
+  terminal (`design/machine/010.Terminal.md`): the person's routes, and the agents' routes
+  (`"agents": true`), over one database, sharing the serde binding in `examples/boxes/shared/`.
 
 ## Layout
 

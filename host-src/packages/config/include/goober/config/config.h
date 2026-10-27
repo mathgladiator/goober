@@ -72,7 +72,8 @@ struct HostConfig {
 
   // The configured domain and its tenant for a Host header value, with any port
   // removed and case folded. In local mode, "$domain.localhost" also reaches
-  // $domain, and "localhost" or "127.0.0.1", when not configured, reaches the
+  // $domain, and "localhost", "127.0.0.1", "[::1]", or "10.0.2.2" (the Android emulator),
+  // when not configured, reaches the
   // platform domain (or else the first domain).
   std::optional<std::pair<std::string, DomainEntry>> resolve_host(std::string_view host) const;
   std::optional<std::string> tenant_for_host(std::string_view host) const;
