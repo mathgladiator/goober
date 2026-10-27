@@ -38,6 +38,9 @@ struct HttpRoute {
   bool headers_declared = false;  // with request-headers, the box sees only those headers
   std::vector<std::string> request_headers;
   std::string response;  // "", "json", "json:$Type", "text", "html", "markdown", or "empty"
+  // Origins whose pages may call this route from a browser (037 § CORS), like
+  // https://app.example.com, or "*". Never with credentials: only bearer tokens cross.
+  std::vector<std::string> cors;
   // An MCP tool (050.AgentsMCP.md) is a route with verb "tool": its input is a named type,
   // and its description is part of the box's shape.
   std::string description;

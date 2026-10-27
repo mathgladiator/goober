@@ -10,6 +10,7 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
+#include "goober/base/hash.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "goober/json/json.h"
@@ -429,6 +430,39 @@ void Host::handle(Request req, Responder respond) {
 
   auto active = boxes_->active();
   const auto& table = active->table_for(domain);
+  if (req.method == "options") {
+    // A CORS preflight, answered by the host (037): which verbs at this path allow the origin.
+    std::string origin = base::to_lower(req.header("origin"));
+    std::vector<std::string> verbs;
+    std::set<std::string> allow_headers = {"authorization", "content-type"};
+    bool any_origin = false;
+    for (const char* v : {"get", "post", "put", "patch", "delete"}) {
+      auto m = table.match(path->segments, v);
+      if (!m.value) continue;
+      const auto& cors = m.value->route->cors;
+      bool star = std::find(cors.begin(), cors.end(), "*") != cors.end();
+      if (star || (!origin.empty() && std::find(cors.begin(), cors.end(), origin) != cors.end())) {
+        verbs.push_back(base::to_lower(v) == "get" ? "GET, HEAD" : std::string(v));
+        any_origin |= star;
+        for (const auto& h : m.value->route->request_headers) allow_headers.insert(h);
+      }
+    }
+    if (verbs.empty() || origin.empty()) return finish(error_page(*tenant, 403, request_id), R"({"why":"no cors"})");
+    Response res;
+    res.status = 204;
+    std::string methods, headers;
+    for (auto& v : verbs) {
+      for (auto& c : v) c = char(std::toupper(static_cast<unsigned char>(c)));
+      methods += (methods.empty() ? "" : ", ") + v;
+    }
+    for (const auto& h : allow_headers) headers += (headers.empty() ? "" : ", ") + h;
+    res.headers.emplace_back("access-control-allow-origin", any_origin ? "*" : req.header("origin"));
+    res.headers.emplace_back("access-control-allow-methods", methods);
+    res.headers.emplace_back("access-control-allow-headers", headers);
+    res.headers.emplace_back("access-control-max-age", "600");
+    res.headers.emplace_back("vary", "origin");
+    return finish(std::move(res), R"({"cors":"preflight"})");
+  }
   std::string verb = req.method == "head" ? "get" : req.method;
   auto match = table.match(path->segments, verb);
   if (match.value) {
@@ -810,6 +844,35 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   int64_t now_ms = extra["now_ms"].as_int64();
   std::string extra_text = json::dump(extra);
 
+  // The status vocabulary (037): 5xx belongs to the host, a redirect may only go to a path
+  // on this site, and an "empty" response is a 204.
+  if (result.outcome == runtime::wasm::CallResult::Outcome::kOk) {
+    std::string why;
+    if (result.status >= 500) {
+      why = "the box answered " + std::to_string(result.status) + "; 5xx belongs to the host";
+    } else if (result.status >= 300 && result.status < 400) {
+      std::string location;
+      for (const auto& [k, v] : result.headers) {
+        if (k == "location") location = v;
+      }
+      bool code_ok = result.status == 301 || result.status == 302 || result.status == 303 || result.status == 307 ||
+                     result.status == 308;
+      if (!code_ok || location.empty() || safe_return(location) != location) {
+        why = "the box redirected to \"" + location.substr(0, 200) + "\"; a box may only redirect to a path on this site";
+      }
+    }
+    if (!why.empty()) {
+      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
+                                                       {"request_id", request_id},
+                                                       {"version", ref.box->version},
+                                                       {"level", "host"},
+                                                       {"text", why}}));
+      result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+    } else if (ref.route->response == "empty" && result.status >= 200 && result.status < 300) {
+      result.status = 204;
+      result.body.clear();
+    }
+  }
   Response res;
   if (result.outcome == runtime::wasm::CallResult::Outcome::kOk) {
     res.status = result.status;
@@ -860,6 +923,30 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   } else {
     int status = result.outcome == runtime::wasm::CallResult::Outcome::kTimeout ? 504 : 500;
     res = error_page(tenant, status, request_id);
+  }
+  // Conditional GETs (037): an ETag from the answer's bytes, and a 304 when the caller has
+  // them already. The box still runs; the bytes don't travel.
+  if (res.status == 200 && (req.method == "get" || req.method == "head") && !res.host_error) {
+    bool has_etag = std::any_of(res.headers.begin(), res.headers.end(), [](const auto& h) { return h.first == "etag"; });
+    if (!has_etag) res.headers.emplace_back("etag", "\"" + base::sha256_hex(res.body).substr(0, 20) + "\"");
+    std::string etag;
+    for (const auto& [k, v] : res.headers) {
+      if (k == "etag") etag = v;
+    }
+    if (!etag.empty() && req.header("if-none-match") == etag) {
+      res.status = 304;
+      res.body.clear();
+    }
+  }
+  // CORS (037): the route's listed origins may read the answer from a browser. Credentials
+  // never cross: no cookie rides a cross-origin request, so only bearer callers get in.
+  std::string origin = req.header("origin");
+  if (!origin.empty() && !ref.route->cors.empty()) {
+    bool any = std::find(ref.route->cors.begin(), ref.route->cors.end(), "*") != ref.route->cors.end();
+    if (any || std::find(ref.route->cors.begin(), ref.route->cors.end(), base::to_lower(origin)) != ref.route->cors.end()) {
+      res.headers.emplace_back("access-control-allow-origin", any ? "*" : origin);
+      res.headers.emplace_back("vary", "origin");
+    }
   }
   finish(std::move(res), std::move(extra_text));
 }

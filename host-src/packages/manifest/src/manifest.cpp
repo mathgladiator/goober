@@ -94,6 +94,19 @@ bool parse_request_parts(const bj::object& def, const std::string& verb, const s
       route->request_headers.push_back(name);
     }
   }
+  if (auto* c = def.if_contains("cors")) {
+    if (!c->is_array() || c->as_array().empty()) return *error = where + ".cors is a list of origins", false;
+    for (const auto& o : c->as_array()) {
+      std::string origin = o.is_string() ? base::to_lower(std::string(o.as_string())) : "";
+      bool ok = origin == "*";
+      if (!ok && (origin.starts_with("https://") || origin.starts_with("http://"))) {
+        auto rest = origin.substr(origin.find("://") + 3);
+        ok = !rest.empty() && rest.find_first_of("/?#@ ") == std::string::npos;
+      }
+      if (!ok) return *error = where + ".cors holds origins like https://app.example.com, or \"*\"", false;
+      route->cors.push_back(origin);
+    }
+  }
   if (auto r = get_string(def, "response", &err)) {
     if (!kResponses.count(*r) && types::json_type_name(*r).empty()) {
       return *error = where + ".response must be json, json:$Type, text, html, markdown, or empty", false;
@@ -789,7 +802,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             std::string key(f.key());
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
-                key == "response") {
+                key == "response" || key == "cors") {
               continue;
             }
             if (kLaterRoute.count(key)) {

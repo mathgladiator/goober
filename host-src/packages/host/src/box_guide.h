@@ -78,8 +78,12 @@ Route, tool, and timer names are [a-z][a-z0-9_]*, unique across the whole host.
   "body": "json:OrderUpdate",               or "text" / "binary"; checked before the box wakes
   "max-body-bytes": 65536,
   "response": "json:Order",                 a 2xx JSON answer must match, or it's a 500
-  "template": "order"                       browsers asking for HTML get the JSON rendered
+  "template": "order",                      browsers asking for HTML get the JSON rendered
+  "cors": ["https://app.example.com"]       browser pages there may call it with a bearer token
 }}}}
+Answers: 2xx and 4xx as you send them; 5xx is the host's (your body is replaced and your writes
+roll back); a redirect (301/302/303/307/308) must point at a path on this site; "response":
+"empty" makes any 2xx a 204. GET answers get an ETag and a 304 when the caller has the bytes.
 Parameters: {name : string|int32|int64}; literal segments win over parameters.
 Requirements are an OR of AND clauses of roles: [] is any signed-in user; "owner",
 "admin/project_{project_id}" (a path parameter), "self/user_{!user_id}", and "host:owner"

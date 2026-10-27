@@ -41,7 +41,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 030 Larger env. | partial | `external` services by verb and path, `require` pins from the context, credentials by key name, per-request budgets, an egress log (015). | OpenAPI documents and generated clients, async calls, per-service rate limits, box-to-box calls. |
 | 035 Outbox | partial | Elements committed with the request's writes, a dispatcher with ordered delivery per service, backoff, stable idempotency keys, dead letters and retry (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
-| 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`, checked by the host (011). | The status vocabulary, CORS, ETags on box GETs, compression, ranges; undeclared routes still see every header and parameter. |
+| 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content and box GETs; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`; the status vocabulary; CORS per route (011). | ETags that skip the box, compression, ranges, declared redirect targets; undeclared routes still see every header and parameter. |
 | 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
 | 039 Internal | partial | Internal routes with callers, synchronous calls carrying the person and tenant, both sides checked, cycles refused, depth capped, deadlines shrink (016). | Outbox to boxes, idempotent routes, typed generated calls, tenant binding by path, worst-case sums. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
@@ -166,9 +166,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [ ] Fuzz the parsers (markdown, Mustache, front matter, types, multipart, SQL tokenizer).
 
 ### Phase 5: the rest of the HTTP contract (037)
-- [ ] ETags and 304 on box GETs.
-- [ ] The status vocabulary: clamp box 4xx, tie success codes to the response kind.
-- [ ] CORS declared in the manifest, preflight answered by the host.
+- [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).
+- [x] The status vocabulary: 5xx is the host's, redirects only to same-site paths, `empty` is 204.
+- [x] CORS per route (`"cors"`), preflights answered by the host, never with credentials.
+- [ ] ETags from commit versions, so a 304 doesn't wake the box; compression and ranges.
 
 ### Phase 6: time (045)
 - [x] Timer routes with `every-ms` and `cron`, and data-driven `by_timer` sources firing per
