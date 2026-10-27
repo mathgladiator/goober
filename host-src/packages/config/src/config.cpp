@@ -130,8 +130,9 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   }
 
   if (const auto* listen = get_object(root, "listen", &err)) {
-    if (!check_keys(*listen, {"address", "port"}, "listen", &err)) return *error = err, nullptr;
+    if (!check_keys(*listen, {"address", "port", "behind-proxy"}, "listen", &err)) return *error = err, nullptr;
     if (auto v = get_string(*listen, "address", &err)) cfg->listen_address = *v;
+    if (auto v = get_bool(*listen, "behind-proxy", &err)) cfg->behind_proxy = *v;
     if (auto v = get_int(*listen, "port", &err)) {
       if (*v < 0 || *v > 65535) return *error = "listen.port must be 0 (any free port) to 65535", nullptr;
       cfg->listen_port = uint16_t(*v);
@@ -173,7 +174,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     cfg->public_url = *v;
   }
   if (const auto* id = get_object(root, "identity", &err)) {
-    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "operators", "clients"}, "identity", &err)) {
+    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "smtp", "operators", "clients"}, "identity", &err)) {
       return *error = err, nullptr;
     }
     if (auto v = get_bool(*id, "cookie-secure", &err)) cfg->identity.cookie_secure = *v;
@@ -182,7 +183,38 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       return *error = "identity.session-days must be 1 to 400", nullptr;
     }
     if (auto v = get_string(*id, "mailer", &err)) cfg->identity.mailer = *v;
-    if (cfg->identity.mailer != "dev") return *error = "identity.mailer must be \"dev\" in v1", nullptr;
+    if (cfg->identity.mailer != "dev" && cfg->identity.mailer != "smtp") {
+      return *error = "identity.mailer must be \"dev\" or \"smtp\"", nullptr;
+    }
+    if (const auto* smtp = get_object(*id, "smtp", &err)) {
+      if (!check_keys(*smtp, {"url", "from", "username", "password-file"}, "identity.smtp", &err)) {
+        return *error = err, nullptr;
+      }
+      auto& m = cfg->identity.smtp;
+      m.url = get_string(*smtp, "url", &err).value_or("");
+      m.from = base::to_lower(get_string(*smtp, "from", &err).value_or(""));
+      m.username = get_string(*smtp, "username", &err).value_or("");
+      m.password_file = get_string(*smtp, "password-file", &err).value_or("");
+      std::string_view rest = m.url.starts_with("smtps://") ? std::string_view(m.url).substr(8)
+                              : m.url.starts_with("smtp://") ? std::string_view(m.url).substr(7)
+                                                             : std::string_view();
+      bool host_ok = !rest.empty() && rest.size() < 256;
+      for (char c : rest) {
+        host_ok = host_ok && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+                              c == '-' || c == ':' || c == '[' || c == ']');
+      }
+      if (!host_ok) return *error = "identity.smtp.url must be smtps://host[:port] or smtp://host[:port]", nullptr;
+      if (!is_email(m.from)) return *error = "identity.smtp.from must be an email address", nullptr;
+      for (char c : m.username) {
+        if (static_cast<unsigned char>(c) < 0x20) return *error = "identity.smtp.username holds a control character", nullptr;
+      }
+      if (!m.username.empty() && m.password_file.empty()) {
+        return *error = "identity.smtp.password-file is required with a username", nullptr;
+      }
+    }
+    if (cfg->identity.mailer == "smtp" && cfg->identity.smtp.url.empty()) {
+      return *error = "identity.mailer \"smtp\" needs identity.smtp {url, from, username, password-file}", nullptr;
+    }
     if (const auto* ops = get_object(*id, "operators", &err)) {
       for (const auto& kv : *ops) {
         std::string email = base::to_lower(kv.key());
@@ -236,10 +268,15 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     }
   }
   if (const auto* limits = get_object(root, "limits", &err)) {
-    if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes"}, "limits", &err)) {
+    if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute"}, "limits",
+                    &err)) {
       return *error = err, nullptr;
     }
     if (auto v = get_int(*limits, "body-max-bytes", &err)) cfg->body_max_bytes = *v;
+    if (auto v = get_int(*limits, "requests-per-minute", &err)) {
+      if (*v < 10 || *v > 1'000'000) return *error = "limits.requests-per-minute must be 10 to 1000000", nullptr;
+      cfg->requests_per_minute = *v;
+    }
     if (!read_limit(*limits, "timeout-ms", cfg->timeout_ms, &err) || !read_limit(*limits, "fuel", cfg->fuel, &err) ||
         !read_limit(*limits, "memory-max-bytes", cfg->memory_max_bytes, &err)) {
       return *error = err, nullptr;

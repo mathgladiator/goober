@@ -86,6 +86,7 @@ is_domain() { [[ "$1" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { warn "use a lo
 is_port() { [[ "$1" =~ ^[0-9]+$ ]] && (($1 >= 1 && $1 <= 65535)) || { warn "a port is 1 to 65535"; return 1; }; }
 is_count() { [[ "$1" =~ ^[0-9]+$ ]] && (($1 >= 1)) || { warn "a whole number, at least 1"; return 1; }; }
 is_url() { [[ "$1" =~ ^https?://[^/[:space:]]+$ ]] || { warn "like https://goober.example.com, with no path"; return 1; }; }
+is_url_any() { [[ "$1" =~ ^smtps?://[A-Za-z0-9.:\[\]-]+$ ]] || { warn "like smtps://smtp.example.com:465"; return 1; }; }
 port_busy() { (echo >"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 tenant_from_domain() {
   local t="${1%%.*}"; t="${t//-/_}"; t="${t,,}"
@@ -205,8 +206,15 @@ ask SESSION_DAYS "Days a sign-in lasts:" "30" is_count
 if [[ $PROD == 1 ]]; then
   COOKIE_SECURE=true
   note "Session cookies will be __Host- and Secure, so they only travel over HTTPS."
-  warn "v1 has only the dev mailer: sign-in codes are written to storage/mail/outbox/ and"
-  warn "logs/mail.log on the server, not sent. Fine for you; not yet for customers."
+  note "Sign-in codes go by email. Without SMTP, the dev mailer writes them to"
+  note "storage/mail/outbox/ on the server: fine for you alone, useless for anyone else."
+  confirm USE_SMTP "Send mail through an SMTP server (TLS required)?" y
+  if [[ $USE_SMTP == 1 ]]; then
+    ask SMTP_URL "SMTP URL (smtps://host:465, or smtp://host:587 with STARTTLS):" "smtps://smtp.example.com:465" is_url_any
+    ask SMTP_FROM "Send from:" "no-reply@$PLATFORM" is_email
+    ask SMTP_USER "SMTP username (empty for none):" ""
+    ask SMTP_PASS_FILE "A file holding only the SMTP password (kept out of the config):" "/etc/goober/smtp-password"
+  fi
 else
   COOKIE_SECURE=false
   note "Local mode prints each sign-in code in the terminal running the host."
@@ -266,7 +274,9 @@ fi
 
 export G_ADDRESS="$ADDRESS" G_PORT="$PORT" G_PLATFORM="$PLATFORM" G_PUBLIC_URL="$PUBLIC_URL"
 export G_DOMAINS="$(printf '%s\n' "${DOMAINS[@]}")" G_OPERATORS="$(printf '%s\n' "${OPERATORS[@]}")"
-export G_TOKEN="$CONFIG_TOKEN" G_COOKIE_SECURE="$COOKIE_SECURE" G_SESSION_DAYS="$SESSION_DAYS" G_TERMINAL="$TERMINAL"
+export G_SMTP="${USE_SMTP:-0}" G_SMTP_URL="${SMTP_URL:-}" G_SMTP_FROM="${SMTP_FROM:-}" G_SMTP_USER="${SMTP_USER:-}"
+export G_SMTP_PASS_FILE="${SMTP_PASS_FILE:-}"
+export G_PROD="$PROD" G_TOKEN="$CONFIG_TOKEN" G_COOKIE_SECURE="$COOKIE_SECURE" G_SESSION_DAYS="$SESSION_DAYS" G_TERMINAL="$TERMINAL"
 export G_NET="$NET_THREADS" G_BOX="$BOX_THREADS" G_PIN="$PIN" G_BODY="$BODY_MAX"
 export G_T_DEF="$T_DEF" G_T_MAX="$T_MAX" G_F_DEF="$F_DEF" G_F_MAX="$F_MAX" G_M_DEF="$M_DEF" G_M_MAX="$M_MAX"
 JSON="$(python3 - <<'PY'
@@ -277,7 +287,8 @@ for line in e["G_DOMAINS"].splitlines():
     d, t, o = line.split("|")
     domains[d] = {"tenant": t, **({"owner": o} if o else {})}
 cfg = {
-    "listen": {"address": e["G_ADDRESS"], "port": int(e["G_PORT"])},
+    "listen": {"address": e["G_ADDRESS"], "port": int(e["G_PORT"]),
+               **({"behind-proxy": True} if e["G_PROD"] == "1" else {})},
     "storage": "storage",
     "platform-domain": e["G_PLATFORM"],
     **({"public-url": e["G_PUBLIC_URL"]} if e["G_PUBLIC_URL"] else {}),
@@ -286,7 +297,10 @@ cfg = {
     "identity": {
         "cookie-secure": e["G_COOKIE_SECURE"] == "true",
         "session-days": int(e["G_SESSION_DAYS"]),
-        "mailer": "dev",
+        "mailer": "smtp" if e["G_SMTP"] == "1" else "dev",
+        **({"smtp": {"url": e["G_SMTP_URL"], "from": e["G_SMTP_FROM"],
+                     **({"username": e["G_SMTP_USER"], "password-file": e["G_SMTP_PASS_FILE"]} if e["G_SMTP_USER"] else {})}}
+           if e["G_SMTP"] == "1" else {}),
         "operators": {o: ["host:owner"] for o in e["G_OPERATORS"].splitlines()},
         **({"clients": {"dumb-terminal": {
             "name": "dumb terminal",

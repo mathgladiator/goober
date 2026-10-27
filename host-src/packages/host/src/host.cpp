@@ -11,6 +11,7 @@
 #include "goober/json/json.h"
 #include "goober/router/path.h"
 #include "http_util.h"
+#include "mailer.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -34,6 +35,8 @@ const char* reason(int status) {
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 413: return "Payload Too Large";
+    case 415: return "Unsupported Media Type";
+    case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
     case 503: return "Service Unavailable";
     case 504: return "Gateway Timeout";
@@ -48,6 +51,22 @@ bool prefers_html(std::string_view accept) {
   if (html == std::string_view::npos) return false;
   auto json = accept.find("application/json");
   return json == std::string_view::npos || html < json;
+}
+
+// The endpoints worth slowing down per client address: guessing codes, minting tokens,
+// registering clients, uploading, and agents' calls. Everything else shares one budget.
+std::optional<std::pair<const char*, RateRule>> sensitive(const std::string& path, const std::string& method) {
+  if (method != "post") return std::nullopt;
+  if (path == "/identity/email/start") return std::pair{"sign-in-start", RateRule{10, 5}};
+  if (path == "/identity/email/verify") return std::pair{"sign-in-verify", RateRule{20, 10}};
+  if (path == "/oauth/token") return std::pair{"token", RateRule{60, 30}};
+  if (path == "/oauth/register") return std::pair{"register", RateRule{20.0 / 60, 5}};
+  if (path == "/oauth/device") return std::pair{"device", RateRule{10, 5}};
+  if (path == "/oauth/device/verify") return std::pair{"device-verify", RateRule{10, 5}};
+  if (path == "/oauth/authorize") return std::pair{"authorize", RateRule{30, 10}};
+  if (path == "/attachment/upload") return std::pair{"upload", RateRule{30, 10}};
+  if (path == "/mcp") return std::pair{"mcp", RateRule{120, 60}};
+  return std::nullopt;
 }
 
 // Request headers a box never sees: credentials belong to the host.
@@ -73,6 +92,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check([this](const manifest::Manifest& m, std::string* error) { return check_data(m, error); });
+  smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
@@ -121,8 +141,15 @@ std::string Host::reload() {
 // The dev mailer (005 §11, Q45): each mail becomes a MIME file under
 // storage/mail/outbox/ and a line in logs/mail.log. In local mode it is also
 // printed, so the person playing sees their sign-in code in the terminal.
+void Host::drain_mail() { smtp_->drain(); }
+
 void Host::send_mail(const identity::Mail& mail) {
   auto cfg = config_.get();
+  if (cfg->identity.mailer == "smtp") {
+    // Queued, so the sign-in answers in the same time whether or not a mail goes out.
+    smtp_->send(mail);
+    return;
+  }
   int64_t now = base::now_unix_ms();
   uint8_t rnd[4];
   base::os_random_fill(rnd);
@@ -234,6 +261,25 @@ void Host::handle(Request req, Responder respond) {
   };
 
   auto path = router::normalize_path(req.path);
+  // Floods and guessing are slowed per client address, before any work is queued.
+  {
+    std::string client = client_address(req);
+    int64_t now = base::now_unix_ms();
+    double rpm = double(cfg->requests_per_minute);
+    int64_t wait = limiter_.take("all", client, RateRule{rpm, std::max(10.0, rpm / 4)}, now);
+    std::string bucket = "all";
+    if (!wait && path) {
+      if (auto rule = sensitive(path->path, req.method)) {
+        wait = limiter_.take(rule->first, client, rule->second, now);
+        bucket = rule->first;
+      }
+    }
+    if (wait) {
+      auto res = error_page(resolved ? resolved->second.tenant : "", 429, request_id);
+      res.headers.emplace_back("retry-after", std::to_string(wait));
+      return finish(std::move(res), json::dump(bj::object{{"why", "rate limited"}, {"bucket", bucket}, {"client", client}}));
+    }
+  }
   if (path && path->path == kOperationsMcpPath) {
     pool_->post([this, req, finish] { handle_operations(req, finish); });
     return;
@@ -310,6 +356,19 @@ void Host::handle(Request req, Responder respond) {
       finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"content failed"})");
     }
   });
+}
+
+std::string Host::client_address(const Request& req) const {
+  if (config_.get()->behind_proxy) {
+    // The proxy appends the address it saw; anything before it came from the client.
+    std::string xff = req.header("x-forwarded-for");
+    auto comma = xff.rfind(',');
+    std::string last = comma == std::string::npos ? xff : xff.substr(comma + 1);
+    while (!last.empty() && last.front() == ' ') last.erase(0, 1);
+    while (!last.empty() && last.back() == ' ') last.pop_back();
+    if (!last.empty() && last.size() <= 64) return last;
+  }
+  return req.remote;
 }
 
 std::optional<SignedIn> Host::caller(const Request& req, const std::string& tenant) {

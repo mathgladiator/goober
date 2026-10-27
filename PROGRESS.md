@@ -73,9 +73,11 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 Fine for **one person on a laptop**, and for a **personal VPS behind Caddy** with these
 caveats, which Phase 3 works through:
 
-- **Sign-in mail doesn't leave the machine.** The only mailer writes `.eml` files, so on
-  a server you read your own code from `storage/mail/outbox/`. Nobody else can sign in.
-- **No rate limits** on sign-in, tokens, or uploads beyond the per-address code throttle.
+- **Sign-in mail** goes through SMTP when `identity.mailer` is `smtp`; otherwise the dev
+  mailer writes `.eml` files and nobody else can sign in. The SMTP path is tested against
+  a stand-in curl, not yet against a real mail server.
+- **Rate limits** are per client address and in memory: they reset on restart, and a
+  client with many addresses gets many budgets.
 - **Secrets sit in the config file** (operator token, later mail credentials), protected
   only by file mode 0600. There is no vault (064).
 - **Backups are manual**: copy `storage/` while the host is stopped. No Litestream, no
@@ -138,8 +140,11 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [ ] Connect a real MCP client (Claude Code or Grok) to `/mcp` through OAuth.
 
 ### Phase 3: production readiness
-- [ ] A real mailer (SMTP submission with TLS), so others can sign in.
-- [ ] Rate limits: sign-in starts, code checks, token and device polling, uploads.
+- [x] A real mailer: SMTP with TLS through curl, from a background queue so timing reveals
+      nothing, the password read from a file and kept off the command line; setup asks.
+- [x] Rate limits per client address: one budget for everything (`limits.requests-per-minute`)
+      and tighter ones for sign-in, tokens, registration, the device flow, consent, uploads,
+      and `/mcp`; `listen.behind-proxy` reads the address from X-Forwarded-For behind Caddy.
 - [ ] Online backups (SQLite backup API) and a tested restore; Litestream notes.
 - [ ] Log rotation, and an access log without query strings or other user data.
 - [ ] JSON error bodies for API callers; security headers everywhere.

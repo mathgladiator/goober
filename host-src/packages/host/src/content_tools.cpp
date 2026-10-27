@@ -2,15 +2,12 @@
 // pages, templates, and attachments.
 
 #include <fcntl.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #include <cctype>
 #include <set>
 
 #include "goober/base/encoding.h"
+#include "goober/base/process.h"
 #include "goober/base/names.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -19,7 +16,6 @@
 #include "goober/render/mustache.h"
 #include "goober/router/path.h"
 
-extern char** environ;
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -142,58 +138,19 @@ std::optional<std::string> fetch_https(const std::string& url, size_t max_bytes,
   for (char c : url) {
     if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) return *error = "the URL holds a space or control character", std::nullopt;
   }
-  int out[2], err[2];
-  if (pipe(out) != 0) return *error = "pipe failed", std::nullopt;
-  if (pipe(err) != 0) {
-    close(out[0]);
-    close(out[1]);
-    return *error = "pipe failed", std::nullopt;
-  }
-  posix_spawn_file_actions_t actions;
-  posix_spawn_file_actions_init(&actions);
-  posix_spawn_file_actions_adddup2(&actions, out[1], 1);
-  posix_spawn_file_actions_adddup2(&actions, err[1], 2);
-  posix_spawn_file_actions_addclose(&actions, out[0]);
-  posix_spawn_file_actions_addclose(&actions, err[0]);
   std::string limit = std::to_string(max_bytes);
-  std::vector<std::string> argv_s = {"curl",  "-sS",          "-f",      "-L",         "--max-redirs", "3",
-                                     "--proto", "=https",     "--proto-redir", "=https", "--max-time",  "20",
-                                     "--max-filesize", limit, "-A", "goober-host", "--", url};
-  std::vector<char*> argv;
-  for (auto& a : argv_s) argv.push_back(a.data());
-  argv.push_back(nullptr);
-  pid_t pid = 0;
-  int rc = posix_spawnp(&pid, "curl", &actions, nullptr, argv.data(), environ);
-  posix_spawn_file_actions_destroy(&actions);
-  close(out[1]);
-  close(err[1]);
-  if (rc != 0) {
-    close(out[0]);
-    close(err[0]);
-    return *error = "could not run curl", std::nullopt;
-  }
-  std::string body, msg;
-  char buf[65536];
-  bool too_big = false;
-  for (ssize_t n; (n = read(out[0], buf, sizeof buf)) > 0;) {
-    if (body.size() + size_t(n) > max_bytes) {
-      too_big = true;
-      break;
-    }
-    body.append(buf, size_t(n));
-  }
-  close(out[0]);
-  if (too_big) kill(pid, SIGTERM);
-  for (ssize_t n; (n = read(err[0], buf, sizeof buf)) > 0;) msg.append(buf, size_t(std::min<ssize_t>(n, 2000)));
-  close(err[0]);
-  int status = 0;
-  waitpid(pid, &status, 0);
-  if (too_big) return *error = "the file is larger than " + limit + " bytes", std::nullopt;
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+  auto r = base::run_process({"curl", "-sS", "-f", "-L", "--max-redirs", "3", "--proto", "=https", "--proto-redir",
+                              "=https", "--max-time", "20", "--max-filesize", limit, "-A", "goober-host", "--", url},
+                             "", max_bytes, 25000);
+  if (!r.started) return *error = "could not run curl", std::nullopt;
+  if (r.truncated) return *error = "the file is larger than " + limit + " bytes", std::nullopt;
+  if (r.timed_out) return *error = "fetching " + url + " took too long", std::nullopt;
+  if (r.exit_code != 0) {
+    std::string msg = r.err;
     while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
     return *error = "fetching " + url + " failed: " + (msg.empty() ? "curl exited with an error" : msg), std::nullopt;
   }
-  return body;
+  return r.out;
 }
 
 bj::object attachment_json(const attachments::Attachment& a, const std::vector<std::string>* used_by) {

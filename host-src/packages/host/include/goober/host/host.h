@@ -12,6 +12,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/host/rate_limit.h"
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
 #include "goober/runtime_wasm/engine.h"
@@ -53,6 +54,9 @@ class Host {
   // Rereads the config file. Returns a note for the log.
   std::string reload();
 
+  // Waits until queued mail has been handed to the mail server (tests).
+  void drain_mail();
+
   // For tests and tools.
   config::ConfigHolder& config() { return config_; }
   content::ContentStore& content() { return *content_; }
@@ -85,6 +89,8 @@ class Host {
                     const std::string& domain, const std::string& tenant);
   // A client from the realm, or from identity.clients in the config (registered on first use).
   std::optional<identity::Client> oauth_client(const std::string& tenant, const std::string& client_id);
+  // The client's address: the peer, or the last X-Forwarded-For entry behind a proxy.
+  std::string client_address(const server::http::Request& req) const;
   // This request's origin, like https://example.com or http://localhost:8080.
   std::string origin_of(const server::http::Request& req) const;
   std::string session_cookie_name() const;
@@ -145,6 +151,8 @@ class Host {
   std::vector<std::string> startup_notes_;
   int64_t started_ms_ = 0;
   std::atomic<uint64_t> requests_{0};
+  RateLimiter limiter_;
+  std::unique_ptr<class SmtpQueue> smtp_;
 };
 
 }  // namespace goober::host

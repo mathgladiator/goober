@@ -1,0 +1,38 @@
+#include "goober/host/rate_limit.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace goober::host {
+
+int64_t RateLimiter::take(std::string_view bucket, std::string_view key, const RateRule& rule, int64_t now_ms) {
+  std::string id = std::string(bucket) + "\n" + std::string(key);
+  std::lock_guard lock(mu_);
+  // Now and then, forget buckets that have refilled: they hold nothing worth keeping.
+  if (++calls_ % 4096 == 0) {
+    for (auto it = buckets_.begin(); it != buckets_.end();) {
+      bool idle = now_ms - it->second.last_ms > 15 * 60 * 1000;
+      it = idle ? buckets_.erase(it) : std::next(it);
+    }
+  }
+  auto [it, fresh] = buckets_.try_emplace(id, Bucket{rule.burst, now_ms, rule.burst});
+  Bucket& b = it->second;
+  if (!fresh) {
+    double elapsed = double(std::max<int64_t>(0, now_ms - b.last_ms));
+    b.tokens = std::min(rule.burst, b.tokens + elapsed * rule.per_minute / 60000.0);
+    b.last_ms = now_ms;
+  }
+  if (b.tokens >= 1) {
+    b.tokens -= 1;
+    return 0;
+  }
+  double wait_ms = (1 - b.tokens) * 60000.0 / rule.per_minute;
+  return std::max<int64_t>(1, int64_t(std::ceil(wait_ms / 1000.0)));
+}
+
+size_t RateLimiter::size() const {
+  std::lock_guard lock(mu_);
+  return buckets_.size();
+}
+
+}  // namespace goober::host

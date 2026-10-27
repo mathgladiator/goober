@@ -32,8 +32,16 @@ struct IdentityConfig {
   // since a plain-HTTP host can't set a Secure cookie everywhere.
   bool cookie_secure = true;
   int64_t session_days = 30;
-  // "dev" writes each mail to storage/mail/ as a MIME file. No real provider in v1.
+  // "dev" writes each mail to storage/mail/ as a MIME file. "smtp" sends it through an
+  // SMTP server with TLS (submission on 587 with STARTTLS, or smtps on 465).
   std::string mailer = "dev";
+  struct Smtp {
+    std::string url;            // smtps://host:465 or smtp://host:587 (STARTTLS is required)
+    std::string from;           // the sender address, like no-reply@example.com
+    std::string username;       // may be empty for a server that needs no sign-in
+    std::string password_file;  // a file holding only the password; kept out of the config
+  };
+  Smtp smtp;
   // Host identities: an email and the host roles it holds, like "host:owner".
   std::map<std::string, std::vector<std::string>> operators;
   // OAuth clients registered in every tenant realm, by client_id, like the dumb
@@ -66,6 +74,11 @@ struct HostConfig {
   int box_threads = 4;
   bool pin_boxes = false;
   int64_t body_max_bytes = 1 << 20;
+  // Requests one client address may make per minute, in a burst of a quarter of that.
+  int64_t requests_per_minute = 1200;
+  // The host sits behind a proxy like Caddy (099): the client's address is the last one in
+  // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.
+  bool behind_proxy = false;
   Limit timeout_ms{1000, 10000};
   Limit fuel{100'000'000, 2'000'000'000};
   Limit memory_max_bytes{64 << 20, 512 << 20};

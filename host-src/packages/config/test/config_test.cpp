@@ -76,6 +76,14 @@ TEST(Config, ReadsIdentityOwnersAndPublicUrl) {
   EXPECT_FALSE(parse_config(R"({"identity":{"operators":{"me@example.com":["owner"]}}})", "/", &err));
   EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"a","owner":"nope"}}})", "/", &err));
   EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"ses"}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"smtp"}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"smtp","smtp":{"url":"http://x","from":"a@b.c"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"smtp","smtp":{"url":"smtps://x;rm","from":"a@b.c"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"identity":{"mailer":"smtp","smtp":{"url":"smtps://x","from":"a@b.c","username":"u"}}})", "/", &err));
+  auto smtp = parse_config(R"({"identity":{"mailer":"smtp","smtp":{"url":"smtps://smtp.example.com:465",
+      "from":"No-Reply@Example.com","username":"u","password-file":"/etc/goober/smtp"}}})", "/", &err);
+  ASSERT_TRUE(smtp) << err;
+  EXPECT_EQ(smtp->identity.smtp.from, "no-reply@example.com");
   EXPECT_FALSE(parse_config(R"({"public-url":"goober.example.com"})", "/", &err));
 }
 

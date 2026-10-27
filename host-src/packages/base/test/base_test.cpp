@@ -5,6 +5,7 @@
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
+#include "goober/base/process.h"
 #include "goober/base/names.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
@@ -110,3 +111,18 @@ TEST(Random, SeededIsDeterministic) {
 }
 
 TEST(Time, FormatUtc) { EXPECT_EQ(format_utc_ms(0), "1970-01-01T00:00:00.000Z"); }
+
+TEST(Process, RunsWithoutAShellAndBoundsOutput) {
+  auto r = run_process({"cat"}, "hello; rm -rf /", 1024, 5000);
+  ASSERT_TRUE(r.started);
+  EXPECT_EQ(r.exit_code, 0);
+  EXPECT_EQ(r.out, "hello; rm -rf /");
+  auto big = run_process({"yes"}, "", 1000, 5000);
+  EXPECT_TRUE(big.truncated);
+  auto slow = run_process({"sleep", "5"}, "", 10, 200);
+  EXPECT_TRUE(slow.timed_out);
+  auto fails = run_process({"sh", "-c", "echo oops >&2; exit 3"}, "", 10, 5000);
+  EXPECT_EQ(fails.exit_code, 3);
+  EXPECT_EQ(fails.err, "oops\n");
+  EXPECT_FALSE(run_process({"no-such-program-goober"}, "", 10, 1000).started);
+}
