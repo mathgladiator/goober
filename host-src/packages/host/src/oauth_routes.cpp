@@ -156,6 +156,17 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     return finish(std::move(res), log("metadata"));
   }
 
+  // MCP authorization (RFC 9728): /mcp is a protected resource, signed in to by this realm.
+  if ((path == "/.well-known/oauth-protected-resource" || path == "/.well-known/oauth-protected-resource/mcp") &&
+      is_get) {
+    auto res = json_response(200, bj::object{{"resource", origin + "/mcp"},
+                                             {"authorization_servers", bj::array{bj::value(origin)}},
+                                             {"bearer_methods_supported", bj::array{"header"}},
+                                             {"resource_name", domain}});
+    res.headers.back() = {"cache-control", "no-cache"};
+    return finish(std::move(res), log("protected_resource"));
+  }
+
   // ---- The authorization code flow: GET shows the consent screen, POST records the answer.
   if (path == "/oauth/authorize" && (is_get || is_post)) {
     auto p = is_get ? router::parse_query(req.query) : router::parse_query(req.body);

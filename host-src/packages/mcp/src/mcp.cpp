@@ -67,6 +67,8 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) 
     }
     std::string text = out.value.is_string() ? std::string(out.value.get_string()) : goober::json::pretty(out.value);
     result = bj::object{{"content", bj::array{bj::object{{"type", "text"}, {"text", text}}}}, {"isError", out.is_error}};
+    // An object result is also given as structured content, for clients that read it.
+    if (!out.is_error && out.value.is_object()) result["structuredContent"] = out.value;
   } else {
     return error_body(id, -32601, "method not found: " + method);
   }

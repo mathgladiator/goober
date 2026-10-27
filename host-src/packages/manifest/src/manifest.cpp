@@ -33,14 +33,142 @@ const std::vector<std::string>& reserved_prefixes() {
 namespace {
 
 // Fields from 150.DeepManifest.md that v1 accepts with a warning.
-const std::set<std::string> kLaterTopLevel = {"types", "pins",    "policy",   "deployment",
+const std::set<std::string> kLaterTopLevel = {"pins",    "policy",   "deployment",
                                               "external", "keys", "static",   "headers",
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
                                               "instances"};
-const std::set<std::string> kLaterRoute = {"response", "body",     "query",     "headers",     "callers",
-                                           "signal",   "max-body-bytes", "timeout-ms", "description",
-                                           "request-headers", "grantable", "revocable"};
+const std::set<std::string> kLaterRoute = {"headers", "callers", "signal", "timeout-ms", "grantable", "revocable",
+                                           "queue",   "shadow-calls"};
+const std::set<std::string> kResponses = {"json", "text", "html", "markdown", "empty"};
+
+bool is_header_name(std::string_view h) {
+  if (h.empty() || h.size() > 64) return false;
+  for (char c : h) {
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+  }
+  return true;
+}
+
+// The request parts of 037: body, max-body-bytes, query, request-headers, and response.
+bool parse_request_parts(const bj::object& def, const std::string& verb, const std::string& where, HttpRoute* route,
+                         std::string* error) {
+  std::string err;
+  if (auto b = get_string(def, "body", &err)) {
+    if (*b != "text" && *b != "binary" && types::json_type_name(*b).empty()) {
+      return *error = where + ".body must be json:$Type, text, or binary", false;
+    }
+    if (verb == "get" || verb == "delete") return *error = where + ": a " + verb + " carries no body", false;
+    route->body = *b;
+  }
+  if (!err.empty()) return *error = where + ".body: " + err, false;
+  if (auto n = get_int(def, "max-body-bytes", &err)) {
+    if (*n < 1 || *n > (int64_t(1) << 30)) return *error = where + ".max-body-bytes must be 1 to 1073741824", false;
+    route->max_body_bytes = *n;
+  }
+  if (!err.empty()) return *error = where + ".max-body-bytes: " + err, false;
+  if (auto* q = def.if_contains("query")) {
+    if (!q->is_object()) return *error = where + ".query must be an object of parameter schemas", false;
+    route->query_declared = true;
+    for (const auto& kv : q->as_object()) {
+      std::string name(kv.key());
+      bool ok = !name.empty() && name.size() <= 64 && !(name[0] >= '0' && name[0] <= '9') && name[0] != '!';
+      for (char c : name) ok = ok && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+      if (!ok) return *error = where + ".query: "" + name + "" isn't a valid parameter name", false;
+      auto schema = types::parse_schema(kv.value(), where + ".query." + name, true, error);
+      if (!schema) return false;
+      route->query.emplace_back(name, *schema);
+    }
+  }
+  if (auto* h = def.if_contains("request-headers")) {
+    if (!h->is_array()) return *error = where + ".request-headers must be a list of header names", false;
+    route->headers_declared = true;
+    for (const auto& x : h->as_array()) {
+      std::string name = x.is_string() ? base::to_lower(std::string(x.as_string())) : "";
+      if (!is_header_name(name)) return *error = where + ".request-headers holds a bad header name", false;
+      // Credentials belong to the host, never to a box (037 § Everything a request can carry).
+      if (name == "authorization" || name == "cookie" || name.starts_with("goober-")) {
+        return *error = where + ".request-headers can't name " + name + ": the host keeps it", false;
+      }
+      route->request_headers.push_back(name);
+    }
+  }
+  if (auto r = get_string(def, "response", &err)) {
+    if (!kResponses.count(*r) && types::json_type_name(*r).empty()) {
+      return *error = where + ".response must be json, json:$Type, text, html, markdown, or empty", false;
+    }
+    route->response = *r;
+  }
+  if (!err.empty()) return *error = where + ".response: " + err, false;
+  return true;
+}
+
+bool parse_requirements_value(const bj::value& v, const router::RoutePattern& p, std::vector<std::vector<std::string>>* out,
+                              std::string* why);
+
+// routes.mcp.$name.tool (050.AgentsMCP.md § Tools are routes). Resources come later.
+bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!mcp.is_object()) return *error = "routes.mcp must be an object", false;
+  std::string err;
+  for (const auto& kv : mcp.as_object()) {
+    std::string key(kv.key());
+    std::string where = "routes.mcp." + key;
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    for (const auto& verb : kv.value().as_object()) {
+      std::string v(verb.key());
+      if (v == "resource") {
+        m->warnings.push_back(where + ".resource is accepted but not implemented in v1");
+        continue;
+      }
+      if (v != "tool") return *error = where + ": unknown verb (tool, resource)", false;
+      std::string at = where + ".tool";
+      if (!verb.value().is_object()) return *error = at + " must be an object", false;
+      const auto& def = verb.value().as_object();
+      for (const auto& f : def) {
+        std::string k(f.key());
+        if (k == "name" || k == "description" || k == "input" || k == "response" || k == "requirements") continue;
+        if (k == "public") return *error = at + ": MCP routes can't be public; an agent always acts for somebody", false;
+        if (k == "grantable" || k == "revocable" || k == "queue") {
+          m->warnings.push_back(at + "." + k + " is accepted but not implemented in v1");
+          continue;
+        }
+        return *error = at + ": unknown field \"" + k + "\"", false;
+      }
+      HttpRoute tool;
+      tool.verb = "tool";
+      tool.name = key;
+      if (auto n = get_string(def, "name", &err); n && *n != key) {
+        return *error = at + ".name must be the tool's key, " + key, false;
+      }
+      if (!base::is_valid_name(key)) return *error = where + ": tool name must match [a-z][a-z0-9_]* (at most 63)", false;
+      if (!names->insert(key).second) return *error = "route name \"" + key + "\" is used twice", false;
+      auto d = get_string(def, "description", &err);
+      if (!d || d->empty() || d->size() > 2000) {
+        return *error = at + ".description is required (at most 2000 bytes): a model reads it and acts on it", false;
+      }
+      tool.description = *d;
+      if (auto in = get_string(def, "input", &err)) {
+        if (types::json_type_name(*in).empty()) return *error = at + ".input must be json:$Type", false;
+        tool.input = *in;
+      }
+      if (auto r = get_string(def, "response", &err)) {
+        if (*r != "json" && *r != "text" && types::json_type_name(*r).empty()) {
+          return *error = at + ".response must be json, json:$Type, or text", false;
+        }
+        tool.response = *r;
+      }
+      if (!err.empty()) return *error = at + ": " + err, false;
+      auto* req = def.if_contains("requirements");
+      if (!req) return *error = at + ": needs requirements; a tool with none is denied to everyone", false;
+      std::string why;
+      if (!parse_requirements_value(*req, router::RoutePattern{}, &tool.requirements, &why)) {
+        return *error = at + ": " + why, false;
+      }
+      m->tools.push_back(std::move(tool));
+    }
+  }
+  return true;
+}
 
 bool is_role_char(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
@@ -240,7 +368,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   for (const auto& kv : root) {
     std::string key(kv.key());
     if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
-        key == "templates" || key == "data") {
+        key == "templates" || key == "data" || key == "types") {
       continue;
     }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
@@ -293,6 +421,13 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     }
   }
   if (!err.empty()) return *error = err, std::nullopt;
+  if (auto t = get_string(root, "types", &err)) {
+    if (t->empty() || t->size() > 128 || t->find('/') != std::string::npos || !t->ends_with(".json")) {
+      return *error = "\"types\" names the types document, a file like orders.openapi.json", std::nullopt;
+    }
+    m.types = *t;
+  }
+  if (!err.empty()) return *error = err, std::nullopt;
   if (const auto* data = get_object(root, "data", &err)) {
     if (!parse_data(*data, &m, error)) return std::nullopt;
   }
@@ -303,6 +438,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   if (const auto* routes = get_object(root, "routes", &err)) {
     for (const auto& proto : *routes) {
       std::string protocol(proto.key());
+      if (protocol == "mcp") {
+        if (!parse_tools(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
       if (protocol != "http") {
         m.warnings.push_back("routes." + protocol + " is accepted but not implemented in v1");
         continue;
@@ -323,7 +462,9 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           const auto& def = verb.value().get_object();
           for (const auto& f : def) {
             std::string key(f.key());
-            if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents") {
+            if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
+                key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
+                key == "response") {
               continue;
             }
             if (kLaterRoute.count(key)) {
@@ -349,6 +490,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           route.agents = goober::json::get_bool(def, "agents", &err).value_or(false);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
+          if (!parse_request_parts(def, v, where, &route, error)) return std::nullopt;
           auto is_public = goober::json::get_bool(def, "public", &err);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           auto req = def.find("requirements");
@@ -374,6 +516,40 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   }
   if (!err.empty()) return *error = err, std::nullopt;
   return m;
+}
+
+namespace {
+bool parse_requirements_value(const bj::value& v, const router::RoutePattern& p, std::vector<std::vector<std::string>>* out,
+                              std::string* why) {
+  return parse_requirements(v, p, out, why);
+}
+}  // namespace
+
+bool check_types(const Manifest& m, const types::Types* t, std::string* error) {
+  auto need = [&](const std::string& ref, const std::string& where) {
+    std::string name = types::json_type_name(ref);
+    if (name.empty()) return true;
+    if (!t) {
+      *error = where + " names " + ref + ", but the version has no types document" +
+               (m.types.empty() ? " (add \"types\")" : " (" + m.types + " wasn't supplied)");
+      return false;
+    }
+    if (!t->has(name)) {
+      *error = where + " names " + ref + ", which isn't in " + m.types;
+      return false;
+    }
+    return true;
+  };
+  for (const auto& r : m.routes) {
+    std::string where = "routes.http." + r.pattern.source + "." + r.verb;
+    if (!need(r.body, where + ".body") || !need(r.response, where + ".response")) return false;
+  }
+  for (const auto& tool : m.tools) {
+    std::string where = "routes.mcp." + tool.name + ".tool";
+    if (!need(tool.input, where + ".input") || !need(tool.response, where + ".response")) return false;
+  }
+  if (t && m.types.empty()) return *error = "a types document came with a manifest that names none", false;
+  return true;
 }
 
 std::string DataStrategy::database_for(std::string_view tenant) const {

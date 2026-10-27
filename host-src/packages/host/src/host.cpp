@@ -216,7 +216,9 @@ void Host::handle(Request req, Responder respond) {
   Finish finish = [this, req, respond, started, domain, request_id](Response res, std::string extra) {
     res.headers.emplace_back("goober-request-id", request_id);
     bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
-    if (res.status == 401) {
+    bool has_challenge = std::any_of(res.headers.begin(), res.headers.end(),
+                                     [](const auto& h) { return h.first == "www-authenticate"; });
+    if (res.status == 401 && !has_challenge) {
       // RFC 6750 §3: say how to authenticate, and whether the token sent was the problem.
       res.headers.emplace_back("www-authenticate", bearer ? "Bearer error=\"invalid_token\"" : "Bearer");
     }
@@ -239,6 +241,17 @@ void Host::handle(Request req, Responder respond) {
   if (!resolved) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");
   auto tenant = std::optional<std::string>(resolved->second.tenant);
   if (!path) return finish(error_page(*tenant, 400, request_id), R"({"why":"bad path"})");
+  if (path->path == "/mcp") {
+    pool_->post([this, req, finish, domain, tenant = *tenant] {
+      try {
+        handle_tenant_mcp(req, finish, domain, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: mcp: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"mcp failed"})");
+      }
+    });
+    return;
+  }
   if (path->path == "/oauth" || path->path.starts_with("/oauth/") || path->path.starts_with("/.well-known/")) {
     pool_->post([this, req, finish, p = path->path, domain, tenant = *tenant] {
       try {
@@ -399,54 +412,13 @@ void Host::serve_content(const Request& req, const Finish& finish, const std::st
   finish(std::move(res), json::dump(extra));
 }
 
-void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
-                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>) {
+// Runs one route or tool of a box: its databases' transactions, its logs, and the check
+// of a typed response. Commits when the box answered below 500, else rolls back.
+Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, const std::string& tenant,
+                             const std::string& request_id, const std::optional<SignedIn>& who) {
   auto cfg = config_.get();
-  std::string request_id = req.header("goober-request-id");
   const auto& m = ref.box->manifest;
-
-  // Identity: who is calling, and may they use this route.
-  std::optional<SignedIn> who;
-  try {
-    who = signed_in(req, tenant);
-  } catch (const std::exception& e) {
-    std::cerr << "goober-host: identity: " << e.what() << "\n";
-    return finish(error_page(tenant, 500, request_id), R"({"why":"identity failed"})");
-  }
-  std::optional<manifest::Caller> caller;
-  if (who) caller = manifest::Caller{std::to_string(who->user.user_id), who->host, who->roles};
-  switch (manifest::check_access(*ref.route, caller ? &*caller : nullptr, params, tenant)) {
-    case manifest::Access::kAllowed:
-      break;
-    case manifest::Access::kSignIn:
-      return finish(sign_in_or_401(req, tenant), R"({"why":"sign in first"})");
-    case manifest::Access::kForbidden:
-      return finish(error_page(tenant, 403, request_id), R"({"why":"requirements not met"})");
-    case manifest::Access::kBadValue:
-      return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
-  }
-  // Agent tokens reach only routes that opted in (050.AgentsMCP.md § Who is calling).
-  if (who && who->agent && !ref.route->agents) {
-    return finish(error_page(tenant, 403, request_id), R"({"why":"agent tokens can't call this route"})");
-  }
-  // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
-  if (req.method != "get" && req.method != "head" && !same_origin(req)) {
-    return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
-  }
-
-  bj::object headers;
-  for (const auto& [k, v] : req.headers) {
-    if (!hidden_from_box(k)) headers[k] = v;
-  }
-  bj::object query;
-  for (const auto& [k, v] : router::parse_query(req.query)) query[k] = v;
-  bj::object params_json;
-  for (const auto& [k, v] : params) params_json[k] = v;
-  bj::object doc{{"request_id", request_id}, {"method", req.method},       {"path", req.path},
-                 {"params", params_json},   {"query", query},             {"headers", headers},
-                 {"body", req.body},        {"domain", domain},           {"tenant", tenant},
-                 {"user", user_json(who)}};
-
+  const auto& route = *ref.route;
   runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64(), {}};
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
@@ -486,6 +458,27 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                    {"seed", std::to_string(input.seed)},
                    {"now_ms", input.now_ms}};
   if (who) extra["user_id"] = std::to_string(who->user.user_id);
+  // A typed response must match its type: a box can't leak a field the schema doesn't name (037).
+  if (std::string type = types::json_type_name(route.response);
+      !type.empty() && result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status >= 200 &&
+      result.status < 300 && result.content_type.starts_with("application/json") && ref.box->types) {
+    std::string err;
+    auto parsed = json::parse(result.body, &err);
+    auto checked = parsed ? ref.box->types->check(type, *parsed, &err) : std::nullopt;
+    if (!checked) {
+      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+                                                       {"request_id", request_id},
+                                                       {"version", ref.box->version},
+                                                       {"level", "host"},
+                                                       {"text", "response isn't a valid " + type + ": " + err}}));
+      // Treated as a host error: the write set is rolled back below, and the caller gets a 500.
+      result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+      result.error = "response isn't a valid " + type;
+      extra["outcome"] = "bad_response";
+    } else {
+      result.body = json::dump(*checked);
+    }
+  }
   bool ok = result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status < 500;
   if (session && session->statements() > 0) {
     extra["sql"] = session->statements();
@@ -503,6 +496,109 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                                                        {"text", "commit failed: " + err}}));
     }
   }
+  return BoxCall{std::move(result), std::move(extra)};
+}
+
+void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
+                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>) {
+  auto cfg = config_.get();
+  std::string request_id = req.header("goober-request-id");
+  const auto& m = ref.box->manifest;
+
+  // Identity: who is calling, and may they use this route.
+  std::optional<SignedIn> who;
+  try {
+    who = signed_in(req, tenant);
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: identity: " << e.what() << "\n";
+    return finish(error_page(tenant, 500, request_id), R"({"why":"identity failed"})");
+  }
+  std::optional<manifest::Caller> caller;
+  if (who) caller = manifest::Caller{std::to_string(who->user.user_id), who->host, who->roles};
+  switch (manifest::check_access(*ref.route, caller ? &*caller : nullptr, params, tenant)) {
+    case manifest::Access::kAllowed:
+      break;
+    case manifest::Access::kSignIn:
+      return finish(sign_in_or_401(req, tenant), R"({"why":"sign in first"})");
+    case manifest::Access::kForbidden:
+      return finish(error_page(tenant, 403, request_id), R"({"why":"requirements not met"})");
+    case manifest::Access::kBadValue:
+      return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
+  }
+  // Agent tokens reach only routes that opted in (050.AgentsMCP.md § Who is calling).
+  if (who && who->agent && !ref.route->agents) {
+    return finish(error_page(tenant, 403, request_id), R"({"why":"agent tokens can't call this route"})");
+  }
+  // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
+  if (req.method != "get" && req.method != "head" && !same_origin(req)) {
+    return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
+  }
+
+  // What the request carries, checked against what the route declares (037): nothing
+  // invalid reaches the box.
+  const auto& route = *ref.route;
+  auto refuse = [&](int status, const std::string& why) {
+    Response r;
+    r.status = status;
+    r.headers.emplace_back("content-type", "application/json");
+    r.headers.emplace_back("cache-control", "no-store");
+    r.body = json::dump(bj::object{{"error", why}, {"status", status}, {"request_id", request_id}});
+    finish(std::move(r), json::dump(bj::object{{"box", m.box}, {"route", route.name}, {"refused", why}}));
+  };
+  if (route.max_body_bytes && int64_t(req.body.size()) > *route.max_body_bytes) {
+    return refuse(413, "the body is larger than " + std::to_string(*route.max_body_bytes) + " bytes");
+  }
+  std::string body = req.body;
+  if (std::string type = types::json_type_name(route.body); !type.empty()) {
+    if (!base::to_lower(req.header("content-type")).starts_with("application/json")) {
+      return refuse(415, "the body must be application/json");
+    }
+    std::string err;
+    auto parsed = json::parse(req.body, &err);
+    if (!parsed) return refuse(400, "the body isn't JSON: " + err);
+    auto checked = ref.box->types ? ref.box->types->check(type, *parsed, &err) : std::nullopt;
+    if (!checked) return refuse(400, type + " " + err);
+    body = json::dump(*checked);
+  }
+  bj::object headers;
+  for (const auto& [k, v] : req.headers) {
+    if (hidden_from_box(k)) continue;
+    if (route.headers_declared &&
+        std::find(route.request_headers.begin(), route.request_headers.end(), k) == route.request_headers.end()) {
+      continue;
+    }
+    headers[k] = v;
+  }
+  bj::object query;
+  auto raw_query = router::parse_query(req.query);
+  if (route.query_declared) {
+    // Only declared parameters, typed, with defaults filled in.
+    for (const auto& [name, schema] : route.query) {
+      auto it = raw_query.find(name);
+      if (it == raw_query.end()) {
+        if (schema->default_value) query[name] = *schema->default_value;
+        continue;
+      }
+      std::string err;
+      auto v = types::check_text(*schema, it->second, &err);
+      if (!v) return refuse(400, "query parameter " + name + " " + err);
+      query[name] = std::move(*v);
+    }
+  } else {
+    for (const auto& [k, v] : raw_query) query[k] = v;
+  }
+  bj::object params_json;
+  for (const auto& [k, v] : params) params_json[k] = v;
+  bj::object doc{{"request_id", request_id}, {"method", req.method},       {"path", req.path},
+                 {"params", params_json},   {"query", query},             {"headers", headers},
+                 {"body", body},            {"domain", domain},           {"tenant", tenant},
+                 {"user", user_json(who)}};
+
+  auto call = call_box(ref, doc, tenant, request_id, who);
+  auto& result = call.result;
+  auto& extra = call.extra;
+  auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
+  int64_t now_ms = extra["now_ms"].as_int64();
   std::string extra_text = json::dump(extra);
 
   Response res;
@@ -536,7 +632,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         res.headers.emplace_back("vary", "accept");
         res.body = std::move(*html);
       } else {
-        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
                                                          {"request_id", request_id},
                                                          {"version", ref.box->version},
                                                          {"level", "host"},

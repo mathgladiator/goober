@@ -10,6 +10,7 @@
 
 #include "goober/json/json.h"
 #include "goober/router/path.h"
+#include "goober/types/types.h"
 
 namespace goober::manifest {
 
@@ -28,6 +29,19 @@ struct HttpRoute {
   // "agents": true lets agent tokens call the route (050.AgentsMCP.md); otherwise only
   // a person, signed in through a browser or a person client, may.
   bool agents = false;
+  // What the request may carry (037.Http.md § Everything a request can carry). The host
+  // checks all of it before the box wakes up.
+  std::string body;  // "", "json:$Type", "text", or "binary"
+  std::optional<int64_t> max_body_bytes;
+  bool query_declared = false;  // with a query block, the box sees only those parameters, typed
+  std::vector<std::pair<std::string, types::SchemaPtr>> query;
+  bool headers_declared = false;  // with request-headers, the box sees only those headers
+  std::vector<std::string> request_headers;
+  std::string response;  // "", "json", "json:$Type", "text", "html", "markdown", or "empty"
+  // An MCP tool (050.AgentsMCP.md) is a route with verb "tool": its input is a named type,
+  // and its description is part of the box's shape.
+  std::string description;
+  std::string input;  // "json:$Type", or "" for a tool that takes nothing
   std::string export_name() const { return "goober_route_" + name; }
 };
 
@@ -86,6 +100,8 @@ struct Manifest {
   std::vector<std::string> domains;  // "*" or lowercase domain names
   Behavior behavior;
   std::vector<HttpRoute> routes;
+  std::vector<HttpRoute> tools;  // routes.mcp.$name.tool, with verb "tool"
+  std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
@@ -101,6 +117,10 @@ bool parse_requirements(const boost::json::value& v, const router::RoutePattern&
 
 // The URL prefixes no box may declare a route under.
 const std::vector<std::string>& reserved_prefixes();
+
+// Checks that every json:$Type the manifest names is in its types document, which is
+// nullptr when the version came without one.
+bool check_types(const Manifest& m, const types::Types* t, std::string* error);
 
 // Parses and checks a manifest. On failure returns nullopt with `error` set.
 std::optional<Manifest> parse_manifest(std::string_view text, std::string* error);

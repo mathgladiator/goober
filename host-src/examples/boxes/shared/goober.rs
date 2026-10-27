@@ -57,8 +57,9 @@ impl Request {
     }
     /// The body parsed as a JSON object, or a 400-ready message.
     pub fn json_body(&self) -> Result<serde_json::Map<String, Value>, String> {
+        // A tool's input is the body, already checked by the host; it has no content type.
         let ct = self.header("content-type").unwrap_or("");
-        if !ct.starts_with("application/json") {
+        if self.doc["method"] != "tool" && !ct.starts_with("application/json") {
             return Err("Content-Type must be application/json".into());
         }
         match serde_json::from_str::<Value>(self.body()) {

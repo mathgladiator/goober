@@ -248,6 +248,37 @@ def main():
     st, _, body = desk("GET", "/devices")
     check(st == 200 and "push_token" not in body and "America/Chicago" in body, "agents see time zones, not push tokens")
 
+    print("the agent works over MCP")
+    def mcp(method, params=None):
+        st, h, body = web.call("POST", "/mcp", js={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
+                               headers={"Authorization": "Bearer " + agent.get("access_token", "")})
+        return st, json_of(body)
+    st, h, _ = web.call("POST", "/mcp", js={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    check(st == 401 and "oauth-protected-resource" in h.get("www-authenticate", ""), "/mcp without a token points at OAuth")
+    st, got = mcp("initialize", {"protocolVersion": "2025-06-18"})
+    check(st == 200 and got.get("result", {}).get("protocolVersion") == "2025-06-18", "initialize")
+    st, got = mcp("tools/list")
+    names = [t["name"] for t in got.get("result", {}).get("tools", [])]
+    check("desk_ask" in names and "desk_set_alarm" in names, "tools/list offers the desk's tools")
+    check(not any(n.startswith("terminal") for n in names), "and nothing of the terminal's")
+    ask = next((t for t in got.get("result", {}).get("tools", []) if t["name"] == "desk_ask"), {})
+    check(ask.get("inputSchema", {}).get("additionalProperties") is False, "inputs are closed objects")
+    st, got = mcp("tools/call", {"name": "desk_ask", "arguments": {"task": f"MCP approval {run}", "risk": "low"}})
+    res = got.get("result", {})
+    mcp_id = res.get("structuredContent", {}).get("id", "")
+    check(not res.get("isError") and mcp_id, "desk_ask opens an approval")
+    st, got = mcp("tools/call", {"name": "desk_ask", "arguments": {"task": "x", "risk": "extreme"}})
+    check(got.get("result", {}).get("isError") is True, "a bad input is a tool error, and nothing runs")
+    key = secrets.token_hex(8)
+    st, _, _ = term("POST", f"/approvals/{mcp_id}/decision",
+                    js={"decision": "deny", "feedback": "Not today.", "idempotency_key": key,
+                        "decided_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                    headers={"Idempotency-Key": key})
+    check(st == 204, "the person denies it on the terminal")
+    st, got = mcp("tools/call", {"name": "desk_check", "arguments": {"id": mcp_id}})
+    sc = got.get("result", {}).get("structuredContent", {})
+    check(sc.get("status") == "denied" and sc.get("feedback") == "Not today.", "desk_check reads the answer")
+
     print("refresh and sign-out")
     st, _, body = web.call("POST", token_path, form={"grant_type": "refresh_token", "client_id": "dumb-terminal",
                                                      "refresh_token": tokens["refresh_token"]})

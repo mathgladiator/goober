@@ -7,7 +7,7 @@
 #[path = "../../shared/goober.rs"]
 mod goober;
 
-use goober::{Request, error, respond_empty, respond_json, respond_raw_json, sql_or_500};
+use goober::{Request, error, respond_json, respond_raw_json, sql_or_500};
 use serde_json::{Map, Value, json};
 
 const DB: &str = "desk";
@@ -36,10 +36,19 @@ const STATUS: &str = "json_remove(json_object(
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_approval_create() -> i32 {
     let req = Request::read();
-    let body = match req.json_body() {
-        Ok(b) => b,
-        Err(e) => return bad(&e),
-    };
+    match req.json_body() {
+        Ok(body) => approval_create(&req, body),
+        Err(e) => bad(&e),
+    }
+}
+
+/// The tool twin of POST /desk/v1/approvals (050): the input is an Ask.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_ask() -> i32 {
+    goober_route_desk_approval_create()
+}
+
+fn approval_create(req: &Request, body: Map<String, Value>) -> i32 {
     let checked = (|| -> Result<Value, String> {
         goober::closed(&body, &["task", "description", "requester", "risk", "expires_at", "actions"], "ApprovalRequest")?;
         let task = goober::string_field(&body, "task", true, 200)?.unwrap();
@@ -89,7 +98,20 @@ pub extern "C" fn goober_route_desk_approval_create() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_approval_get() -> i32 {
     let req = Request::read();
-    let id = req.param("approval_id").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    approval_get(req.param("approval_id").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0))
+}
+
+/// The tool twin: the input is {id}, an int64 the host passes as a string.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_check() -> i32 {
+    let req = Request::read();
+    match req.json_body() {
+        Ok(b) => approval_get(b.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0)),
+        Err(e) => bad(&e),
+    }
+}
+
+fn approval_get(id: i64) -> i32 {
     let q = format!("SELECT {STATUS} FROM approvals a LEFT JOIN decisions d ON d.approval_id = a.id WHERE a.id = :id");
     let Some(r) = sql_or_500(DB, &q, json!({ "id": id, "now": goober::now_ms() })) else { return 0 };
     match r.first().and_then(|v| v.as_str()) {
@@ -100,6 +122,11 @@ pub extern "C" fn goober_route_desk_approval_get() -> i32 {
 }
 
 /// GET /desk/v1/approvals: the newest 50, with their status.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_recent() -> i32 {
+    goober_route_desk_approvals()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_approvals() -> i32 {
     let q = format!(
@@ -112,6 +139,11 @@ pub extern "C" fn goober_route_desk_approvals() -> i32 {
 }
 
 /// GET /desk/v1/alarms: every alarm the snapshot carries.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_list_alarms() -> i32 {
+    goober_route_desk_alarms()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_alarms() -> i32 {
     let Some(r) = sql_or_500(
@@ -129,15 +161,29 @@ pub extern "C" fn goober_route_desk_alarms() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_alarm_put() -> i32 {
     let req = Request::read();
-    let id = req.param("alarm_id").unwrap_or("").to_string();
+    match req.json_body() {
+        Ok(body) => alarm_put(req.param("alarm_id").unwrap_or(""), &body),
+        Err(e) => bad(&e),
+    }
+}
+
+/// The tool twin: the input is {id, alarm}.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_set_alarm() -> i32 {
+    let req = Request::read();
+    match req.json_body() {
+        Ok(b) => alarm_put(b.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                           b.get("alarm").and_then(|v| v.as_object()).unwrap_or(&Map::new())),
+        Err(e) => bad(&e),
+    }
+}
+
+fn alarm_put(id: &str, body: &Map<String, Value>) -> i32 {
+    let id = id.to_string();
     if !is_key(&id, 200) {
         return bad("an alarm id is 1 to 200 of [A-Za-z0-9._-]");
     }
-    let body = match req.json_body() {
-        Ok(b) => b,
-        Err(e) => return bad(&e),
-    };
-    let spec = match check_alarm(&id, &body) {
+    let spec = match check_alarm(&id, body) {
         Ok(v) => v,
         Err(e) => return bad(&e),
     };
@@ -158,12 +204,24 @@ pub extern "C" fn goober_route_desk_alarm_put() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_alarm_delete() -> i32 {
     let req = Request::read();
-    let id = req.param("alarm_id").unwrap_or("");
+    alarm_delete(req.param("alarm_id").unwrap_or(""))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_remove_alarm() -> i32 {
+    let req = Request::read();
+    match req.json_body() {
+        Ok(b) => alarm_delete(b.get("id").and_then(|v| v.as_str()).unwrap_or("")),
+        Err(e) => bad(&e),
+    }
+}
+
+fn alarm_delete(id: &str) -> i32 {
     let Some(r) = sql_or_500(DB, "DELETE FROM alarms WHERE alarm_key = ?", json!([id])) else { return 0 };
     if r.changes() == 0 {
         error(404, "no such alarm");
     } else {
-        respond_empty(204);
+        respond_json(200, &json!({ "removed": id }));
     }
     0
 }
@@ -172,14 +230,28 @@ pub extern "C" fn goober_route_desk_alarm_delete() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_dashboard_put() -> i32 {
     let req = Request::read();
-    let id = req.param("dashboard_id").unwrap_or("").to_string();
+    match req.json_body() {
+        Ok(body) => dashboard_put(req.param("dashboard_id").unwrap_or(""), body),
+        Err(e) => bad(&e),
+    }
+}
+
+/// The tool twin: the input is {id, dashboard}.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_set_dashboard() -> i32 {
+    let req = Request::read();
+    match req.json_body() {
+        Ok(b) => dashboard_put(b.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                               b.get("dashboard").and_then(|v| v.as_object()).cloned().unwrap_or_default()),
+        Err(e) => bad(&e),
+    }
+}
+
+fn dashboard_put(id: &str, body: Map<String, Value>) -> i32 {
+    let id = id.to_string();
     if !is_key(&id, 64) {
         return bad("a dashboard id is 1 to 64 of [A-Za-z0-9._-]");
     }
-    let body = match req.json_body() {
-        Ok(b) => b,
-        Err(e) => return bad(&e),
-    };
     let checked = (|| -> Result<(String, Option<String>), String> {
         goober::closed(&body, &["id", "title", "subtitle", "refresh_seconds", "settings", "pages"], "Dashboard")?;
         if let Some(v) = body.get("id") {
@@ -228,17 +300,34 @@ pub extern "C" fn goober_route_desk_dashboard_put() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_dashboard_delete() -> i32 {
     let req = Request::read();
-    let id = req.param("dashboard_id").unwrap_or("");
+    dashboard_delete(req.param("dashboard_id").unwrap_or(""))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_remove_dashboard() -> i32 {
+    let req = Request::read();
+    match req.json_body() {
+        Ok(b) => dashboard_delete(b.get("id").and_then(|v| v.as_str()).unwrap_or("")),
+        Err(e) => bad(&e),
+    }
+}
+
+fn dashboard_delete(id: &str) -> i32 {
     let Some(r) = sql_or_500(DB, "DELETE FROM dashboards WHERE dashboard_key = ?", json!([id])) else { return 0 };
     if r.changes() == 0 {
         error(404, "no such dashboard");
     } else {
-        respond_empty(204);
+        respond_json(200, &json!({ "removed": id }));
     }
     0
 }
 
 /// PUT /desk/v1/settings: the backend's display name and the default location for solar alarms.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_set_settings() -> i32 {
+    goober_route_desk_settings_put()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_settings_put() -> i32 {
     let req = Request::read();
@@ -276,6 +365,11 @@ pub extern "C" fn goober_route_desk_settings_put() -> i32 {
 
 /// GET /desk/v1/devices: the person's installs and their time zones, for agents that plan
 /// "6am in their zone". Push tokens stay out of agents' reach.
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_desk_list_devices() -> i32 {
+    goober_route_desk_devices()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_desk_devices() -> i32 {
     let Some(r) = sql_or_500(

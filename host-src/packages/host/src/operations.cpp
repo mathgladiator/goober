@@ -216,10 +216,13 @@ void Host::register_tools() {
       {"version_upload",
        "Uploads a box: a manifest (object or JSON text) and its module, as WAT text or base64 WASM. The host checks "
        "the manifest, the module's imports (only goober-abi@1), and one export goober_route_$name per route, then "
-       "stores the version and makes it active (the v1 dev policy: no approval step).",
+       "stores the version and makes it active (the v1 dev policy: no approval step). When the manifest names a "
+       "types document (\"types\": \"x.openapi.json\"), pass that document as types: the OpenAPI components.schemas "
+       "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"wat", string_property("The module as WebAssembly text.")},
-                      {"wasm_base64", string_property("The module as base64 binary WASM.")}},
+                      {"wasm_base64", string_property("The module as base64 binary WASM.")},
+                      {"types", mcp::any_property("The types document (OpenAPI 3.x), as a JSON object or text.")}},
                      {"manifest"}),
        [this](const bj::object& args) {
          auto it = args.find("manifest");
@@ -237,8 +240,12 @@ void Host::register_tools() {
            if (!decoded) return ToolResult::fail("wasm_base64 is not valid base64");
            module = std::move(*decoded);
          }
+         std::string types;
+         if (auto t = args.find("types"); t != args.end() && !t->value().is_null()) {
+           types = t->value().is_string() ? std::string(t->value().get_string()) : json::pretty(t->value());
+         }
          std::string err;
-         auto result = boxes_->upload(manifest, module, &err);
+         auto result = boxes_->upload(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));

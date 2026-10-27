@@ -18,8 +18,17 @@ const router::RouteTable<RouteRef>& ActiveSet::table_for(const std::string& doma
   return it == tables_.end() ? kEmpty : it->second;
 }
 
+const std::map<std::string, RouteRef>& ActiveSet::tools_for(const std::string& domain) const {
+  static const std::map<std::string, RouteRef> kEmpty;
+  auto it = tools_.find(domain);
+  if (it != tools_.end()) return it->second;
+  it = tools_.find("*");
+  return it == tools_.end() ? kEmpty : it->second;
+}
+
 bool ActiveSet::build(std::string* error) {
   tables_.clear();
+  tools_.clear();
   std::set<std::string> keys = {"*"};
   for (const auto& [_, box] : boxes) {
     for (const auto& d : box->manifest.domains) keys.insert(d);
@@ -35,10 +44,43 @@ bool ActiveSet::build(std::string* error) {
           return false;
         }
       }
+      // Tool names conflict per domain, like paths (019 § per-protocol overlap rules).
+      auto& tools = tools_[key];
+      for (const auto& tool : box->manifest.tools) {
+        if (!tools.emplace(tool.name, RouteRef{box, &tool}).second) {
+          *error = "tool " + tool.name + " in box " + name + " conflicts with another box on domain " + key;
+          return false;
+        }
+      }
     }
   }
   return true;
 }
+
+namespace {
+std::vector<std::string> exports_of(const manifest::Manifest& m) {
+  std::vector<std::string> out;
+  for (const auto& r : m.routes) out.push_back(r.export_name());
+  for (const auto& t : m.tools) out.push_back(t.export_name());
+  return out;
+}
+
+// The version's types document, parsed and checked against what the manifest names.
+std::optional<std::shared_ptr<const types::Types>> load_types(const manifest::Manifest& m, std::string_view text,
+                                                               std::string* error) {
+  std::shared_ptr<const types::Types> out;
+  if (!text.empty()) {
+    auto t = types::Types::parse(text, error);
+    if (!t) {
+      *error = (m.types.empty() ? std::string("types") : m.types) + ": " + *error;
+      return std::nullopt;
+    }
+    out = std::make_shared<const types::Types>(std::move(*t));
+  }
+  if (!manifest::check_types(m, out.get(), error)) return std::nullopt;
+  return out;
+}
+}  // namespace
 
 BoxRegistry::BoxRegistry(wal::HostWal& wal, runtime::wasm::Engine& engine)
     : wal_(wal), engine_(engine), active_(std::make_shared<ActiveSet>()) {}
@@ -59,11 +101,11 @@ std::optional<ActiveBox> BoxRegistry::load_version(const std::string& box, const
   }
   auto m = manifest::parse_manifest(*text, error);
   if (!m) return std::nullopt;
-  std::vector<std::string> exports;
-  for (const auto& r : m->routes) exports.push_back(r.export_name());
-  auto compiled = engine_.compile(*wasm, exports, error);
+  auto t = load_types(*m, base::read_file(dir / "types.json").value_or(""), error);
+  if (!t) return std::nullopt;
+  auto compiled = engine_.compile(*wasm, exports_of(*m), error);
   if (!compiled) return std::nullopt;
-  return ActiveBox{version, std::move(*m), compiled};
+  return ActiveBox{version, std::move(*m), compiled, *t};
 }
 
 std::vector<std::string> BoxRegistry::load_all() {
@@ -104,12 +146,15 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   // Names are unique across the host: no route name may repeat in another box.
   std::set<std::string> mine;
   for (const auto& r : candidate->manifest.routes) mine.insert(r.name);
+  for (const auto& t : candidate->manifest.tools) mine.insert(t.name);
   for (const auto& [other, box] : current->boxes) {
     if (other == name) continue;
-    for (const auto& r : box->manifest.routes) {
-      if (mine.count(r.name)) {
-        *error = "route name \"" + r.name + "\" is already used by box " + other;
-        return false;
+    for (const auto* list : {&box->manifest.routes, &box->manifest.tools}) {
+      for (const auto& r : *list) {
+        if (mine.count(r.name)) {
+          *error = "route name \"" + r.name + "\" is already used by box " + other;
+          return false;
+        }
       }
     }
   }
@@ -122,10 +167,12 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
 }
 
 std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, std::string_view module,
-                                                std::string* error) {
+                                                std::string_view types_text, std::string* error) {
   std::lock_guard lock(mu_);
   auto m = manifest::parse_manifest(manifest_text, error);
   if (!m) return std::nullopt;
+  auto t = load_types(*m, types_text, error);
+  if (!t) return std::nullopt;
   if (check_ && !check_(*m, error)) return std::nullopt;
   std::string wasm;
   if (!runtime::wasm::Engine::is_binary(module)) {
@@ -133,20 +180,23 @@ std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, 
   } else {
     wasm.assign(module);
   }
-  std::vector<std::string> exports;
-  for (const auto& r : m->routes) exports.push_back(r.export_name());
-  auto compiled = engine_.compile(wasm, exports, error);
+  auto compiled = engine_.compile(wasm, exports_of(*m), error);
   if (!compiled) return std::nullopt;
 
-  std::string version = base::sha256_hex("goober-version-1\n" + std::string(manifest_text) + "\n" + wasm).substr(0, 24);
+  // The version is named by everything in it; a types document joins the hash only when
+  // present, so versions without one keep their names.
+  std::string hashed = "goober-version-1\n" + std::string(manifest_text) + "\n" + wasm;
+  if (!types_text.empty()) hashed += "\ntypes\n" + std::string(types_text);
+  std::string version = base::sha256_hex(hashed).substr(0, 24);
   std::string dir = "boxes/" + m->box + "/versions/" + version;
   wal::Bundle bundle = {
       {wal::FileChange::Kind::kWrite, dir + "/manifest.json", std::string(manifest_text)},
       {wal::FileChange::Kind::kWrite, dir + "/box.wasm", wasm},
       {wal::FileChange::Kind::kWrite, "boxes/" + m->box + "/active", version},
   };
+  if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
   UploadResult result{version, m->warnings};
-  auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled});
+  auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled, *t});
   if (!activate(candidate, bundle, error)) return std::nullopt;
   return result;
 }
@@ -194,6 +244,11 @@ std::optional<std::string> BoxRegistry::manifest_text(const std::string& box, co
     return std::nullopt;
   }
   return base::read_file(wal_.root() / "boxes" / box / "versions" / version / "manifest.json");
+}
+
+std::optional<std::string> BoxRegistry::types_text(const std::string& box, const std::string& version) const {
+  if (!manifest_text(box, version)) return std::nullopt;
+  return base::read_file(wal_.root() / "boxes" / box / "versions" / version / "types.json");
 }
 
 }  // namespace goober::boxes

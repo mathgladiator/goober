@@ -1,8 +1,14 @@
 {
   "box": "desk",
   "mission": "Let the executive's agents ask for approvals and read the answers, and set the alarms and dashboards the terminal shows. Agents can never decide an approval: this box has no write path to decisions.",
-  "domains": ["*"],
-  "behavior": { "timeout-ms": 1000, "fuel": 100000000, "memory-max-bytes": 33554432 },
+  "domains": [
+    "*"
+  ],
+  "behavior": {
+    "timeout-ms": 1000,
+    "fuel": 100000000,
+    "memory-max-bytes": 33554432
+  },
   "data": {
     "sqlite3": {
       "desk": {
@@ -10,12 +16,52 @@
         "database": "terminal",
         "pattern": "sql",
         "tables": {
-          "approvals": { "read": true, "insert": true },
-          "decisions": { "read": true },
-          "alarms": { "read": true, "insert": true, "update": ["spec", "updated_ms"], "delete": true },
-          "dashboards": { "read": true, "insert": true, "update": ["title", "subtitle", "spec", "updated_ms"], "delete": true },
-          "settings": { "read": true, "insert": true, "update": ["name", "lat", "lon", "label"] },
-          "devices": { "read": ["user_id", "device_name", "platform", "timezone", "updated_ms"] }
+          "approvals": {
+            "read": true,
+            "insert": true
+          },
+          "decisions": {
+            "read": true
+          },
+          "alarms": {
+            "read": true,
+            "insert": true,
+            "update": [
+              "spec",
+              "updated_ms"
+            ],
+            "delete": true
+          },
+          "dashboards": {
+            "read": true,
+            "insert": true,
+            "update": [
+              "title",
+              "subtitle",
+              "spec",
+              "updated_ms"
+            ],
+            "delete": true
+          },
+          "settings": {
+            "read": true,
+            "insert": true,
+            "update": [
+              "name",
+              "lat",
+              "lon",
+              "label"
+            ]
+          },
+          "devices": {
+            "read": [
+              "user_id",
+              "device_name",
+              "platform",
+              "timezone",
+              "updated_ms"
+            ]
+          }
         },
         "row-limit": 200
       }
@@ -24,29 +70,227 @@
   "routes": {
     "http": {
       "/desk/v1/approvals": {
-        "post": { "name": "desk_approval_create", "requirements": [["owner"]], "agents": true },
-        "get": { "name": "desk_approvals", "requirements": [["owner"]], "agents": true }
+        "post": {
+          "name": "desk_approval_create",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true,
+          "body": "json:Ask",
+          "max-body-bytes": 131072
+        },
+        "get": {
+          "name": "desk_approvals",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
       },
       "/desk/v1/approvals/{approval_id : int64}": {
-        "get": { "name": "desk_approval_get", "requirements": [["owner"]], "agents": true }
+        "get": {
+          "name": "desk_approval_get",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
       },
       "/desk/v1/alarms": {
-        "get": { "name": "desk_alarms", "requirements": [["owner"]], "agents": true }
+        "get": {
+          "name": "desk_alarms",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
       },
       "/desk/v1/alarms/{alarm_id : string}": {
-        "put": { "name": "desk_alarm_put", "requirements": [["owner"]], "agents": true },
-        "delete": { "name": "desk_alarm_delete", "requirements": [["owner"]], "agents": true }
+        "put": {
+          "name": "desk_alarm_put",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true,
+          "body": "json:Alarm",
+          "max-body-bytes": 131072
+        },
+        "delete": {
+          "name": "desk_alarm_delete",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
       },
       "/desk/v1/dashboards/{dashboard_id : string}": {
-        "put": { "name": "desk_dashboard_put", "requirements": [["owner"]], "agents": true },
-        "delete": { "name": "desk_dashboard_delete", "requirements": [["owner"]], "agents": true }
+        "put": {
+          "name": "desk_dashboard_put",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true,
+          "body": "json:Dashboard",
+          "max-body-bytes": 600000
+        },
+        "delete": {
+          "name": "desk_dashboard_delete",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
       },
       "/desk/v1/settings": {
-        "put": { "name": "desk_settings_put", "requirements": [["owner"]], "agents": true }
+        "put": {
+          "name": "desk_settings_put",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true,
+          "body": "json:Settings",
+          "max-body-bytes": 131072
+        }
       },
       "/desk/v1/devices": {
-        "get": { "name": "desk_devices", "requirements": [["owner"]], "agents": true }
+        "get": {
+          "name": "desk_devices",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ],
+          "agents": true
+        }
+      }
+    },
+    "mcp": {
+      "desk_ask": {
+        "tool": {
+          "description": "Ask the person to approve something before you do it. They see it on their phone and desktop and answer approve, deny, or approve with feedback. Returns an id; call desk_check with it to read the answer. You can never approve your own request.",
+          "input": "json:Ask",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_check": {
+        "tool": {
+          "description": "Read the answer to one of your approval requests: pending, approved, denied, approved_with_feedback (with the person's feedback), or expired.",
+          "input": "json:ApprovalRef",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_recent": {
+        "tool": {
+          "description": "List the newest 50 approval requests and their status.",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_set_alarm": {
+        "tool": {
+          "description": "Create or replace an alarm or notification on the person's devices. An alarm is a rule (a time, a daily time, or a solar event like 15 minutes before sunset), and each device works out when it rings. At most 64.",
+          "input": "json:AlarmPut",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_remove_alarm": {
+        "tool": {
+          "description": "Remove an alarm by its id.",
+          "input": "json:AlarmRef",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_list_alarms": {
+        "tool": {
+          "description": "List every alarm the person's devices carry.",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_set_dashboard": {
+        "tool": {
+          "description": "Create or replace a dashboard the person can open on their devices: pages of widgets (metric, line_chart, bar_chart, table, list, progress, status, markdown).",
+          "input": "json:DashboardPut",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_remove_dashboard": {
+        "tool": {
+          "description": "Remove a dashboard by its id.",
+          "input": "json:DashboardRef",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_set_settings": {
+        "tool": {
+          "description": "Set the name the person's terminal shows for this server, and the default location for solar alarms.",
+          "input": "json:Settings",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
+      },
+      "desk_list_devices": {
+        "tool": {
+          "description": "List the person's devices and their time zones, for planning alarms at a local time.",
+          "requirements": [
+            [
+              "owner"
+            ]
+          ]
+        }
       }
     }
-  }
+  },
+  "types": "desk.openapi.json"
 }

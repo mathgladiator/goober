@@ -117,6 +117,8 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/008.Databases.md`](design/machine/008.Databases.md) | Tenant databases: expand-only JSON schemas, direct SQL under SQLite's authorizer, request transactions, operator db tools. |
 | [`design/machine/009.OAuth.md`](design/machine/009.OAuth.md) | OAuth 2.1: person and agent clients, PKCE with consent, rotating refresh tokens, the device flow, bearer tokens on routes. |
 | [`design/machine/010.Terminal.md`](design/machine/010.Terminal.md) | The terminal's backend: a `terminal` box for the person and a `desk` box for agents, with no write path from agents to decisions. |
+| [`design/machine/011.Types.md`](design/machine/011.Types.md) | Types: the OpenAPI types document in a strict subset, and requests and responses the host checks against each route's declarations. |
+| [`design/machine/012.Agents.md`](design/machine/012.Agents.md) | Agents over MCP: box tools at `/mcp` on every domain, filtered by roles, typed, audited, and discoverable through OAuth. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 

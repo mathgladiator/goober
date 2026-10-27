@@ -12,6 +12,7 @@
 #include "goober/manifest/manifest.h"
 #include "goober/router/table.h"
 #include "goober/runtime_wasm/engine.h"
+#include "goober/types/types.h"
 #include "goober/wal/wal.h"
 
 namespace goober::boxes {
@@ -21,6 +22,7 @@ struct ActiveBox {
   std::string version;
   manifest::Manifest manifest;
   std::shared_ptr<const runtime::wasm::CompiledBox> compiled;
+  std::shared_ptr<const types::Types> types;  // the version's types document (036), or null
 };
 
 struct RouteRef {
@@ -37,12 +39,15 @@ class ActiveSet {
   // The route table for a domain: its own table when some manifest names it,
   // or else the table of routes on "*".
   const router::RouteTable<RouteRef>& table_for(const std::string& domain) const;
+  // The MCP tools on a domain, by name (050): its own when some manifest names it, else "*".
+  const std::map<std::string, RouteRef>& tools_for(const std::string& domain) const;
 
   // Builds the tables. Returns false with `error` set on a conflict.
   bool build(std::string* error);
 
  private:
   std::map<std::string, router::RouteTable<RouteRef>> tables_;  // "*" plus every named domain
+  std::map<std::string, std::map<std::string, RouteRef>> tools_;
 };
 
 struct UploadResult {
@@ -69,8 +74,13 @@ class BoxRegistry {
   // Loads every box's active version. Problems are returned as warnings.
   std::vector<std::string> load_all();
 
-  // Checks, stores, and activates a version. `module` is binary WASM or WAT text.
-  std::optional<UploadResult> upload(std::string_view manifest_text, std::string_view module, std::string* error);
+  // Checks, stores, and activates a version. `module` is binary WASM or WAT text, and
+  // `types_text` is the types document the manifest's "types" names, or empty.
+  std::optional<UploadResult> upload(std::string_view manifest_text, std::string_view module, std::string* error) {
+    return upload(manifest_text, module, "", error);
+  }
+  std::optional<UploadResult> upload(std::string_view manifest_text, std::string_view module,
+                                     std::string_view types_text, std::string* error);
 
   // Makes an existing version active.
   bool promote(const std::string& box, const std::string& version, std::string* error);
@@ -79,6 +89,7 @@ class BoxRegistry {
   std::vector<std::string> box_names() const;
   std::vector<VersionInfo> versions(const std::string& box) const;
   std::optional<std::string> manifest_text(const std::string& box, const std::string& version) const;
+  std::optional<std::string> types_text(const std::string& box, const std::string& version) const;
 
  private:
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;

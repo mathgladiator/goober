@@ -40,14 +40,14 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets. | `pattern: "query"` iterators, plan checks, pagination cursors. |
 | 030 Larger env. | none | Operators can fetch an https image with curl (Q21). | `external`, OpenAPI clients, `require`, credentials, egress audit. |
 | 035 Outbox | none | | Outbox elements, dispatcher, idempotency keys, dead letters. |
-| 036 Json | none | | The types document, the strict subset, validation, serialization. |
-| 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content. | Declared `query` and `request-headers`, `body` types, `max-body-bytes`, status vocabulary, CORS, ETags on box GETs, compression, ranges. |
+| 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
+| 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`, checked by the host (011). | The status vocabulary, CORS, ETags on box GETs, compression, ranges; undeclared routes still see every header and parameter. |
 | 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
 | 039 Internal | none | | Internal routes, callers, context propagation. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | none | | Timer routes, `by_timer`, cron, DST rules. |
-| 050 Agents/MCP | partial | The operator MCP endpoint (host:owner tools). Agent tokens (009), refused on HTTP routes unless `"agents": true`. | `/mcp` on every domain, box `mcp` routes, filtered discovery, agent audit, per-agent quotas. |
+| 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, the agent history on the account page, a run with a real MCP client. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
 | 064 Keys | none | Secrets live in the host config file (mode 0600). | The vault, envelope encryption, `keys/...`. |
 | 070 UI | partial | Markdown, Mustache with layouts, content negotiation for box JSON through templates, strict CSP on templated pages (007). | `static` in manifests, pins, the `/goober/` client script, sign-in through the product layout. |
@@ -124,10 +124,18 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       real browser. The app's own e2e test is tied to its dev server's `/oauth/consent`
       shortcut, so it can't drive goober's consent screen unchanged.
 
-### Phase 2: agents as first-class callers (050)
-- [ ] `/mcp` on every domain for agent tokens, serving box `routes.mcp` tools,
-      discovery filtered by the person's roles, every call audited.
-- [ ] Move the desk box's agent surface from `"agents": true` HTTP routes to MCP tools.
+### Phase 2: agents as first-class callers (050), and the types they need (036, 037)
+- [x] The `types` package: a box's OpenAPI types document in 036's strict subset, stored
+      with the version, checked at upload (`design/machine/011.Types.md`).
+- [x] Routes declare `body`, `max-body-bytes`, `query`, `request-headers`, and `response`;
+      the host checks requests before the box wakes and typed responses before they leave.
+- [x] `/mcp` on every domain for bearer tokens, serving box `routes.mcp` tools, discovery
+      filtered by the person's roles, inputs typed, every call audited in `logs/agents.log`;
+      RFC 9728 protected-resource metadata so MCP clients find the realm
+      (`design/machine/012.Agents.md`).
+- [x] The desk box offers ten MCP tools and typed HTTP bodies; the end-to-end script asks
+      over MCP and answers on the terminal (55 checks).
+- [ ] Connect a real MCP client (Claude Code or Grok) to `/mcp` through OAuth.
 
 ### Phase 3: production readiness
 - [ ] A real mailer (SMTP submission with TLS), so others can sign in.
@@ -138,16 +146,15 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [ ] Graceful shutdown that drains requests; a health endpoint for Caddy.
 
 ### Phase 4: security review
-- [ ] A written review (`design/machine/011.SecurityReview.md`): identity and OAuth,
+- [ ] A written review (`design/machine/013.SecurityReview.md`): identity and OAuth,
       sessions and CSRF, content and XSS, attachments, SQL authorizer, WASM boundary,
       operator surface, filesystem paths, denial of service. Each finding fixed or
       recorded with a reason.
 
-### Phase 5: the HTTP and JSON contract (036, 037)
-- [ ] A `types` document (OpenAPI `components.schemas`, the strict subset) checked at
-      upload; `body: "json:$Type"` validated before the box wakes, closed objects.
-- [ ] Declared `query` and `request-headers`; `max-body-bytes`.
+### Phase 5: the rest of the HTTP contract (037)
 - [ ] ETags and 304 on box GETs.
+- [ ] The status vocabulary: clamp box 4xx, tie success codes to the response kind.
+- [ ] CORS declared in the manifest, preflight answered by the host.
 
 ### Phase 6: time (045)
 - [ ] Timer routes with `every-ms` and `cron`, and data-driven `by_timer` rows with

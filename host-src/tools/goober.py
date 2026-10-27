@@ -101,6 +101,9 @@ def main(argv):
         manifest = json.loads(pathlib.Path(argv[2]).read_text())
         module = pathlib.Path(argv[3])
         args = {"manifest": manifest}
+        # The types document the manifest names sits beside it (036).
+        if manifest.get("types"):
+            args["types"] = json.loads((pathlib.Path(argv[2]).parent / manifest["types"]).read_text())
         if module.suffix == ".wat":
             args["wat"] = module.read_text()
         else:

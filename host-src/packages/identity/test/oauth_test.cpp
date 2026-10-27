@@ -71,6 +71,12 @@ TEST(OAuthRedirects, LoopbackPortsMayDifferAndNothingElse) {
   EXPECT_TRUE(is_valid_redirect_uri("com.mathgladiator.dumb:/oauth/callback"));
   EXPECT_TRUE(is_valid_redirect_uri("http://[::1]/cb"));
   EXPECT_FALSE(is_valid_redirect_uri("http://example.com/cb"));
+  EXPECT_TRUE(is_valid_redirect_uri("http://localhost:33418/callback"));  // MCP clients; exact match only
+  EXPECT_FALSE(is_valid_redirect_uri("http://localhost.evil.test/cb"));
+  EXPECT_FALSE(is_valid_redirect_uri("http://localhost:/cb"));
+  Client mcp{"m", "m", {"http://localhost:33418/callback"}, false, "", 0};
+  EXPECT_TRUE(redirect_allowed(mcp, "http://localhost:33418/callback"));
+  EXPECT_FALSE(redirect_allowed(mcp, "http://localhost:33419/callback"));
   EXPECT_FALSE(is_valid_redirect_uri("javascript:alert(1)"));
   EXPECT_FALSE(is_valid_redirect_uri("myapp:/cb"));  // no dot: not reverse-DNS
   EXPECT_FALSE(is_valid_redirect_uri("https://example.com/cb#frag"));

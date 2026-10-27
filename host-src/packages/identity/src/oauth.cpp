@@ -178,6 +178,18 @@ bool is_valid_redirect_uri(std::string_view uri) {
     if (c <= 0x20 || c >= 0x7f) return false;
   }
   if (parse_loopback(uri)) return true;
+  // MCP clients register http://localhost:PORT/callback. It is allowed, but matched exactly:
+  // only the IP literals get the any-port rule (999 decision 2).
+  if (uri.starts_with("http://localhost:") || uri.starts_with("http://localhost/")) {
+    auto rest = uri.substr(16);
+    size_t i = 0;
+    if (!rest.empty() && rest[0] == ':') {
+      for (i = 1; i < rest.size() && rest[i] >= '0' && rest[i] <= '9'; ++i) {
+      }
+      if (i == 1 || i > 6) return false;
+    }
+    return i < rest.size() && rest[i] == '/';
+  }
   if (uri.starts_with("https://")) {
     auto host = uri.substr(8);
     return !host.empty() && host[0] != '/' && host.find('/') != std::string_view::npos;

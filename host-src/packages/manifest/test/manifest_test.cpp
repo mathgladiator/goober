@@ -24,7 +24,7 @@ TEST(Manifest, ParsesTheV1Subset) {
   EXPECT_EQ(m->box, "hello");
   EXPECT_EQ(m->routes.size(), 3u);
   EXPECT_EQ(*m->behavior.timeout_ms, 500);
-  EXPECT_EQ(m->warnings.size(), 3u);  // data is read now
+  EXPECT_EQ(m->warnings.size(), 2u);  // data and response are read now; lifecycle and timer warn
   EXPECT_TRUE(m->applies_to("anything.com"));
   EXPECT_EQ(m->routes[0].export_name().substr(0, 13), "goober_route_");
 }
@@ -191,4 +191,45 @@ TEST(Manifest, DataStrategies) {
          "unknown operation");
   refuse(R"({"box":"g","domains":["*"],"data":{"sqlite3":{"b":{"schema":"s","database":"d","pattern":"sql","sql":"x","tables":{"t":{}}}}}})",
          "doesn't apply");
+}
+
+TEST(Manifest, RequestPartsTypesAndTools) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"o","domains":["*"],"types":"orders.openapi.json","routes":{
+    "http":{"/orders":{"post":{"name":"add","requirements":[],"body":"json:Order","max-body-bytes":4096,
+                               "response":"json:Order","request-headers":["Idempotency-Key"]},
+                       "get":{"name":"list","public":true,"query":{"limit":{"type":"integer","format":"int32","default":10}}}}},
+    "mcp":{"add_order":{"tool":{"description":"Adds an order.","input":"json:Order","requirements":[["owner"]]}}}}})",
+                          &err);
+  ASSERT_TRUE(m) << err;
+  EXPECT_EQ(m->types, "orders.openapi.json");
+  EXPECT_EQ(m->routes[0].body, "json:Order");
+  EXPECT_EQ(*m->routes[0].max_body_bytes, 4096);
+  EXPECT_EQ(m->routes[0].request_headers.at(0), "idempotency-key");
+  EXPECT_TRUE(m->routes[1].query_declared);
+  ASSERT_EQ(m->tools.size(), 1u);
+  EXPECT_EQ(m->tools[0].verb, "tool");
+  EXPECT_EQ(m->tools[0].export_name(), "goober_route_add_order");
+
+  auto types = goober::types::Types::parse(R"({"openapi":"3.1.0","components":{"schemas":{
+    "Order":{"type":"object","additionalProperties":false,"properties":{"n":{"type":"integer","format":"int32"}}}}}})", &err);
+  ASSERT_TRUE(types) << err;
+  EXPECT_TRUE(check_types(*m, &*types, &err)) << err;
+  EXPECT_FALSE(check_types(*m, nullptr, &err));
+  EXPECT_NE(err.find("wasn't supplied"), std::string::npos) << err;
+
+  auto refuse = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"box":"o","domains":["*"],"routes":{"http":{"/a":{"get":{"name":"a","public":true,"body":"json:X"}}}}})", "carries no body");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"http":{"/a":{"post":{"name":"a","public":true,"body":"xml"}}}}})", "body must be");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"http":{"/a":{"get":{"name":"a","public":true,"request-headers":["Cookie"]}}}}})", "host keeps it");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"http":{"/a":{"get":{"name":"a","public":true,"query":{"q":{"type":"object","additionalProperties":false}}}}}}})", "scalars");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"description":"d","public":true}}}}})", "can't be public");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"requirements":[]}}}}})", "description is required");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"description":"d"}}}}})", "needs requirements");
+  refuse(R"({"box":"o","domains":["*"],"routes":{"mcp":{"t":{"tool":{"name":"u","description":"d","requirements":[]}}}}})", "tool's key");
+  refuse(R"({"box":"o","domains":["*"],"types":"../x.json"})", "types document");
 }

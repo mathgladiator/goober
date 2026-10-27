@@ -95,6 +95,10 @@ Read these before doing design work:
   - `design/machine/010.Terminal.md`: the dumb terminal's backend as two example boxes,
     `terminal` (the person) and `desk` (agents), with decisions in their own table so no agent
     can decide; checked by `just terminal-e2e`.
+  - `design/machine/011.Types.md`: a box's OpenAPI types document in 036's strict subset, and
+    routes that declare body, query, request-headers, and response, checked by the host.
+  - `design/machine/012.Agents.md`: `/mcp` on every domain: box tools for bearer tokens,
+    filtered discovery, typed inputs, an audit log, and RFC 9728 metadata.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

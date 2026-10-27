@@ -1,0 +1,165 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "desk", "version": "1" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Ask": {
+        "type": "object", "required": ["task"], "additionalProperties": false,
+        "properties": {
+          "task": { "type": "string", "maxLength": 200, "minLength": 1, "description": "A plain-text title for what you want to do." },
+          "description": { "type": "string", "maxLength": 64000, "description": "Markdown in the terminal's restricted dialect: headings, emphasis, lists, tables, code, and https links. No raw HTML or images." },
+          "requester": { "type": "string", "maxLength": 120, "description": "Who is asking, for display. Defaults to your client id." },
+          "risk": { "type": "string", "enum": ["unknown", "low", "medium", "high"], "default": "unknown" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "When the request stops mattering, in UTC." },
+          "actions": { "type": "array", "maxItems": 3, "minItems": 1, "items": { "type": "string", "enum": ["approve", "deny", "approve_with_feedback"] } }
+        }
+      },
+      "ApprovalRef": {
+        "type": "object", "required": ["id"], "additionalProperties": false,
+        "properties": { "id": { "type": "integer", "format": "int64", "description": "The id desk_ask returned." } }
+      },
+      "Location": {
+        "type": "object", "required": ["lat", "lon"], "additionalProperties": false,
+        "properties": {
+          "lat": { "type": "number", "format": "double", "minimum": -90, "maximum": 90 },
+          "lon": { "type": "number", "format": "double", "minimum": -180, "maximum": 180 },
+          "label": { "type": "string", "maxLength": 120 }
+        }
+      },
+      "Trigger": {
+        "type": "object", "required": ["type"], "additionalProperties": false,
+        "description": "One flat object: at uses at; daily uses time, days, date, tz; solar uses event, offset_minutes, location, days, date, tz.",
+        "properties": {
+          "type": { "type": "string", "enum": ["at", "daily", "solar"] },
+          "at": { "type": "string", "format": "date-time" },
+          "time": { "type": "string", "maxLength": 5, "description": "A local wall-clock time, HH:mm." },
+          "days": { "type": "array", "maxItems": 7, "items": { "type": "string", "enum": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"] } },
+          "date": { "type": "string", "format": "date" },
+          "tz": { "type": "string", "maxLength": 64, "description": "An IANA zone, like America/Chicago." },
+          "event": { "type": "string", "enum": ["sunrise", "sunset", "civil_dawn", "civil_dusk", "nautical_dawn", "nautical_dusk", "astronomical_dawn", "astronomical_dusk", "golden_hour_start", "golden_hour_end", "solar_noon"] },
+          "offset_minutes": { "type": "integer", "format": "int32", "minimum": -1440, "maximum": 1440 },
+          "location": { "$ref": "#/components/schemas/Location" }
+        }
+      },
+      "Alarm": {
+        "type": "object", "required": ["kind", "title", "trigger"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 200 },
+          "kind": { "type": "string", "enum": ["alarm", "notification"], "description": "alarm rings until dismissed; notification is ordinary." },
+          "title": { "type": "string", "maxLength": 200 },
+          "body": { "type": "string", "maxLength": 2000 },
+          "priority": { "type": "string", "enum": ["low", "default", "high"] },
+          "snooze_minutes": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 120 },
+          "enabled": { "type": "boolean" },
+          "until": { "type": "string", "format": "date-time" },
+          "trigger": { "$ref": "#/components/schemas/Trigger" }
+        }
+      },
+      "AlarmPut": {
+        "type": "object", "required": ["id", "alarm"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 200, "description": "Your stable id for this alarm; setting it again replaces it." },
+          "alarm": { "$ref": "#/components/schemas/Alarm" }
+        }
+      },
+      "AlarmRef": {
+        "type": "object", "required": ["id"], "additionalProperties": false,
+        "properties": { "id": { "type": "string", "maxLength": 200 } }
+      },
+      "Option": {
+        "type": "object", "required": ["value", "label"], "additionalProperties": false,
+        "properties": { "value": { "type": "string", "maxLength": 64 }, "label": { "type": "string", "maxLength": 120 } }
+      },
+      "Setting": {
+        "type": "object", "required": ["id", "label", "type"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 64 },
+          "label": { "type": "string", "maxLength": 120 },
+          "type": { "type": "string", "enum": ["select", "toggle"] },
+          "options": { "type": "array", "maxItems": 20, "items": { "$ref": "#/components/schemas/Option" } },
+          "default": { "type": "string", "maxLength": 64 }
+        }
+      },
+      "Series": {
+        "type": "object", "required": ["name", "points"], "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "maxLength": 120 },
+          "points": { "type": "array", "maxItems": 500, "items": { "type": "number", "format": "double" } }
+        }
+      },
+      "Item": {
+        "type": "object", "required": ["title"], "additionalProperties": false,
+        "properties": {
+          "title": { "type": "string", "maxLength": 200 },
+          "subtitle": { "type": "string", "maxLength": 200 },
+          "trailing": { "type": "string", "maxLength": 60 },
+          "status": { "type": "string", "enum": ["ok", "warn", "crit", "info"] }
+        }
+      },
+      "Row": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 200 } },
+      "Widget": {
+        "type": "object", "required": ["type"], "additionalProperties": false,
+        "description": "One flat object; type says which fields matter (999 § Dashboards).",
+        "properties": {
+          "type": { "type": "string", "enum": ["metric", "line_chart", "bar_chart", "table", "list", "progress", "status", "markdown"] },
+          "title": { "type": "string", "maxLength": 120 },
+          "span": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 12 },
+          "label": { "type": "string", "maxLength": 120 },
+          "value": { "type": "string", "maxLength": 60 },
+          "unit": { "type": "string", "maxLength": 20 },
+          "delta": { "type": "string", "maxLength": 30 },
+          "delta_good": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["ok", "warn", "crit", "info"] },
+          "sparkline": { "type": "array", "maxItems": 200, "items": { "type": "number", "format": "double" } },
+          "detail": { "type": "string", "maxLength": 400 },
+          "series": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/Series" } },
+          "labels": { "type": "array", "maxItems": 500, "items": { "type": "string", "maxLength": 60 } },
+          "columns": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 } },
+          "rows": { "type": "array", "maxItems": 200, "items": { "$ref": "#/components/schemas/Row" } },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Item" } },
+          "progress": { "type": "number", "format": "double", "minimum": 0, "maximum": 1 },
+          "text": { "type": "string", "maxLength": 8000 }
+        }
+      },
+      "Page": {
+        "type": "object", "required": ["id", "title", "widgets"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 64 },
+          "title": { "type": "string", "maxLength": 120 },
+          "columns": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 6 },
+          "widgets": { "type": "array", "maxItems": 50, "items": { "$ref": "#/components/schemas/Widget" } }
+        }
+      },
+      "Dashboard": {
+        "type": "object", "required": ["title", "pages"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 64 },
+          "title": { "type": "string", "maxLength": 200 },
+          "subtitle": { "type": "string", "maxLength": 200 },
+          "refresh_seconds": { "type": "integer", "format": "int32", "minimum": 15, "maximum": 86400 },
+          "settings": { "type": "array", "maxItems": 20, "items": { "$ref": "#/components/schemas/Setting" } },
+          "pages": { "type": "array", "maxItems": 20, "minItems": 1, "items": { "$ref": "#/components/schemas/Page" } }
+        }
+      },
+      "DashboardPut": {
+        "type": "object", "required": ["id", "dashboard"], "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 64 },
+          "dashboard": { "$ref": "#/components/schemas/Dashboard" }
+        }
+      },
+      "DashboardRef": {
+        "type": "object", "required": ["id"], "additionalProperties": false,
+        "properties": { "id": { "type": "string", "maxLength": 64 } }
+      },
+      "Settings": {
+        "type": "object", "required": ["name"], "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "maxLength": 120, "minLength": 1 },
+          "default_location": { "$ref": "#/components/schemas/Location" }
+        }
+      }
+    }
+  }
+}

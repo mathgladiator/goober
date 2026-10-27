@@ -89,6 +89,15 @@ class Host {
   std::string origin_of(const server::http::Request& req) const;
   std::string session_cookie_name() const;
   void send_mail(const identity::Mail& mail);
+  struct BoxCall {
+    runtime::wasm::CallResult result;
+    boost::json::object extra;  // fields for the access log
+  };
+  BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
+                   const std::string& request_id, const std::optional<SignedIn>& who);
+  // /mcp on every domain: box tools for agents and people with bearer tokens (mcp_routes.cpp).
+  void handle_tenant_mcp(const server::http::Request& req, const Finish& finish, const std::string& domain,
+                         const std::string& tenant);
   void serve_box(server::http::Request req, Finish finish, boxes::RouteRef ref,
                  std::map<std::string, std::string> params, std::string domain, std::string tenant,
                  std::shared_ptr<const boxes::ActiveSet> keep_alive);
