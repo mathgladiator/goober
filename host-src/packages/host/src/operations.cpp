@@ -68,15 +68,18 @@ Response json_response(int status, std::string body) {
 
 }  // namespace
 
-void Host::handle_operations(const Request& req, const Finish& finish) {
+std::string Host::bearer_operator(const Request& req) const {
   auto cfg = config_.get();
   std::string auth = req.header("authorization");
-  std::string operator_name;
-  if (!cfg->operations_token.empty() && constant_time_equal(auth, "Bearer " + cfg->operations_token)) {
-    operator_name = "config";
-  } else if (auth.starts_with("Bearer ")) {
-    if (auto t = find_operator_token(cfg->storage, std::string_view(auth).substr(7))) operator_name = "token:" + t->name;
+  if (!cfg->operations_token.empty() && constant_time_equal(auth, "Bearer " + cfg->operations_token)) return "config";
+  if (auth.starts_with("Bearer ")) {
+    if (auto t = find_operator_token(cfg->storage, std::string_view(auth).substr(7))) return "token:" + t->name;
   }
+  return "";
+}
+
+void Host::handle_operations(const Request& req, const Finish& finish) {
+  std::string operator_name = bearer_operator(req);
   if (operator_name.empty()) {
     auto res = json_response(
         401, R"({"error":"a bearer token is required: mint one with goober-host token create, or set operations.token"})");

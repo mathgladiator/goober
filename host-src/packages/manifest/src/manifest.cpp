@@ -1,4 +1,5 @@
 #include "goober/manifest/manifest.h"
+
 #include "goober/router/table.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include "goober/base/encoding.h"
 #include "goober/base/names.h"
 #include "goober/json/json.h"
+#include "goober/render/mustache.h"
 
 namespace goober::manifest {
 namespace bj = boost::json;
@@ -24,7 +26,7 @@ bool Manifest::applies_to(std::string_view domain) const {
 const std::vector<std::string>& reserved_prefixes() {
   static const std::vector<std::string> kPrefixes = {
       "/.well-known", "/oauth",    "/identity",        "/mcp",          "/goober",
-      "/goober-operations", "/goober-operations-mcp", "/internal", "/error-message"};
+      "/goober-operations", "/goober-operations-mcp", "/internal", "/error-message", "/attachment"};
   return kPrefixes;
 }
 
@@ -32,7 +34,7 @@ namespace {
 
 // Fields from 150.DeepManifest.md that v1 accepts with a warning.
 const std::set<std::string> kLaterTopLevel = {"types", "pins",    "policy",   "deployment", "data",
-                                              "external", "keys", "static",   "templates",  "headers",
+                                              "external", "keys", "static",   "headers",
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
                                               "instances"};
@@ -82,6 +84,8 @@ bool check_role_template(std::string_view role, const router::RoutePattern& patt
   return true;
 }
 
+}  // namespace
+
 bool parse_requirements(const bj::value& v, const router::RoutePattern& pattern,
                         std::vector<std::vector<std::string>>* out, std::string* why) {
   if (!v.is_array()) return *why = "requirements must be a list", false;
@@ -105,6 +109,9 @@ bool parse_requirements(const bj::value& v, const router::RoutePattern& pattern,
   }
   return true;
 }
+
+namespace {
+
 const std::set<std::string> kVerbs = {"get", "post", "put", "patch", "delete"};
 
 bool under_reserved(const router::RoutePattern& p) {
@@ -127,7 +134,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
 
   for (const auto& kv : root) {
     std::string key(kv.key());
-    if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes") continue;
+    if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
+        key == "templates") {
+      continue;
+    }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
     if (kLaterTopLevel.count(key)) {
       m.warnings.push_back("\"" + key + "\" is accepted but not implemented in v1");
@@ -165,6 +175,20 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   }
   if (!err.empty()) return *error = err, std::nullopt;
 
+  if (const auto* templates = get_object(root, "templates", &err)) {
+    for (const auto& t : *templates) {
+      std::string name(t.key());
+      if (!base::is_valid_name(name)) return *error = "template name \"" + name + "\" must match [a-z][a-z0-9_]*", std::nullopt;
+      if (!t.value().is_string()) return *error = "templates." + name + " must be a string", std::nullopt;
+      std::string why;
+      if (!render::check_mustache(t.value().get_string(), &why)) {
+        return *error = "templates." + name + ": " + why, std::nullopt;
+      }
+      m.templates[name] = std::string(t.value().get_string());
+    }
+  }
+  if (!err.empty()) return *error = err, std::nullopt;
+
   std::set<std::string> names;
   router::RouteTable<int> shapes;
   if (const auto* routes = get_object(root, "routes", &err)) {
@@ -190,7 +214,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           const auto& def = verb.value().get_object();
           for (const auto& f : def) {
             std::string key(f.key());
-            if (key == "name" || key == "public" || key == "requirements") continue;
+            if (key == "name" || key == "public" || key == "requirements" || key == "template") continue;
             if (kLaterRoute.count(key)) {
               m.warnings.push_back(where + "." + key + " is accepted but not implemented in v1");
               continue;
@@ -206,7 +230,12 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           if (!shapes.add(*pattern, v, 0)) {
             return *error = where + " conflicts with another route of the same shape", std::nullopt;
           }
-          HttpRoute route{v, *name, *pattern, false, {}};
+          HttpRoute route{v, *name, *pattern, false, {}, {}};
+          if (auto t = get_string(def, "template", &err)) {
+            if (!base::is_valid_name(*t)) return *error = where + ": template \"" + *t + "\" must match [a-z][a-z0-9_]*", std::nullopt;
+            route.template_name = *t;
+          }
+          if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           auto is_public = goober::json::get_bool(def, "public", &err);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           auto req = def.find("requirements");

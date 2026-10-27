@@ -19,3 +19,10 @@ and the `goober-host` binary with SIGHUP reload.
   browser, 401 otherwise, 403 for unmet requirements, 400 for smuggled `/` or `:`.
 - Identity pages are host-owned and unframeable, and refuse cross-origin POSTs.
 - Operator tokens are stored only as hashes and checked per request, so revoking is immediate.
+- Content goes through the `site` package: pages with requirements are gated exactly like
+  box routes, templated pages get the strict CSP, and private (`_`) paths are never served.
+- Attachments are served only with the extension that matches their sniffed type, SVG and
+  PDF as sandboxed downloads. Uploading needs an operator token, a host operator, or a
+  tenant owner, and a cookie-authenticated POST must be same-origin.
+- A box's JSON rendered through a template is data: it can't supply `body`, so it can't
+  inject markup.

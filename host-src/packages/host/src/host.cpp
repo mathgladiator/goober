@@ -40,6 +40,15 @@ const char* reason(int status) {
   }
 }
 
+// True when the caller would rather have HTML than JSON: text/html is listed, and
+// before application/json if both are.
+bool prefers_html(std::string_view accept) {
+  auto html = accept.find("text/html");
+  if (html == std::string_view::npos) return false;
+  auto json = accept.find("application/json");
+  return json == std::string_view::npos || html < json;
+}
+
 // Request headers a box never sees: credentials belong to the host.
 bool hidden_from_box(std::string_view name) { return name == "authorization" || name == "cookie"; }
 
@@ -56,6 +65,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                              (rec.torn_tail ? ", torn tail dropped" : ""));
   }
   content_ = std::make_unique<content::ContentStore>(*wal_);
+  site_ = std::make_unique<site::Site>(*content_);
+  attachments_ = std::make_unique<attachments::Store>(*wal_);
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
@@ -63,9 +74,12 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(
       "goober-operations", std::string(kVersion),
-      "Operate a goober host: write static content per tenant (content_*), deploy WASM boxes "
-      "(version_upload with a manifest and WAT or base64 WASM), and read logs.");
+      "Operate a goober host. Build sites as a CMS: call site_guide first, then write pages (page_put, as "
+      "markdown, an HTML fragment in a template, or a whole HTML document), templates (template_put), and images "
+      "(attachment_put, from base64 or a URL). Deploy WASM boxes (version_upload), query tenant databases "
+      "(db_list, db_query), and read logs.");
   register_tools();
+  register_content_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
 }
 
@@ -219,6 +233,18 @@ void Host::handle(Request req, Responder respond) {
     return;
   }
 
+  if (path->path == "/attachment" || path->path.starts_with("/attachment/")) {
+    pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
+      try {
+        handle_attachment(req, finish, p, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: attachment: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"attachment failed"})");
+      }
+    });
+    return;
+  }
+
   auto active = boxes_->active();
   const auto& table = active->table_for(domain);
   std::string verb = req.method == "head" ? "get" : req.method;
@@ -235,26 +261,102 @@ void Host::handle(Request req, Responder respond) {
     return finish(error_page(*tenant, 405, request_id), "");
   }
   pool_->post([this, req, finish, tenant = *tenant, p = path->path] {
-    serve_static(req, finish, tenant, p);
+    try {
+      serve_content(req, finish, tenant, p);
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: content: " << e.what() << "\n";
+      finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"content failed"})");
+    }
   });
 }
 
-void Host::serve_static(const Request& req, const Finish& finish, const std::string& tenant,
-                        const std::string& path) {
-  auto file = content_->resolve(tenant, path);
-  if (!file) return finish(error_page(tenant, 404, req.header("goober-request-id")), R"({"why":"no content"})");
-  Response res;
-  res.headers.emplace_back("etag", file->etag);
-  res.headers.emplace_back("cache-control", "no-cache");
-  res.headers.emplace_back("x-content-type-options", "nosniff");
-  if (req.header("if-none-match") == file->etag) {
-    res.status = 304;
-    return finish(std::move(res), "");
+std::optional<SignedIn> Host::caller(const Request& req, const std::string& tenant) { return signed_in(req, tenant); }
+
+bj::value Host::user_json(const std::optional<SignedIn>& who) {
+  if (!who) return nullptr;
+  bj::array roles;
+  for (const auto& r : who->roles) roles.push_back(bj::value(r));
+  return bj::object{{"user_id", std::to_string(who->user.user_id)},
+                    {"email", who->user.email},
+                    {"roles", std::move(roles)},
+                    {"host", who->host}};
+}
+
+int Host::authorize(const bj::value& requirements, const std::optional<SignedIn>& who, const std::string& tenant) {
+  manifest::HttpRoute route;
+  std::string why;
+  // A page's requirements may substitute {!tenant} and {!user_id}; a malformed list denies everyone.
+  if (!manifest::parse_requirements(requirements, router::RoutePattern{}, &route.requirements, &why)) return 403;
+  std::optional<manifest::Caller> c;
+  if (who) c = manifest::Caller{std::to_string(who->user.user_id), who->host, who->roles};
+  switch (manifest::check_access(route, c ? &*c : nullptr, {}, tenant)) {
+    case manifest::Access::kAllowed: return 200;
+    case manifest::Access::kSignIn: return 401;
+    case manifest::Access::kForbidden: return 403;
+    case manifest::Access::kBadValue: return 400;
   }
-  res.headers.emplace_back("content-type", file->content_type);
-  res.body = std::move(file->data);
+  return 403;
+}
+
+Response Host::sign_in_or_401(const Request& req, const std::string& tenant) const {
+  if ((req.method == "get" || req.method == "head") && req.header("accept").find("text/html") != std::string::npos) {
+    Response res;
+    res.status = 303;
+    std::string back = req.path + (req.query.empty() ? "" : "?" + req.query);
+    res.headers.emplace_back("location", "/identity/sign-in?return=" + base::percent_encode(back));
+    res.headers.emplace_back("cache-control", "no-store");
+    return res;
+  }
+  return error_page(tenant, 401, req.header("goober-request-id"));
+}
+
+void Host::serve_content(const Request& req, const Finish& finish, const std::string& tenant, const std::string& path) {
+  std::string request_id = req.header("goober-request-id");
+  // Who is asking matters only for pages with requirements, and for templates that greet them.
+  std::optional<SignedIn> who = caller(req, tenant);
+  site::Visit v;
+  v.tenant = tenant;
+  v.path = path;
+  for (const auto& [k, val] : router::parse_query(req.query)) v.query[k] = val;
+  v.accept = req.header("accept");
+  v.origin = (config_.get()->identity.cookie_secure ? "https://" : "http://") + req.header("host");
+  v.user = user_json(who);
+  v.authorize = [&](const bj::value& requirements) { return authorize(requirements, who, tenant); };
+  auto r = site_->visit(v);
+  bj::object extra{{"content", site::kind_name(r.kind)}};
+  if (!r.file.empty()) extra["file"] = r.file;
+  if (who) extra["user_id"] = std::to_string(who->user.user_id);
+  if (r.status == 401) return finish(sign_in_or_401(req, tenant), json::dump(extra));
+  if (r.status >= 400) {
+    if (!r.error.empty()) {
+      extra["error"] = r.error;
+      std::cerr << "goober-host: content " << tenant << path << ": " << r.error << "\n";
+    }
+    return finish(error_page(tenant, r.status, request_id), json::dump(extra));
+  }
+  Response res;
+  res.status = r.status;
+  if (r.status >= 300 && r.status < 400) {
+    res.headers.emplace_back("location", r.location);
+    res.headers.emplace_back("cache-control", "no-cache");
+    return finish(std::move(res), json::dump(extra));
+  }
+  res.headers.emplace_back("etag", r.etag);
+  res.headers.emplace_back("cache-control", r.restricted || who ? "private, no-cache" : "no-cache");
+  res.headers.emplace_back("x-content-type-options", "nosniff");
+  if (r.kind != site::Kind::kStatic) {
+    res.headers.emplace_back("referrer-policy", "same-origin");
+    res.headers.emplace_back("vary", "accept, cookie");
+  }
+  for (auto& h : r.headers) res.headers.push_back(std::move(h));
+  if (req.header("if-none-match") == r.etag) {
+    res.status = 304;
+    return finish(std::move(res), json::dump(extra));
+  }
+  res.headers.emplace_back("content-type", r.content_type);
+  res.body = std::move(r.body);
   res.head_only = req.method == "head";
-  finish(std::move(res), "");
+  finish(std::move(res), json::dump(extra));
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
@@ -276,32 +378,13 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   switch (manifest::check_access(*ref.route, caller ? &*caller : nullptr, params, tenant)) {
     case manifest::Access::kAllowed:
       break;
-    case manifest::Access::kSignIn: {
-      if ((req.method == "get" || req.method == "head") && req.header("accept").find("text/html") != std::string::npos) {
-        Response res;
-        res.status = 303;
-        std::string back = req.path + (req.query.empty() ? "" : "?" + req.query);
-        res.headers.emplace_back("location", "/identity/sign-in?return=" + base::percent_encode(back));
-        res.headers.emplace_back("cache-control", "no-store");
-        return finish(std::move(res), R"({"why":"sign in first"})");
-      }
-      return finish(error_page(tenant, 401, request_id), R"({"why":"sign in first"})");
-    }
+    case manifest::Access::kSignIn:
+      return finish(sign_in_or_401(req, tenant), R"({"why":"sign in first"})");
     case manifest::Access::kForbidden:
       return finish(error_page(tenant, 403, request_id), R"({"why":"requirements not met"})");
     case manifest::Access::kBadValue:
       return finish(error_page(tenant, 400, request_id), R"({"why":"a substituted value holds / or :"})");
   }
-  bj::value user_json = nullptr;
-  if (who) {
-    bj::array roles;
-    for (const auto& r : who->roles) roles.push_back(bj::value(r));
-    user_json = bj::object{{"user_id", std::to_string(who->user.user_id)},
-                           {"email", who->user.email},
-                           {"roles", std::move(roles)},
-                           {"host", who->host}};
-  }
-
   bj::object headers;
   for (const auto& [k, v] : req.headers) {
     if (!hidden_from_box(k)) headers[k] = v;
@@ -313,7 +396,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   bj::object doc{{"request_id", request_id}, {"method", req.method},       {"path", req.path},
                  {"params", params_json},   {"query", query},             {"headers", headers},
                  {"body", req.body},        {"domain", domain},           {"tenant", tenant},
-                 {"user", user_json}};
+                 {"user", user_json(who)}};
 
   runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64()};
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(m.behavior.timeout_ms), cfg->fuel.resolve(m.behavior.fuel),
@@ -357,6 +440,36 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     res.headers.emplace_back("x-content-type-options", "nosniff");
     res.body = std::move(result.body);
     res.head_only = req.method == "head";
+    // One route, many audiences (007 §8): a browser gets the JSON through the route's template.
+    if (!ref.route->template_name.empty() && result.content_type.starts_with("application/json") &&
+        prefers_html(req.header("accept"))) {
+      std::string err;
+      auto data = json::parse(res.body, &err);
+      std::optional<std::string> html;
+      if (data && data->is_object()) {
+        bj::object d = std::move(data->as_object());
+        d["user"] = user_json(who);
+        bj::object query_obj;
+        for (const auto& [k, v] : router::parse_query(req.query)) query_obj[k] = v;
+        d["request"] = bj::object{{"path", req.path}, {"query", std::move(query_obj)}};
+        html = site_->render_named(tenant, ref.route->template_name, std::move(d), &m.templates, &err);
+      } else if (err.empty()) {
+        err = "the response is not a JSON object";
+      }
+      if (html) {
+        std::erase_if(res.headers, [](const auto& h) { return h.first == "content-type"; });
+        res.headers.emplace_back("content-type", "text/html; charset=utf-8");
+        res.headers.emplace_back("vary", "accept");
+        res.body = std::move(*html);
+      } else {
+        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+                                                         {"request_id", request_id},
+                                                         {"version", ref.box->version},
+                                                         {"level", "host"},
+                                                         {"text", "template " + ref.route->template_name + ": " + err}}));
+        res = error_page(tenant, 500, request_id);
+      }
+    }
   } else {
     int status = result.outcome == runtime::wasm::CallResult::Outcome::kTimeout ? 504 : 500;
     res = error_page(tenant, status, request_id);

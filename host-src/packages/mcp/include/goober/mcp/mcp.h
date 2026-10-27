@@ -50,5 +50,8 @@ bj::object object_schema(std::initializer_list<std::pair<std::string, bj::value>
 bj::value string_property(std::string description);
 bj::value integer_property(std::string description);
 bj::value any_property(std::string description);
+bj::value boolean_property(std::string description);
+bj::value object_property(std::string description);
+bj::value enum_property(std::string description, std::initializer_list<std::string> values);
 
 }  // namespace goober::mcp

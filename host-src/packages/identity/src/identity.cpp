@@ -6,7 +6,7 @@
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
 #include "goober/base/random.h"
-#include "goober/identity/sqlite.h"
+#include "goober/sqlite/sqlite.h"
 
 namespace goober::identity {
 

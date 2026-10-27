@@ -114,4 +114,18 @@ bj::value integer_property(std::string description) {
 }
 bj::value any_property(std::string description) { return bj::object{{"description", description}}; }
 
+bj::value boolean_property(std::string description) {
+  return bj::object{{"type", "boolean"}, {"description", description}};
+}
+
+bj::value object_property(std::string description) {
+  return bj::object{{"type", "object"}, {"description", description}};
+}
+
+bj::value enum_property(std::string description, std::initializer_list<std::string> values) {
+  bj::array e;
+  for (const auto& v : values) e.push_back(bj::value(v));
+  return bj::object{{"type", "string"}, {"enum", std::move(e)}, {"description", description}};
+}
+
 }  // namespace goober::mcp

@@ -1,9 +1,10 @@
 goober_package(
   NAME host
   SOURCES src/worker_pool.cpp src/host.cpp src/operations.cpp src/identity_routes.cpp src/operator_tokens.cpp
-  DEPS goober_base goober_json goober_config goober_wal goober_content goober_router goober_manifest
+          src/attachment_routes.cpp src/content_tools.cpp
+  DEPS goober_base goober_json goober_config goober_wal goober_content goober_site goober_attachments goober_router goober_manifest
        goober_runtime_wasm goober_boxes goober_identity goober_server_http goober_mcp
-  TESTS test/host_test.cpp test/identity_routes_test.cpp test/operator_tokens_test.cpp
+  TESTS test/host_test.cpp test/identity_routes_test.cpp test/operator_tokens_test.cpp test/content_test.cpp
 )
 
 add_executable(goober-host src/main.cpp)

@@ -1,10 +1,10 @@
-#include "goober/identity/sqlite.h"
+#include "goober/sqlite/sqlite.h"
 
 #include <sqlite3.h>
 
 #include <stdexcept>
 
-namespace goober::identity::sqlite {
+namespace goober::sqlite {
 
 namespace {
 [[noreturn]] void fail(sqlite3* db, std::string_view what) {
@@ -81,4 +81,4 @@ std::string Stmt::text(int column) const {
 
 bool Stmt::is_null(int column) const { return sqlite3_column_type(stmt_, column) == SQLITE_NULL; }
 
-}  // namespace goober::identity::sqlite
+}  // namespace goober::sqlite

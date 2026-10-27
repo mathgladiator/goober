@@ -135,3 +135,17 @@ TEST(Manifest, SubstitutedValuesCantSmuggleScopes) {
   EXPECT_EQ(check_access(m->routes[0], &c, {{"project_id", "x"}}, "t"), Access::kAllowed);
   EXPECT_EQ(check_access(m->routes[0], &c, {{"project_id", "x:y"}}, "t"), Access::kBadValue);
 }
+
+TEST(Manifest, TemplatesAreCheckedAndRoutesNameThem) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"h","domains":["*"],
+    "templates": {"job": "<h1>Job {{id}}</h1>"},
+    "routes":{"http":{"/jobs/{id : int64}":{"get":{"name":"job","template":"job","public":true}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  EXPECT_EQ(m->templates.at("job"), "<h1>Job {{id}}</h1>");
+  EXPECT_EQ(m->routes[0].template_name, "job");
+  EXPECT_FALSE(parse_manifest(R"({"box":"h","domains":["*"],"templates":{"bad":"{{#open}}"}})", &err));
+  EXPECT_NE(err.find("templates.bad"), std::string::npos);
+  EXPECT_FALSE(parse_manifest(R"({"box":"h","domains":["*"],"routes":{"http":{"/attachment/x":{"get":{"name":"x","public":true}}}}})", &err));
+  EXPECT_NE(err.find("reserved"), std::string::npos);
+}

@@ -12,7 +12,7 @@
 struct sqlite3;
 struct sqlite3_stmt;
 
-namespace goober::identity::sqlite {
+namespace goober::sqlite {
 
 class Db {
  public:
@@ -56,4 +56,4 @@ class Stmt {
   sqlite3_stmt* stmt_ = nullptr;
 };
 
-}  // namespace goober::identity::sqlite
+}  // namespace goober::sqlite

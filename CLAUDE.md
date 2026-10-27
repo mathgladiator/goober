@@ -77,6 +77,9 @@ Read these before doing design work:
     CMake, the two thread pools, the v1 ABI, storage and the host WAL, HTTP rules, MCP tools.
   - `design/machine/006.LocalIdentity.md`: v1 identity (emailed codes, cookie sessions, realms
     per tenant, route requirements), local mode, operator tokens, setup, and the justfile.
+  - `design/machine/007.Content.md`: content as its own vector: pages (markdown, fragments,
+    documents), Mustache templates with layouts, listings and feeds, and attachments at
+    `/attachment/$id.$ext` with uploads and MCP tools.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

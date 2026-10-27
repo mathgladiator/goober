@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "goober/json/json.h"
 #include "goober/router/path.h"
 
 namespace goober::manifest {
@@ -20,6 +21,9 @@ struct HttpRoute {
   // signed-in user of the realm. Roles may hold {param}, {!tenant}, and {!user_id}.
   bool is_public = false;
   std::vector<std::vector<std::string>> requirements;
+  // A template that renders the route's JSON for callers that prefer HTML
+  // (070.UI.md § One route, many audiences; design/machine/007.Content.md §8).
+  std::string template_name;
   std::string export_name() const { return "goober_route_" + name; }
 };
 
@@ -54,10 +58,17 @@ struct Manifest {
   std::vector<std::string> domains;  // "*" or lowercase domain names
   Behavior behavior;
   std::vector<HttpRoute> routes;
+  std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
 
   bool applies_to(std::string_view domain) const;
 };
+
+// Parses requirements in disjunctive normal form: a list of roles (one clause), or a
+// list of lists of roles. Parameters must belong to `pattern`; content pages pass an
+// empty pattern, so only {!tenant} and {!user_id} can be substituted.
+bool parse_requirements(const boost::json::value& v, const router::RoutePattern& pattern,
+                        std::vector<std::vector<std::string>>* out, std::string* why);
 
 // The URL prefixes no box may declare a route under.
 const std::vector<std::string>& reserved_prefixes();

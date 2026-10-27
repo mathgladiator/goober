@@ -7,6 +7,7 @@
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "http_util.h"
 #include "goober/json/json.h"
 #include "goober/router/path.h"
 
@@ -17,15 +18,6 @@ using server::http::Request;
 using server::http::Response;
 
 namespace {
-
-// Only a path on this site: no scheme, no "//host", no header injection.
-std::string safe_return(std::string_view r) {
-  if (r.empty() || r.size() > 2048 || r[0] != '/' || r.starts_with("//") || r.starts_with("/\\")) return "/";
-  for (char c : r) {
-    if (c == '\r' || c == '\n' || c == '\0') return "/";
-  }
-  return std::string(r);
-}
 
 std::string read_cookie(const Request& req, std::string_view name) {
   std::string header = req.header("cookie");
@@ -41,15 +33,6 @@ std::string read_cookie(const Request& req, std::string_view name) {
     i = end + 1;
   }
   return "";
-}
-
-// A POST must come from a page on the same host, when the browser says where it came from.
-bool same_origin(const Request& req) {
-  std::string origin = req.header("origin");
-  if (origin.empty()) return true;
-  auto scheme = origin.find("://");
-  if (scheme == std::string::npos) return false;
-  return base::to_lower(origin.substr(scheme + 3)) == base::to_lower(req.header("host"));
 }
 
 constexpr const char* kStyle = R"css(
