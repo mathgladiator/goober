@@ -145,7 +145,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(
       "goober-operations", std::string(kVersion),
-      "Operate a goober host. Build sites as a CMS: call site_guide first, then write pages (page_put, as "
+      "Operate a goober host. Build products as boxes: call box_guide first. Build sites as a CMS: call "
+      "site_guide first, then write pages (page_put, as "
       "markdown, an HTML fragment in a template, or a whole HTML document), templates (template_put), and images "
       "(attachment_put, from base64 or a URL). Deploy WASM boxes (version_upload), query tenant databases "
       "(db_list, db_query), and read logs.");

@@ -5,6 +5,7 @@
 
 #include "goober/base/files.h"
 #include "goober/base/time.h"
+#include "box_guide.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 
@@ -64,6 +65,10 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
 
 void Host::register_data_tools() {
   using mcp::any_property;
+  mcp_->add_tool({"box_guide",
+                  "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, "
+                  "databases, and types work on goober, and how to deploy them.",
+                  mcp::object_schema({}, {}), [](const bj::object&) { return ToolResult::ok(bj::value(kBoxGuide)); }});
   mcp_->add_tool({"timers_list",
                   "The timers the host has planned (045): each timer, tenant, and row, with when it is next due.",
                   mcp::object_schema({}, {}),

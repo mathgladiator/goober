@@ -183,6 +183,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [ ] Internal routes, so a decision can tell the agent's box.
 - [ ] Push through FCM once decision 7 is made.
 
+### Building products
+- [x] `box_guide` on the operator MCP: the boundary, manifest, routes, tools, timers, data,
+      and types in one read, so an agent can build and deploy a product from it.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

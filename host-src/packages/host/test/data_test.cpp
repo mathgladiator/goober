@@ -117,6 +117,14 @@ class DataRoutesTest : public ::testing::Test {
   uint16_t port = 0;
 };
 
+TEST_F(DataRoutesTest, BoxGuideDescribesTheBoundary) {
+  auto guide = tool("box_guide", {});
+  ASSERT_TRUE(guide.is_string()) << json::dump(guide);
+  for (const char* must : {"goober_route_$name", "goober_sql", "additionalProperties", "routes", "timer_run", "schema_put"}) {
+    EXPECT_NE(std::string(guide.as_string()).find(must), std::string::npos) << must;
+  }
+}
+
 TEST_F(DataRoutesTest, BoxesWriteInATransactionAndOperatorsPoke) {
   std::string err;
   // A manifest naming a schema the host doesn't have is refused.
