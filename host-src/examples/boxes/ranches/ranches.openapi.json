@@ -1,0 +1,103 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "ranches", "version": "1" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "RanchInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "slug": { "type": "string", "maxLength": 80, "description": "A short id like hill-ranch; made from the name when left out." },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "kind": { "type": "string", "enum": ["ranch", "farm", "butcher", "market", "co-op", "processor", "other"], "default": "ranch" },
+          "website": { "type": "string", "maxLength": 500, "description": "https://... The robot reads it weekly for offerings." },
+          "email": { "type": "string", "maxLength": 254 },
+          "phone": { "type": "string", "maxLength": 50 },
+          "address": { "type": "string", "maxLength": 300 },
+          "city": { "type": "string", "maxLength": 100 },
+          "region": { "type": "string", "maxLength": 100, "description": "A state, county, or area name you group by, like Fresno County." },
+          "notes": { "type": "string", "maxLength": 16000 },
+          "status": { "type": "string", "enum": ["prospect", "contacted", "replied", "interested", "partner", "declined"], "default": "prospect" },
+          "extract": { "type": "string", "maxLength": 4000, "description": "Optional JSON extract spec for a site without schema.org data, like {\"items\": \".product\", \"fields\": {\"name\": \".title\", \"price\": \".price\", \"url\": \"a@href\", \"unit\": \".unit\"}}. Try it with web_fetch first." }
+        }
+      },
+      "RanchUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug"],
+        "properties": {
+          "slug": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "kind": { "type": "string", "enum": ["ranch", "farm", "butcher", "market", "co-op", "processor", "other"] },
+          "website": { "type": "string", "maxLength": 500 },
+          "email": { "type": "string", "maxLength": 254 },
+          "phone": { "type": "string", "maxLength": 50 },
+          "address": { "type": "string", "maxLength": 300 },
+          "city": { "type": "string", "maxLength": 100 },
+          "region": { "type": "string", "maxLength": 100 },
+          "notes": { "type": "string", "maxLength": 16000, "description": "Replaces the notes; read them first to append." },
+          "status": { "type": "string", "enum": ["prospect", "contacted", "replied", "interested", "partner", "declined"] },
+          "extract": { "type": "string", "maxLength": 4000 },
+          "watch": { "type": "boolean", "description": "Whether the robot keeps reading the website." }
+        }
+      },
+      "RanchQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": { "type": "string", "maxLength": 200, "description": "Text in the name, city, notes, or website." },
+          "status": { "type": "string", "enum": ["prospect", "contacted", "replied", "interested", "partner", "declined"] },
+          "kind": { "type": "string", "enum": ["ranch", "farm", "butcher", "market", "co-op", "processor", "other"] },
+          "region": { "type": "string", "maxLength": 100 },
+          "limit": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 500, "default": 100 },
+          "offset": { "type": "integer", "format": "int32", "minimum": 0, "maximum": 100000, "default": 0 }
+        }
+      },
+      "RanchRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug"],
+        "properties": { "slug": { "type": "string", "minLength": 1, "maxLength": 80 } }
+      },
+      "ContactInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug", "channel", "direction", "summary"],
+        "properties": {
+          "slug": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "channel": { "type": "string", "enum": ["email", "phone", "text", "visit", "social", "form", "other"] },
+          "direction": { "type": "string", "enum": ["out", "in"], "description": "out: we reached them; in: they reached us." },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "description": "What was said or sent, and what's next." },
+          "status": { "type": "string", "enum": ["prospect", "contacted", "replied", "interested", "partner", "declined"], "description": "Move the ranch to this status too." }
+        }
+      },
+      "OfferingQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": { "type": "string", "maxLength": 200, "description": "Text in the offering's name, like brisket or quarter." },
+          "category": { "type": "string", "enum": ["beef", "pork", "lamb", "goat", "bison", "chicken", "turkey", "eggs", "other"] },
+          "region": { "type": "string", "maxLength": 100 },
+          "in_stock": { "type": "boolean", "description": "Only what the site says is in stock." },
+          "limit": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 500, "default": 100 }
+        }
+      },
+      "OfferingInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug", "name"],
+        "properties": {
+          "slug": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "category": { "type": "string", "enum": ["beef", "pork", "lamb", "goat", "bison", "chicken", "turkey", "eggs", "other"] },
+          "price": { "type": "string", "maxLength": 100, "description": "As written, like $950 or $12.50/lb." },
+          "unit": { "type": "string", "maxLength": 32, "description": "lb, each, share, box, ..." },
+          "in_stock": { "type": "boolean" },
+          "url": { "type": "string", "maxLength": 1000 }
+        }
+      }
+    }
+  }
+}

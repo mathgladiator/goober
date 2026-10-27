@@ -21,18 +21,18 @@ if [[ -z "${GOOBER_TOKEN:-}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if 
 fi
 
 EX="$HOST_SRC/examples"
-for schema in guestbook/guestbook1 terminal/terminal1; do
+for schema in guestbook/guestbook1 terminal/terminal1 leads/leads1 ranches/ranches1; do
   "$HERE/goober.py" schema "$EX/boxes/$schema.schema.json" >/dev/null
   echo "stored schema ${schema#*/}"
 done
 if command -v cargo >/dev/null; then
-  for box in dice guestbook terminal desk; do
+  for box in dice guestbook terminal desk leads ranches; do
     cargo build --quiet --release --target wasm32-unknown-unknown --manifest-path "$EX/boxes/$box/Cargo.toml"
     "$HERE/goober.py" deploy "$EX/boxes/$box/manifest.json" "$EX/boxes/$box/target/wasm32-unknown-unknown/release/$box.wasm" >/dev/null
     echo "deployed $box"
   done
 else
-  echo "no cargo: skipping the Rust boxes (dice, guestbook, terminal, desk)"
+  echo "no cargo: skipping the Rust boxes (dice, guestbook, terminal, desk, leads, ranches)"
 fi
 "$HERE/goober.py" deploy "$EX/boxes/echo/manifest.json" "$EX/boxes/echo/echo.wat" >/dev/null
 echo "deployed echo"

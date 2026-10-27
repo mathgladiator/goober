@@ -1,0 +1,125 @@
+{
+  "box": "ranches",
+  "mission": "Keep a directory of local ranches, farms, and butchers, a log of every outreach to them, and an index of what they sell, read weekly from their own websites by goober's polite robot. Agents add and update ranches and log contacts; anyone may read the public index of offerings and ranch names. Notes, emails, and the contact log are the owner's only.",
+  "domains": ["*"],
+  "types": "ranches.openapi.json",
+  "behavior": { "timeout-ms": 9000, "fuel": 1000000000, "memory-max-bytes": 67108864 },
+  "data": {
+    "sqlite3": {
+      "meat": {
+        "schema": "ranches1",
+        "database": "ranches",
+        "tenant": "meat",
+        "pattern": "sql",
+        "tables": {
+          "ranches": {
+            "read": true,
+            "insert": true,
+            "update": ["name", "kind", "website", "email", "phone", "address", "city", "region", "notes", "status",
+                       "platform", "extract", "watch", "checked_ms", "check_error", "last_contact_ms", "updated_ms"]
+          },
+          "contacts": { "read": true, "insert": true },
+          "offerings": {
+            "read": true,
+            "insert": true,
+            "update": ["name", "category", "price_cents", "price_text", "currency", "unit", "in_stock", "url", "source", "seen_ms"],
+            "delete": true
+          }
+        },
+        "row-limit": 1000
+      }
+    }
+  },
+  "external": {
+    "farms": {
+      "web": { "hosts": ["*"] },
+      "methods": { "fetch": { "budget": { "calls": 3 } } }
+    }
+  },
+  "routes": {
+    "http": {
+      "/meat/offerings": {
+        "get": {
+          "name": "meat_offerings",
+          "public": true,
+          "cors": ["*"],
+          "query": {
+            "q": { "type": "string", "maxLength": 200 },
+            "category": { "type": "string", "maxLength": 32 },
+            "region": { "type": "string", "maxLength": 100 },
+            "limit": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 500, "default": 100 }
+          }
+        }
+      },
+      "/meat/ranches": {
+        "get": {
+          "name": "meat_ranches",
+          "public": true,
+          "cors": ["*"],
+          "query": { "region": { "type": "string", "maxLength": 100 } }
+        }
+      }
+    },
+    "mcp": {
+      "ranch_add": {
+        "tool": {
+          "description": "Add a ranch, farm, butcher, or market to the directory. Give its website if it has one: the robot reads it for offerings (schema.org data, Shopify catalogs, or your extract spec).",
+          "input": "json:RanchInput",
+          "requirements": [["owner"]]
+        }
+      },
+      "ranch_update": {
+        "tool": {
+          "description": "Change fields of a ranch by its slug: contact details, status, notes (replaced, so read them first), the extract spec, or whether the robot watches its site.",
+          "input": "json:RanchUpdate",
+          "requirements": [["owner"]]
+        }
+      },
+      "ranch_list": {
+        "tool": {
+          "description": "List ranches with their status, region, contact details, when they were last contacted, how many offerings were found, and when the site was last read.",
+          "input": "json:RanchQuery",
+          "requirements": [["owner"]]
+        }
+      },
+      "ranch_get": {
+        "tool": {
+          "description": "One ranch in full: details, notes, the outreach log (newest first), and its offerings.",
+          "input": "json:RanchRef",
+          "requirements": [["owner"]]
+        }
+      },
+      "contact_log": {
+        "tool": {
+          "description": "Record an outreach: an email, call, text, or visit to or from a ranch, what was said, and optionally its new status. Use it every time you reach out, so nobody is contacted twice by mistake.",
+          "input": "json:ContactInput",
+          "requirements": [["owner"]]
+        }
+      },
+      "ranch_check": {
+        "tool": {
+          "description": "Read a ranch's website now (politely, through goober's robot) and update its offerings. Answers what was found, or why nothing was (robots.txt, no product data, an error).",
+          "input": "json:RanchRef",
+          "requirements": [["owner"]]
+        }
+      },
+      "offering_search": {
+        "tool": {
+          "description": "Search the index of offerings across every ranch: name, price, unit, stock, the ranch, its city and region, and when the robot last saw it.",
+          "input": "json:OfferingQuery",
+          "requirements": [["owner"]]
+        }
+      },
+      "offering_add": {
+        "tool": {
+          "description": "Record an offering by hand, for a ranch whose site the robot can't read (prices from a call, a flyer, a market stall).",
+          "input": "json:OfferingInput",
+          "requirements": [["owner"]]
+        }
+      }
+    },
+    "timer": {
+      "refresh": { "name": "ranches_refresh", "every-ms": 300000, "timeout-ms": 9000 }
+    }
+  }
+}

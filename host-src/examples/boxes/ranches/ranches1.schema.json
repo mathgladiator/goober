@@ -1,0 +1,68 @@
+{
+  "schema": "ranches1",
+  "tables": {
+    "ranches": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "slug": { "type": "string", "max-length": 80 },
+        "name": { "type": "string", "max-length": 200 },
+        "kind": { "type": "string", "max-length": 32, "default": "ranch" },
+        "website": { "type": "string", "max-length": 500, "nullable": true },
+        "email": { "type": "string", "max-length": 254, "nullable": true },
+        "phone": { "type": "string", "max-length": 50, "nullable": true },
+        "address": { "type": "string", "max-length": 300, "nullable": true },
+        "city": { "type": "string", "max-length": 100, "nullable": true },
+        "region": { "type": "string", "max-length": 100, "nullable": true },
+        "notes": { "type": "string", "max-length": 16000, "default": "" },
+        "status": { "type": "string", "max-length": 32, "default": "prospect" },
+        "platform": { "type": "string", "max-length": 50, "nullable": true },
+        "extract": { "type": "string", "max-length": 4000, "nullable": true },
+        "watch": { "type": "int32", "default": 1 },
+        "checked_ms": { "type": "int64", "nullable": true },
+        "check_error": { "type": "string", "max-length": 500, "nullable": true },
+        "last_contact_ms": { "type": "int64", "nullable": true },
+        "created_ms": { "type": "int64" },
+        "updated_ms": { "type": "int64" }
+      },
+      "indexes": {
+        "ranches_by_slug": { "columns": ["slug"], "unique": true },
+        "ranches_by_status": { "columns": ["status"] },
+        "ranches_by_checked": { "columns": ["checked_ms"] }
+      }
+    },
+    "contacts": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "ranch_id": { "type": "int64" },
+        "at_ms": { "type": "int64" },
+        "channel": { "type": "string", "max-length": 32 },
+        "direction": { "type": "string", "max-length": 8 },
+        "summary": { "type": "string", "max-length": 4000 },
+        "actor": { "type": "string", "max-length": 120 }
+      },
+      "indexes": { "contacts_by_ranch": { "columns": ["ranch_id", "at_ms"] } }
+    },
+    "offerings": {
+      "columns": {
+        "id": { "type": "int64", "primary-key": true },
+        "ranch_id": { "type": "int64" },
+        "offer_key": { "type": "string", "max-length": 400 },
+        "name": { "type": "string", "max-length": 300 },
+        "category": { "type": "string", "max-length": 32, "nullable": true },
+        "price_cents": { "type": "int64", "nullable": true },
+        "price_text": { "type": "string", "max-length": 100, "nullable": true },
+        "currency": { "type": "string", "max-length": 8, "nullable": true },
+        "unit": { "type": "string", "max-length": 32, "nullable": true },
+        "in_stock": { "type": "int32", "nullable": true },
+        "url": { "type": "string", "max-length": 1000, "nullable": true },
+        "source": { "type": "string", "max-length": 16 },
+        "seen_ms": { "type": "int64" }
+      },
+      "indexes": {
+        "offerings_by_key": { "columns": ["offer_key"], "unique": true },
+        "offerings_by_ranch": { "columns": ["ranch_id"] },
+        "offerings_by_category": { "columns": ["category"] }
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@ unsafe extern "C" {
     fn goober_respond(status: i32, type_ptr: *const u8, type_len: i32, body_ptr: *const u8, body_len: i32) -> i32;
     fn goober_header_set(name_ptr: *const u8, name_len: i32, value_ptr: *const u8, value_len: i32) -> i32;
     fn goober_now_ms() -> i64;
+    fn goober_random_fill(ptr: *mut u8, len: i32) -> i32;
     fn goober_log(level: i32, ptr: *const u8, len: i32) -> i32;
     fn goober_sql(st_ptr: *const u8, st_len: i32, sql_ptr: *const u8, sql_len: i32, p_ptr: *const u8, p_len: i32) -> i32;
     fn goober_result_read(ptr: *mut u8, len: i32) -> i32;
@@ -123,6 +124,26 @@ pub fn header(name: &str, value: &str) -> bool {
 /// The request's time in Unix milliseconds, fixed for the whole request.
 pub fn now_ms() -> i64 {
     unsafe { goober_now_ms() }
+}
+
+/// `bytes` random bytes from the host (seeded per request, so a replay repeats them), as hex.
+pub fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    unsafe {
+        goober_random_fill(buf.as_mut_ptr(), bytes as i32);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The fields of a plain HTML form post (the host decodes them), if this request is one.
+pub fn form(req: &Request) -> Option<&serde_json::Map<String, Value>> {
+    req.doc.get("form").and_then(|f| f.as_object())
+}
+
+/// Answers 303 See Other to a path on this site.
+pub fn redirect(path: &str) {
+    header("location", path);
+    respond(303, "text/plain", b"");
 }
 
 pub fn log(text: &str) {

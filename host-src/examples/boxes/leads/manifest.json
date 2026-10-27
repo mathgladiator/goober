@@ -1,0 +1,63 @@
+{
+  "box": "leads",
+  "mission": "Collect emails and survey answers from a landing page's form (an ad's destination, say), confirm them by email when a mail service is set up, and let the owner and their agents read, count, and export them. Visitors can only add or update their own entry; nothing they send is shown to anyone but the owner.",
+  "domains": ["*"],
+  "types": "leads.openapi.json",
+  "behavior": { "timeout-ms": 3000, "fuel": 200000000, "memory-max-bytes": 33554432 },
+  "data": {
+    "sqlite3": {
+      "leads": {
+        "schema": "leads1",
+        "database": "leads",
+        "pattern": "sql",
+        "tables": {
+          "leads": { "read": true, "insert": true, "update": ["name", "answers", "updated_ms", "confirmed_ms"] }
+        },
+        "row-limit": 1000
+      }
+    }
+  },
+  "routes": {
+    "http": {
+      "/leads/{campaign : string}/signup": {
+        "post": { "name": "lead_signup", "public": true, "max-body-bytes": 65536 }
+      },
+      "/leads/confirm/{token : string}": {
+        "get": { "name": "lead_confirm", "public": true }
+      },
+      "/leads/v1/export/{campaign : string}": {
+        "get": { "name": "lead_export_csv", "requirements": [["owner"]], "agents": true }
+      }
+    },
+    "mcp": {
+      "leads_list": {
+        "tool": {
+          "description": "List leads (newest first): email, name, survey answers, UTM source/medium/campaign/content, confirmed or not, and when. Filter by campaign or by text.",
+          "input": "json:LeadsQuery",
+          "requirements": [["owner"]]
+        }
+      },
+      "leads_stats": {
+        "tool": {
+          "description": "Count leads per campaign (total and confirmed), per UTM source and ad (utm_content), and per day for the last 30 days. Use it to see which ads bring people in.",
+          "input": "json:StatsQuery",
+          "requirements": [["owner"]]
+        }
+      },
+      "survey_summary": {
+        "tool": {
+          "description": "Tally the answers to one survey question in a campaign: each distinct answer and how many gave it.",
+          "input": "json:SurveyQuery",
+          "requirements": [["owner"]]
+        }
+      },
+      "leads_export": {
+        "tool": {
+          "description": "Every lead of a campaign as CSV text (email, name, confirmed, created, UTM fields, then one column per survey question).",
+          "input": "json:CampaignRef",
+          "requirements": [["owner"]]
+        }
+      }
+    }
+  }
+}

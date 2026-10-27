@@ -108,3 +108,7 @@ reload dir=dir:
 # Install or upgrade goober on a server over ssh (Ubuntu 24.04+ / Debian 13+), with Caddy and backups.
 deploy target dir="/srv/goober/host":
     {{host_src}}/tools/deploy.sh {{target}} {{dir}}
+
+# Play the example products (leads, ranches) end to end against the running host, as GrokBot would.
+products-e2e dir=dir url="http://localhost:8080":
+    python3 -I {{host_src}}/tools/products_e2e.py --config {{trim_start_match(dir, "dir=")}}/host.json --url {{trim_start_match(url, "url=")}}

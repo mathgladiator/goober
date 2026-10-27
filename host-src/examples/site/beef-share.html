@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local beef, straight from the ranch</title>
+<meta name="description" content="Join the list for quarter and half beef shares from ranches near you.">
+<meta property="og:title" content="Local beef, straight from the ranch">
+<style>
+  :root { --ink: #1d1a16; --paper: #faf6ef; --accent: #8a3b12; }
+  body { margin: 0; font: 18px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--paper); }
+  main { max-width: 34rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  h1 { font-size: 2rem; line-height: 1.15; margin: 0 0 .5rem; }
+  label { display: block; margin: 1rem 0 .25rem; font-weight: 600; }
+  input[type=email], input[type=text], select { width: 100%; box-sizing: border-box; padding: .6rem; font: inherit;
+    border: 1px solid #c9bfae; border-radius: 6px; background: #fff; }
+  .choice { font-weight: 400; display: flex; gap: .5rem; align-items: baseline; }
+  button { margin-top: 1.5rem; width: 100%; padding: .8rem; font: inherit; font-weight: 700; color: #fff;
+    background: var(--accent); border: 0; border-radius: 6px; }
+  .fine { font-size: .85rem; color: #6b6255; }
+  .trap { position: absolute; left: -10000px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Local beef, straight from the ranch</h1>
+  <p>We're lining up quarter and half shares from small ranches nearby. Tell us what you'd
+  want, and we'll email you when a share opens up.</p>
+  <form method="post" action="/leads/beef-share/signup">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" required autocomplete="email">
+    <label for="name">First name (optional)</label>
+    <input id="name" name="name" type="text" autocomplete="given-name">
+    <label for="cut">What size share?</label>
+    <select id="cut" name="q_share">
+      <option value="quarter">A quarter</option>
+      <option value="half">A half</option>
+      <option value="whole">A whole</option>
+      <option value="cuts">Just some cuts</option>
+    </select>
+    <label for="when">When would you buy?</label>
+    <select id="when" name="q_when">
+      <option value="now">As soon as possible</option>
+      <option value="3months">In the next three months</option>
+      <option value="later">Later this year</option>
+    </select>
+    <label for="zip">ZIP code</label>
+    <input id="zip" name="q_zip" type="text" inputmode="numeric" maxlength="10">
+    <label class="choice"><input type="checkbox" name="consent" value="yes" required> You may email me about shares.</label>
+    <div class="trap" aria-hidden="true"><label>Website <input name="website" tabindex="-1" autocomplete="off"></label></div>
+    <input type="hidden" name="utm_source"><input type="hidden" name="utm_medium">
+    <input type="hidden" name="utm_campaign"><input type="hidden" name="utm_content">
+    <input type="hidden" name="next" value="/thanks">
+    <button type="submit">Put me on the list</button>
+    <p class="fine">We'll never sell your email. One click unsubscribes.</p>
+  </form>
+</main>
+<script>
+  // The ad's UTM tags ride along with the form, so the owner can see which ad worked.
+  var q = new URLSearchParams(location.search);
+  ["utm_source", "utm_medium", "utm_campaign", "utm_content"].forEach(function (k) {
+    var v = q.get(k), el = document.querySelector("input[name=" + k + "]");
+    if (v && el) el.value = v;
+  });
+</script>
+</body>
+</html>

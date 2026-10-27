@@ -127,7 +127,8 @@ bool header_safe(std::string_view v) {
   return v.size() < 1024;
 }
 
-// Resolves a host to one address the robot may connect to, as text for curl's --resolve.
+// Resolves a host to the addresses the robot may connect to (at most four, IPv4 first), as
+// text for curl's --resolve, which tries each in turn.
 std::optional<std::string> pick_address(const std::string& host_in, bool local, std::string* why) {
   std::string host = host_in;
   if (host.size() > 2 && host.front() == '[') host = host.substr(1, host.size() - 2);
@@ -139,20 +140,25 @@ std::optional<std::string> pick_address(const std::string& host_in, bool local, 
     *why = "can't resolve " + host;
     return std::nullopt;
   }
-  std::optional<std::string> out;
+  std::vector<std::string> v4, v6;
   bool any_private = false;
-  for (addrinfo* a = res; a && !out; a = a->ai_next) {
+  for (addrinfo* a = res; a; a = a->ai_next) {
     char text[INET6_ADDRSTRLEN] = {};
     const void* raw = a->ai_family == AF_INET ? static_cast<const void*>(&reinterpret_cast<sockaddr_in*>(a->ai_addr)->sin_addr)
                                               : static_cast<const void*>(&reinterpret_cast<sockaddr_in6*>(a->ai_addr)->sin6_addr);
     if (!inet_ntop(a->ai_family, raw, text, sizeof text)) continue;
     if (public_address(a->ai_addr) || local) {
-      out = a->ai_family == AF_INET6 ? "[" + std::string(text) + "]" : std::string(text);
+      auto& list = a->ai_family == AF_INET6 ? v6 : v4;
+      std::string t = a->ai_family == AF_INET6 ? "[" + std::string(text) + "]" : std::string(text);
+      if (std::find(list.begin(), list.end(), t) == list.end()) list.push_back(t);
     } else {
       any_private = true;
     }
   }
   freeaddrinfo(res);
+  std::optional<std::string> out;
+  v4.insert(v4.end(), v6.begin(), v6.end());
+  for (size_t i = 0; i < v4.size() && i < 4; ++i) out = out ? *out + "," + v4[i] : v4[i];
   if (!out) *why = any_private ? host + " resolves only to private or reserved addresses" : "no usable address for " + host;
   return out;
 }
