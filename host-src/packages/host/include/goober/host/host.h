@@ -82,6 +82,14 @@ class Host {
   // Waits until queued mail has been handed to the mail server (tests).
   void drain_mail();
 
+  // Backups to S3 (design/machine/019.Backups.md). A host thread ticks every few seconds;
+  // tests turn that off with set_backups_manual(true) before start() and tick themselves.
+  void set_backups_manual(bool manual) { backups_manual_ = manual; }
+  void backup_tick(int64_t now_ms);
+  // Runs "nightly", "increment", or "assets" now. nullopt with `error` when it couldn't.
+  std::optional<boost::json::object> backup_run(const std::string& what, int64_t now_ms, std::string* error);
+  boost::json::object backup_status(bool with_points);
+
   // For tests and tools.
   config::ConfigHolder& config() { return config_; }
   content::ContentStore& content() { return *content_; }
@@ -241,6 +249,10 @@ class Host {
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class MailQueue> mail_;
+  std::unique_ptr<class BackupService> backups_;
+  std::thread backup_thread_;
+  bool backups_manual_ = false;
+  void run_backups();
 };
 
 }  // namespace goober::host

@@ -184,6 +184,13 @@ void Host::register_data_tools() {
                   scope_props({{"value", mcp::string_property("The secret, 1 to 8192 printable bytes.")}}),
                   [this](const bj::object& args) {
                     std::string err;
+                    // The host's own keys are set on the machine, never by an agent: whoever sets the AWS
+                    // keys chooses where mail and backups go, and the backup key decides who can read them.
+                    std::string name = arg(args, "name").value_or("");
+                    if (arg(args, "scope") == "system" && (name.starts_with("aws_") || name == "backup_key")) {
+                      return ToolResult::fail(name + " is the host's own key: set it on the server with `goober-host key set " +
+                                              name + "`");
+                    }
                     if (!keys_->set(arg(args, "scope").value_or(""), arg(args, "tenant").value_or(""),
                                     arg(args, "name").value_or(""), arg(args, "value").value_or(""), base::now_unix_ms(),
                                     &err)) {
@@ -195,11 +202,35 @@ void Host::register_data_tools() {
                   mcp::object_schema({}, {}), [this](const bj::object&) { return ToolResult::ok(keys_->list()); }});
   mcp_->add_tool({"key_delete", "Removes a key. Calls that name it fail until it is set again.", scope_props({}),
                   [this](const bj::object& args) {
+                    std::string name = arg(args, "name").value_or("");
+                    if (arg(args, "scope") == "system" && (name.starts_with("aws_") || name == "backup_key")) {
+                      return ToolResult::fail(name + " is the host's own key: it is managed on the server");
+                    }
                     if (!keys_->remove(arg(args, "scope").value_or(""), arg(args, "tenant").value_or(""),
                                        arg(args, "name").value_or(""))) {
                       return ToolResult::fail("no such key");
                     }
                     return ToolResult::ok(bj::object{{"removed", true}});
+                  }});
+  // Backups to S3 (design/machine/019.Backups.md).
+  mcp_->add_tool({"backup_status",
+                  "Backups to S3: whether they're on, the current night and last increment, the attachment queue, the "
+                  "last error, whether the backup key's copy is confirmed, and (with points) the restore points.",
+                  mcp::object_schema({{"points", mcp::boolean_property("Also list the restore points in the bucket.")}}, {}),
+                  [this](const bj::object& args) {
+                    bool points = args.contains("points") && args.at("points").is_bool() && args.at("points").as_bool();
+                    return ToolResult::ok(backup_status(points));
+                  }});
+  mcp_->add_tool({"backup_run",
+                  "Runs a backup stream now: nightly (a whole sealed archive; increments then measure against it), "
+                  "increment (the databases' changed pages and changed files), or assets (queued attachments).",
+                  mcp::object_schema({{"what", mcp::enum_property("Which stream.", {"nightly", "increment", "assets"})}},
+                                     {"what"}),
+                  [this](const bj::object& args) {
+                    std::string err;
+                    auto r = backup_run(arg(args, "what").value_or(""), base::now_unix_ms(), &err);
+                    if (!r) return ToolResult::fail(err);
+                    return ToolResult::ok(std::move(*r));
                   }});
   // The outbox's dead letters (035): what couldn't be delivered, and what to do about it.
   mcp_->add_tool({"outbox_dead_letters",

@@ -92,6 +92,15 @@ backup dest dir=dir: build
 restore from dir=dir: build
     @{{bin}} restore {{quote(from)}} --config {{trim_start_match(dir, "dir=")}}/host.json
 
+# Rebuild a sandboxed devbox in DEST from the S3 backups, at the latest moment or one like
+# 2026-10-26T18:00 (UTC). Reads ~/.config/goober/backup.env; see host-src/tools/rehydrate.sh.
+rehydrate dest at="": build
+    {{host_src}}/tools/rehydrate.sh {{quote(dest)}} {{quote(at)}}
+
+# S3 backups end to end against a stand-in S3: nightly, increment, assets, rehydrate.
+backup-e2e: build
+    python3 -I {{host_src}}/tools/backup_e2e.py
+
 # Fuzz every parser and the SQL authorizer under AddressSanitizer: just fuzz 50000
 fuzz iters="20000":
     cmake --preset asan >/dev/null && cmake --build --preset asan

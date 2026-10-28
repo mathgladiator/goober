@@ -18,6 +18,7 @@
 #include "goober/router/path.h"
 #include "http_util.h"
 #include "keys.h"
+#include "backups.h"
 #include "mailer.h"
 #include "network.h"
 #include "timer_state.h"
@@ -138,6 +139,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
+  backups_ = std::make_unique<BackupService>([this] { return config_.get(); }, *keys_, config_file_);
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(
       "goober-operations", std::string(kVersion),
@@ -156,6 +158,43 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
 }
 
 Host::~Host() { stop(); }
+
+void Host::backup_tick(int64_t now_ms) { backups_->tick(now_ms); }
+
+std::optional<bj::object> Host::backup_run(const std::string& what, int64_t now_ms, std::string* error) {
+  bool ok = false;
+  bj::object out{{"ran", what}};
+  if (what == "nightly") {
+    ok = backups_->run_nightly(now_ms, error);
+  } else if (what == "increment") {
+    ok = backups_->run_increment(now_ms, error);
+  } else if (what == "assets") {
+    backups_->nudge();
+    error->clear();
+    out["uploaded"] = backups_->run_assets(now_ms, error);
+    ok = error->empty();
+  } else {
+    *error = "what is nightly, increment, or assets";
+  }
+  if (!ok) return std::nullopt;
+  return out;
+}
+
+bj::object Host::backup_status(bool with_points) { return backups_->status(with_points); }
+
+void Host::run_backups() {
+  std::unique_lock lock(timer_thread_mu_);
+  while (!timers_stopping_) {
+    lock.unlock();
+    try {
+      backups_->tick(base::now_unix_ms());
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: backups: " << e.what() << "\n";
+    }
+    lock.lock();
+    timer_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return timers_stopping_; });
+  }
+}
 
 uint16_t Host::start() {
   auto cfg = config_.get();
@@ -178,6 +217,11 @@ uint16_t Host::start() {
   timer_thread_ = std::thread([this] { run_timers(); });
   outbox_thread_ = std::thread([this] { run_outbox(); });
   crawl_thread_ = std::thread([this] { run_crawls(); });
+  if (!backups_manual_) backup_thread_ = std::thread([this] { run_backups(); });
+  if (cfg->backup.enabled() && !cfg->sandbox) {
+    auto status = backups_->status(false);
+    if (status.contains("key_warning")) startup_notes_.push_back(std::string(status.at("key_warning").as_string()));
+  }
   return server_->port();
 }
 
@@ -191,6 +235,7 @@ void Host::stop() {
     timer_thread_.join();
     if (outbox_thread_.joinable()) outbox_thread_.join();
     if (crawl_thread_.joinable()) crawl_thread_.join();
+    if (backup_thread_.joinable()) backup_thread_.join();
   }
   if (!server_) {
     if (pool_) pool_->shutdown();

@@ -3,6 +3,7 @@
 
 #include <charconv>
 
+#include "backups.h"
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -137,6 +138,7 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
       return finish(std::move(res), json::dump(bj::object{{"why", err}}));
     }
     extra["id"] = a->id;
+    backups_->nudge();  // queued for the bucket at the next backup tick
     if (from_browser) {
       Response res;
       res.status = 303;

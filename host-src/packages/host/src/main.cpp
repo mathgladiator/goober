@@ -11,6 +11,14 @@
 //   goober-host db exec TENANT DATABASE SQL [--config host.json]
 //   goober-host backup DIR [--config host.json]      a consistent copy, while running
 //   goober-host restore DIR [--config host.json]     into an empty storage, host stopped
+//   goober-host key set NAME [--tenant T] [--config host.json]   the value on stdin
+//   goober-host key list [--config host.json]
+//   goober-host backup key [--confirm] [--config host.json]      print the S3 backups' key
+//   goober-host backup list [--config host.json]                 restore points in the bucket
+//   goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R]
+//                [--endpoint URL] [--prefix P]] [--key-file F] [--keep-keys] [--port N]
+//       a sandboxed devbox from S3; AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and
+//       AWS_SESSION_TOKEN), and GOOBER_BACKUP_KEY unless --key-file
 //
 // The db commands read the database files directly, so they work whether or not the
 // host is running; exec is logged to logs/db.log as the operator "cli".
@@ -20,6 +28,7 @@
 // SIGHUP rereads the config; SIGINT and SIGTERM stop the host.
 
 #include <sys/stat.h>
+#include <unistd.h>
 #include <csignal>
 #include <cstring>
 #include <iostream>
@@ -33,6 +42,8 @@
 #include "goober/host/backup.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
+#include "../src/backups.h"
+#include "../src/keys.h"
 
 namespace {
 
@@ -47,7 +58,13 @@ constexpr const char* kUsage =
     "       goober-host db query TENANT DATABASE SQL [--config host.json]\n"
     "       goober-host db exec TENANT DATABASE SQL [--config host.json]\n"
     "       goober-host backup DIR [--config host.json]\n"
-    "       goober-host restore DIR [--config host.json]\n";
+    "       goober-host restore DIR [--config host.json]\n"
+    "       goober-host key set NAME [--tenant T] [--config host.json]   (the value on stdin)\n"
+    "       goober-host key list [--config host.json]\n"
+    "       goober-host backup key [--confirm] [--config host.json]\n"
+    "       goober-host backup list [--config host.json]\n"
+    "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
+    "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n";
 
 std::string shell_quote(const std::string& s) {
   std::string out = "'";
@@ -181,6 +198,130 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
   return 2;
 }
 
+struct Flags {
+  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file;
+  bool confirm = false, keep_keys = false;
+  uint16_t port = 8080;
+};
+
+std::string read_stdin() {
+  std::string value, line;
+  while (std::getline(std::cin, line)) value += line + "\n";
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) value.pop_back();
+  return value;
+}
+
+int run_key(const std::vector<std::string>& args, const std::string& config_path, const Flags& flags) {
+  std::string err;
+  auto config = goober::config::load_config(config_path, &err);
+  if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+  goober::host::KeyStore keys(config->storage);
+  const std::string& verb = args.size() > 1 ? args[1] : "";
+  if (verb == "set" && args.size() == 3) {
+    // From stdin, so a secret is never on a command line or in shell history.
+    if (isatty(0)) std::cerr << "value for " << args[2] << " (then Enter): ";
+    std::string value = read_stdin();
+    if (!keys.set(flags.tenant.empty() ? "system" : "tenant", flags.tenant, args[2], value,
+                  goober::base::now_unix_ms(), &err)) {
+      return std::cerr << "goober-host: " << err << "\n", 1;
+    }
+    std::cout << "set keys/" << (flags.tenant.empty() ? "system" : "tenant/" + flags.tenant) << "/" << args[2] << "\n";
+    return 0;
+  }
+  if (verb == "list") {
+    for (const auto& k : keys.list()) {
+      std::cout << k.at("key").as_string() << "  " << k.at("set_at").as_string() << "  " << k.at("fingerprint").as_string()
+                << "\n";
+    }
+    return 0;
+  }
+  std::cerr << kUsage;
+  return 2;
+}
+
+int run_backup_cli(const std::vector<std::string>& args, const std::string& config_path, const Flags& flags) {
+  std::string err;
+  auto config = goober::config::load_config(config_path, &err);
+  if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+  goober::host::KeyStore keys(config->storage);
+  goober::host::BackupService service([config] { return config; }, keys, config_path);
+  if (args[1] == "key") {
+    auto key = service.key(&err);
+    if (!key) return std::cerr << "goober-host: " << err << "\n", 1;
+    if (flags.confirm) {
+      service.confirm_key();
+      std::cout << "confirmed: a copy of the backup key is kept somewhere else\n";
+      return 0;
+    }
+    std::cout << goober::backup::key_hex(*key) << "\n";
+    std::cerr << "Keep this key somewhere other than this machine (a password manager). Without it no backup can be\n"
+                 "read. Then run: goober-host backup key --confirm\n";
+    return 0;
+  }
+  if (args[1] == "list") {
+    if (!config->backup.enabled()) return std::cerr << "goober-host: backups are off in " << config_path << "\n", 1;
+    goober::aws::S3 s3({config->backup.bucket, config->backup.region.empty() ? config->aws.region : config->backup.region,
+                        config->backup.endpoint, config->backup.prefix},
+                       [&keys] { return keys.aws_credentials(); }, config->storage / "tmp");
+    auto points = goober::host::list_restore_points(s3, &err);
+    if (!points) return std::cerr << "goober-host: " << err << "\n", 1;
+    for (const auto& p : *points) {
+      std::cout << goober::base::format_utc_ms(p.at_ms) << "  " << (p.increment.empty() ? "nightly" : "increment") << "\n";
+    }
+    std::cout << "(" << points->size() << " restore points)\n";
+    return 0;
+  }
+  std::cerr << kUsage;
+  return 2;
+}
+
+int run_rehydrate(const std::vector<std::string>& args, const Flags& flags) {
+  if (args.size() != 2) return std::cerr << kUsage, 2;
+  std::string err;
+  goober::host::RehydrateOptions o;
+  o.dir = args[1];
+  o.port = flags.port;
+  o.keep_keys = flags.keep_keys;
+  if (!flags.from.empty()) {
+    auto from = goober::config::load_config(flags.from, &err);
+    if (!from) return std::cerr << "goober-host: " << err << "\n", 1;
+    if (!from->backup.enabled()) return std::cerr << "goober-host: " << flags.from << " has no backup.s3\n", 1;
+    o.location = {from->backup.bucket, from->backup.region.empty() ? from->aws.region : from->backup.region,
+                  from->backup.endpoint, from->backup.prefix};
+  }
+  if (!flags.bucket.empty()) o.location.bucket = flags.bucket;
+  if (!flags.region.empty()) o.location.region = flags.region;
+  if (!flags.endpoint.empty()) o.location.endpoint = flags.endpoint;
+  if (!flags.prefix.empty()) o.location.prefix = flags.prefix.back() == '/' ? flags.prefix : flags.prefix + "/";
+  if (o.location.bucket.empty()) return std::cerr << "goober-host: say where: --from host.json or --bucket\n", 2;
+  if (o.location.region.empty()) o.location.region = "us-east-1";
+  auto env = [](const char* k) { return std::string(std::getenv(k) ? std::getenv(k) : ""); };
+  o.credentials = {env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"), env("AWS_SESSION_TOKEN")};
+  if (o.credentials.access_key_id.empty() || o.credentials.secret_access_key.empty()) {
+    return std::cerr << "goober-host: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY\n", 2;
+  }
+  std::string key_text = flags.key_file.empty() ? env("GOOBER_BACKUP_KEY") : goober::base::read_file(flags.key_file).value_or("");
+  auto key = goober::backup::parse_key(key_text);
+  if (!key) return std::cerr << "goober-host: the backup key (GOOBER_BACKUP_KEY or --key-file) must be 64 hex digits\n", 2;
+  o.key = *key;
+  if (!flags.at.empty()) {
+    auto at = goober::backup::parse_moment(flags.at);
+    if (!at) return std::cerr << "goober-host: --at is like 2026-10-26, 2026-10-26T18:00, or 2026-10-26T18:00:00Z (UTC)\n", 2;
+    o.at_ms = *at;
+  }
+  goober::host::RehydrateReport report;
+  if (!goober::host::rehydrate(o, &report, &err)) return std::cerr << "goober-host: " << err << "\n", 1;
+  std::cout << "rehydrated " << o.dir.string() << " from the night of " << report.night
+            << (report.increment.empty() ? "" : " and the increment at " + report.increment) << ":\n"
+            << "  " << report.databases << " databases (" << report.deltas << " from increments), " << report.assets
+            << " attachments" << (report.missing_assets ? " (" + std::to_string(report.missing_assets) + " missing)" : "")
+            << "\n";
+  for (const auto& n : report.notes) std::cout << "  note: " << n << "\n";
+  std::cout << "It is a sandbox: no mail, calls, deliveries, or backups leave it. Run it with:\n"
+            << "  goober-host --config " << (o.dir / "host.json").string() << " --local\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -190,6 +331,7 @@ int main(int argc, char** argv) {
   std::string config_path = "host.json";
   std::string token_name = "operator";
   bool local = false, claude = false;
+  Flags flags;
   std::vector<std::string> positional;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -201,6 +343,22 @@ int main(int argc, char** argv) {
       local = true;
     } else if (a == "--claude") {
       claude = true;
+    } else if (a == "--confirm") {
+      flags.confirm = true;
+    } else if (a == "--keep-keys") {
+      flags.keep_keys = true;
+    } else if ((a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
+                a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port") && i + 1 < argc) {
+      std::string v = argv[++i];
+      if (a == "--tenant") flags.tenant = v;
+      if (a == "--at") flags.at = v;
+      if (a == "--from") flags.from = v;
+      if (a == "--bucket") flags.bucket = v;
+      if (a == "--region") flags.region = v;
+      if (a == "--endpoint") flags.endpoint = v;
+      if (a == "--prefix") flags.prefix = v;
+      if (a == "--key-file") flags.key_file = v;
+      if (a == "--port") flags.port = uint16_t(std::atoi(v.c_str()));
     } else if (a == "--version") {
       std::cout << "goober-host " << goober::host::kVersion << "\n";
       return 0;
@@ -213,6 +371,11 @@ int main(int argc, char** argv) {
   }
   if (!positional.empty() && positional[0] == "token") return run_token(positional, config_path, token_name, claude, local);
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
+  if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
+  if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
+  if (positional.size() == 2 && positional[0] == "backup" && (positional[1] == "key" || positional[1] == "list")) {
+    return run_backup_cli(positional, config_path, flags);
+  }
   if (!positional.empty() && (positional[0] == "backup" || positional[0] == "restore")) {
     if (positional.size() != 2) return std::cerr << kUsage, 2;
     std::string err;

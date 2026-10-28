@@ -35,6 +35,18 @@ std::string sha256_hex(std::string_view data);
 // can't be read.
 std::optional<std::string> sha256_file_hex(const std::filesystem::path& path);
 
+// HMAC-SHA-256 over data given in pieces.
+class HmacSha256 {
+ public:
+  explicit HmacSha256(std::string_view key);
+  void update(std::string_view data) { inner_.update(data); }
+  std::array<uint8_t, 32> finish();
+
+ private:
+  Sha256 inner_;
+  uint8_t opad_[64];
+};
+
 // HMAC-SHA-256 (RFC 2104) of the data under the key, as 32 raw bytes or 64 hex digits.
 std::array<uint8_t, 32> hmac_sha256(std::string_view key, std::string_view data);
 std::string hmac_sha256_hex(std::string_view key, std::string_view data);

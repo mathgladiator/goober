@@ -206,9 +206,17 @@ ask SESSION_DAYS "Days a sign-in lasts:" "30" is_count
 if [[ $PROD == 1 ]]; then
   COOKIE_SECURE=true
   note "Session cookies will be __Host- and Secure, so they only travel over HTTPS."
-  note "Sign-in codes go by email. Without SMTP, the dev mailer writes them to"
+  note "Sign-in codes and boxes' mail go by email. Without a mailer, the dev mailer writes them to"
   note "storage/mail/outbox/ on the server: fine for you alone, useless for anyone else."
-  confirm USE_SMTP "Send mail through an SMTP server (TLS required)?" y
+  note "Amazon SES sends through its API with AWS keys from the key store (set below)."
+  confirm USE_SES "Send mail through Amazon SES?" y
+  USE_SMTP=0
+  if [[ $USE_SES == 1 ]]; then
+    ask SES_FROM "Send from (an address or domain verified in SES):" "no-reply@$PLATFORM" is_email
+    ask AWS_REGION "The SES region:" "us-east-1"
+  else
+    confirm USE_SMTP "Send mail through an SMTP server (TLS required)?" y
+  fi
   if [[ $USE_SMTP == 1 ]]; then
     ask SMTP_URL "SMTP URL (smtps://host:465, or smtp://host:587 with STARTTLS):" "smtps://smtp.example.com:465" is_url_any
     ask SMTP_FROM "Send from:" "no-reply@$PLATFORM" is_email
@@ -271,12 +279,37 @@ else
   CONFIG_TOKEN="dev-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 fi
 
+# ---------------------------------------------------------------- 9. backups
+
+S3_BUCKET=""
+if [[ $PROD == 1 ]]; then
+  step "Backups"
+  note "Off the machine (663.Backups.md): a sealed archive every night (fourteen kept), the"
+  note "databases' changed pages every fifteen minutes, and each attachment once, to S3."
+  ask S3_BUCKET "S3 bucket for backups (empty for none):" ""
+  if [[ -n "$S3_BUCKET" ]]; then
+    ask S3_REGION "Its region:" "${AWS_REGION:-us-east-1}"
+    ask S3_PREFIX "A prefix in the bucket, for this host:" "${PLATFORM}/"
+  fi
+  if [[ ${USE_SES:-0} == 1 || -n "$S3_BUCKET" ]]; then
+    note "SES and S3 use AWS keys, kept in the host's key store (never in the config)."
+    note "The IAM user needs ses:SendRawEmail, and s3 Get/Put/Delete/ListBucket on the bucket."
+    confirm SET_AWS "Enter the AWS access keys now?" y
+    if [[ $SET_AWS == 1 ]]; then
+      read -r -p "AWS access key id: " AWS_KEY_ID
+      read -r -s -p "AWS secret access key (hidden): " AWS_SECRET; echo
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------- review and write
 
 export G_ADDRESS="$ADDRESS" G_PORT="$PORT" G_PLATFORM="$PLATFORM" G_PUBLIC_URL="$PUBLIC_URL"
 export G_DOMAINS="$(printf '%s\n' "${DOMAINS[@]}")" G_OPERATORS="$(printf '%s\n' "${OPERATORS[@]}")"
 export G_SMTP="${USE_SMTP:-0}" G_SMTP_URL="${SMTP_URL:-}" G_SMTP_FROM="${SMTP_FROM:-}" G_SMTP_USER="${SMTP_USER:-}"
 export G_SMTP_PASS_FILE="${SMTP_PASS_FILE:-}"
+export G_SES="${USE_SES:-0}" G_SES_FROM="${SES_FROM:-}" G_AWS_REGION="${AWS_REGION:-us-east-1}"
+export G_S3_BUCKET="${S3_BUCKET:-}" G_S3_REGION="${S3_REGION:-}" G_S3_PREFIX="${S3_PREFIX:-}"
 export G_PROD="$PROD" G_TOKEN="$CONFIG_TOKEN" G_COOKIE_SECURE="$COOKIE_SECURE" G_SESSION_DAYS="$SESSION_DAYS" G_TERMINAL="$TERMINAL"
 export G_NET="$NET_THREADS" G_BOX="$BOX_THREADS" G_PIN="$PIN" G_BODY="$BODY_MAX"
 export G_T_DEF="$T_DEF" G_T_MAX="$T_MAX" G_F_DEF="$F_DEF" G_F_MAX="$F_MAX" G_M_DEF="$M_DEF" G_M_MAX="$M_MAX"
@@ -298,7 +331,8 @@ cfg = {
     "identity": {
         "cookie-secure": e["G_COOKIE_SECURE"] == "true",
         "session-days": int(e["G_SESSION_DAYS"]),
-        "mailer": "smtp" if e["G_SMTP"] == "1" else "dev",
+        "mailer": "ses" if e["G_SES"] == "1" else "smtp" if e["G_SMTP"] == "1" else "dev",
+        **({"ses": {"from": e["G_SES_FROM"]}} if e["G_SES"] == "1" else {}),
         **({"smtp": {"url": e["G_SMTP_URL"], "from": e["G_SMTP_FROM"],
                      **({"username": e["G_SMTP_USER"], "password-file": e["G_SMTP_PASS_FILE"]} if e["G_SMTP_USER"] else {})}}
            if e["G_SMTP"] == "1" else {}),
@@ -308,6 +342,9 @@ cfg = {
             "redirect-uris": ["com.mathgladiator.dumb:/oauth/callback", "http://127.0.0.1/callback"],
             "acts-as": "person"}}} if e["G_TERMINAL"] == "1" else {}),
     },
+    **({"aws": {"region": e["G_AWS_REGION"]}} if e["G_SES"] == "1" else {}),
+    **({"backup": {"s3": {"bucket": e["G_S3_BUCKET"], "region": e["G_S3_REGION"], "prefix": e["G_S3_PREFIX"]}}}
+       if e["G_S3_BUCKET"] else {}),
     "threads": {"network": int(e["G_NET"]), "boxes": int(e["G_BOX"]), "pin-boxes": e["G_PIN"] == "1"},
     "limits": {
         "body-max-bytes": int(e["G_BODY"]),
@@ -328,6 +365,19 @@ confirm WRITE "Write this to $CONFIG?" y
 umask 077
 printf '%s\n' "$JSON" >"$CONFIG"
 mkdir -p "$DIR/storage"
+# The AWS keys go into the key store through stdin, never a command line.
+if [[ -n "${AWS_KEY_ID:-}" && -n "${AWS_SECRET:-}" ]]; then
+  printf '%s' "$AWS_KEY_ID" | "$BIN" key set aws_access_key_id --config "$CONFIG" >/dev/null
+  printf '%s' "$AWS_SECRET" | "$BIN" key set aws_secret_access_key --config "$CONFIG" >/dev/null
+  unset AWS_SECRET
+  good "stored the AWS keys in the key store"
+fi
+if [[ -n "${S3_BUCKET:-}" ]]; then
+  BACKUP_KEY="$("$BIN" backup key --config "$CONFIG" 2>/dev/null)"
+  warn "The backup key (keep a copy OFF this machine, in a password manager; no backup can be read without it):"
+  say "  $BACKUP_KEY"
+  note "Once it's stored safely: $BIN backup key --confirm --config $CONFIG"
+fi
 "$BIN" check --config "$CONFIG" >/dev/null || die "the host refused the config it was just given; see above"
 good "wrote $CONFIG"
 good "storage at $DIR/storage"
@@ -444,7 +494,7 @@ Next:
   ${B}just serve $DIR${N}           run it in the foreground to try it (no --local)
   install ${B}$DIR/deploy/${N} for systemd and Caddy, and point DNS at this server
   sign in as an operator at ${B}$PUBLIC_URL/identity/sign-in/as-host${N}; $(
-  [[ ${USE_SMTP:-0} == 1 ]] && echo "the code comes by email" || echo "the code is in $DIR/storage/mail/outbox/")
+  [[ ${USE_SMTP:-0} == 1 || ${USE_SES:-0} == 1 ]] && echo "the code comes by email" || echo "the code is in $DIR/storage/mail/outbox/")
 EOF
 else
   cat <<EOF

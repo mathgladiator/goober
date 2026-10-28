@@ -136,7 +136,7 @@ std::optional<std::string> sha256_file_hex(const std::filesystem::path& path) {
   return hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
 }
 
-std::array<uint8_t, 32> hmac_sha256(std::string_view key, std::string_view data) {
+HmacSha256::HmacSha256(std::string_view key) {
   // RFC 2104: a key longer than a block is hashed first; then inner and outer pads.
   uint8_t block[64] = {};
   if (key.size() > 64) {
@@ -145,19 +145,26 @@ std::array<uint8_t, 32> hmac_sha256(std::string_view key, std::string_view data)
   } else {
     std::memcpy(block, key.data(), key.size());
   }
-  uint8_t ipad[64], opad[64];
+  uint8_t ipad[64];
   for (int i = 0; i < 64; ++i) {
     ipad[i] = block[i] ^ 0x36;
-    opad[i] = block[i] ^ 0x5c;
+    opad_[i] = block[i] ^ 0x5c;
   }
-  Sha256 inner;
-  inner.update(std::string_view(reinterpret_cast<char*>(ipad), 64));
-  inner.update(data);
-  auto inner_digest = inner.finish();
+  inner_.update(std::string_view(reinterpret_cast<char*>(ipad), 64));
+}
+
+std::array<uint8_t, 32> HmacSha256::finish() {
+  auto inner_digest = inner_.finish();
   Sha256 outer;
-  outer.update(std::string_view(reinterpret_cast<char*>(opad), 64));
+  outer.update(std::string_view(reinterpret_cast<char*>(opad_), 64));
   outer.update(std::string_view(reinterpret_cast<const char*>(inner_digest.data()), inner_digest.size()));
   return outer.finish();
+}
+
+std::array<uint8_t, 32> hmac_sha256(std::string_view key, std::string_view data) {
+  HmacSha256 h(key);
+  h.update(data);
+  return h.finish();
 }
 
 std::string hmac_sha256_hex(std::string_view key, std::string_view data) {

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <set>
 
+#include "backups.h"
 #include "goober/base/encoding.h"
 #include "goober/base/process.h"
 #include "goober/base/names.h"
@@ -427,6 +428,7 @@ void Host::register_content_tools() {
          auto a = attachments_->put(*tenant, bytes, name, arg(args, "alt").value_or(""),
                                     arg(args, "visibility").value_or("public"), base::now_unix_ms(), &err);
          if (!a) return ToolResult::fail(err);
+         backups_->nudge();  // queued for the bucket at the next backup tick
          return ToolResult::ok(attachment_json(*a, nullptr));
        }});
 
