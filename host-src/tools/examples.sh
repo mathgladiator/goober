@@ -21,7 +21,7 @@ if [[ -z "${GOOBER_TOKEN:-}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if 
 fi
 
 EX="$HOST_SRC/examples"
-for schema in guestbook/guestbook1 terminal/terminal1 leads/leads1 ranches/ranches1; do
+for schema in guestbook/guestbook1 terminal/terminal1 leads/leads2 ranches/ranches1; do
   "$HERE/goober.py" schema "$EX/boxes/$schema.schema.json" >/dev/null
   echo "stored schema ${schema#*/}"
 done
@@ -33,6 +33,15 @@ if command -v cargo >/dev/null; then
   done
 else
   echo "no cargo: skipping the Rust boxes (dice, guestbook, terminal, desk, leads, ranches)"
+fi
+# The sample landing page posts to the beef-share campaign, which the owner opens: the first
+# request makes the leads database, then the campaign goes in as the operator.
+if command -v cargo >/dev/null; then
+  PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("listen",{}).get("port",8080))' "$CONFIG")"
+  curl -s -o /dev/null -X POST -H 'content-type: application/json' --data '{}' "http://127.0.0.1:$PORT/leads/beef-share/signup" || true
+  "$HERE/goober.py" call db_exec tenant="$TENANT" database=leads \
+    sql="INSERT INTO campaigns (campaign, title, open, created_ms, updated_ms) VALUES ('beef-share', 'The beef share landing page', 1, 0, 0) ON CONFLICT (campaign) DO NOTHING" >/dev/null &&
+    echo "opened the beef-share campaign"
 fi
 "$HERE/goober.py" deploy "$EX/boxes/echo/manifest.json" "$EX/boxes/echo/echo.wat" >/dev/null
 echo "deployed echo"

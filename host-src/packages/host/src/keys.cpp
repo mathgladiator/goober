@@ -21,8 +21,31 @@ std::optional<fs::path> KeyStore::file(std::string_view scope, std::string_view 
   return std::nullopt;
 }
 
+namespace {
+
+// A host a key may go to: a name like api.example.com, *.example.com, or 127.0.0.1.
+bool valid_key_host(const std::string& h) {
+  std::string bare = h.starts_with("*.") ? h.substr(2) : h;
+  if (bare.empty() || bare.size() > 253 || bare.find('.') == std::string::npos) return false;
+  for (char c : bare) {
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+  }
+  return true;
+}
+
+// The host of an http(s) URL, lowercased, without a port.
+std::string host_of(std::string_view url) {
+  auto scheme = url.find("://");
+  if (scheme == std::string_view::npos) return "";
+  url.remove_prefix(scheme + 3);
+  auto end = url.find_first_of("/:?#");
+  return base::to_lower(url.substr(0, end));
+}
+
+}  // namespace
+
 bool KeyStore::set(std::string_view scope, std::string_view tenant, std::string_view name, std::string_view value,
-                   int64_t now_ms, std::string* error) {
+                   int64_t now_ms, std::string* error, const std::vector<std::string>& hosts) {
   auto f = file(scope, tenant, name);
   if (!f) return *error = "a key is scope system, or tenant with a tenant, and a name like stripe_live", false;
   if (value.empty() || value.size() > 8192) return *error = "a key's value is 1 to 8192 bytes", false;
@@ -31,7 +54,13 @@ bool KeyStore::set(std::string_view scope, std::string_view tenant, std::string_
   }
   std::error_code mkdir_error;
   fs::create_directories(f->parent_path(), mkdir_error);
-  std::string body = json::dump(bj::object{{"value", value}, {"set_at", now_ms}});
+  bj::array host_list;
+  for (const auto& h : hosts) {
+    std::string lower = base::to_lower(h);
+    if (!valid_key_host(lower)) return *error = "\"" + h + "\" isn't a host name like api.example.com or *.example.com", false;
+    host_list.push_back(bj::value(lower));
+  }
+  std::string body = json::dump(bj::object{{"value", value}, {"set_at", now_ms}, {"hosts", host_list}});
   // Written 0600 from the start, then renamed into place.
   // A temporary name of its own, so two writers never interleave in one file.
   uint8_t rnd[8];
@@ -70,6 +99,36 @@ std::optional<std::string> KeyStore::resolve(std::string_view credentials, std::
   return std::string(value->as_string());
 }
 
+std::optional<std::string> KeyStore::resolve_for(std::string_view credentials, std::string_view tenant, std::string_view url,
+                                                 std::string* why) const {
+  std::optional<fs::path> f;
+  if (credentials.starts_with("keys/system/")) f = file("system", "", credentials.substr(12));
+  if (credentials.starts_with("keys/tenant/{!tenant}/")) f = file("tenant", tenant, credentials.substr(22));
+  auto text = f ? base::read_file(*f) : std::nullopt;
+  std::string err;
+  auto v = text ? json::parse(*text, &err) : std::nullopt;
+  const bj::value* value = v && v->is_object() ? v->as_object().if_contains("value") : nullptr;
+  if (!value || !value->is_string()) {
+    *why = "the key " + std::string(credentials) + " isn't set; an operator sets it with key_set";
+    return std::nullopt;
+  }
+  std::string host = host_of(url);
+  const bj::value* hosts = v->as_object().if_contains("hosts");
+  bool allowed = false;
+  if (hosts && hosts->is_array()) {
+    for (const auto& h : hosts->as_array()) {
+      std::string allowed_host = h.is_string() ? std::string(h.as_string()) : "";
+      allowed |= allowed_host == host || (allowed_host.starts_with("*.") && host.ends_with(allowed_host.substr(1)));
+    }
+  }
+  if (!allowed) {
+    *why = "the key " + std::string(credentials) + " may not be sent to " + host +
+           ": an operator names the hosts a key goes to (key_set hosts)";
+    return std::nullopt;
+  }
+  return std::string(value->as_string());
+}
+
 std::optional<aws::Credentials> KeyStore::aws_credentials() const {
   auto id = resolve("keys/system/aws_access_key_id", "");
   auto secret = resolve("keys/system/aws_secret_access_key", "");
@@ -92,6 +151,7 @@ bj::array KeyStore::list() const {
     // A fingerprint tells two values apart without saying anything about either.
     out.push_back(bj::object{{"key", "keys/" + rel},
                              {"set_at", o.contains("set_at") ? base::format_utc_ms(o.at("set_at").as_int64()) : ""},
+                             {"hosts", o.contains("hosts") ? o.at("hosts") : bj::value(bj::array{})},
                              {"fingerprint", base::sha256_hex("goober-key-fingerprint\n" + value).substr(0, 12)}});
   }
   return out;

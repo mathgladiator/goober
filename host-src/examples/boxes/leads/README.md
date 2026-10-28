@@ -5,15 +5,18 @@ owner's agent tools to count, tally, and export them. See `READINESS.md` at the 
 
 ## Use it
 
-1. Deploy: `just examples` stores `leads1` and deploys the box, along with the sample landing
+1. Deploy: `just examples` stores `leads2` and deploys the box, along with the sample landing
    page `beef-share.html` and its `thanks` and `confirmed` pages.
 2. Make your own landing page: a whole `.html` document (inline scripts and pixels work there)
    whose form posts to `/leads/<campaign>/signup` with `email`, `consent`, optional `name`,
    survey answers as `q_<question>` fields, hidden `utm_source`, `utm_medium`,
    `utm_campaign`, and `utm_content` fields, the `website` honeypot, and `next` (a path on
    this site to land on). Copy `examples/site/beef-share.html`.
-3. Point the ad at `https://your.domain/your-page?utm_source=facebook&utm_content=<ad name>`.
-4. Ask your agent: `leads_stats` (which ad works), `survey_summary`, `leads_list`,
+3. Open the campaign: ask your agent to `campaign_open` it (the sample's `beef-share` is
+   opened by `just examples`). A form posting to a campaign nobody opened is refused, so
+   strangers can't fill the table with campaigns of their own; `campaign_close` stops one.
+4. Point the ad at `https://your.domain/your-page?utm_source=facebook&utm_content=<ad name>`.
+5. Ask your agent: `leads_stats` (which ad works), `survey_summary`, `leads_list`,
    `leads_export`; or download `/leads/v1/export/<campaign>` signed in as the owner.
 
 ## Confirmation mail

@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "goober/base/encoding.h"
+#include "goober/base/files.h"
 #include "goober/base/process.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -97,8 +98,31 @@ bool header_safe(std::string_view v) {
   return v.size() < 1024;
 }
 
-// Resolves a host to the addresses the robot may connect to (at most four, IPv4 first), as
-// text for curl's --resolve, which tries each in turn.
+}  // namespace
+
+bool public_address(const sockaddr* addr) {
+  if (addr->sa_family == AF_INET) {
+    return v4_public(ntohl(reinterpret_cast<const sockaddr_in*>(addr)->sin_addr.s_addr));
+  }
+  if (addr->sa_family != AF_INET6) return false;
+  const uint8_t* b = reinterpret_cast<const sockaddr_in6*>(addr)->sin6_addr.s6_addr;
+  static const uint8_t kMapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+  if (std::memcmp(b, kMapped, 12) == 0) return v4_public(uint32_t(b[12]) << 24 | uint32_t(b[13]) << 16 | uint32_t(b[14]) << 8 | b[15]);
+  bool zero_prefix = true;
+  for (int i = 0; i < 12; ++i) zero_prefix &= b[i] == 0;
+  if (zero_prefix) return false;                              // ::, ::1, and IPv4-compatible
+  if ((b[0] & 0xfe) == 0xfc) return false;                    // fc00::/7 unique local
+  if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false;    // fe80::/10 link-local
+  if (b[0] == 0xfe && (b[1] & 0xc0) == 0xc0) return false;    // fec0::/10 site-local
+  if (b[0] == 0xff) return false;                             // multicast
+  if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;  // documentation
+  if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0 && b[3] == 0) return false;        // Teredo
+  if (b[0] == 0x20 && b[1] == 0x02) return false;                                  // 6to4
+  if (b[0] == 0 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b) return false;     // NAT64
+  if (b[0] == 0x01 && b[1] == 0 && b[2] == 0 && b[3] == 0) return false;           // discard
+  return (b[0] & 0xe0) == 0x20;                                                    // 2000::/3, global unicast
+}
+
 std::optional<std::string> pick_address(const std::string& host_in, bool local, std::string* why) {
   std::string host = host_in;
   if (host.size() > 2 && host.front() == '[') host = host.substr(1, host.size() - 2);
@@ -133,30 +157,6 @@ std::optional<std::string> pick_address(const std::string& host_in, bool local, 
   return out;
 }
 
-}  // namespace
-
-bool public_address(const sockaddr* addr) {
-  if (addr->sa_family == AF_INET) {
-    return v4_public(ntohl(reinterpret_cast<const sockaddr_in*>(addr)->sin_addr.s_addr));
-  }
-  if (addr->sa_family != AF_INET6) return false;
-  const uint8_t* b = reinterpret_cast<const sockaddr_in6*>(addr)->sin6_addr.s6_addr;
-  static const uint8_t kMapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
-  if (std::memcmp(b, kMapped, 12) == 0) return v4_public(uint32_t(b[12]) << 24 | uint32_t(b[13]) << 16 | uint32_t(b[14]) << 8 | b[15]);
-  bool zero_prefix = true;
-  for (int i = 0; i < 12; ++i) zero_prefix &= b[i] == 0;
-  if (zero_prefix) return false;                              // ::, ::1, and IPv4-compatible
-  if ((b[0] & 0xfe) == 0xfc) return false;                    // fc00::/7 unique local
-  if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false;    // fe80::/10 link-local
-  if (b[0] == 0xfe && (b[1] & 0xc0) == 0xc0) return false;    // fec0::/10 site-local
-  if (b[0] == 0xff) return false;                             // multicast
-  if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;  // documentation
-  if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0 && b[3] == 0) return false;        // Teredo
-  if (b[0] == 0x20 && b[1] == 0x02) return false;                                  // 6to4
-  if (b[0] == 0 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b) return false;     // NAT64
-  if (b[0] == 0x01 && b[1] == 0 && b[2] == 0 && b[3] == 0) return false;           // discard
-  return (b[0] & 0xe0) == 0x20;                                                    // 2000::/3, global unicast
-}
 
 bool Page::is_html() const {
   std::string t = base::to_lower(content_type);
@@ -201,6 +201,11 @@ bool WebFetcher::host_allowed(const web::Url& u, const FetchOptions& o, std::str
   auto cfg = config_();
   // Outside local mode, only the scheme's own port: no reaching odd services on a host.
   if (!cfg->local && u.port != 0) return *why = "only the default ports (80, 443) are fetched", false;
+  // By name only: an address would slip past a site's opt-out, which names its host
+  // (security review 4, S4-9). Another name for the same server still can; see 017 §8.
+  bool literal = u.host.front() == '[' ||
+                 std::all_of(u.host.begin(), u.host.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) || c == '.'; });
+  if (!cfg->local && literal) return *why = "sites are fetched by name, not by address", false;
   for (const auto& h : opted_out()) {
     if (u.host == h || u.host.ends_with("." + h)) return *why = u.host + " asked not to be crawled", false;
   }
@@ -248,23 +253,33 @@ WebFetcher::Raw WebFetcher::get(const web::Url& u, const std::vector<std::pair<s
     out.error = why;
     return out;
   }
+  // Fractions of a second count: a 1.9 s budget isn't rounded down to 1.
+  int64_t ms = std::max<int64_t>(100, timeout_ms);
+  std::string max_time = std::to_string(ms / 1000) + "." + std::to_string(ms % 1000 / 100);
   std::vector<std::string> argv = {"curl", "-q", "-g", "--noproxy", "*", "-sS", "-i", "--compressed", "--max-redirs", "0",
-                                   "--proto", "=http,https", "--max-time",
-                                   std::to_string(std::max<int64_t>(1, timeout_ms / 1000))};
+                                   "--proto", "=http,https", "--max-time", max_time};
   bool literal = u.host.front() == '[' || std::all_of(u.host.begin(), u.host.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) || c == '.'; });
   if (!literal) {
     // Connect to the address that was checked, so a second DNS answer can't point elsewhere.
     argv.push_back("--resolve");
     argv.push_back(u.host + ":" + std::to_string(u.effective_port()) + ":" + *addr);
   }
+  // Headers and the URL go to curl in a private file: a box's URL can carry a person's data.
+  std::string conf = "url = " + base::curl_quoted(u.str()) + "\n";
   for (const auto& [k, v] : headers) {
     if (!header_safe(v)) continue;
-    argv.push_back("-H");
-    argv.push_back(k + ": " + v);
+    conf += "header = " + base::curl_quoted(k + ": " + v) + "\n";
   }
-  argv.push_back("--");
-  argv.push_back(u.str());
+  auto conf_file = base::write_private_file(cfg->storage / "tmp", ".fetch-", conf);
+  if (!conf_file) {
+    out.error = "can't prepare the fetch";
+    return out;
+  }
+  argv.push_back("-K");
+  argv.push_back(conf_file->string());
   auto r = base::run_process(argv, "", max_bytes + 65536, timeout_ms + 1000);
+  std::error_code rm_error;
+  fs::remove(*conf_file, rm_error);
   if (!r.started) {
     out.error = "could not run curl";
     return out;

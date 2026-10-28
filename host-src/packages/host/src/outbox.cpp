@@ -25,6 +25,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
+constexpr int64_t kOutboxSliceUs = 3'000'000;
+
 constexpr const char* kOutboxTable = R"sql(
 CREATE TABLE IF NOT EXISTS goober_outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,10 +79,17 @@ bool Host::enqueue_outbox(const manifest::Manifest& m, const std::string& tenant
     return true;
   }
   auto dir = config_.get()->storage / "sqlite3" / tenant;
-  fs::create_directories(dir);
-  sqlite::Db db(dir / "outbox.db");
-  db.exec(kOutboxTable);
-  db.exec("BEGIN IMMEDIATE");
+  std::unique_ptr<sqlite::Db> opened;
+  try {
+    fs::create_directories(dir);
+    opened = std::make_unique<sqlite::Db>(dir / "outbox.db");
+    opened->exec(kOutboxTable);
+    opened->exec("BEGIN IMMEDIATE");
+  } catch (const std::exception& e) {
+    *error = e.what();
+    return false;
+  }
+  sqlite::Db& db = *opened;
   try {
     for (const auto& e : pending) {
       sqlite::Stmt s(db, kInsert);
@@ -252,10 +261,13 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
     while (s.step()) services.push_back(s.text(0));
   }
   int delivered = 0;
+  // One outbox gets a few seconds a tick, so a slow service can't hold up every other
+  // tenant's deliveries (security review 4, S4-6); what's left goes next tick.
+  int64_t budget_end = base::monotonic_us() + kOutboxSliceUs;
   // Commit order per service: each service's oldest pending element goes first, and once it
   // waits, the ones behind it wait too. Services don't wait for each other.
   for (const auto& service : services) {
-    for (int n = 0; n < 50; ++n) {
+    for (int n = 0; n < 50 && base::monotonic_us() < budget_end; ++n) {
       std::optional<Row> head;
       {
         sqlite::Stmt s(*db,
@@ -283,8 +295,9 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       if (!r.idem_header.empty()) headers.emplace_back(r.idem_header, r.idem_key);
       HttpOut reply;
       if (!r.credentials.empty()) {
-        auto value = keys_->resolve(r.credentials, tenant);
-        if (!value) reply.error = "the key " + r.credentials + " isn't set";
+        std::string why;
+        auto value = keys_->resolve_for(r.credentials, tenant, r.url, &why);
+        if (!value) reply.error = why;
         else headers.emplace_back(r.auth_header, r.auth_prefix + *value);
       }
       int64_t started = base::monotonic_us();
@@ -346,7 +359,7 @@ bj::array Host::outbox_list(const std::string& state) {
     while (s.step()) {
       std::string url = s.text(6);
       out.push_back(bj::object{{"tenant", tenant},
-                               {"database", database.empty() ? "outbox" : database},
+                               {"database", database.empty() ? "_outbox" : database},
                                {"id", s.int64(0)},
                                {"created_at", base::format_utc_ms(s.int64(1))},
                                {"box", s.text(2)},
@@ -362,7 +375,8 @@ bj::array Host::outbox_list(const std::string& state) {
 }
 
 bool Host::outbox_set(const std::string& tenant, const std::string& database, int64_t id, bool retry) {
-  auto db = open_outbox(tenant, database == "outbox" ? "" : database);
+  // "_outbox" is outbox.db, a box without data's; no database can have that name.
+  auto db = open_outbox(tenant, database == "_outbox" ? "" : database);
   if (!db) return false;
   sqlite::Stmt s(*db, retry ? "UPDATE goober_outbox SET state = 'pending', attempts = 0, next_ms = 0, deadline_ms = "
                               "? WHERE id = ? AND state = 'dead'"

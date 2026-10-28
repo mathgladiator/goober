@@ -397,6 +397,13 @@ pub extern "C" fn goober_route_ranch_add() -> i32 {
             return 0;
         }
     }
+    // The public index hides exactly "declined": a status is one of the known ones, or nothing.
+    if let Some(st) = s(&i, "status") {
+        if !STATUSES.contains(&st) {
+            error(400, &format!("status is one of {}", STATUSES.join(", ")));
+            return 0;
+        }
+    }
     let now = goober::now_ms();
     let r = sql(
         DB,
@@ -430,6 +437,10 @@ pub extern "C" fn goober_route_ranch_update() -> i32 {
         if let Some(v) = i.get(f).and_then(|v| v.as_str()) {
             if f == "website" && !v.is_empty() && !valid_website(v) {
                 error(400, "website must be an http(s) URL");
+                return 0;
+            }
+            if f == "status" && !STATUSES.contains(&v.trim()) {
+                error(400, &format!("status is one of {}", STATUSES.join(", ")));
                 return 0;
             }
             sets.push(format!("{f} = :{f}"));

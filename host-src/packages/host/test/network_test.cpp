@@ -139,7 +139,7 @@ class NetworkTest : public ::testing::Test {
       "routes":{"http":{"/ask":{"post":{"name":"ask","public":true}},"/send":{"post":{"name":"send","public":true}},
                         "/send-fail":{"post":{"name":"send_fail","public":true}}}}})";
     ASSERT_TRUE(host->boxes().upload(manifest, kWat, &err)) << err;
-    ASSERT_TRUE(host->keys().set("system", "", "svc_key", "sk_test_secret", 1, &err)) << err;
+    ASSERT_TRUE(host->keys().set("system", "", "svc_key", "sk_test_secret", 1, &err, {"127.0.0.1"})) << err;
   }
   void TearDown() override { host.reset(); }
   int64_t notes() {
@@ -164,6 +164,13 @@ TEST_F(NetworkTest, SafeCallsGoNowWithTheKeyTheBoxNeverSees) {
   EXPECT_EQ(seen[0].method, "get");
   EXPECT_EQ(seen[0].target, "/items/a%20b%2Fc?q=x");  // a value can't add a path segment
   EXPECT_EQ(seen[0].auth, "Bearer sk_test_secret");
+  // A key goes only to the hosts it names: set for another host, the call fails before it leaves.
+  std::string err;
+  ASSERT_TRUE(host->keys().set("system", "", "svc_key", "sk_test_secret", 2, &err, {"api.example.com"})) << err;
+  ASSERT_EQ(post(port, "/ask", &body), 200);
+  EXPECT_NE(body.find("may not be sent to 127.0.0.1"), std::string::npos) << body;
+  EXPECT_EQ(stub.seen().size(), 1u);
+  EXPECT_FALSE(host->keys().set("system", "", "svc_key", "x", 2, &err, {"not a host"}));
   // Without the key, the call fails in the box's hands, and nothing goes out.
   host->keys().remove("system", "", "svc_key");
   ASSERT_EQ(post(port, "/ask", &body), 200);
@@ -227,4 +234,18 @@ TEST(BuildCall, PathValuesCanNeitherAddNorWalkSegments) {
   auto ok = host::build_call(svc, m, bj::object{{"path", bj::object{{"id", "../admin"}}}}, ctx, &err);
   ASSERT_TRUE(ok) << err;
   EXPECT_EQ(ok->url, "https://api.example.com/v1/customers/..%2Fadmin");
+}
+
+// Security review 4, S4-5: outside local mode a service's address must be public, whatever its
+// name says, and the address checked is the one curl connects to.
+TEST(SendHttp, ServicesReachOnlyPublicAddresses) {
+  auto scratch = fs::path(GOOBER_TEST_TMP) / "send-http";
+  for (const char* url : {"https://127.0.0.1:8443/admin", "https://localhost/x", "https://[::1]:8443/",
+                          "https://10.0.0.5/", "https://169.254.169.254/latest/meta-data/"}) {
+    auto r = host::send_http("get", url, {}, "", "", false, scratch, 2000);
+    EXPECT_EQ(r.status, 0) << url;
+    EXPECT_NE(r.error.find("private or reserved"), std::string::npos) << url << ": " << r.error;
+  }
+  // Nothing about the request is left behind.
+  EXPECT_TRUE(base::list_files(scratch).empty());
 }

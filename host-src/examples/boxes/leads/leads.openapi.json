@@ -1,6 +1,9 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "leads", "version": "1" },
+  "info": {
+    "title": "leads",
+    "version": "1"
+  },
   "paths": {},
   "components": {
     "schemas": {
@@ -8,34 +11,96 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "campaign": { "type": "string", "maxLength": 64, "description": "Only this campaign, like beef-share." },
-          "query": { "type": "string", "maxLength": 200, "description": "Only leads whose email, name, or answers contain this." },
-          "limit": { "type": "integer", "format": "int32", "minimum": 1, "maximum": 1000, "default": 100 },
-          "offset": { "type": "integer", "format": "int32", "minimum": 0, "maximum": 1000000, "default": 0 }
+          "campaign": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Only this campaign, like beef-share."
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Only leads whose email, name, or answers contain this."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 1000000,
+            "default": 0
+          }
         }
       },
       "StatsQuery": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "campaign": { "type": "string", "maxLength": 64, "description": "Only this campaign; every campaign when left out." }
+          "campaign": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Only this campaign; every campaign when left out."
+          }
         }
       },
       "CampaignRef": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["campaign"],
+        "required": [
+          "campaign"
+        ],
         "properties": {
-          "campaign": { "type": "string", "minLength": 1, "maxLength": 64 }
+          "campaign": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
         }
       },
       "SurveyQuery": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["campaign", "question"],
+        "required": [
+          "campaign",
+          "question"
+        ],
         "properties": {
-          "campaign": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "question": { "type": "string", "minLength": 1, "maxLength": 64, "description": "A survey field's name without its q_ prefix, like cut or budget." }
+          "campaign": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "A survey field's name without its q_ prefix, like cut or budget."
+          }
+        }
+      },
+      "CampaignInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "campaign"
+        ],
+        "properties": {
+          "campaign": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Lowercase letters, digits, - and _, like beef-share."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "What the campaign is, for you."
+          }
         }
       }
     }

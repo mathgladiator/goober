@@ -353,3 +353,23 @@ TEST_F(WebTest, BoxesFetchThroughTheirWebService) {
     EXPECT_FALSE(host->boxes().upload(m, "(module (memory (export \"memory\") 1))", &err)) << bad;
   }
 }
+
+// Security review 4, S4-9: outside local mode the robot fetches by name, so an opted-out
+// site can't be reached by its address instead.
+TEST(WebOutsideLocalMode, FetchesByNameOnly) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "web-production";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"localhost": {"tenant": "playground"}}, "operations": {"token": "test-token-0123456789"},
+      "threads": {"network": 1, "boxes": 1}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  host::Host h(cfg);
+  uint16_t port = h.start();
+  for (const char* url : {"https://203.0.113.7/", "https://[2001:db8::1]/"}) {
+    bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                   {"params", bj::object{{"name", "web_fetch"}, {"arguments", bj::object{{"url", url}}}}}};
+    auto r = post(port, "/goober-operations-mcp", json::dump(req), "Bearer test-token-0123456789");
+    EXPECT_NE(r.body.find("fetched by name"), std::string::npos) << url << ": " << r.body;
+  }
+}

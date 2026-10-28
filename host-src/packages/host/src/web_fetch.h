@@ -34,6 +34,11 @@ namespace bj = boost::json;
 // (CGNAT), multicast, documentation, or reserved, in IPv4 or IPv6 (mapped addresses too).
 bool public_address(const sockaddr* addr);
 
+// Resolves a host to the addresses the host may connect to (at most four, IPv4 first, public
+// ones only unless `local`), as text for curl's --resolve, which tries each in turn. The robot
+// and box services both connect only to an address checked here.
+std::optional<std::string> pick_address(const std::string& host, bool local, std::string* why);
+
 struct FetchOptions {
   int64_t timeout_ms = 15000;     // the whole fetch, waiting for the site's turn included
   int64_t max_age_ms = 3600000;   // a cached copy younger than this is used as it is

@@ -11,7 +11,7 @@
 //   goober-host db exec TENANT DATABASE SQL [--config host.json]
 //   goober-host backup DIR [--config host.json]      a consistent copy, while running
 //   goober-host restore DIR [--config host.json]     into an empty storage, host stopped
-//   goober-host key set NAME [--tenant T] [--config host.json]   the value on stdin
+//   goober-host key set NAME [--hosts a.com,*.b.com] [--tenant T] [--config host.json]   the value on stdin
 //   goober-host key list [--config host.json]
 //   goober-host backup key [--confirm] [--config host.json]      print the S3 backups' key
 //   goober-host backup list [--config host.json]                 restore points in the bucket
@@ -59,7 +59,7 @@ constexpr const char* kUsage =
     "       goober-host db exec TENANT DATABASE SQL [--config host.json]\n"
     "       goober-host backup DIR [--config host.json]\n"
     "       goober-host restore DIR [--config host.json]\n"
-    "       goober-host key set NAME [--tenant T] [--config host.json]   (the value on stdin)\n"
+    "       goober-host key set NAME [--hosts H,...] [--tenant T] [--config host.json]   (the value on stdin)\n"
     "       goober-host key list [--config host.json]\n"
     "       goober-host backup key [--confirm] [--config host.json]\n"
     "       goober-host backup list [--config host.json]\n"
@@ -199,7 +199,7 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
 }
 
 struct Flags {
-  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file;
+  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts;
   bool confirm = false, keep_keys = false;
   uint16_t port = 8080;
 };
@@ -218,11 +218,20 @@ int run_key(const std::vector<std::string>& args, const std::string& config_path
   goober::host::KeyStore keys(config->storage);
   const std::string& verb = args.size() > 1 ? args[1] : "";
   if (verb == "set" && args.size() == 3) {
+    std::vector<std::string> hosts;
+    for (size_t a = 0, b; !flags.hosts.empty() && a <= flags.hosts.size(); a = b + 1) {
+      b = flags.hosts.find(',', a);
+      if (b == std::string::npos) b = flags.hosts.size();
+      if (b > a) hosts.push_back(flags.hosts.substr(a, b - a));
+    }
+    // A box's key goes only where its hosts say; the host's own keys go to no box at all.
+    bool own = flags.tenant.empty() && (args[2].starts_with("aws_") || args[2] == "backup_key");
+    if (hosts.empty() && !own) return std::cerr << "goober-host: --hosts is required: where the key may be sent\n", 2;
     // From stdin, so a secret is never on a command line or in shell history.
     if (isatty(0)) std::cerr << "value for " << args[2] << " (then Enter): ";
     std::string value = read_stdin();
     if (!keys.set(flags.tenant.empty() ? "system" : "tenant", flags.tenant, args[2], value,
-                  goober::base::now_unix_ms(), &err)) {
+                  goober::base::now_unix_ms(), &err, hosts)) {
       return std::cerr << "goober-host: " << err << "\n", 1;
     }
     std::cout << "set keys/" << (flags.tenant.empty() ? "system" : "tenant/" + flags.tenant) << "/" << args[2] << "\n";
@@ -347,10 +356,11 @@ int main(int argc, char** argv) {
       flags.confirm = true;
     } else if (a == "--keep-keys") {
       flags.keep_keys = true;
-    } else if ((a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
+    } else if ((a == "--hosts" || a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
                 a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port") && i + 1 < argc) {
       std::string v = argv[++i];
       if (a == "--tenant") flags.tenant = v;
+      if (a == "--hosts") flags.hosts = v;
       if (a == "--at") flags.at = v;
       if (a == "--from") flags.from = v;
       if (a == "--bucket") flags.bucket = v;

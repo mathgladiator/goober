@@ -180,8 +180,13 @@ void Host::register_data_tools() {
   };
   mcp_->add_tool({"key_set",
                   "Sets a credential that boxes name in external.$service.credentials, like keys/system/openai or "
-                  "keys/tenant/{!tenant}/stripe. Write-only: no tool ever reads a value back, and boxes never see it.",
-                  scope_props({{"value", mcp::string_property("The secret, 1 to 8192 printable bytes.")}}),
+                  "keys/tenant/{!tenant}/stripe, and the hosts it may be sent to: a box calling anywhere else gets an "
+                  "error, not the key. Write-only: no tool ever reads a value back, and boxes never see it.",
+                  scope_props({{"value", mcp::string_property("The secret, 1 to 8192 printable bytes.")},
+                               {"hosts", bj::value(bj::object{{"type", "array"},
+                                                              {"items", bj::object{{"type", "string"}}},
+                                                              {"description", "Where it may go: like api.resend.com, or "
+                                                                              "*.example.com."}})}}),
                   [this](const bj::object& args) {
                     std::string err;
                     // The host's own keys are set on the machine, never by an agent: whoever sets the AWS
@@ -191,9 +196,16 @@ void Host::register_data_tools() {
                       return ToolResult::fail(name + " is the host's own key: set it on the server with `goober-host key set " +
                                               name + "`");
                     }
+                    std::vector<std::string> hosts;
+                    if (auto* h = args.if_contains("hosts"); h && h->is_array()) {
+                      for (const auto& v : h->as_array()) {
+                        if (v.is_string()) hosts.emplace_back(v.as_string());
+                      }
+                    }
+                    if (hosts.empty()) return ToolResult::fail("hosts is required: where the key may be sent");
                     if (!keys_->set(arg(args, "scope").value_or(""), arg(args, "tenant").value_or(""),
                                     arg(args, "name").value_or(""), arg(args, "value").value_or(""), base::now_unix_ms(),
-                                    &err)) {
+                                    &err, hosts)) {
                       return ToolResult::fail(err);
                     }
                     return ToolResult::ok(bj::object{{"set", true}});

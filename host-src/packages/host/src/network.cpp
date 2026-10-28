@@ -20,6 +20,7 @@
 #include "goober/router/path.h"
 #include "goober/types/types.h"
 #include "keys.h"
+#include "web_fetch.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -157,6 +158,32 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
     conf += "header = " + base::curl_quoted(k + ": " + v) + "\n";
   }
   if (!content_type.empty()) conf += "header = " + base::curl_quoted("Content-Type: " + content_type) + "\n";
+  // The URL too: its query can hold a person's email or a token, and argv is public.
+  conf += "url = " + base::curl_quoted(url) + "\n";
+  // Outside local mode, only a public address, and the one checked: a service's name can't
+  // point the host at its own network (security review 4, S4-5).
+  std::string resolve;
+  if (!allow_loopback_http) {
+    std::string rest = url.substr(url.find("://") + 3);
+    std::string authority = rest.substr(0, rest.find_first_of("/?#"));
+    std::string host = authority, port = "443";
+    if (authority.starts_with("[")) {
+      host = authority.substr(0, authority.find(']') + 1);
+      if (authority.size() > host.size() + 1 && authority[host.size()] == ':') port = authority.substr(host.size() + 1);
+    } else if (auto colon = authority.rfind(':'); colon != std::string::npos) {
+      host = authority.substr(0, colon);
+      port = authority.substr(colon + 1);
+    }
+    std::string why;
+    auto addr = pick_address(host, false, &why);
+    if (!addr) {
+      out.error = why;
+      return out;
+    }
+    if (host.front() != '[' && !std::all_of(host.begin(), host.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) || c == '.'; })) {
+      resolve = host + ":" + port + ":" + *addr;
+    }
+  }
   auto written = base::write_private_file(scratch, ".call-", conf);
   if (!written) {
     out.error = "can't prepare the call";
@@ -175,8 +202,10 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
     argv.push_back("--data-binary");
     argv.push_back("@-");
   }
-  argv.push_back("--");
-  argv.push_back(url);
+  if (!resolve.empty()) {
+    argv.push_back("--resolve");
+    argv.push_back(resolve);
+  }
   auto r = base::run_process(argv, body, kMaxReplyBytes + 65536, timeout_ms + 500);
   std::error_code ec;
   fs::remove(conf_file, ec);
@@ -286,8 +315,9 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (config_.get()->sandbox) return fail("this host is a sandbox: no calls leave it");
   auto headers = built->headers;
   if (!svc->credentials.empty()) {
-    auto value = keys_->resolve(svc->credentials, ctx.tenant);
-    if (!value) return fail("the key " + credentials + " isn't set; an operator sets it with key_set");
+    std::string why;
+    auto value = keys_->resolve_for(svc->credentials, ctx.tenant, built->url, &why);
+    if (!value) return fail(why);
     headers.emplace_back(svc->auth_header, svc->auth_prefix + *value);
   }
   auto cfg = config_.get();

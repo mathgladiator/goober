@@ -83,7 +83,10 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
         return finish(is_form, &next);
     }
     let campaign = req.param("campaign").unwrap_or("").to_string();
-    if !valid_slug(&campaign) {
+    // Only campaigns the owner opened: a stranger can't invent campaigns to fill the table.
+    let open = valid_slug(&campaign)
+        && sql(DB, "SELECT 1 FROM campaigns WHERE campaign = :c AND open = 1", json!({ "c": campaign })).first().is_some();
+    if !open {
         return refuse(is_form, "That campaign isn't one this site runs.");
     }
     let email = match field("email") {
@@ -182,6 +185,51 @@ const LEAD: &str = "json_object('email', email, 'name', name, 'campaign', campai
 
 fn input(req: &Request) -> Map<String, Value> {
     req.json_body().unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_campaign_open() -> i32 {
+    let req = Request::read();
+    let i = input(&req);
+    let campaign = i.get("campaign").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !valid_slug(&campaign) {
+        error(400, "a campaign is lowercase letters, digits, - and _, like beef-share");
+        return 0;
+    }
+    let now = goober::now_ms();
+    let Some(_) = sql_or_500(DB,
+        "INSERT INTO campaigns (campaign, title, open, created_ms, updated_ms) VALUES (:c, coalesce(:t, ''), 1, :now, :now) \
+         ON CONFLICT (campaign) DO UPDATE SET open = 1, title = coalesce(:t, campaigns.title), updated_ms = :now",
+        json!({ "c": campaign, "t": i.get("title"), "now": now })) else { return 0 };
+    respond_json(200, &json!({ "campaign": campaign, "open": true, "form_action": format!("/leads/{campaign}/signup") }));
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_campaign_close() -> i32 {
+    let req = Request::read();
+    let i = input(&req);
+    let Some(r) = sql_or_500(DB, "UPDATE campaigns SET open = 0, updated_ms = :now WHERE campaign = :c",
+        json!({ "c": i.get("campaign"), "now": goober::now_ms() })) else { return 0 };
+    if r.changes() == 0 {
+        error(404, "no such campaign");
+    } else {
+        respond_json(200, &json!({ "campaign": i.get("campaign"), "open": false }));
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_campaign_list() -> i32 {
+    let req = Request::read();
+    let i = input(&req);
+    let Some(r) = sql_or_500(DB,
+        "SELECT json_group_array(json_object('campaign', c.campaign, 'title', c.title, 'open', json(CASE c.open WHEN 1 \
+           THEN 'true' ELSE 'false' END), 'leads', (SELECT count(*) FROM leads l WHERE l.campaign = c.campaign))) \
+         FROM campaigns c WHERE (:c IS NULL OR c.campaign = :c) ORDER BY c.created_ms DESC",
+        json!({ "c": i.get("campaign") })) else { return 0 };
+    respond_raw_json(200, r.first().and_then(|v| v.as_str()).unwrap_or("[]"));
+    0
 }
 
 #[unsafe(no_mangle)]

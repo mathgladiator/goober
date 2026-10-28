@@ -84,7 +84,7 @@ def main():
 
         st, _, body = web.call("POST", "/mcp", js={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=agent)
         names = {t["name"] for t in json_of(body).get("result", {}).get("tools", [])}
-        check({"leads_list", "leads_stats", "survey_summary", "ranch_add", "offering_search"} <= names,
+        check({"leads_list", "leads_stats", "survey_summary", "campaign_open", "ranch_add", "offering_search"} <= names,
               "the agent sees the products' tools on /mcp")
 
         print("leads: visitors from an ad")
@@ -92,6 +92,10 @@ def main():
         visitor = f"visitor-{run}@example.com"
         form = {"email": visitor, "consent": "yes", "q_share": "half", "q_zip": "93701", "utm_source": "facebook",
                 "utm_content": "ad-b", "next": "/thanks"}
+        st, _, page = web.call("POST", f"/leads/{campaign}/signup", form=form, headers=same_site)
+        check(st == 400 and "isn't one this site runs" in page, "a campaign nobody opened takes no signups")
+        st, ok, out = tool("campaign_open", {"campaign": campaign, "title": "the e2e ad"})
+        check(ok and out.get("form_action") == f"/leads/{campaign}/signup", "the agent opens the campaign")
         st, h, _ = web.call("POST", f"/leads/{campaign}/signup", form=form, headers=same_site)
         check(st == 303 and h.get("location") == "/thanks", "the form posts and lands on /thanks")
         st, h, _ = web.call("POST", f"/leads/{campaign}/signup", form={**form, "q_share": "quarter", "q_when": "now"},
