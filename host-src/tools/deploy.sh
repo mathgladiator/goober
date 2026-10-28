@@ -73,7 +73,24 @@ echo "── copying to $TARGET"
 # server can swap what root is about to run.
 REMOTE="$(ssh "${SSH_OPTS[@]}" "$TARGET" 'mktemp -d /tmp/goober-deploy.XXXXXXXX')"
 [[ "$REMOTE" =~ ^/tmp/goober-deploy\.[A-Za-z0-9]+$ ]] || { echo "unexpected staging directory: $REMOTE" >&2; exit 1; }
-scp -q "${SSH_OPTS[@]}" "${FILES[@]}" "$TARGET:$REMOTE/"
+# What is about to go up, file by file, then scp's own progress meter (percent, bytes, rate,
+# time left) for each.
+TOTAL=0
+for f in "${FILES[@]}"; do
+  BYTES="$(stat -c %s "$f")"
+  TOTAL=$((TOTAL + BYTES))
+  printf '   %-22s %10s\n' "$(basename "$f")" "$(numfmt --to=iec-i --suffix=B "$BYTES")"
+done
+printf '   %-22s %10s\n' "total" "$(numfmt --to=iec-i --suffix=B "$TOTAL")"
+STARTED=$SECONDS
+if [[ -t 1 ]]; then
+  scp "${SSH_OPTS[@]}" "${FILES[@]}" "$TARGET:$REMOTE/"
+else
+  scp -q "${SSH_OPTS[@]}" "${FILES[@]}" "$TARGET:$REMOTE/"  # no terminal: no meter to draw
+fi
+ELAPSED=$((SECONDS - STARTED))
+echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
+  "($(numfmt --to=iec-i --suffix=B/s $((TOTAL / (ELAPSED > 0 ? ELAPSED : 1)))))"
 
 echo "── installing on $TARGET"
 ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST; rm -rf $REMOTE"
