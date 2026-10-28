@@ -154,11 +154,12 @@ On a fresh Ubuntu 24.04+ or Debian 13+ machine (x86_64, sudo, DNS already pointi
 
 ```sh
 just deploy you@server            # or host-src/tools/deploy.sh you@server [/srv/goober/host]
+just deploy you@server --with-rust  # also Rust and vendored crates, to build source projects there
 ```
 
 It builds the `server` preset here (a release binary with libstdc++ linked in, needing only
 glibc 2.38), copies it, and runs `tools/server-bootstrap.sh` there. That script installs Caddy,
-curl, python3, and tzdata; creates a `goober` system user and `/srv/goober/host`; runs setup as
+curl, python3, tzdata, and bubblewrap (the build sandbox); creates a `goober` system user and `/srv/goober/host`; runs setup as
 `goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (two
 weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
 own. Running it again upgrades: it checks the config with the new binary and restarts.
@@ -167,8 +168,31 @@ Then, on the server, mint an operator token
 (`sudo -u goober goober-host token create --config /srv/goober/host/host.json --name claude-code --claude`)
 and use it from your laptop: `GOOBER_URL=https://your.domain GOOBER_TOKEN=... tools/goober.py push playground site/`.
 
-For sign-in mail to reach anyone but you, answer yes to SMTP in setup and put the password in a
-file the `goober` user can read (`chown root:goober`, `chmod 0640`).
+For mail to reach anyone but you, answer yes to Amazon SES in setup (with a verified sending
+address, and your account out of SES's sandbox), or to SMTP with its password in a file the
+`goober` user can read (`chown root:goober`, `chmod 0640`).
+
+For backups off the machine, give setup an S3 bucket. Setup stores the AWS keys in the key
+store (`goober-host key set aws_access_key_id`, value on stdin) and prints the **backup key**:
+keep a copy somewhere else, then run `goober-host backup key --confirm`. On your laptop,
+`just rehydrate ~/copy` rebuilds any moment as a sandboxed devbox
+(`design/machine/019.Backups.md`).
+
+## Source projects
+
+Agents keep a product's source in the host and build and deploy it from there
+(`design/machine/020.Source.md`): `source_create`, `source_checkout`, `source_commit`,
+`source_deploy`. People use the same projects from a terminal:
+
+```sh
+tools/goober.py source new hello ~/src/hello rust-box   # create and pull
+$EDITOR ~/src/hello/src/lib.rs
+tools/goober.py source push ~/src/hello "Say more"       # commit what changed
+tools/goober.py source deploy hello                      # build in the sandbox, deploy
+```
+
+Rust builds need cargo with the wasm32 target, bubblewrap, and vendored crates
+(`tools/vendor.sh DIR`, then `"source": {"vendor": "DIR"}`); `just setup` does this on a dev box.
 
 ## Layout
 
@@ -178,8 +202,10 @@ binary, and a `QUALITY.md`. The underscore in a name is a namespace (`server_htt
 
 | package | is |
 | --- | --- |
-| base | Hashes, encodings, the name grammar, durable files, seeded randomness, time. |
+| base | Hashes (SHA-256, HMAC), ChaCha20, encodings, the name grammar, durable files, processes, seeded randomness, time. |
 | json | Boost.JSON, compiled once, with typed field readers. |
+| aws | Signature Version 4, S3 objects, and SES mail, through curl. |
+| backup | Sealed files, page-level SQLite deltas, and the names of what goes in the bucket. |
 | config | The JSON host config, validation, and reload. |
 | wal | The host WAL: bundles of file changes, committed then applied, replayed after a crash. |
 | render | Front matter, Mustache, and markdown to HTML. |
@@ -195,4 +221,5 @@ binary, and a `QUALITY.md`. The underscore in a name is a namespace (`server_htt
 | identity | Sign-in codes, sessions, roles, and the audit, in one SQLite database per realm. |
 | server_http | The HTTP/1.1 server on Boost.Beast. |
 | mcp | MCP over streamable HTTP: JSON-RPC and a tool registry. |
+| source | Source projects: revisions, conflicts, and unified diffs. |
 | host | The wiring, identity endpoints, operator tools and tokens, and the `goober-host` binary. |

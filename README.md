@@ -104,6 +104,8 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/human/400.Cluster.Service.md`](design/human/400.Cluster.Service.md) | Cluster, routing, and services: service mode, one ownership registry, leases with fencing epochs, routing, and recovery. |
 | [`design/human/410.API.md`](design/human/410.API.md) | The operator API: every operation as HTTP and MCP, by area, with approval as the only UI-only action. |
 | [`design/human/420.Migration.md`](design/human/420.Migration.md) | Migration: schemas as partial table sets, immediate expansion/contraction/indexing, refused changes, upgrade boxes that force a change, data migrations through boxes. |
+| [`design/human/521.Source.md`](design/human/521.Source.md) | Source kept in the host: an agent checks out a project, changes it, builds it in the host's sandbox, and deploys it, and the source stays in the machine (drafted by Claude at the human's request). |
+| [`design/human/663.Backups.md`](design/human/663.Backups.md) | Backups to S3: attachments as they arrive, a sealed nightly kept fourteen days, database increments between, and rehydrating any moment onto a devbox (drafted by Claude at the human's request). |
 | [`design/human/800.Crawl.md`](design/human/800.Crawl.md) | Goober as a good robot: polite crawling through the host, views that simplify pages, and the local meat index as the example (drafted by Claude at the human's request). |
 | [`design/human/999.Mobile.md`](design/human/999.Mobile.md) | The mobile terminal: the dumb app's contract with goober (OAuth as a person client, /terminal/v1 routes, alarms as rules, idempotent approvals, a linted markdown dialect, push as a nudge). |
 | [`design/machine/`](design/machine/) | Documents drafted by AI. These are proposals until a human ratifies them. |
@@ -125,6 +127,9 @@ data flowing out, interior effects, and process multiplicity and lifetime.**
 | [`design/machine/015.Network.md`](design/machine/015.Network.md) | The network and the outbox: declared services, credentials the box never sees, and effects that happen only if the request commits. |
 | [`design/machine/016.Internal.md`](design/machine/016.Internal.md) | Internal routes: boxes calling boxes as the same person, with both sides declared and no cycles. |
 | [`design/machine/017.Crawl.md`](design/machine/017.Crawl.md) | The polite robot: fetching with robots.txt and pacing, views that simplify pages, crawls, and the `web` service for boxes. |
+| [`design/machine/018.Mail.md`](design/machine/018.Mail.md) | Mail through Amazon SES, a host `mail` service boxes send through after commit, daily limits, and sandbox hosts that send nothing. |
+| [`design/machine/019.Backups.md`](design/machine/019.Backups.md) | S3 backups: sealed nightlies, page-level database increments, queued attachments, rotation, and rehydrating a sandboxed devbox. |
+| [`design/machine/020.Source.md`](design/machine/020.Source.md) | Source projects over MCP: revisions, conflicts, sandboxed builds with vendored crates, and deploys from a revision. |
 | [`design/machine/db.versioning.md`](design/machine/db.versioning.md) | Survey: how other databases version schemas while live, the burden on developers, and lessons for goober's migrations. |
 | [`design/machine/db.unify.event.source.md`](design/machine/db.unify.event.source.md) | Food for thought: a per-database write log, converting databases into event sources, and whether data is just writes stored differently. |
 

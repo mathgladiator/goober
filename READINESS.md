@@ -1,126 +1,154 @@
 # Readiness
 
-> How ready goober is for the human's experiments, as of 2026-10-27. Short on purpose:
-> `PROGRESS.md` has the full account, and each line here names where the proof lives.
-> "Tested" means automated checks pass against a running host on this machine. Nothing here
-> has met a real server, a real ad, a real mail provider, or Grok yet.
+> How ready goober is for the human's experiments, as of 2026-10-27 (evening). Short on
+> purpose: `PROGRESS.md` has the full account, and each line here names where the proof lives.
+> "Tested" means automated checks pass against a running host on this machine, with stand-ins
+> for AWS. Nothing here has met a real server, real AWS, a real ad, or Grok yet.
 
 | question | ready? | in one line |
 | --- | --- | --- |
-| 1. Host my static content | **Yes** | Markdown, HTML, templates, images; one-command deploy with TLS and nightly backups. |
-| 2. Dynamic content deployed from Grok | **Yes, untried with Grok** | Grok holds an operator token and calls `version_upload`; boxes in WAT need no toolchain. |
+| 1. Host my static content | **Yes** | Markdown, HTML, templates, images. One-command deploy with TLS. |
+| 2. Dynamic content deployed from Grok | **Yes, untried with Grok** | Grok keeps a project's source in the host, then commits, builds, and deploys it there. |
 | 3. GrokBot doing outreach and tracking | **Yes, untried with Grok** | `leads` and `ranches` boxes, with MCP tools an agent drives through a minted token. |
-| 3a. Facebook ads to collect emails and surveys | **Yes**, add a mail provider | A landing page, a form, consent, UTM tags per ad, counts and CSV for the agent. |
+| 3a. Facebook ads to collect emails and surveys | **Yes** | A landing page, consent, UTM tags per ad, confirmation mail through SES, counts and CSV. |
 | 3b. Track local ranches and their offerings | **Yes** | A CRM with an outreach log, and an offerings index the robot keeps current. |
-| 3c. An agent builds a ranch's whole digital side | **Partly** | The parts are there; payments, mail inboxes, and scheduling need outside services. |
-| 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction; built for hundreds of sites, not millions. |
+| 3c. An agent builds a ranch's whole digital side | **Partly** | The parts are there. Payments, mail inboxes, and scheduling need outside services. |
+| 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction, built for hundreds of sites, not millions. |
+| 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
+| 6. Mail that arrives | **Yes, untried with real SES** | Sign-in codes and boxes' mail through Amazon SES, with per-tenant and per-address limits. |
 
 ## 1. Static content: yes
 
-- **What works.** Pages in markdown or HTML, Mustache layouts, listings and feeds, images as
-  attachments, and whole HTML documents served as written.
-  - Push a folder with `tools/goober.py push <tenant> <dir>`. Big pushes retry on 429, and
-    operators may send 64 MiB.
-  - A built Astro or Next.js site works as it is (`_astro/`, `_next/` are served).
-- **Deploy.** Run `just deploy you@server` on Ubuntu 24.04+ or Debian 13+. It sets up:
-  - Caddy, with automatic TLS and compression;
-  - a `goober` system user and the systemd unit;
-  - nightly backups, kept two weeks.
-  - Run it again to upgrade (`host-src/README.md` § Deploy).
-- **Watch for.**
-  - Backups sit on the same disk: copy them off yourself.
-  - Sign-in mail needs SMTP set up in setup.
-  - The deploy script has been dry-run here, never against a real machine.
+- **What works.**
+  - Pages in markdown or HTML, Mustache layouts, listings and feeds, images, and whole HTML
+    documents served as written.
+  - Push a folder with `tools/goober.py push`, or keep the site as a source project
+    (template `site`) and `source_deploy` it.
+  - A built Astro or Next.js site works as it is.
+- **Deploy.** `just deploy you@server` on Ubuntu 24.04+ or Debian 13+ sets up Caddy (TLS), a
+  `goober` user, systemd, and local nightly copies. Setup asks for SES and an S3 bucket.
+- **Watch for.** The deploy script has been dry-run here, never against a real machine.
 
 ## 2. Dynamic content from Grok: yes, untried with Grok
 
 - **How Grok connects.** Mint an operator token on the server
   (`goober-host token create --name grok`) and give Grok
   `https://your.domain/goober-operations-mcp` with `Authorization: Bearer <token>`.
-- **What Grok does first.** It reads `box_guide`, writes a manifest and a box, and deploys
-  with `version_upload`:
-  - A box in WAT text needs no toolchain.
-  - A box in Rust is built wherever cargo is; `rust_binding` hands over the binding.
+- **The loop** (`design/human/521.Source.md`, `design/machine/020.Source.md`):
+  1. `source_create` (a Rust box, a WAT box, or a site);
+  2. `source_checkout`;
+  3. `source_commit`;
+  4. `source_deploy`.
+
+  The host builds Rust in a sandbox with no network, so Grok needs no laptop, and the source
+  stays in the machine for the next conversation. `source_revert` goes back. You can pull,
+  edit, and push the same project from a terminal with `goober.py source`.
+- **For Rust on the server:** `just deploy you@server --with-rust` installs the toolchain and
+  the vendored crates (serde, serde_json). WAT boxes and sites need nothing.
+- **Proof.** `source_tools_test`. A Rust template was built, deployed, and serving on the demo
+  host.
 - **Watch for.**
-  - The operator token is host owner: it can do anything. Give it only to an agent you trust
-    like yourself.
-  - Every upload goes live at once; there are no approvals yet.
-  - Grok's remote MCP tool has not been tried against this endpoint.
+  - The operator token is host owner: give it only to an agent you trust like yourself.
+  - Every deploy goes live at once: there are no approvals yet.
+  - Grok's remote MCP hasn't been tried.
+  - bubblewrap on Ubuntu 24.04 is untested; it works here.
 
 ## 3. GrokBot doing outreach and tracking: yes, untried with Grok
 
-- **Give it a narrower key than the operator token.**
+- **A narrower key than the operator token:**
   1. `client_put` registers GrokBot as an agent.
   2. You sign in once.
-  3. `agent_token_mint` gives it a token for up to a year, acting for you. Its reach is set
-     by your roles and by which routes allow agents.
-  4. It calls box tools at `https://your.domain/mcp`.
-  5. You see what it did, and can revoke it, on your account page.
-- **Proof.** `just products-e2e` plays GrokBot through both products: 30 checks, all passing.
+  3. `agent_token_mint` gives it a token for up to a year.
+  4. It calls box tools at `/mcp`.
+  5. Your account page shows it and revokes it.
+- **Proof.** `just products-e2e` plays GrokBot through both products, and every check passes.
 
 **3a. Ads that collect emails and surveys: yes.**
 - **The flow.**
-  1. Copy `examples/site/beef-share.html`: a landing page with consent, survey questions,
-     the ad's UTM tags, and a honeypot.
-  2. It posts to the `leads` box, which keeps one row per email per campaign.
-  3. GrokBot asks `leads_stats` which ad works, `survey_summary` for the tallies, and
-     `leads_export` for a CSV.
-  - Inline scripts and the Facebook pixel work on whole HTML pages.
+  1. Copy `examples/site/beef-share.html`.
+  2. GrokBot opens the campaign (`campaign_open`): a form posting to a campaign nobody opened
+     is refused.
+  3. Signups land in `leads`, and each gets a confirmation link through the host's mail
+     service. It leaves only after the signup is stored, at most once a day per address.
+  4. `leads_stats`, `survey_summary`, and `leads_export` show which ad works.
 - **To finish.**
-  - Turn on confirmation mail: a Resend key and the snippet in `examples/boxes/leads/README.md`.
-  - Unsubscribes and sending campaigns are not built. Use a mailing tool for bulk mail.
+  - Get SES out of its sandbox (an AWS request) and verify your domain.
+  - Unsubscribes and bulk campaigns aren't built: use a mailing tool for those.
 
-**3b. Tracking local ranches: yes.**
-- The `ranches` box keeps ranches, farms, and butchers in one shared index.
-- GrokBot adds them, logs every email, call, and visit with `contact_log` (so nobody is
-  contacted twice), and moves each ranch along prospect, contacted, replied, interested,
-  partner.
-- The robot reads each ranch's site weekly for what it sells.
-- Finding ranches in the first place is GrokBot's job: search, maps, market lists.
+**3b. Tracking local ranches: yes.** `ranches` keeps ranches, farms, and butchers. GrokBot
+logs outreach with `contact_log` and moves each ranch along its statuses, and the robot reads
+each ranch's site weekly.
 
 **3c. An agent building a ranch's operations: partly.**
-- **Ready.**
-  - A ranch's site and order or waitlist forms.
-  - A box for inventory, shares, and orders.
-  - Its customer list, reminders by timer, and dashboards on the dumb terminal.
-  - Calls to outside services with keys the box never sees: Stripe, Resend, Twilio, through
-    the outbox.
-- **Not ready.**
-  - Receiving mail (038).
-  - File uploads from customers (060).
-  - Payments end to end: Stripe is reachable, but its webhooks need a route written for them.
-  - Each ranch on its own domain and sign-in: there is no domain registry yet, so it's a
-    config edit and a reload.
-  - Approvals before an agent's code goes live.
+- **Ready:**
+  - sites and forms;
+  - a box for inventory, shares, and orders, kept as a source project;
+  - customer lists, reminders, and dashboards;
+  - mail out;
+  - calls to Stripe or Twilio with keys bound to their hosts.
+- **Not ready:**
+  - receiving mail (038);
+  - customer file uploads to boxes (060);
+  - Stripe webhooks end to end;
+  - a domain per ranch without a config edit;
+  - approvals.
 
 ## 4. A good robot for a local meat index: yes, at small scale
 
-- **What the robot does.** It obeys robots.txt, says who it is, and asks each site at most
-  once every two seconds. It reaches only public addresses and caches pages, refetching
-  conditionally.
-- **What it hands back.** The full HTML, or views: text, markdown, links, meta (with the
-  shop platform, like Shopify), schema.org JSON-LD (Product, Offer, LocalBusiness), tables,
-  CSS `select`, and `extract`, a three-selector scraper.
-- **Who uses it.**
-  - Operators: `web_fetch` and background crawls (`crawl_start`, `crawl_records`).
-  - Boxes: a `web` service.
-- **The `ranches` box reads**
-  - schema.org data;
-  - a Shopify store's `/products.json`;
-  - or a per-ranch extract spec.
-- **Proof.** `design/machine/017.Crawl.md`, and the web tests plus `products-e2e`.
+- **What it does.** It obeys robots.txt, says who it is, and asks each site at most once
+  every two seconds. It fetches public sites by name only and caches what it reads.
+- **What it hands back.** The full HTML or simpler views (text, markdown, links, meta,
+  JSON-LD, tables, `select`, `extract`). There are crawls for operators and a `web` service
+  for boxes. `design/machine/017.Crawl.md`.
 - **Watch for.**
-  - No JavaScript rendering: sites that draw their prices with script need their JSON
-    endpoint or a manual `offering_add`.
-  - One machine at two seconds per site handles hundreds of sites a week, not a global index.
-  - Whether to republish what it reads is your call (QUESTIONS.md Q33).
-- **The design.** `design/human/800.Crawl.md` is yours to edit; I drafted it and left it
-  uncommitted.
+  - No JavaScript rendering.
+  - Hundreds of sites a week, not a global index.
+  - Whether to republish what it reads is your call (Q33).
+
+## 5. Survive losing the machine: yes, untried with real S3
+
+- **What goes up** (`design/human/663.Backups.md`, `design/machine/019.Backups.md`):
+  - every attachment, once, as it arrives;
+  - a sealed `tar.gz` of everything else nightly, kept 14 days by the timestamp in its name;
+  - every 15 minutes, only the database pages that changed since the night.
+
+  Everything is encrypted before it leaves (ChaCha20 and HMAC), with a backup key that only
+  you and the machine hold.
+- **Getting it back.** `just rehydrate ~/copy [2026-10-26T18:00]` rebuilds any moment on a
+  devbox. The devbox is a sandbox: no mail, calls, or backups leave it.
+- **Proof.**
+  - `s3_backup_test` against a stand-in S3.
+  - `just backup-e2e`: the real binary against a Python S3 stand-in that checks AWS
+    signatures its own way.
+  - The signer also matches AWS's published examples and curl's own.
+- **Watch for.**
+  - **Copy the backup key off the machine** (`goober-host backup key`), or the backups can't
+    be read.
+  - Archives are at most 5 GiB.
+  - The nightly needs room on disk for one more copy of storage.
+
+## 6. Mail that arrives: yes, untried with real SES
+
+- **What sends.** `identity.mailer: "ses"` sends sign-in codes and every box's mail through
+  SES's API with AWS keys from the key store. Boxes declare a `mail` service, and their mail
+  goes through the outbox after commit, within daily limits (`design/machine/018.Mail.md`).
+- **Watch for.**
+  - SES starts in its sandbox: request production access and verify the domain (DKIM)
+    before ads run.
+  - Bounces and complaints are SES's to suppress for now.
 
 ## Before real people use it
 
-1. Deploy to the new machine and set up SMTP or a mail API.
-2. Try Grok's remote MCP against `/mcp` and `/goober-operations-mcp`.
-3. Decide Q24, a separate origin for the sign-in screens, before strangers sign in.
-4. Decide Q29 to Q33: shared tenants, minted tokens, and what the robot may publish.
-5. Get an outside security review before anything holds other people's money or secrets.
+1. Deploy to the new machine (`just deploy you@server --with-rust`). Answer SES and S3 in
+   setup, then **store the backup key in your password manager** and run
+   `goober-host backup key --confirm`.
+2. In AWS:
+   - verify the sending domain;
+   - leave the SES sandbox;
+   - create the bucket and an IAM user with SES send and S3 rights on that bucket only.
+3. Run `just rehydrate` once on your laptop: a backup is real only once restored.
+4. Try Grok's remote MCP against `/goober-operations-mcp` (deploying) and `/mcp` (GrokBot).
+5. Decide the open questions:
+   - Q24, a separate origin for the sign-in screens, before strangers sign in;
+   - Q29 to Q38 in `design/QUESTIONS.md`.
+6. Get an outside security review before anything holds other people's money or secrets.

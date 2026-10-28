@@ -17,14 +17,17 @@ lets boxes call outside services with keys they never see, through an outbox tha
 fires if the request commits; reads the web politely for operators, crawls, and boxes,
 turning pages into text, markdown, links, schema.org data, and scraped records; signs
 people in with emailed codes or OAuth (the dumb terminal, agents through the device flow,
-MCP clients, or long-lived minted tokens); and is operated by an agent over MCP with 57
-tools. It deploys to a fresh server with one command and backs itself up nightly. It has
-had three rounds of internal review and fuzzing. Two example products run on it end to end:
+MCP clients, or long-lived minted tokens); sends mail through Amazon SES or SMTP, boxes' mail
+included; keeps agents' source code itself, building Rust in a sandbox and deploying from a
+revision; and is operated by an agent over MCP with 70 tools. It deploys to a fresh server
+with one command and backs itself up to S3: sealed nightlies kept 14 days, database
+increments every 15 minutes, and attachments, any moment of which rehydrates into a
+sandboxed devbox. It has had four rounds of internal review and fuzzing. Two example products run on it end to end:
 an ad landing page that collects emails and surveys, and a ranch CRM and meat index fed by
 the crawler. `READINESS.md` says what that means for the human's experiments. It is **not yet** the system the human docs describe: there are
 no approvals, no host write sets, no bus, no generated code, no domain registry, no
 mail routes, and no cluster, and a few things only the human can do: run the real dumb app,
-connect a real MCP client, and decide the open questions (Q17 to Q28).
+connect a real MCP client, try real AWS, and decide the open questions (Q17 to Q38).
 
 ## Status by design document
 
@@ -50,14 +53,14 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 035 Outbox | partial | Elements committed with the request's writes, a dispatcher delivering each service from its own oldest element (one stuck service never blocks another), backoff, stable idempotency keys, dead letters and retry, and stranded outboxes found by scanning storage (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content and box GETs; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`; the status vocabulary; CORS per route (011). | ETags that skip the box, compression, ranges, declared redirect targets; undeclared routes still see every header and parameter. |
-| 038 Mail | none | A dev mailer that writes `.eml` files. | Mail routes, Stalwart, reply tokens, `send-email@1`, a real provider. |
+| 038 Mail | partial | Mail out through SMTP or Amazon SES; boxes send through a host `mail` service, via the outbox, within per-tenant and per-address daily limits; a sandbox sends nothing (018). | Mail routes and inbound mail, Stalwart, reply tokens, verified senders per domain, `send-email@1`, bounce handling. |
 | 039 Internal | partial | Internal routes with callers, synchronous calls carrying the person and tenant, both sides checked, cycles refused, depth capped, deadlines shrink (016). | Outbox to boxes, idempotent routes, typed generated calls, tenant binding by path, worst-case sums. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
 | 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, a run with a real MCP client. |
 | 060 Files | partial | Attachments: sniffed types, a ledger, bytes through the WAL, an upload path (007 §7). | The `upload` verb on box routes, resizing and metadata stripping, `asset` responses, the sweeper. |
-| 064 Keys | partial | `keys/system/...` and `keys/tenant/{!tenant}/...`, set write-only by operators, attached by the host at call time (015). | The vault, envelope encryption, rotation, user keys, the key screen for people. |
+| 064 Keys | partial | `keys/system/...` and `keys/tenant/{!tenant}/...`, set write-only by operators, each bound to the hosts it may be sent to, attached by the host at call time (015); the host's own AWS and backup keys can be set only on the machine (018, 019). | The vault, envelope encryption, rotation, user keys, the key screen for people. |
 | 070 UI | partial | Markdown, Mustache with layouts, content negotiation for box JSON through templates, strict CSP on templated pages (007). | `static` in manifests, pins, the `/goober/` client script, sign-in through the product layout. |
 | 099 The system | partial | Plain HTTP behind Caddy; systemd unit from setup. | Litestream, Stalwart, NATS, on-demand TLS ask. |
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
@@ -72,27 +75,31 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 330 Stability | none | | Capabilities, providers, pins, replay. |
 | 390 Quotas | none | | |
 | 400 Cluster | none | Single machine only. | |
-| 410 API | partial | 57 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
+| 410 API | partial | 70 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, backups, source projects, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | partial | Expand-only schema application, refused changes named per tenant (008 §3). | Contraction, emulated type changes, upgrade boxes. |
+| 521 Source | built | Drafted by Claude at the human's request, uncommitted for the human. Projects with numbered revisions, content stored once, commits that land on top when they don't overlap, diffs, revert; builds of Rust (in a bubblewrap sandbox, offline, vendored crates), WAT, or prebuilt WASM; deploys of schemas, boxes, and sites; eleven MCP tools and `goober.py source` (020). | Branches, merges inside a file, GitHub mirroring, deleting projects, crates beyond the vendored set. |
+| 663 Backups | built | Drafted by Claude at the human's request, uncommitted for the human. Sealed (ChaCha20 + HMAC) nightlies kept keep-days by timestamp, page-level database increments, attachments queued once each, rotation, `backup_status`, and `goober-host rehydrate` into a sandboxed devbox (019). | A panel page, multipart uploads past 5 GiB, two destinations, key rotation, restoring into a live host. |
 | 800 Crawl | partial | Drafted by Claude at the human's request, uncommitted for the human (Q32). The robot: robots.txt, pacing per site, public addresses only (pinned through redirects), a cache with conditional refetches, opt-out; views (html, text, markdown, links, meta with the shop platform, JSON-LD, tables, select, extract); operator crawls with scope, sitemaps, and records; a `web` service for boxes; the ranches example (017). | JavaScript rendering, a public opt-out page, sharing crawl results between boxes, robots and pacing state across restarts. |
 | 999 Mobile | partial | OAuth as a person client (009); the `terminal` and `desk` boxes (010): me, config, sync, dashboards, idempotent decisions, devices, events; approvals, alarms, dashboards, and settings from agents over HTTP or ten MCP tools, typed by the host, with no write path to decisions; a 6am briefing timer in each device's zone (014); ETags on the snapshot; 57 end-to-end checks. Local mode answers the emulator's 10.0.2.2. | Push (decision 7), telling an agent's box about a decision (agents poll), a run with the real app. |
 
 ## Production readiness, honestly
 
 Fine for **one person on a laptop**, and for a **personal VPS behind Caddy**
-(`just deploy you@server`: Ubuntu 24.04+ or Debian 13+, a `goober` user, systemd, nightly
-backups kept two weeks; written and dry-run here, not yet run against a real server), with
-these caveats:
+(`just deploy you@server [--with-rust]`: Ubuntu 24.04+ or Debian 13+, a `goober` user,
+systemd, bubblewrap, local nightly copies, and S3 backups when setup is given a bucket;
+written and dry-run here, not yet run against a real server), with these caveats:
 
-- **Sign-in mail** goes through SMTP when `identity.mailer` is `smtp`; otherwise the dev
-  mailer writes `.eml` files and nobody else can sign in. The SMTP path is tested against
-  a stand-in curl, not yet against a real mail server.
+- **Mail** goes through SES (`identity.mailer: "ses"`) or SMTP; otherwise the dev mailer
+  writes `.eml` files and nobody else can sign in. SES and S3 are tested against stand-ins
+  that check AWS signatures, and the signer against AWS's published examples and curl, but
+  not yet against real AWS. A new SES account starts in its sandbox.
 - **Rate limits** are per client address and in memory: they reset on restart, and a
   client with many addresses gets many budgets.
 - **Secrets sit in files** protected only by mode 0600: the operator token in the config,
   the SMTP password in its own file. There is no vault (064).
-- **Backups are nightly on a deployed server** (a systemd timer, two weeks kept, on the same
-  disk): copy them off the machine yourself. Restore is tested. No Litestream yet.
+- **Backups go to S3** when `backup.s3` is set: sealed with a backup key that must also be
+  kept off the machine (`goober-host backup key`), or nothing can be restored. Rehydrate is
+  tested end to end against a stand-in S3. Without a bucket, backups are local copies only.
 - **Logs rotate** at 64 MiB (three kept), but the access log still records paths, which can
   hold user data (300 wants none).
 - **No approvals**: whoever holds an operator token ships code live (005 §9).
@@ -100,7 +107,10 @@ these caveats:
   no imports beyond `goober`). The host around it has had one internal review, fuzzing,
   and a sanitizer run (`013.SecurityReview.md`), and no outside review. The identity screens
   still share an origin with box pages (Q24).
-- **Keys** for outside services are plain 0600 files, write-only through the tools.
+- **Keys** for outside services are plain 0600 files, write-only through the tools, and
+  each goes only to the hosts it was set for.
+- **Source builds** run cargo and build scripts from vendored crates inside bubblewrap (no
+  network, no secrets); bubblewrap on Ubuntu 24.04's AppArmor rules is untested.
 - **Minted agent tokens** live up to a year (Q31): treat one like a password, and revoke it
   from the account page when an agent is done.
 - **The robot** reads only public addresses, obeys robots.txt, and paces itself, but what a
@@ -191,6 +201,11 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] A third review, of the robot and the example products: eleven findings fixed (013 W1 to
       W11), among them a robots.txt that could hold a thread for 23 s and a cache a box could
       read past its own allow list. The whole suite also passes under ASan and UBSan.
+- [x] A fourth review (2026-10-27, evening), security and code quality across the host: every
+      finding fixed or recorded (013 S4-1 to S4-12, Q4-1 to Q4-14), among them nested
+      templates that could crash the host, a box sending a stored key to its own server,
+      services reaching private addresses, timers firing another box's rows, and a
+      multi-database commit that could enqueue mail for writes that didn't land.
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).
@@ -245,6 +260,23 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] The robot in the host, operator `web_fetch` and crawls, and the `web` service for boxes
       (`design/machine/017.Crawl.md`).
 - [ ] Robots and pacing state that survives a restart; a public opt-out page (Q32).
+
+### Phase 10: mail and backups (018, 663)
+- [x] The `aws` package: SigV4 (AWS's examples and curl agree), S3, and SES.
+- [x] SES as the host's mailer; a `mail` service for boxes through the outbox, with limits;
+      the `sandbox` flag (`design/machine/018.Mail.md`).
+- [x] Backups to S3: sealed nightlies with rotation, page-level increments, queued
+      attachments; `goober-host rehydrate` and `just rehydrate`; `just backup-e2e`
+      (`design/machine/019.Backups.md`).
+- [ ] Run against real AWS: a verified SES domain out of the sandbox, a bucket, and a
+      rehydrate on the human's laptop. This needs the human.
+
+### Phase 11: source kept in the host (521)
+- [x] The `source` package and the operator tools: create, checkout, commit, log, diff,
+      revert, build, deploy, jobs (`design/machine/020.Source.md`).
+- [x] Sandboxed Rust builds (bubblewrap, offline, vendored crates), WAT, and prebuilt WASM;
+      `deploy.sh --with-rust`; `goober.py source` for people.
+- [ ] Grok driving the loop over its remote MCP tool. This needs the human.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

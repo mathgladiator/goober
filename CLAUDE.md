@@ -78,6 +78,8 @@ Read these before doing design work:
   - `design/human/400.Cluster.Service.md`: service mode, ownership registry, fenced leases, routing, recovery.
   - `design/human/410.API.md`: the full operator API catalog (HTTP + MCP), approval UI-only.
   - `design/human/420.Migration.md`: partial schemas, change kinds applied immediately, refused changes, upgrade boxes that force a change, data migrations via boxes.
+  - `design/human/521.Source.md`: source kept in the host: projects with numbered revisions an agent checks out, commits to (conflicts only on the same files), builds in the host's sandbox, and deploys over MCP, so Grok's code lives in the machine. Drafted by Claude at the human's request.
+  - `design/human/663.Backups.md`: backups off the machine to S3: attachments queued and uploaded once, a nightly sealed tar.gz kept fourteen days by its timestamp, database increments between nightlies, and rehydrating any moment onto a sandboxed devbox. Drafted by Claude at the human's request.
   - `design/human/800.Crawl.md`: goober as a good robot: polite fetching through the host (robots.txt, pacing, public addresses only), views that simplify pages (text, markdown, links, meta, JSON-LD, tables, select, extract), crawls, and the local meat index as the example. Drafted by Claude at the human's request.
   - `design/human/999.Mobile.md`: the dumb mobile terminal: a person OAuth client (PKCE, loopback any port), `/terminal/v1/` routes on a box, alarms as rules, idempotent decisions, linted markdown, push as a nudge; eight open decisions.
 - `design/QUESTIONS.md`: questions still open after the first round, plus new ones from building v1.
@@ -112,6 +114,12 @@ Read these before doing design work:
     as the same person, both sides checked at upload, no cycles.
   - `design/machine/017.Crawl.md`: the robot (robots.txt, pacing, address checks, cache,
     opt-out), page views, operator crawls and tools, and the `web` service boxes call.
+  - `design/machine/018.Mail.md`: Amazon SES as the host's mailer, AWS keys in the key store,
+    a `mail` service boxes send through via the outbox with daily limits, and the sandbox flag.
+  - `design/machine/019.Backups.md`: S3 backups: sealing, the bucket's layout, the nightly,
+    page-level increments, assets, rotation, `goober-host rehydrate`, and the tests.
+  - `design/machine/020.Source.md`: source projects over MCP: storage, concurrency,
+    `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
