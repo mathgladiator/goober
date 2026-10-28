@@ -196,6 +196,34 @@ sends {"to", "template": "order-ready", "vars": {"name": "Ann"}} instead of subj
 {{site}} and {{email}} (the recipient) are filled in. The host's own mails (sign-in codes and
 the rest) can't be sent by a box.
 
+## Receiving mail
+
+A box receives mail on addresses it declares (the host's Stalwart takes SMTP and asks the host):
+"routes": {"mail": {
+  "support@": {"receive": {"name": "support_inbox", "public": true,
+                           "max-bytes": 10485760, "attachments": 5}},
+  "reply+{ticket : token}@": {"receive": {"name": "ticket_reply", "public": true}},
+  "*@": {"receive": {"name": "inbox", "public": true, "automatic": false}}}}
+support@ is that address on every domain the box serves (support@example.com for one).
+*@ takes what no other route claims. Parameters in the address arrive as params; a
+{name : token} part is a reply token (below). Mail routes are public: anyone can send.
+The request's body is the message as JSON: {to, envelope_from, from: {address, name}, sender
+(a verified address, or null), to_list, cc, reply_to, subject, text, html, message_id,
+in_reply_to, references, date, attachments: [{id, filename, content_type, bytes, inline,
+content_id}], automatic, truncated, bytes}. text is always there (made from the HTML if needed).
+Answer 2xx (or nothing) to accept: the sender's server hears 250. Answer 4xx with
+{"error": "..."} to refuse: it hears 550 with your words. Answer 503 to defer: it hears 451
+and tries again later; your writes roll back. A failure or timeout defers too.
+Auto-replies and bounces never reach a route unless it says "automatic": true. A message past
+max-bytes (default 10 MiB, at most 25 MiB) or with more attachments than "attachments"
+(default 0) is refused at the door.
+Attachments stay in the host; read one with the mail service:
+goober_call("mail", "attachment", {"id": "17"}) answers {filename, content_type, bytes, base64}
+(at most 8 MiB, only for your box, kept 30 days).
+Reply tokens: send with "reply": {"route": "ticket_reply", "params": {"ticket": "42"}} and the
+host mints reply+<token>@your.domain as the Reply-To (the call answers it as reply_to). A
+reply arrives on ticket_reply with params.ticket = "42"; a forged token never reaches you.
+
 ## Reading the web
 
 A box reads web pages through the host's polite robot (robots.txt obeyed, one request per site

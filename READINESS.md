@@ -15,7 +15,7 @@
 | 3c. An agent builds a ranch's whole digital side | **Partly** | The parts are there. Payments, mail inboxes, and scheduling need outside services. |
 | 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction, built for hundreds of sites, not millions. |
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
-| 6. Mail that arrives | **Yes, untried with real SES** | Sign-in codes and boxes' mail through Amazon SES, with per-tenant and per-address limits. |
+| 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
 
 ## 1. Static content: yes
 
@@ -86,10 +86,10 @@ each ranch's site weekly.
   - sites and forms;
   - a box for inventory, shares, and orders, kept as a source project;
   - customer lists, reminders, and dashboards;
-  - mail out;
+  - mail out, and mail in: a box receives on addresses it declares (024);
   - calls to Stripe or Twilio with keys bound to their hosts.
 - **Not ready:**
-  - receiving mail (038);
+  - verified senders on received mail (Q39);
   - customer file uploads to boxes (060);
   - Stripe webhooks end to end;
   - a domain per ranch without a config edit;
@@ -129,7 +129,7 @@ each ranch's site weekly.
   - Archives are at most 5 GiB.
   - The nightly needs room on disk for one more copy of storage.
 
-## 6. Mail that arrives: yes, untried with real SES
+## 6. Mail that arrives: yes, untried with real SES or a real MX
 
 - **What sends.** `identity.mailer: "ses"` sends sign-in codes and every box's mail through
   SES's API with AWS keys from the key store. Boxes declare a `mail` service, and their mail
@@ -138,6 +138,12 @@ each ranch's site weekly.
   - SES starts in its sandbox: request production access and verify the domain (DKIM)
     before ads run.
   - Bounces and complaints are SES's to suppress for now.
+- **What receives.** Every deploy installs Stalwart on port 25, which hands each message to the
+  host; a box declares `routes.mail` addresses (`support@`, `*@`, `reply+{ticket : token}@`)
+  and its answer is the SMTP answer (`design/machine/024.MailIn.md`). `just mail-e2e` runs it
+  all here, with the real Stalwart. On the server: add the MX records deploy prints, and open
+  inbound TCP 25 at your provider (many block it until asked). Senders aren't verified yet:
+  From is only a string (Q39).
 
 ## Before real people use it
 

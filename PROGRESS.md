@@ -53,7 +53,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 035 Outbox | partial | Elements committed with the request's writes, a dispatcher delivering each service from its own oldest element (one stuck service never blocks another), backoff, stable idempotency keys, dead letters and retry, and stranded outboxes found by scanning storage (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content and box GETs; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`; the status vocabulary; CORS per route (011). | ETags that skip the box, compression, ranges, declared redirect targets; undeclared routes still see every header and parameter. |
-| 038 Mail | partial | Mail out through SMTP or Amazon SES; boxes send through a host `mail` service, via the outbox, within per-tenant and per-address daily limits; a sandbox sends nothing (018). | Mail routes and inbound mail, Stalwart, reply tokens, verified senders per domain, `send-email@1`, bounce handling. |
+| 038 Mail | partial | Mail in through Stalwart and `routes.mail`, with reply tokens and the box's answer as the SMTP answer (024). Mail out through SMTP or Amazon SES; boxes send through a host `mail` service, via the outbox, within per-tenant and per-address daily limits; a sandbox sends nothing (018). | Verified senders (Q39), verified senders per domain for mail out, `send-email@1`, bounce handling. |
 | 039 Internal | partial | Internal routes with callers, synchronous calls carrying the person and tenant, both sides checked, cycles refused, depth capped, deadlines shrink (016). | Outbox to boxes, idempotent routes, typed generated calls, tenant binding by path, worst-case sums. |
 | 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
@@ -302,10 +302,13 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       parsed (MIME, charsets, attachments kept in the host), automatic mail dropped unless a
       route opts in, the box's answer as the SMTP answer (250, 550, 451); signed reply
       addresses minted by `send` with `reply`; attachments read by handle.
-- [ ] Stalwart installed and configured by setup and deploy, DNS records printed, an end-to-end
-      test against a real Stalwart (in progress).
-- [ ] Verified senders (038 § The sender is a verified claim): Stalwart's hook doesn't carry
-      SPF, DKIM, or DMARC results, so `sender` is null for now (in progress).
+- [x] Stalwart 1.0.1 (pinned, checksummed) installed or upgraded and configured by every deploy
+      (`--without-mail` skips), never able to relay or queue, with Caddy's certificate and the
+      MX records printed (`tools/stalwart.sh`); `just stalwart-e2e` and `just mail-e2e` run the
+      real Stalwart, the second against a real host and box, over SMTP.
+- [ ] Verified senders (038 § The sender is a verified claim): Stalwart's hook carries no SPF,
+      DKIM, or DMARC result, so `sender` is null (Q39).
+- [ ] Mail reaching the real server: port 25 open, MX records, a first message. This needs the human.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

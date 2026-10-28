@@ -191,6 +191,13 @@ keep a copy somewhere else, then run `goober-host backup key --confirm`. On your
 `just rehydrate ~/copy` rebuilds any moment as a sandboxed devbox
 (`design/machine/019.Backups.md`).
 
+## Receiving mail
+
+Every deploy also installs Stalwart on port 25 (`--without-mail` skips it). It hands every
+message to the host, which gives it to the box whose `routes.mail` claims the address, and the
+box's answer is the SMTP answer (`design/machine/024.MailIn.md`). Deploy prints the MX records
+to add. Open inbound TCP 25 at your provider. Try it here with `just mail-e2e`.
+
 ## Source projects
 
 Agents keep a product's source in the host and build and deploy it from there

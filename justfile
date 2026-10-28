@@ -101,6 +101,14 @@ rehydrate dest at="": build
 backup-e2e: build
     python3 -I {{host_src}}/tools/backup_e2e.py
 
+# Mail in with the real Stalwart (downloaded once to build/stalwart): against a stand-in hook,
+# then against a real goober host with a box of mail routes.
+stalwart-e2e:
+    python3 -I {{host_src}}/tools/stalwart_e2e.py
+
+mail-e2e: build
+    python3 -I {{host_src}}/tools/mail_e2e.py
+
 # Fuzz every parser and the SQL authorizer under AddressSanitizer: just fuzz 50000
 fuzz iters="20000":
     cmake --preset asan >/dev/null && cmake --build --preset asan

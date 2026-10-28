@@ -48,7 +48,10 @@ Response hook_json(const bj::object& o) {
 
 bj::object hook_accept() { return bj::object{{"action", "accept"}}; }
 // Stalwart answers 250 and keeps nothing: the box has the message.
-bj::object hook_discard() { return bj::object{{"action", "discard"}}; }
+bj::object hook_discard() {
+  return bj::object{{"action", "discard"},
+                    {"response", bj::object{{"status", 250}, {"enhanced_status", "2.0.0"}, {"message", "Delivered"}}}};
+}
 bj::object hook_reject(int status, const std::string& enhanced, const std::string& message) {
   // One line of printable ASCII: it goes into the SMTP reply as it is.
   std::string clean;

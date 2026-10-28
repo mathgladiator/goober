@@ -12,9 +12,11 @@ set -euo pipefail
 DIR=""
 RUN_AS="goober"
 WITH_RUST=""
+WITHOUT_MAIL=""
 while (($#)); do
   case "$1" in
     --with-rust) WITH_RUST=--with-rust ;;
+    --without-mail) WITHOUT_MAIL=1 ;;
     --user) RUN_AS="${2:-}"; shift ;;
     -*) echo "✗ unknown option $1" >&2; exit 2 ;;
     *) DIR="$1" ;;
@@ -49,7 +51,8 @@ echo "── packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # bubblewrap is the sandbox source projects build in (521.Source.md).
-apt-get install -y -qq caddy curl python3 tzdata ca-certificates bubblewrap >/dev/null
+# iproute2 and openssl: Stalwart's provisioning namespace, and its first certificate.
+apt-get install -y -qq caddy curl python3 tzdata ca-certificates bubblewrap iproute2 openssl >/dev/null
 
 echo "── user and directory"
 id "$RUN_AS" >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --create-home --shell /usr/sbin/nologin "$RUN_AS"
@@ -125,8 +128,123 @@ open(p, "w").write(json.dumps(c, indent=2) + "\n")
   fi
 fi
 
-echo "── health"
 PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["listen"].get("port", 8080))' "$DIR/host.json")"
+MAIL_DNS=""
+if [[ -z "$WITHOUT_MAIL" && -f "$DIR/host.json" ]]; then
+  echo "── mail in: Stalwart on port 25, handing every message to goober (024.MailIn.md)"
+  MAIL_HOME=/srv/stalwart
+  SW=/usr/local/lib/goober/stalwart.sh
+  install -d -m 0755 /usr/local/lib/goober
+  install -m 0755 "$SRC/stalwart.sh" "$SW"
+  if id stalwart >/dev/null 2>&1; then
+    IFS=: read -r _ _ SW_UID _ _ SW_HOME _ < <(getent passwd stalwart)
+    [[ "$SW_UID" -ne 0 && "$SW_HOME" == "$MAIL_HOME" ]] || die "user stalwart exists with home $SW_HOME; expected $MAIL_HOME"
+  else
+    useradd --system --home-dir "$MAIL_HOME" --create-home --shell /usr/sbin/nologin stalwart
+  fi
+  install -d -o stalwart -g stalwart -m 0750 "$MAIL_HOME"
+  # The binary is root's (pinned version and checksum in stalwart.sh); its data is Stalwart's.
+  bash "$SW" install "$MAIL_HOME"
+  chown -R root:root "$MAIL_HOME/bin"
+  # One token, two copies: Stalwart sends it, goober checks it. Made once.
+  HOST_TOKEN="$DIR/mail-hook.token"
+  if [[ ! -s "$HOST_TOKEN" ]]; then
+    (umask 077 && head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$HOST_TOKEN")
+  fi
+  chown "$RUN_AS:$RUN_AS" "$HOST_TOKEN"
+  chmod 0600 "$HOST_TOKEN"
+  install -o stalwart -g stalwart -m 0600 "$HOST_TOKEN" "$MAIL_HOME/hook.token"
+  # STARTTLS with Caddy's certificate for the platform domain, once Caddy has one; until then
+  # a short-lived self-signed one. The daily timer below copies renewals and reloads.
+  PLATFORM="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("platform-domain", ""))' "$DIR/host.json")"
+  install -d -o stalwart -g stalwart -m 0700 "$MAIL_HOME/tls"
+  cat > /usr/local/lib/goober/stalwart-tls.sh <<'TLS'
+#!/usr/bin/env bash
+# Copies Caddy's certificate for the platform domain to Stalwart, and reloads it when it
+# changed. Run as root (Caddy's files are its own); installed by server-bootstrap.sh.
+set -euo pipefail
+NAME="${1:?platform domain}"
+DEST=/srv/stalwart/tls
+CRT="$(find /var/lib/caddy/.local/share/caddy/certificates -path "*/$NAME/$NAME.crt" 2>/dev/null | head -n 1)"
+if [[ -z "$CRT" || ! -f "${CRT%.crt}.key" ]]; then
+  if [[ ! -s "$DEST/cert.pem" ]]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=$NAME" \
+      -keyout "$DEST/key.pem" -out "$DEST/cert.pem" >/dev/null 2>&1
+    chown stalwart:stalwart "$DEST/key.pem" "$DEST/cert.pem"
+    chmod 0600 "$DEST/key.pem" "$DEST/cert.pem"
+  fi
+  exit 0
+fi
+if cmp -s "$CRT" "$DEST/cert.pem" && cmp -s "${CRT%.crt}.key" "$DEST/key.pem"; then exit 0; fi
+install -o stalwart -g stalwart -m 0600 "$CRT" "$DEST/cert.pem"
+install -o stalwart -g stalwart -m 0600 "${CRT%.crt}.key" "$DEST/key.pem"
+if systemctl is-active --quiet stalwart; then
+  runuser -u stalwart -- /usr/local/lib/goober/stalwart.sh reload-tls /srv/stalwart
+fi
+TLS
+  chmod 0755 /usr/local/lib/goober/stalwart-tls.sh
+  /usr/local/lib/goober/stalwart-tls.sh "${PLATFORM:-localhost}"
+  # Relaying only for the host's domains, read from the config on every deploy.
+  RELAY="$(python3 -c '
+import json, re, sys
+c = json.load(open(sys.argv[1]))
+print(",".join(d for d in sorted(c.get("domains", {})) if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d)))
+' "$DIR/host.json")"
+  # configure runs with Stalwart stopped, in a private network namespace root makes: its
+  # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
+  systemctl stop stalwart 2>/dev/null || true
+  unshare --net -- sh -c 'ip link set lo up && exec runuser -u stalwart -- env STALWART_PRIVATE_NETNS=1 "$@"' sh \
+    bash "$SW" configure "$MAIL_HOME" --smtp 0.0.0.0:25 --admin 127.0.0.1:8025 \
+    --hook-url "http://127.0.0.1:$PORT/internal/routes/mta/stalwart" --hook-token-file "$MAIL_HOME/hook.token" \
+    --max-bytes 26214400 --hostname "${PLATFORM:-localhost}" ${RELAY:+--relay-domains "$RELAY"} \
+    --cert "$MAIL_HOME/tls/cert.pem" --key "$MAIL_HOME/tls/key.pem"
+  bash "$SW" systemd "$MAIL_HOME" stalwart > /etc/systemd/system/stalwart.service
+  cat > /etc/systemd/system/goober-stalwart-tls.service <<UNIT
+[Unit]
+Description=Copy Caddy's certificate to Stalwart
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/goober/stalwart-tls.sh ${PLATFORM:-localhost}
+UNIT
+  cat > /etc/systemd/system/goober-stalwart-tls.timer <<UNIT
+[Unit]
+Description=Copy Caddy's certificate to Stalwart, daily
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now stalwart goober-stalwart-tls.timer >/dev/null 2>&1
+  systemctl restart stalwart
+  # goober takes the hook once its config names the token.
+  if sudo -u "$RUN_AS" python3 -c '
+import json, sys
+p, token = sys.argv[1], sys.argv[2]
+c = json.load(open(p))
+inbound = c.setdefault("mail", {}).setdefault("inbound", {})
+if inbound.get("token-file") == token:
+    sys.exit(1)
+inbound["token-file"] = token
+open(p, "w").write(json.dumps(c, indent=2) + "\n")
+' "$DIR/host.json" "$HOST_TOKEN"; then
+    echo "   set mail.inbound.token-file in host.json"
+    systemctl restart goober-host
+  fi
+  systemctl --no-pager --lines=0 status stalwart | head -3 || true
+  MAIL_DNS="$(python3 -c '
+import json, re, sys
+c = json.load(open(sys.argv[1]))
+mx = c.get("platform-domain", "")
+for d in sorted(c.get("domains", {})):
+    if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d):
+        print(f"  {d}.  MX  10 {mx}.")
+' "$DIR/host.json")"
+fi
+
+echo "── health"
 for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/goober/health" >/dev/null 2>&1 && break; sleep 0.2; done
 curl -fsS "http://127.0.0.1:$PORT/goober/health" && echo
 systemctl --no-pager --lines=0 status goober-host | head -3 || true
@@ -139,3 +257,12 @@ mints an operator token; use it from your laptop as GOOBER_URL=https://<domain>
 GOOBER_TOKEN=<token> host-src/tools/goober.py ..., or with the printed claude command.
 Logs: journalctl -u goober-host -f, and $DIR/storage/logs/. Backups: $DIR/backups/.
 EOF
+if [[ -n "$MAIL_DNS" ]]; then
+  cat <<EOF
+
+Mail in: Stalwart listens on port 25 (journalctl -u stalwart -f). Add these DNS records, and
+open TCP port 25 inbound in your provider's firewall (many block it until asked):
+$MAIL_DNS
+Then declare routes.mail in a box (box_guide, "Receiving mail").
+EOF
+fi

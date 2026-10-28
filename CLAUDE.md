@@ -126,6 +126,8 @@ Read these before doing design work:
     HTML, a layout), defaults for each host mail, overrides per tenant or host, and box templates.
   - `design/machine/023.OperatorOAuth.md`: a second OAuth issuer, `/oauth/operator`, in the host
     realm, so agents that only speak OAuth (Grok) sign an operator in and reach the operator tools.
+  - `design/machine/024.MailIn.md`: mail in: Stalwart on port 25 calling the host's MTA hook,
+    `routes.mail` addresses, the box's answer as the SMTP answer, reply tokens, and deploys.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
