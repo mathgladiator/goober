@@ -265,9 +265,51 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
       }
-      if (k == "box" || k == "web") continue;
+      if (k == "box" || k == "web" || k == "mail") continue;
       if (k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    if (const auto* mail = def.if_contains("mail")) {
+      // Mail through the host's mailer, after commit, through the outbox (design/machine/018.Mail.md).
+      if (def.contains("base") || def.contains("credentials") || def.contains("auth") || def.contains("box") ||
+          def.contains("web")) {
+        return *error = where + ": a mail service has no base, credentials, box, or web; the host sends", false;
+      }
+      if (!mail->is_object()) return *error = where + ".mail is {\"from-name\": \"Beef Share\"}", false;
+      for (const auto& f : mail->as_object()) {
+        if (f.key() != "from-name") return *error = where + ".mail: unknown field \"" + std::string(f.key()) + "\"", false;
+      }
+      svc.mail = true;
+      svc.mail_from_name = get_string(mail->as_object(), "from-name", &err).value_or("");
+      if (svc.mail_from_name.size() > 64 || svc.mail_from_name.find_first_of("\"\\\r\n<>") != std::string::npos) {
+        return *error = where + ".mail.from-name is at most 64 characters, without quotes, backslashes, or <>", false;
+      }
+      ExternalMethod send;
+      send.name = "send";
+      send.verb = "mail";
+      send.effect = "outbox";
+      send.budget_calls = 1;
+      send.attempts = 6;
+      send.backoff_ms = 30000;
+      send.within_ms = 24LL * 3600 * 1000;
+      if (const auto* methods = get_object(def, "methods", &err)) {
+        for (const auto& mk : *methods) {
+          std::string mw = where + ".methods." + std::string(mk.key());
+          if (mk.key() != "send") return *error = mw + ": a mail service's one method is send", false;
+          if (!mk.value().is_object()) return *error = mw + " must be an object", false;
+          for (const auto& f : mk.value().as_object()) {
+            if (f.key() != "budget") return *error = mw + ": unknown field \"" + std::string(f.key()) + "\"", false;
+            if (const auto* b = get_object(mk.value().as_object(), "budget", &err)) {
+              send.budget_calls = get_int(*b, "calls", &err).value_or(send.budget_calls);
+            }
+          }
+        }
+      }
+      if (!err.empty()) return *error = where + ": " + err, false;
+      if (send.budget_calls < 1 || send.budget_calls > 10) return *error = where + ".methods.send.budget.calls is 1 to 10", false;
+      svc.methods["send"] = std::move(send);
+      m->external.push_back(std::move(svc));
+      continue;
     }
     if (const auto* web = def.if_contains("web")) {
       // Reading the web, politely, through the host: robots.txt, pacing, public addresses only.
@@ -368,6 +410,10 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
                                                                          : std::string_view();
       if (!base::is_valid_name(rest)) {
         return *error = where + ".credentials names a key: keys/system/$name or keys/tenant/{!tenant}/$name", false;
+      }
+      // The host's own keys (AWS, for SES and backups; the backup key) are never handed to a box's service.
+      if (c.starts_with("keys/system/") && (rest.starts_with("aws_") || rest == "backup_key")) {
+        return *error = where + ".credentials: " + svc.credentials + " is the host's own key", false;
       }
     }
     if (const auto* auth = get_object(def, "auth", &err)) {

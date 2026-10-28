@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "goober/aws/aws.h"
 #include "goober/json/json.h"
 
 namespace goober::host {
@@ -23,6 +24,9 @@ class KeyStore {
   bool remove(std::string_view scope, std::string_view tenant, std::string_view name);
   // A credentials name from a manifest, like keys/system/mailer or keys/tenant/{!tenant}/stripe.
   std::optional<std::string> resolve(std::string_view credentials, std::string_view tenant) const;
+  // The AWS keys for SES and S3: keys/system/aws_access_key_id and aws_secret_access_key, and
+  // aws_session_token when set. nullopt unless both of the first two are.
+  std::optional<aws::Credentials> aws_credentials() const;
   // Names, scopes, when each was set, and a short fingerprint; never values.
   boost::json::array list() const;
 

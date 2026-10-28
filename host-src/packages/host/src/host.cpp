@@ -134,7 +134,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       [this](const manifest::Manifest& m, std::string* error) { return check_data(m, error) && check_calls(m, error); });
   timers_ = std::make_unique<TimerState>();
   keys_ = std::make_unique<KeyStore>(config->storage);
-  smtp_ = std::make_unique<SmtpQueue>([this] { return config_.get(); },
+  mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
@@ -223,10 +223,10 @@ std::string Host::reload() {
 // The dev mailer (005 §11, Q45): each mail becomes a MIME file under
 // storage/mail/outbox/ and a line in logs/mail.log. In local mode it is also
 // printed, so the person playing sees their sign-in code in the terminal.
-void Host::drain_mail() { smtp_->drain(); }
+void Host::drain_mail() { mail_->drain(); }
 
 // Every mail is queued, so a sign-in answers in the same time whether or not one goes out.
-void Host::send_mail(const identity::Mail& mail) { smtp_->send(mail); }
+void Host::send_mail(const identity::Mail& mail) { mail_->send(mail); }
 
 void Host::write_dev_mail(const identity::Mail& mail) {
   auto cfg = config_.get();
@@ -234,14 +234,9 @@ void Host::write_dev_mail(const identity::Mail& mail) {
   uint8_t rnd[4];
   base::os_random_fill(rnd);
   std::string name = std::to_string(now) + "-" + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), 4)) + ".eml";
-  std::time_t secs = now / 1000;
-  std::tm tm{};
-  gmtime_r(&secs, &tm);
-  char date[64];
-  std::strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S +0000", &tm);
-  std::string eml = "From: goober <no-reply@" + cfg->platform_domain + ">\r\nTo: " + mail.to + "\r\nSubject: " +
-                    mail.subject + "\r\nDate: " + date +
-                    "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + mail.text;
+  // The same message a real mailer would send, headers and all.
+  std::string eml = mime_message("no-reply@" + cfg->platform_domain, mail, now,
+                                 base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), 4)));
   auto file = cfg->storage / "mail" / "outbox" / name;
   base::write_file_durable(file, eml);
   base::append_line(cfg->storage / "logs" / "mail.log",

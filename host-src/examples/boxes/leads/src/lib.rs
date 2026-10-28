@@ -140,9 +140,9 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
         let sent = goober::call(
             "mail",
             "send",
-            json!({ "body": { "to": [email], "subject": "Please confirm your email",
+            json!({ "to": email, "subject": "Please confirm your email",
                     "text": format!("Thanks for signing up. Confirm your email by opening this link:\n\n{link}\n\n\
-                                     If this wasn't you, ignore this message and nothing more will come.\n") } }),
+                                     If this wasn't you, ignore this message and nothing more will come.\n") }),
         );
         // Without a mail service declared, signups simply stay unconfirmed.
         if let Some(e) = sent["error"].as_str() {

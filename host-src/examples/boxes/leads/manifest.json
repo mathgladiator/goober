@@ -17,6 +17,9 @@
       }
     }
   },
+  "external": {
+    "mail": { "mail": { "from-name": "Sign-ups" } }
+  },
   "routes": {
     "http": {
       "/leads/{campaign : string}/signup": {

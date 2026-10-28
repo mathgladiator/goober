@@ -250,6 +250,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);
+  if (svc->mail) return mail_call(ctx, *svc, m, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
   if (!built) return fail(err);
@@ -280,7 +281,9 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     return json::dump(bj::object{{"accepted", true}, {"key", key}});
   }
 
-  // Sent now: effect none (safe), or immediate (effectful, and visible as such).
+  // Sent now: effect none (safe), or immediate (effectful, and visible as such). Not from a
+  // sandbox, which a rehydrated devbox is: nothing it does reaches the world.
+  if (config_.get()->sandbox) return fail("this host is a sandbox: no calls leave it");
   auto headers = built->headers;
   if (!svc->credentials.empty()) {
     auto value = keys_->resolve(svc->credentials, ctx.tenant);
@@ -305,6 +308,66 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     if (auto v = json::parse(reply.body, &err)) result["json"] = std::move(*v);
   }
   return json::dump(result);
+}
+
+namespace {
+
+bool plain_email(std::string_view s) {
+  auto at = s.find('@');
+  if (at == std::string_view::npos || at == 0 || at + 1 >= s.size() || s.size() > 254) return false;
+  if (s.find('@', at + 1) != std::string_view::npos || s.find('.', at) == std::string_view::npos) return false;
+  for (unsigned char c : s) {
+    if (c <= 0x20 || c >= 0x7f || c == '<' || c == '>' || c == '"' || c == ',' || c == ';' || c == '(' || c == ')' ||
+        c == '\\' || c == '[' || c == ']') {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                            const bj::value& request) {
+  auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
+  if (!request.is_object()) return fail("send takes {to, subject, text, reply_to?}");
+  const auto& r = request.as_object();
+  for (const auto& kv : r) {
+    if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to") {
+      return fail("send takes {to, subject, text, reply_to?}; \"" + std::string(kv.key()) + "\" isn't one");
+    }
+  }
+  auto text_field = [&](const char* k) -> std::string {
+    auto* v = r.if_contains(k);
+    return v && v->is_string() ? std::string(v->as_string()) : "";
+  };
+  std::string to = base::to_lower(text_field("to")), subject = text_field("subject"), text = text_field("text"),
+              reply_to = base::to_lower(text_field("reply_to"));
+  if (!plain_email(to)) return fail("to must be one email address");
+  if (!reply_to.empty() && !plain_email(reply_to)) return fail("reply_to must be one email address");
+  if (subject.empty() || subject.size() > 200) return fail("subject is 1 to 200 characters");
+  if (text.empty() || text.size() > 65536) return fail("text is 1 to 65536 bytes");
+  for (char c : subject) {
+    if (c == '\r' || c == '\n') return fail("subject is one line");
+  }
+  OutboxElement e;
+  e.service = svc.name;
+  e.method = m.name;
+  e.verb = "MAIL";
+  e.url = "mail:" + to;
+  e.body = json::dump(bj::object{{"to", to},
+                                 {"subject", subject},
+                                 {"text", base::valid_utf8(text)},
+                                 {"from_name", svc.mail_from_name},
+                                 {"reply_to", reply_to}});
+  e.idempotency_key = base::sha256_hex("goober-outbox\n" + ctx.request_id + "\n" + std::to_string(ctx.pending.size()))
+                          .substr(0, 32);
+  e.attempts = m.attempts;
+  e.backoff_ms = m.backoff_ms;
+  e.within_ms = m.within_ms;
+  std::string key = e.idempotency_key;
+  ctx.pending.push_back(std::move(e));
+  return json::dump(bj::object{{"accepted", true}, {"key", key}});
 }
 
 std::string Host::internal_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,

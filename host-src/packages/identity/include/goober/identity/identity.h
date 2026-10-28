@@ -38,6 +38,8 @@ struct Mail {
   std::string to;
   std::string subject;
   std::string text;
+  std::string from_name;  // the sender's display name; "" means goober
+  std::string reply_to;   // an address replies go to, or ""
 };
 using Mailer = std::function<void(const Mail&)>;
 

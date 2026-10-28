@@ -170,6 +170,18 @@ the request later fails. require pins fields to {!email}, {!user_id}, {!tenant},
 literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
 every call without query strings or bodies.
 
+## Sending mail
+
+A box sends plain-text mail through the host's own mailer (SES or SMTP, set by the operator):
+"external": {"mail": {"mail": {"from-name": "Beef Share"},
+                      "methods": {"send": {"budget": {"calls": 1}}}}}
+goober_call("mail", "send", {"to": "person@example.org", "subject": "Confirm your spot",
+  "text": "...", "reply_to": "owner@example.com"}) answers {"accepted": true, "key"}: the mail
+leaves only if the request commits, through the outbox, retried for a day. It comes from the
+host's address with your from-name. The host caps mail per tenant a day and per address a day
+(config mail), so a form can't be turned into a cannon; a refused mail is a dead letter
+(outbox_dead_letters). A sandbox host (a rehydrated devbox) never sends: mail waits.
+
 ## Reading the web
 
 A box reads web pages through the host's polite robot (robots.txt obeyed, one request per site
@@ -216,7 +228,7 @@ A landing page (an ad's destination, say) is content: a whole .html document wit
 matter is served exactly as written, inline scripts and pixels included (site_guide). Its
 <form method="post" action="/signup"> posts to a public box route; the box reads "form",
 stores the row (a unique column and ON CONFLICT DO NOTHING make repeats harmless), sends any
-confirmation mail through an outbox service, and answers 303 with Location: /thanks. Don't pin
+confirmation mail through a mail service (above), and answers 303 with Location: /thanks. Don't pin
 {!email} in require for anonymous visitors: nobody is signed in, so the call would fail.
 
 ## Agents that can't do OAuth

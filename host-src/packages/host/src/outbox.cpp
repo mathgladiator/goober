@@ -8,12 +8,15 @@
 
 #include <iostream>
 
+#include "goober/base/hash.h"
 #include "goober/base/names.h"
+#include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 #include "keys.h"
+#include "mailer.h"
 #include "network.h"
 
 namespace goober::host {
@@ -170,8 +173,70 @@ int Host::outbox_tick(int64_t now_ms) {
   return delivered;
 }
 
+HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms) {
+  HttpOut out;
+  auto cfg = config_.get();
+  std::string err;
+  auto v = json::parse(body, &err);
+  if (!v || !v->is_object()) {
+    out.status = 400;
+    out.error = "the mail element isn't readable";
+    return out;
+  }
+  const auto& o = v->as_object();
+  auto text = [&](const char* k) {
+    auto* f = o.if_contains(k);
+    return f && f->is_string() ? std::string(f->as_string()) : std::string();
+  };
+  identity::Mail mail{text("to"), text("subject"), text("text"), text("from_name"), text("reply_to")};
+  // The limits (config mail): per tenant a day, and per address a day, counted by a hash of
+  // the address so the ledger holds no addresses.
+  fs::create_directories(cfg->storage / "mail");
+  sqlite::Db ledger(cfg->storage / "mail" / "sent.db");
+  ledger.exec("CREATE TABLE IF NOT EXISTS sent (tenant TEXT NOT NULL, address TEXT NOT NULL, at_ms INTEGER NOT NULL)");
+  ledger.exec("CREATE INDEX IF NOT EXISTS sent_by_tenant ON sent (tenant, at_ms)");
+  ledger.exec("DELETE FROM sent WHERE at_ms < " + std::to_string(now_ms - 2LL * 86400000));
+  std::string address = base::sha256_hex("goober-mail-address\n" + base::to_lower(mail.to)).substr(0, 32);
+  int64_t day_ago = now_ms - 86400000;
+  sqlite::Stmt by_tenant(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND at_ms > ?");
+  by_tenant.bind(1, tenant).bind(2, day_ago);
+  by_tenant.step();
+  if (by_tenant.int64(0) >= cfg->mail.daily_max) {
+    out.status = 429;
+    out.error = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)";
+    return out;
+  }
+  sqlite::Stmt by_address(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND address = ? AND at_ms > ?");
+  by_address.bind(1, tenant).bind(2, address).bind(3, day_ago);
+  by_address.step();
+  if (by_address.int64(0) >= cfg->mail.per_address_daily) {
+    // Asking again today won't change it, and tomorrow the moment has passed: refused for good.
+    out.status = 403;
+    out.error = "this address has had " + std::to_string(cfg->mail.per_address_daily) +
+                " mails today (config mail.per-address-daily)";
+    return out;
+  }
+  auto outcome = mail_->deliver(mail);
+  if (outcome.sent) {
+    sqlite::Stmt add(ledger, "INSERT INTO sent (tenant, address, at_ms) VALUES (?, ?, ?)");
+    add.bind(1, tenant).bind(2, address).bind(3, now_ms).run();
+    out.status = 200;
+    out.body = outcome.message_id;
+    return out;
+  }
+  if (outcome.permanent) {
+    out.status = 400;
+    out.error = outcome.error;
+  } else {
+    out.error = outcome.error;
+  }
+  return out;
+}
+
 int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms) {
   auto cfg = config_.get();
+  // A sandbox delivers nothing: its outbox fills, visibly, and waits.
+  if (cfg->sandbox) return 0;
   auto db = open_outbox(tenant, database);
   if (!db) return 0;
   db->exec("DELETE FROM goober_outbox WHERE state = 'done' AND done_ms < " +
@@ -223,16 +288,19 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
         else headers.emplace_back(r.auth_header, r.auth_prefix + *value);
       }
       int64_t started = base::monotonic_us();
-      if (reply.error.empty()) {
+      if (r.verb == "MAIL") {
+        reply = deliver_outbox_mail(tenant, r.body, now_ms);
+      } else if (reply.error.empty()) {
         reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", 10000);
       }
-      egress_log(tenant, r.box, r.service, r.method, r.verb, r.url, reply.status, reply.error,
+      // A mail's address stays out of the egress log, like a URL's query.
+      egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.url, reply.status, reply.error,
                  base::monotonic_us() - started, r.body.size(), reply.body.size(), "", r.id);
       int64_t attempts = r.attempts + 1;
       bool ok = reply.error.empty() && reply.status >= 200 && reply.status < 300;
       // A 4xx other than 408 or 429 won't get better by asking again.
-      bool permanent = reply.error.empty() && reply.status >= 400 && reply.status < 500 && reply.status != 408 &&
-                       reply.status != 429;
+      // (A mail refused by the host's own limits carries a 4xx and its reason, and is final too.)
+      bool permanent = reply.status >= 400 && reply.status < 500 && reply.status != 408 && reply.status != 429;
       std::string state = ok ? "done" : (permanent || attempts >= r.max_attempts || now_ms >= r.deadline_ms) ? "dead" : "pending";
       int64_t backoff = r.backoff_ms << std::min<int64_t>(attempts - 1, 20);
       int64_t next_ms = now_ms + std::min<int64_t>(backoff, 3'600'000);

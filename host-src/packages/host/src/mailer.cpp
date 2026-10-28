@@ -27,6 +27,17 @@ std::string header_value(std::string v) {
 
 }  // namespace
 
+// A display name as a quoted string: no quotes, backslashes, or line breaks, at most 64 characters.
+std::string display_name(const std::string& name) {
+  std::string out;
+  for (char c : name) {
+    if (c == '"' || c == '\\' || c == '\r' || c == '\n' || static_cast<unsigned char>(c) < 0x20) continue;
+    out += c;
+  }
+  if (out.size() > 64) out.resize(64);
+  return out.empty() ? "goober" : out;
+}
+
 std::string mime_message(const std::string& from, const identity::Mail& mail, int64_t now_ms, const std::string& id) {
   std::time_t secs = now_ms / 1000;
   std::tm tm{};
@@ -40,17 +51,22 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
     if (mail.text[i] == '\n' && (i == 0 || mail.text[i - 1] != '\r')) text += '\r';
     text += mail.text[i];
   }
-  return "From: goober <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) + "\r\nSubject: " +
-         header_value(mail.subject) + "\r\nDate: " + date + "\r\nMessage-ID: <" + id + "@" + domain +
+  std::string reply_to = mail.reply_to.empty() ? "" : "Reply-To: " + header_value(mail.reply_to) + "\r\n";
+  return "From: \"" + display_name(mail.from_name) + "\" <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) +
+         "\r\n" + reply_to + "Subject: " + header_value(mail.subject) + "\r\nDate: " + date + "\r\nMessage-ID: <" + id +
+         "@" + domain +
          ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
          "Content-Transfer-Encoding: 8bit\r\n\r\n" +
          text;
 }
 
-SmtpQueue::SmtpQueue(ConfigFn config, DevFn dev)
-    : config_(std::move(config)), dev_(std::move(dev)), worker_([this] { run(); }) {}
+MailQueue::MailQueue(ConfigFn config, CredentialsFn credentials, DevFn dev)
+    : config_(std::move(config)),
+      credentials_(std::move(credentials)),
+      dev_(std::move(dev)),
+      worker_([this] { run(); }) {}
 
-SmtpQueue::~SmtpQueue() {
+MailQueue::~MailQueue() {
   {
     std::lock_guard lock(mu_);
     stopping_ = true;
@@ -59,7 +75,7 @@ SmtpQueue::~SmtpQueue() {
   worker_.join();
 }
 
-void SmtpQueue::send(identity::Mail mail) {
+void MailQueue::send(identity::Mail mail) {
   {
     std::lock_guard lock(mu_);
     if (queue_.size() >= 1000) return;  // a flood never grows memory without bound
@@ -68,12 +84,62 @@ void SmtpQueue::send(identity::Mail mail) {
   cv_.notify_all();
 }
 
-void SmtpQueue::drain() {
+void MailQueue::drain() {
   std::unique_lock lock(mu_);
   cv_.wait(lock, [&] { return queue_.empty() && !busy_; });
 }
 
-void SmtpQueue::run() {
+MailOutcome MailQueue::deliver(const identity::Mail& mail) {
+  auto cfg = config_();
+  MailOutcome out;
+  // A sandbox (a devbox) never mails anyone: everything goes to the dev mailer.
+  if (cfg->sandbox || cfg->identity.mailer == "dev") {
+    out.via = "dev";
+    try {
+      if (dev_) dev_(mail);
+      out.sent = true;
+    } catch (const std::exception& e) {
+      out.error = std::string("the dev mailer failed: ") + e.what();
+    }
+    return out;
+  }
+  uint8_t rnd[12];
+  base::os_random_fill(rnd);
+  std::string id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
+  if (cfg->identity.mailer == "ses") {
+    out.via = "ses";
+    auto creds = credentials_ ? credentials_() : std::nullopt;
+    if (!creds) {
+      out.error = "no AWS credentials: set keys/system/aws_access_key_id and aws_secret_access_key";
+      return out;
+    }
+    const auto& ses = cfg->identity.ses;
+    aws::SesMessage m{ses.from, mail.to, mime_message(ses.from, mail, base::now_unix_ms(), id), ses.configuration_set};
+    auto r = aws::ses_send(m, *creds, ses.region.empty() ? cfg->aws.region : ses.region, cfg->storage / "tmp", ses.endpoint);
+    out.sent = r.sent;
+    out.permanent = r.permanent;
+    out.error = r.error;
+    out.message_id = r.message_id;
+  } else {
+    out.via = "smtp";
+    try {
+      out.sent = deliver_smtp(*cfg, mail, &out.error);
+    } catch (const std::exception& e) {
+      out.error = e.what();
+    }
+  }
+  bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())},
+                  {"to", mail.to},
+                  {"subject", mail.subject},
+                  {"via", out.via},
+                  {"status", out.sent ? "sent" : "failed"}};
+  if (!out.message_id.empty()) line["message_id"] = out.message_id;
+  if (!out.sent) line["error"] = out.error;
+  base::append_line(cfg->storage / "logs" / "mail.log", json::dump(line));
+  return out;
+}
+
+void MailQueue::run() {
   for (;;) {
     identity::Mail mail;
     {
@@ -84,38 +150,12 @@ void SmtpQueue::run() {
       queue_.pop_front();
       busy_ = true;
     }
-    auto cfg = config_();
-    if (cfg->identity.mailer != "smtp") {
-      try {
-        if (dev_) dev_(mail);
-      } catch (const std::exception& e) {
-        std::cerr << "goober-host: the dev mailer failed: " << e.what() << "\n";
-      }
-      {
-        std::lock_guard lock(mu_);
-        busy_ = false;
-      }
-      cv_.notify_all();
-      continue;
-    }
-    std::string error;
-    bool sent = false;
     // Three tries, a little apart: a mail server that hiccups shouldn't cost a sign-in.
-    for (int attempt = 0; attempt < 3 && !sent; ++attempt) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
       if (attempt > 0) std::this_thread::sleep_for(std::chrono::seconds(attempt * 3));
-      try {
-        sent = deliver(*cfg, mail, &error);
-      } catch (const std::exception& e) {
-        error = e.what();
-      }
+      auto outcome = deliver(mail);
+      if (outcome.sent || outcome.permanent) break;
     }
-    bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())},
-                    {"to", mail.to},
-                    {"subject", mail.subject},
-                    {"via", "smtp"},
-                    {"status", sent ? "sent" : "failed"}};
-    if (!sent) line["error"] = error;
-    base::append_line(cfg->storage / "logs" / "mail.log", json::dump(line));
     {
       std::lock_guard lock(mu_);
       busy_ = false;
@@ -124,7 +164,7 @@ void SmtpQueue::run() {
   }
 }
 
-bool SmtpQueue::deliver(const config::HostConfig& cfg, const identity::Mail& mail, std::string* error) {
+bool MailQueue::deliver_smtp(const config::HostConfig& cfg, const identity::Mail& mail, std::string* error) {
   const auto& smtp = cfg.identity.smtp;
   uint8_t rnd[12];
   base::os_random_fill(rnd);

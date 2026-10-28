@@ -33,7 +33,8 @@ struct IdentityConfig {
   bool cookie_secure = true;
   int64_t session_days = 30;
   // "dev" writes each mail to storage/mail/ as a MIME file. "smtp" sends it through an
-  // SMTP server with TLS (submission on 587 with STARTTLS, or smtps on 465).
+  // SMTP server with TLS (submission on 587 with STARTTLS, or smtps on 465). "ses" sends it
+  // through Amazon SES's API with the AWS keys in the key store (design/machine/018.Mail.md).
   std::string mailer = "dev";
   struct Smtp {
     std::string url;            // smtps://host:465 or smtp://host:587 (STARTTLS is required)
@@ -42,6 +43,19 @@ struct IdentityConfig {
     std::string password_file;  // a file holding only the password; kept out of the config
   };
   Smtp smtp;
+  struct Ses {
+    std::string from;               // a verified SES identity, like no-reply@example.com
+    std::string region;             // "" for aws.region
+    std::string configuration_set;  // optional: SES event publishing, suppression settings
+    std::string endpoint;           // optional: another address for the API (a stand-in, in tests)
+  };
+  Ses ses;
+  // The address mail comes from, whichever mailer sends it.
+  std::string from_address() const {
+    if (mailer == "ses") return ses.from;
+    if (mailer == "smtp") return smtp.from;
+    return "goober@localhost";
+  }
   // Host identities: an email and the host roles it holds, like "host:owner".
   std::map<std::string, std::vector<std::string>> operators;
   // OAuth clients registered in every tenant realm, by client_id, like the dumb
@@ -87,6 +101,35 @@ struct HostConfig {
     int64_t max_page_bytes = 4 << 20;
     std::vector<std::string> opt_out;  // hosts never fetched, whatever asks
   } web;
+  // A devbox (a rehydrated backup, design/machine/019.Backups.md): no mail, outbound call,
+  // outbox delivery, or backup leaves the machine.
+  bool sandbox = false;
+  // AWS for SES and S3 backups. The keys live in the key store (keys/system/aws_access_key_id,
+  // aws_secret_access_key, and optionally aws_session_token), never in the config.
+  struct Aws {
+    std::string region = "us-east-1";
+  } aws;
+  // Mail that boxes send (a "mail" service in a manifest): at most this many a day per tenant,
+  // and to one address.
+  struct Mail {
+    int64_t daily_max = 200;
+    int64_t per_address_daily = 3;
+  } mail;
+  // Backups to S3 (design/human/663.Backups.md). Off unless backup.s3.bucket is set.
+  struct Backup {
+    std::string bucket, region, endpoint, prefix;
+    int nightly_minute = 3 * 60 + 30;  // minutes past midnight UTC: "nightly-at": "03:30"
+    int keep_days = 14;
+    int64_t databases_every_ms = 15 * 60 * 1000;
+    bool enabled() const { return !bucket.empty(); }
+  } backup;
+  // Source projects and their builds (design/human/521.Source.md).
+  struct Source {
+    std::string cargo;         // the cargo to build Rust boxes with; "" looks in PATH and ~/.cargo/bin
+    std::string vendor;        // vendored crates (cargo vendor's output); "" means none, so only std
+    std::string sandbox = "bwrap";  // "bwrap", or "none" to build without one (a devbox you trust)
+    int64_t build_timeout_ms = 300000;
+  } source;
   Limit timeout_ms{1000, 10000};
   Limit fuel{100'000'000, 2'000'000'000};
   Limit memory_max_bytes{64 << 20, 512 << 20};

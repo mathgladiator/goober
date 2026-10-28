@@ -70,6 +70,13 @@ std::optional<std::string> KeyStore::resolve(std::string_view credentials, std::
   return std::string(value->as_string());
 }
 
+std::optional<aws::Credentials> KeyStore::aws_credentials() const {
+  auto id = resolve("keys/system/aws_access_key_id", "");
+  auto secret = resolve("keys/system/aws_secret_access_key", "");
+  if (!id || !secret) return std::nullopt;
+  return aws::Credentials{*id, *secret, resolve("keys/system/aws_session_token", "").value_or("")};
+}
+
 bj::array KeyStore::list() const {
   bj::array out;
   std::error_code ec;

@@ -126,3 +126,59 @@ TEST(Config, LocalModeAliasesDomainsUnderLocalhost) {
   EXPECT_FALSE(local->tenant_for_host("nope.localhost").has_value());
   EXPECT_FALSE(local->tenant_for_host("other.example").has_value());
 }
+
+TEST(Config, ReadsSesBackupSourceAndSandbox) {
+  std::string err;
+  auto cfg = parse_config(R"({
+    "sandbox": true,
+    "aws": {"region": "us-west-2"},
+    "identity": {"mailer": "ses", "ses": {"from": "No-Reply@Example.com", "configuration-set": "goober"}},
+    "mail": {"daily-max": 50, "per-address-daily": 2},
+    "backup": {"s3": {"bucket": "my-backups", "prefix": "host1"}, "nightly-at": "04:15", "keep-days": 7,
+               "databases-every-ms": 600000},
+    "source": {"vendor": "vendor", "sandbox": "none", "build-timeout-ms": 60000}
+  })", "/srv", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_TRUE(cfg->sandbox);
+  EXPECT_EQ(cfg->aws.region, "us-west-2");
+  EXPECT_EQ(cfg->identity.mailer, "ses");
+  EXPECT_EQ(cfg->identity.from_address(), "no-reply@example.com");
+  EXPECT_EQ(cfg->identity.ses.configuration_set, "goober");
+  EXPECT_EQ(cfg->mail.daily_max, 50);
+  EXPECT_EQ(cfg->mail.per_address_daily, 2);
+  EXPECT_TRUE(cfg->backup.enabled());
+  EXPECT_EQ(cfg->backup.bucket, "my-backups");
+  EXPECT_EQ(cfg->backup.prefix, "host1/");
+  EXPECT_EQ(cfg->backup.nightly_minute, 4 * 60 + 15);
+  EXPECT_EQ(cfg->backup.keep_days, 7);
+  EXPECT_EQ(cfg->backup.databases_every_ms, 600000);
+  EXPECT_EQ(cfg->source.vendor, "/srv/vendor");
+  EXPECT_EQ(cfg->source.sandbox, "none");
+
+  auto plain = parse_config("{}", "/srv", &err);
+  ASSERT_TRUE(plain);
+  EXPECT_FALSE(plain->backup.enabled());
+  EXPECT_FALSE(plain->sandbox);
+  EXPECT_EQ(plain->source.sandbox, "bwrap");
+}
+
+TEST(Config, RefusesBadSesBackupAndSource) {
+  std::string err;
+  for (const char* bad : {
+           R"({"identity": {"mailer": "ses"}})",
+           R"({"identity": {"mailer": "ses", "ses": {"from": "not-an-email"}}})",
+           R"({"identity": {"ses": {"from": "a@b.c", "endpoint": "http://example.com"}}})",
+           R"({"aws": {"region": "US East"}})",
+           R"({"backup": {}})",
+           R"({"backup": {"s3": {"bucket": "Bad_Bucket"}}})",
+           R"({"backup": {"s3": {"bucket": "ok-bucket", "prefix": "../x"}}})",
+           R"({"backup": {"s3": {"bucket": "ok-bucket"}, "nightly-at": "25:00"}})",
+           R"({"backup": {"s3": {"bucket": "ok-bucket"}, "databases-every-ms": 1000}})",
+           R"({"source": {"sandbox": "docker"}})",
+           R"({"mail": {"per-address-daily": 0}})",
+       }) {
+    err.clear();
+    EXPECT_FALSE(parse_config(bad, "/", &err)) << bad;
+    EXPECT_FALSE(err.empty()) << bad;
+  }
+}

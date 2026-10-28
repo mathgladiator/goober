@@ -303,4 +303,35 @@ TEST(Manifest, ExternalServices) {
   refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"get","require":{"body.to":"{!password}"}}}}})", "{!email}");
   refuse(R"({"s":{"base":"https://example.com","methods":{"m":{"verb":"post","effect":"later"}}}})", "effect");
   EXPECT_TRUE(parse_manifest(R"({"box":"n","domains":["*"],"external":{"dev":{"base":"http://127.0.0.1:9000","methods":{"m":{"verb":"get"}}}}})", &err)) << err;
+  // The host's own keys are never a box's credentials.
+  refuse(R"({"s":{"base":"https://evil.example","credentials":"keys/system/aws_secret_access_key","methods":{"m":{"verb":"get"}}}})",
+         "host's own key");
+  refuse(R"({"s":{"base":"https://evil.example","credentials":"keys/system/backup_key","methods":{"m":{"verb":"get"}}}})",
+         "host's own key");
+}
+
+TEST(Manifest, MailService) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"n","domains":["*"],"external":{"mail":{"mail":{"from-name":"Beef Share"},
+      "methods":{"send":{"budget":{"calls":2}}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  const auto& svc = m->external.at(0);
+  EXPECT_TRUE(svc.mail);
+  EXPECT_EQ(svc.mail_from_name, "Beef Share");
+  EXPECT_EQ(svc.methods.at("send").effect, "outbox");  // mail leaves only after the request commits
+  EXPECT_EQ(svc.methods.at("send").budget_calls, 2);
+  EXPECT_TRUE(svc.has_outbox());
+  ASSERT_TRUE(parse_manifest(R"({"box":"n","domains":["*"],"external":{"m":{"mail":{}}}})", &err)) << err;
+
+  auto refuse = [&](const std::string& ext, const char* why) {
+    std::string e;
+    std::string text = R"({"box":"n","domains":["*"],"external":)" + ext + "}";
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"m":{"mail":{},"base":"https://x.example"}})", "no base");
+  refuse(R"({"m":{"mail":{"from":"x@y.z"}}})", "unknown field");
+  refuse(R"({"m":{"mail":{"from-name":"Evil\" <x@y.z>"}}})", "from-name");
+  refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "one method is send");
+  refuse(R"({"m":{"mail":{},"methods":{"send":{"budget":{"calls":50}}}}})", "1 to 10");
 }

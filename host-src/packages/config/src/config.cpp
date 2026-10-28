@@ -1,5 +1,6 @@
 #include "goober/config/config.h"
 
+#include <cctype>
 #include <set>
 
 #include "goober/base/encoding.h"
@@ -91,6 +92,31 @@ bool is_email(std::string_view s) {
   return s.find('@', at + 1) == std::string_view::npos;
 }
 
+// Like us-east-1 or eu-central-2.
+bool is_region(std::string_view s) {
+  if (s.empty() || s.size() > 32) return false;
+  for (char c : s) {
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+  }
+  return true;
+}
+
+// "" (the service's own address), https://host[:port], or plain http on this machine.
+bool is_endpoint(std::string_view s) {
+  if (s.empty()) return true;
+  std::string_view rest = s.starts_with("https://") ? s.substr(8)
+                          : s.starts_with("http://127.0.0.1:") || s.starts_with("http://localhost:") ? s.substr(7)
+                                                                                                     : std::string_view();
+  if (rest.empty()) return false;
+  while (!rest.empty() && rest.back() == '/') rest.remove_suffix(1);
+  for (char c : rest) {
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == ':')) {
+      return false;
+    }
+  }
+  return !rest.empty();
+}
+
 bool read_limit(const bj::object& limits, std::string_view key, Limit& out, std::string* error) {
   const bj::object* obj = get_object(limits, key, error);
   if (!error->empty()) return false;
@@ -123,7 +149,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web"},
+                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -174,7 +200,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     cfg->public_url = *v;
   }
   if (const auto* id = get_object(root, "identity", &err)) {
-    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "smtp", "operators", "clients"}, "identity", &err)) {
+    if (!check_keys(*id, {"cookie-secure", "session-days", "mailer", "smtp", "ses", "operators", "clients"}, "identity", &err)) {
       return *error = err, nullptr;
     }
     if (auto v = get_bool(*id, "cookie-secure", &err)) cfg->identity.cookie_secure = *v;
@@ -183,8 +209,8 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       return *error = "identity.session-days must be 1 to 400", nullptr;
     }
     if (auto v = get_string(*id, "mailer", &err)) cfg->identity.mailer = *v;
-    if (cfg->identity.mailer != "dev" && cfg->identity.mailer != "smtp") {
-      return *error = "identity.mailer must be \"dev\" or \"smtp\"", nullptr;
+    if (cfg->identity.mailer != "dev" && cfg->identity.mailer != "smtp" && cfg->identity.mailer != "ses") {
+      return *error = "identity.mailer must be \"dev\", \"smtp\", or \"ses\"", nullptr;
     }
     if (const auto* smtp = get_object(*id, "smtp", &err)) {
       if (!check_keys(*smtp, {"url", "from", "username", "password-file"}, "identity.smtp", &err)) {
@@ -211,6 +237,22 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       if (!m.username.empty() && m.password_file.empty()) {
         return *error = "identity.smtp.password-file is required with a username", nullptr;
       }
+    }
+    if (const auto* ses = get_object(*id, "ses", &err)) {
+      if (!check_keys(*ses, {"from", "region", "configuration-set", "endpoint"}, "identity.ses", &err)) {
+        return *error = err, nullptr;
+      }
+      auto& s = cfg->identity.ses;
+      s.from = base::to_lower(get_string(*ses, "from", &err).value_or(""));
+      s.region = get_string(*ses, "region", &err).value_or("");
+      s.configuration_set = get_string(*ses, "configuration-set", &err).value_or("");
+      s.endpoint = get_string(*ses, "endpoint", &err).value_or("");
+      if (!is_email(s.from)) return *error = "identity.ses.from must be an email address", nullptr;
+      if (!s.region.empty() && !is_region(s.region)) return *error = "identity.ses.region isn't an AWS region", nullptr;
+      if (!is_endpoint(s.endpoint)) return *error = "identity.ses.endpoint must be https://host or http://127.0.0.1:port", nullptr;
+    }
+    if (cfg->identity.mailer == "ses" && cfg->identity.ses.from.empty()) {
+      return *error = "identity.mailer \"ses\" needs identity.ses {from}", nullptr;
     }
     if (cfg->identity.mailer == "smtp" && cfg->identity.smtp.url.empty()) {
       return *error = "identity.mailer \"smtp\" needs identity.smtp {url, from, username, password-file}", nullptr;
@@ -301,6 +343,70 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
         if (!h.is_string()) return *error = "web.opt-out holds host names", nullptr;
         cfg->web.opt_out.emplace_back(base::to_lower(h.as_string()));
       }
+    }
+  }
+  if (auto v = get_bool(root, "sandbox", &err)) cfg->sandbox = *v;
+  if (const auto* aws = get_object(root, "aws", &err)) {
+    if (!check_keys(*aws, {"region"}, "aws", &err)) return *error = err, nullptr;
+    if (auto v = get_string(*aws, "region", &err)) cfg->aws.region = *v;
+    if (!is_region(cfg->aws.region)) return *error = "aws.region isn't an AWS region", nullptr;
+  }
+  if (const auto* mail = get_object(root, "mail", &err)) {
+    if (!check_keys(*mail, {"daily-max", "per-address-daily"}, "mail", &err)) return *error = err, nullptr;
+    if (auto v = get_int(*mail, "daily-max", &err)) cfg->mail.daily_max = *v;
+    if (auto v = get_int(*mail, "per-address-daily", &err)) cfg->mail.per_address_daily = *v;
+    if (cfg->mail.daily_max < 0 || cfg->mail.daily_max > 1000000 || cfg->mail.per_address_daily < 1 ||
+        cfg->mail.per_address_daily > 1000) {
+      return *error = "mail.daily-max is 0 to 1000000 and mail.per-address-daily 1 to 1000", nullptr;
+    }
+  }
+  if (const auto* backup = get_object(root, "backup", &err)) {
+    if (!check_keys(*backup, {"s3", "nightly-at", "keep-days", "databases-every-ms"}, "backup", &err)) return *error = err, nullptr;
+    auto& b = cfg->backup;
+    if (const auto* s3 = get_object(*backup, "s3", &err)) {
+      if (!check_keys(*s3, {"bucket", "region", "endpoint", "prefix"}, "backup.s3", &err)) return *error = err, nullptr;
+      b.bucket = get_string(*s3, "bucket", &err).value_or("");
+      b.region = get_string(*s3, "region", &err).value_or("");
+      b.endpoint = get_string(*s3, "endpoint", &err).value_or("");
+      b.prefix = get_string(*s3, "prefix", &err).value_or("");
+      bool bucket_ok = b.bucket.size() >= 3 && b.bucket.size() <= 63;
+      for (char c : b.bucket) bucket_ok = bucket_ok && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.');
+      if (!bucket_ok) return *error = "backup.s3.bucket must be an S3 bucket name", nullptr;
+      if (!b.region.empty() && !is_region(b.region)) return *error = "backup.s3.region isn't an AWS region", nullptr;
+      if (!is_endpoint(b.endpoint)) return *error = "backup.s3.endpoint must be https://host or http://127.0.0.1:port", nullptr;
+      if (!b.prefix.empty() && (!base::is_safe_relative_path(b.prefix.substr(0, b.prefix.size() - (b.prefix.back() == '/'))))) {
+        return *error = "backup.s3.prefix must be a relative path like goober/", nullptr;
+      }
+      if (!b.prefix.empty() && b.prefix.back() != '/') b.prefix += '/';
+    } else if (err.empty()) {
+      return *error = "backup needs s3 {bucket}", nullptr;
+    }
+    if (auto v = get_string(*backup, "nightly-at", &err)) {
+      bool ok = v->size() == 5 && (*v)[2] == ':' && std::isdigit((unsigned char)(*v)[0]) && std::isdigit((unsigned char)(*v)[1]) &&
+                std::isdigit((unsigned char)(*v)[3]) && std::isdigit((unsigned char)(*v)[4]);
+      int h = ok ? std::stoi(v->substr(0, 2)) : -1, m = ok ? std::stoi(v->substr(3, 2)) : -1;
+      if (!ok || h > 23 || m > 59) return *error = "backup.nightly-at must be HH:MM, in UTC", nullptr;
+      b.nightly_minute = h * 60 + m;
+    }
+    if (auto v = get_int(*backup, "keep-days", &err)) {
+      if (*v < 1 || *v > 365) return *error = "backup.keep-days must be 1 to 365", nullptr;
+      b.keep_days = int(*v);
+    }
+    if (auto v = get_int(*backup, "databases-every-ms", &err)) {
+      if (*v < 60000 || *v > 86400000) return *error = "backup.databases-every-ms must be 60000 to 86400000", nullptr;
+      b.databases_every_ms = *v;
+    }
+  }
+  if (const auto* source = get_object(root, "source", &err)) {
+    if (!check_keys(*source, {"cargo", "vendor", "sandbox", "build-timeout-ms"}, "source", &err)) return *error = err, nullptr;
+    auto& s = cfg->source;
+    if (auto v = get_string(*source, "cargo", &err)) s.cargo = *v;
+    if (auto v = get_string(*source, "vendor", &err)) s.vendor = (base_dir / *v).lexically_normal().string();
+    if (auto v = get_string(*source, "sandbox", &err)) s.sandbox = *v;
+    if (s.sandbox != "bwrap" && s.sandbox != "none") return *error = "source.sandbox must be \"bwrap\" or \"none\"", nullptr;
+    if (auto v = get_int(*source, "build-timeout-ms", &err)) {
+      if (*v < 10000 || *v > 3600000) return *error = "source.build-timeout-ms must be 10000 to 3600000", nullptr;
+      s.build_timeout_ms = *v;
     }
   }
   if (!err.empty()) {

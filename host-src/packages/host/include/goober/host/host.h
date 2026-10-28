@@ -231,8 +231,13 @@ class Host {
   void register_web_tools();
   void run_crawls();
   std::string web_call(struct CallContext& ctx, const manifest::ExternalService& svc, const boost::json::value& request);
+  // A box's mail (design/machine/018.Mail.md): checked now, sent after commit through the outbox.
+  std::string mail_call(struct CallContext& ctx, const manifest::ExternalService& svc,
+                        const manifest::ExternalMethod& m, const boost::json::value& request);
+  // Delivers one outbox mail element through the mailer, within the config's mail limits.
+  struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
-  std::unique_ptr<class SmtpQueue> smtp_;
+  std::unique_ptr<class MailQueue> mail_;
 };
 
 }  // namespace goober::host

@@ -18,28 +18,10 @@ owner's agent tools to count, tally, and export them. See `READINESS.md` at the 
 
 ## Confirmation mail
 
-Without a mail service, signups are stored unconfirmed. To send each new signup a
-confirmation link through the outbox (only once the signup is stored, retried with one
-idempotency key), add a `mail` service to the manifest. For Resend:
-
-```json
-"external": {
-  "mail": {
-    "base": "https://api.resend.com",
-    "credentials": "keys/system/resend",
-    "methods": {
-      "send": {
-        "verb": "post",
-        "path": "/emails",
-        "effect": "outbox",
-        "idempotency": "header/Idempotency-Key",
-        "require": { "body.from": "Your Name <hello@your.domain>" }
-      }
-    }
-  }
-}
-```
-
-then `key_set scope=system name=resend value=re_...` and deploy again. The box sends
-`{"to": [...], "subject", "text"}`, Resend's shape; another provider needs its own field
-names (or a small adapter box).
+Each new signup gets a confirmation link through the host's `mail` service (declared in the
+manifest): it leaves only once the signup is stored, through the outbox, at most once a day
+to an address. With the dev mailer (the default) the mail is written to
+`storage/mail/outbox/` and nobody receives it. To really send it, set the host's mailer to
+Amazon SES (`identity.mailer: "ses"` with `identity.ses.from` a verified address, and the
+AWS keys set with `goober-host key set aws_access_key_id` and `aws_secret_access_key`) or to
+SMTP. See `design/machine/018.Mail.md`.
