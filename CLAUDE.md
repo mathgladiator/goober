@@ -122,6 +122,8 @@ Read these before doing design work:
     `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools.
   - `design/machine/021.IdentityEvents.md`: accounts exist once an address is proved (invites
     expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins.
+  - `design/machine/022.MailTemplates.md`: every mail rendered from a template (subject, text,
+    HTML, a layout), defaults for each host mail, overrides per tenant or host, and box templates.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

@@ -188,7 +188,7 @@ class Renderer {
           if (!v) break;
           std::string s = to_text(*v);
           bool trusted = n.raw && frame == 0 && o_.trusted_html.count(n.text);
-          append(out, trusted ? s : base::html_escape(s), "");
+          append(out, trusted || !o_.escape_html ? s : base::html_escape(s), "");
           break;
         }
         case Node::Kind::kSection: {

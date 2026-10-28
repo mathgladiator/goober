@@ -360,11 +360,13 @@ bool plain_email(std::string_view s) {
 std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                             const bj::value& request) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
-  if (!request.is_object()) return fail("send takes {to, subject, text, reply_to?}");
+  const char* kShape = "send takes {to, subject, text, reply_to?} or {to, template, vars?, reply_to?}";
+  if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
-    if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to") {
-      return fail("send takes {to, subject, text, reply_to?}; \"" + std::string(kv.key()) + "\" isn't one");
+    if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
+        kv.key() != "template" && kv.key() != "vars") {
+      return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
   auto text_field = [&](const char* k) -> std::string {
@@ -375,11 +377,36 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
               reply_to = base::to_lower(text_field("reply_to"));
   if (!plain_email(to)) return fail("to must be one email address");
   if (!reply_to.empty() && !plain_email(reply_to)) return fail("reply_to must be one email address");
+  // A template of the tenant's own (design/machine/022.MailTemplates.md), rendered now so a bad
+  // one fails the call; never one of the host's, so no box can send what looks like a sign-in code.
+  std::string html;
+  bj::object vars{{"site", ctx.domain}, {"email", to}};
+  if (r.contains("template")) {
+    if (r.contains("subject") || r.contains("text")) return fail("give a template or a subject and text, not both");
+    std::string name = text_field("template");
+    if (mail::templates::builtin(name)) return fail(name + " is one of the host's own mails; boxes send their own templates");
+    if (const auto* v = r.if_contains("vars")) {
+      if (!v->is_object()) return fail("vars is an object");
+      if (json::dump(*v).size() > 16384) return fail("vars is at most 16 KiB");
+      for (const auto& kv : v->as_object()) {
+        if (kv.key() != "email") vars[kv.key()] = kv.value();  // the recipient is always to
+      }
+    }
+    std::string err;
+    auto rendered = mail_templates_->render(ctx.tenant, name, vars, &err);
+    if (!rendered) return fail(err);
+    subject = rendered->subject;
+    text = rendered->text;
+    html = rendered->html;
+  } else if (r.contains("vars")) {
+    return fail("vars go with a template");
+  }
   if (subject.empty() || subject.size() > 200) return fail("subject is 1 to 200 characters");
   if (text.empty() || text.size() > 65536) return fail("text is 1 to 65536 bytes");
   for (char c : subject) {
     if (c == '\r' || c == '\n') return fail("subject is one line");
   }
+  if (html.empty()) html = mail_templates_->wrap_text(ctx.tenant, subject, text, vars).html;
   OutboxElement e;
   e.service = svc.name;
   e.method = m.name;
@@ -388,6 +415,7 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   e.body = json::dump(bj::object{{"to", to},
                                  {"subject", subject},
                                  {"text", base::valid_utf8(text)},
+                                 {"html", base::valid_utf8(html)},
                                  {"from_name", svc.mail_from_name},
                                  {"reply_to", reply_to}});
   e.idempotency_key = base::sha256_hex("goober-outbox\n" + ctx.request_id + "\n" + std::to_string(ctx.pending.size()))

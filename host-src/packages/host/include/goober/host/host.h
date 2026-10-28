@@ -16,6 +16,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/mail_templates/templates.h"
 #include "goober/host/rate_limit.h"
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
@@ -103,6 +104,7 @@ class Host {
   db::Databases& databases() { return *databases_; }
   boxes::BoxRegistry& boxes() { return *boxes_; }
   identity::Identity& identity() { return *identity_; }
+  mail::templates::Store& mail_templates() { return *mail_templates_; }
   const std::vector<std::string>& startup_notes() const { return startup_notes_; }
   // One step of every running crawl: at most one page each (design/machine/017.Crawl.md).
   // The crawler thread calls it; tests call it directly. Returns the pages fetched.
@@ -253,6 +255,9 @@ class Host {
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class MailQueue> mail_;
+  // Every mail the host sends is rendered from these (design/machine/022.MailTemplates.md).
+  std::unique_ptr<mail::templates::Store> mail_templates_;
+  void register_mail_tools();
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();

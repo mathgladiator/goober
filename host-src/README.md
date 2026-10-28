@@ -217,6 +217,7 @@ binary, and a `QUALITY.md`. The underscore in a name is a namespace (`server_htt
 | config | The JSON host config, validation, and reload. |
 | wal | The host WAL: bundles of file changes, committed then applied, replayed after a crash. |
 | render | Front matter, Mustache, and markdown to HTML. |
+| mail_templates | The templates every mail is rendered from: defaults, per-tenant overrides, and the layout. |
 | sqlite | A small RAII wrapper over SQLite. |
 | content | The content tree per tenant, through the WAL. |
 | attachments | Byte-sniffed images and PDFs, with a ledger per tenant. |

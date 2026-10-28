@@ -20,6 +20,9 @@ struct TemplateOptions {
   // every other value is escaped whatever the braces say, so a template can't be
   // talked into emitting a raw string a person typed (070.UI.md § Templates).
   std::set<std::string, std::less<>> trusted_html;
+  // False for plain text (a mail's subject and text part): values go in as they are, since
+  // nothing reads the output as HTML.
+  bool escape_html = true;
   int max_partial_depth = 16;
   // Rendering stops with an error past this much output, or this many partials, so
   // branching partials or a huge array can't grow a page without bound.

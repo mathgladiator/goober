@@ -116,3 +116,14 @@ TEST(Mustache, HostileTemplatesAreBounded) {
   // Standalone lines still work right after a standalone tag.
   EXPECT_EQ(R("{{#a}}\n  {{/a}}\nz", R"({"a":true})"), "z");
 }
+
+TEST(Mustache, PlainTextLeavesValuesAsTheyAre) {
+  std::string err;
+  goober::render::TemplateOptions text;
+  text.escape_html = false;
+  auto r = goober::render::render_mustache("Hi {{name}} & co", boost::json::parse(R"({"name":"<Ann & Bo>"})"), text, &err);
+  ASSERT_TRUE(r) << err;
+  EXPECT_EQ(*r, "Hi <Ann & Bo> & co");
+  auto h = goober::render::render_mustache("Hi {{name}}", boost::json::parse(R"({"name":"<Ann>"})"), {}, &err);
+  EXPECT_EQ(*h, "Hi &lt;Ann&gt;");
+}

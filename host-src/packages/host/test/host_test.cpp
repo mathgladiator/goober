@@ -215,3 +215,39 @@ TEST_F(HostTest, OperatorsMaySendLargerBodiesThanAnyoneElse) {
   EXPECT_TRUE(refused("Bearer wrong"));
   EXPECT_TRUE(refused(""));
 }
+
+// Mail templates through the operator tools (022): read the default, override it for one
+// tenant, preview it, and see a bad one refused.
+TEST_F(HostTest, MailTemplatesThroughMcp) {
+  auto got = tool("mail_template_get", {{"tenant", "playground"}, {"name", "sign-in-new"}});
+  auto& g = got.at("result").at("structuredContent");
+  EXPECT_EQ(g.at("source"), "default");
+  EXPECT_NE(std::string(g.at("html").as_string()).find("{{code}}"), std::string::npos);
+  EXPECT_EQ(g.at("sample").at("code"), "042917");
+
+  auto put = tool("mail_template_put", {{"tenant", "playground"},
+                                        {"name", "sign-in-returning"},
+                                        {"subject", "Howdy again, {{site}}"},
+                                        {"text", "Your code: {{code}}"},
+                                        {"html", ""}});
+  EXPECT_FALSE(put.at("result").as_object().contains("isError") && put.at("result").at("isError").as_bool()) << json::dump(put);
+  auto preview = tool("mail_template_preview", {{"tenant", "playground"}, {"name", "sign-in-returning"},
+                                                {"vars", bj::object{{"code", "777777"}}}});
+  auto& p = preview.at("result").at("structuredContent");
+  EXPECT_EQ(p.at("subject"), "Howdy again, localhost");
+  EXPECT_NE(std::string(p.at("html").as_string()).find("Your code: 777777"), std::string::npos);
+
+  bool overridden = false;
+  auto list = tool("mail_template_list", {{"tenant", "playground"}});
+  for (const auto& t : list.at("result").at("structuredContent").at("templates").as_array()) {
+    overridden |= t.at("name") == "sign-in-returning" && t.at("source") == "tenant";
+  }
+  EXPECT_TRUE(overridden);
+
+  auto bad = tool("mail_template_put", {{"tenant", "playground"}, {"name", "layout"}, {"text", "no slot"}});
+  EXPECT_TRUE(bad.at("result").at("isError").as_bool());
+  auto gone = tool("mail_template_remove", {{"tenant", "playground"}, {"name", "sign-in-returning"}});
+  EXPECT_FALSE(gone.at("result").as_object().contains("isError") && gone.at("result").at("isError").as_bool());
+  auto unknown = tool("mail_template_list", {{"tenant", "nobody"}});
+  EXPECT_TRUE(unknown.at("result").at("isError").as_bool());
+}

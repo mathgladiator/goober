@@ -503,11 +503,19 @@ void Host::register_tools() {
          auto token = identity_->mint_agent_token(*tenant, client_id, email, ttl, now, &why);
          if (!token) return ToolResult::fail(why);
          auto client = identity_->client(*tenant, client_id);
-         send_mail(identity::Mail{
+         identity::Mail m{
              email, "An agent can act for you on " + *tenant,
              "An operator just gave the agent " + (client ? client->name : client_id) + " a token to act for you for " +
                  std::to_string(days->as_int64()) +
-                 " days.\n\nIf you expected that, there is nothing to do. If not, open your account page and remove it.\n"});
+                 " days.\n\nIf you expected that, there is nothing to do. If not, open your account page and remove it.\n"};
+         m.realm = *tenant;
+         m.template_name = "agent-token";
+         std::string site = *tenant;
+         for (const auto& [domain, entry] : config_.get()->domains) {
+           if (entry.tenant == *tenant) site = domain;
+         }
+         m.vars = bj::object{{"client", client ? client->name : client_id}, {"days", days->as_int64()}, {"site", site}};
+         send_mail(m);
          return ToolResult::ok(bj::object{{"access_token", *token},
                                           {"expires_at", base::format_utc_ms(now + ttl)},
                                           {"note", "Shown once; goober keeps only its hash."}});

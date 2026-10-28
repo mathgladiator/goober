@@ -23,7 +23,9 @@
 
 namespace goober::host {
 
-// The MIME text of one plain-text mail. Header values lose any CR or LF.
+// The MIME text of one mail: plain text, or multipart/alternative when it has HTML. Header
+// values lose any CR or LF.
+std::string base64_lines(std::string_view data);
 std::string mime_message(const std::string& from, const identity::Mail& mail, int64_t now_ms, const std::string& id);
 
 struct MailOutcome {

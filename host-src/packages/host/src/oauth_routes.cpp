@@ -426,13 +426,19 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
 void Host::mail_new_grant(const SignedIn& who, const identity::Client& client, const std::string& domain,
                           const std::string& from) {
   // No link in it: a link in an email is exactly what a phisher would send (013).
-  send_mail(identity::Mail{
+  identity::Mail m{
       who.user.email, "A new " + std::string(client.person ? "app" : "agent") + " can act for you on " + domain,
       std::string(client.person ? "An app" : "An agent") + " was just allowed to act " +
           (client.person ? "as you" : "for you") + " on " + domain + ": " + client.name + ", from " + from +
           (client.source == "dynamic" ? " (it registered itself, so nobody has checked it)" : "") +
           ".\n\nIf that was you, there is nothing to do. If it wasn't, open " + domain +
-          " yourself, go to your account page, and remove it.\n"});
+          " yourself, go to your account page, and remove it.\n"};
+  m.realm = who.user.realm;
+  m.template_name = "new-grant";
+  m.vars = bj::object{{"kind", client.person ? "app" : "agent"}, {"acting", client.person ? "as you" : "for you"},
+                      {"client", client.name},                   {"from", from},
+                      {"unchecked", client.source == "dynamic"},  {"site", domain}};
+  send_mail(m);
 }
 
 }  // namespace goober::host

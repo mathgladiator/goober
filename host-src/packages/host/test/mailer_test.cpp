@@ -83,7 +83,11 @@ cat > "$dir/stdin"
   EXPECT_EQ(*base::read_file(root / "bin/conf"), "user = \"goober:s3cret \\\"quoted\\\"\"\n");
   EXPECT_EQ(*base::read_file(root / "bin/mode"), "600\n");
   auto mail = base::read_file(root / "bin/stdin");
-  EXPECT_NE(mail->find("Your sign-in code for localhost is "), std::string::npos);
+  // Rendered from the sign-in-new template (022): a welcome, as text and as HTML.
+  EXPECT_NE(mail->find("Your code to finish signing in is "), std::string::npos) << *mail;
+  EXPECT_NE(mail->find("Subject: Welcome to localhost: your sign-in code"), std::string::npos);
+  EXPECT_NE(mail->find("Content-Type: multipart/alternative; boundary="), std::string::npos);
+  EXPECT_NE(mail->find("Content-Type: text/html; charset=utf-8"), std::string::npos);
   // No code left on disk, and the private curl config is gone.
   EXPECT_FALSE(fs::exists(root / "storage/mail/outbox"));
   for (const auto& e : fs::directory_iterator(root / "storage/mail")) ADD_FAILURE() << e.path();

@@ -286,7 +286,11 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       sign-ins append `first-verified` and `signed-in` events; boxes hear them through
       `routes.identity`, after commit, in order, with retries (`design/machine/021.IdentityEvents.md`).
 - [x] A site's `/mcp` with no tools for the caller says where the operator endpoint is.
-- [ ] Mail templates for every host mail, with defaults and per-site overrides (in progress).
+- [x] Mail templates for every mail, with defaults (a welcome for new addresses, a leaner one
+      for returning), per-tenant and host-wide overrides, a layout, HTML with a text part,
+      operator tools, and boxes sending their site's own templates (`design/machine/022.MailTemplates.md`).
+- [ ] Operator OAuth, so agents whose connectors only speak OAuth (Grok) reach
+      `/goober-operations-mcp` (in progress).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

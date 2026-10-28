@@ -47,11 +47,19 @@ const char* kWat = R"wat((module
   (data (i32.const 24) "send")
   (data (i32.const 32) "{\22to\22:\22Person@Example.org\22,\22subject\22:\22Welcome\22,\22text\22:\22Thanks for joining.\22,\22reply_to\22:\22owner@example.com\22}")
   (data (i32.const 160) "{\22to\22:\22person@example.org\22,\22text\22:\22no subject\22}")
+  (data (i32.const 256) "{\22to\22:\22person@example.org\22,\22template\22:\22order-ready\22,\22vars\22:{\22name\22:\22<Ann>\22,\22email\22:\22evil@x.com\22}}")
+  (data (i32.const 512) "{\22to\22:\22person@example.org\22,\22template\22:\22sign-in-new\22,\22vars\22:{\22code\22:\22123456\22}}")
   (func $answer (param $n i32)
     (drop (call $result (i32.const 4096) (local.get $n)))
     (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 4096) (local.get $n))))
   (func (export "goober_route_join") (result i32)
     (call $answer (call $call (i32.const 16) (i32.const 4) (i32.const 24) (i32.const 4) (i32.const 32) (i32.const 107)))
+    (i32.const 0))
+  (func (export "goober_route_tmpl") (result i32)
+    (call $answer (call $call (i32.const 16) (i32.const 4) (i32.const 24) (i32.const 4) (i32.const 256) (i32.const 97)))
+    (i32.const 0))
+  (func (export "goober_route_forge") (result i32)
+    (call $answer (call $call (i32.const 16) (i32.const 4) (i32.const 24) (i32.const 4) (i32.const 512) (i32.const 77)))
     (i32.const 0))
   (func (export "goober_route_bad") (result i32)
     (call $answer (call $call (i32.const 16) (i32.const 4) (i32.const 24) (i32.const 4) (i32.const 160) (i32.const 47)))
@@ -76,7 +84,8 @@ class MailTest : public ::testing::Test {
     port = host->start();
     std::string manifest = R"({"box":"welcome","domains":["*"],
       "external":{"mail":{"mail":{"from-name":"Beef Share"}}},
-      "routes":{"http":{"/join":{"post":{"name":"join","public":true}},"/bad":{"post":{"name":"bad","public":true}}}}})";
+      "routes":{"http":{"/join":{"post":{"name":"join","public":true}},"/bad":{"post":{"name":"bad","public":true}},
+        "/tmpl":{"post":{"name":"tmpl","public":true}},"/forge":{"post":{"name":"forge","public":true}}}}})";
     ASSERT_TRUE(host->boxes().upload(manifest, kWat, &err)) << err;
     ASSERT_TRUE(host->keys().set("system", "", "aws_access_key_id", kCreds.access_key_id, 1, &err)) << err;
     ASSERT_TRUE(host->keys().set("system", "", "aws_secret_access_key", kCreds.secret_access_key, 1, &err)) << err;
@@ -118,6 +127,30 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
   auto dead = host->outbox_list("dead");
   ASSERT_EQ(dead.size(), 1u);
   EXPECT_NE(std::string(dead[0].at("last_error").as_string()).find("per-address-daily"), std::string::npos);
+}
+
+// Mail templates (022): a box sends one of the tenant's own templates by name, wrapped in the
+// layout, to the address it names; never one of the host's own, like a sign-in code.
+TEST_F(MailTest, BoxesSendTheirTenantsTemplatesButNeverTheHostsOwn) {
+  start("");
+  std::string err, body;
+  ASSERT_TRUE(host->mail_templates().put("playground", "order-ready",
+                                         {"Your order is ready, {{name}}", "Pick it up at {{site}}, {{name}}.", ""}, &err))
+      << err;
+  ASSERT_EQ(post(port, "/tmpl", &body), 200) << body;
+  EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  auto mails = fake.mails();
+  ASSERT_EQ(mails.size(), 1u);
+  EXPECT_NE(mails[0].find("To: person@example.org\r\n"), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("Subject: Your order is ready, <Ann>\r\n"), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("Pick it up at localhost, <Ann>."), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("Sent by localhost to person@example.org."), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("Content-Type: text/html"), std::string::npos) << mails[0];
+
+  ASSERT_EQ(post(port, "/forge", &body), 200);
+  EXPECT_NE(body.find("one of the host's own mails"), std::string::npos) << body;
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 0);
 }
 
 TEST_F(MailTest, SesHiccupsAreRetriedAndRefusalsAreNot) {

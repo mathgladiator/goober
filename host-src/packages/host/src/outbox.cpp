@@ -198,6 +198,7 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     return f && f->is_string() ? std::string(f->as_string()) : std::string();
   };
   identity::Mail mail{text("to"), text("subject"), text("text"), text("from_name"), text("reply_to")};
+  mail.html = text("html");
   // The limits (config mail): per tenant a day, and per address a day, counted by a hash of
   // the address so the ledger holds no addresses.
   fs::create_directories(cfg->storage / "mail");

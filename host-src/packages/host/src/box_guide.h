@@ -181,7 +181,7 @@ every call without query strings or bodies.
 
 ## Sending mail
 
-A box sends plain-text mail through the host's own mailer (SES or SMTP, set by the operator):
+A box sends mail through the host's own mailer (SES or SMTP, set by the operator):
 "external": {"mail": {"mail": {"from-name": "Beef Share"},
                       "methods": {"send": {"budget": {"calls": 1}}}}}
 goober_call("mail", "send", {"to": "person@example.org", "subject": "Confirm your spot",
@@ -190,6 +190,11 @@ leaves only if the request commits, through the outbox, retried for a day. It co
 host's address with your from-name. The host caps mail per tenant a day and per address a day
 (config mail), so a form can't be turned into a cannon; a refused mail is a dead letter
 (outbox_dead_letters). A sandbox host (a rehydrated devbox) never sends: mail waits.
+Every mail is wrapped in the site's layout, as text and as HTML. To send a designed mail, the
+operator saves a template of the site's own (mail_template_put, like "order-ready"), and the box
+sends {"to", "template": "order-ready", "vars": {"name": "Ann"}} instead of subject and text;
+{{site}} and {{email}} (the recipient) are filled in. The host's own mails (sign-in codes and
+the rest) can't be sent by a box.
 
 ## Reading the web
 

@@ -57,6 +57,38 @@ std::string encoded_words(const std::string& v) {
   return out;
 }
 
+namespace {
+
+// A text part's body for SMTP: CRLF line endings, and base64 when a line passes 998 bytes
+// (RFC 5322). Returns the transfer encoding.
+std::string encode_text(const std::string& in, std::string* out) {
+  std::string text;
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (in[i] == '\n' && (i == 0 || in[i - 1] != '\r')) text += '\r';
+    text += in[i];
+  }
+  bool long_line = false;
+  for (size_t start = 0, nl; start < text.size(); start = nl + 2) {
+    nl = text.find("\r\n", start);
+    if (nl == std::string::npos) nl = text.size();
+    long_line |= nl - start > 998;
+  }
+  if (!long_line) {
+    *out = std::move(text);
+    return "8bit";
+  }
+  *out = base64_lines(text);
+  return "base64";
+}
+
+}  // namespace
+
+std::string base64_lines(std::string_view data) {
+  std::string b64 = base::base64_encode(data), out;
+  for (size_t i = 0; i < b64.size(); i += 76) out += b64.substr(i, 76) + "\r\n";
+  return out;
+}
+
 std::string mime_message(const std::string& from, const identity::Mail& mail, int64_t now_ms, const std::string& id) {
   std::time_t secs = now_ms / 1000;
   std::tm tm{};
@@ -65,32 +97,24 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
   std::strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S +0000", &tm);
   std::string domain = from.substr(from.find('@') + 1);
   std::string text;
-  // SMTP wants CRLF line endings, and a line holding only "." would end the message early.
-  for (size_t i = 0; i < mail.text.size(); ++i) {
-    if (mail.text[i] == '\n' && (i == 0 || mail.text[i - 1] != '\r')) text += '\r';
-    text += mail.text[i];
-  }
-  // A line past 998 bytes breaks SMTP (RFC 5322): then the body goes as base64, in short lines.
-  bool long_line = false;
-  for (size_t start = 0, nl; start < text.size(); start = nl + 2) {
-    nl = text.find("\r\n", start);
-    if (nl == std::string::npos) nl = text.size();
-    long_line |= nl - start > 998;
-  }
-  std::string encoding = "8bit";
-  if (long_line) {
-    std::string b64 = base::base64_encode(text);
-    text.clear();
-    for (size_t i = 0; i < b64.size(); i += 76) text += b64.substr(i, 76) + "\r\n";
-    encoding = "base64";
-  }
+  std::string encoding = encode_text(mail.text, &text);
   std::string reply_to = mail.reply_to.empty() ? "" : "Reply-To: " + header_value(mail.reply_to) + "\r\n";
   std::string name = display_name(mail.from_name);
   std::string from_name = encoded_words(name) == name ? "\"" + name + "\"" : encoded_words(name);
-  return "From: " + from_name + " <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) + "\r\n" + reply_to +
-         "Subject: " + encoded_words(header_value(mail.subject)) + "\r\nDate: " + date + "\r\nMessage-ID: <" + id + "@" +
-         domain + ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
-         "Content-Transfer-Encoding: " + encoding + "\r\n\r\n" + text;
+  std::string headers = "From: " + from_name + " <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) + "\r\n" +
+                        reply_to + "Subject: " + encoded_words(header_value(mail.subject)) + "\r\nDate: " + date +
+                        "\r\nMessage-ID: <" + id + "@" + domain + ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\n";
+  if (mail.html.empty()) {
+    return headers + "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding + "\r\n\r\n" + text;
+  }
+  // Text first, HTML last: a client shows the last part it can (RFC 2046 § 5.1.4). The HTML
+  // goes as base64, so no line of it can break SMTP, and the boundary can't occur in either.
+  std::string boundary = "=_goober_" + id;
+  return headers + "Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n" +
+         "--" + boundary + "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding +
+         "\r\n\r\n" + text + (text.ends_with("\r\n") ? "" : "\r\n") + "--" + boundary +
+         "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+         base64_lines(base::valid_utf8(mail.html)) + "--" + boundary + "--\r\n";
 }
 
 MailQueue::MailQueue(ConfigFn config, CredentialsFn credentials, DevFn dev)

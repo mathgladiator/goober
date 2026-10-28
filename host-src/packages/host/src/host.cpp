@@ -138,6 +138,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   keys_ = std::make_unique<KeyStore>(config->storage);
   mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
+  mail_templates_ = std::make_unique<mail::templates::Store>(config->storage / "mail" / "templates");
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
   backups_ = std::make_unique<BackupService>([this] { return config_.get(); }, *keys_, config_file_);
@@ -154,6 +155,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_tools();
   register_content_tools();
   register_data_tools();
+  register_mail_tools();
   register_web_tools();
   register_source_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
@@ -276,7 +278,30 @@ std::string Host::reload() {
 void Host::drain_mail() { mail_->drain(); }
 
 // Every mail is queued, so a sign-in answers in the same time whether or not one goes out.
-void Host::send_mail(const identity::Mail& mail) { mail_->send(mail); }
+// A mail naming a template is rendered from the tenant's templates here, so the queue sends
+// what was rendered; any other mail is wrapped in the tenant's layout for its HTML part.
+void Host::send_mail(const identity::Mail& mail) {
+  identity::Mail out = mail;
+  std::string tenant = mail.realm.empty() ? std::string(mail::templates::kEveryTenant) : mail.realm;
+  bj::object vars = mail.vars;
+  vars["email"] = mail.to;
+  if (!vars.contains("site")) vars["site"] = config_.get()->platform_domain;
+  if (!mail.template_name.empty()) {
+    std::string err;
+    if (auto r = mail_templates_->render(tenant, mail.template_name, vars, &err)) {
+      out.subject = std::move(r->subject);
+      out.text = std::move(r->text);
+      out.html = std::move(r->html);
+    } else {
+      // The fallback text still goes: a broken template must never stop a sign-in code.
+      std::cerr << "goober-host: mail template " << mail.template_name << " for " << tenant << ": " << err << "\n";
+    }
+  } else if (out.html.empty()) {
+    out.html = mail_templates_->wrap_text(tenant, out.subject, out.text, vars).html;
+  }
+  out.template_name.clear();
+  mail_->send(std::move(out));
+}
 
 void Host::write_dev_mail(const identity::Mail& mail) {
   auto cfg = config_.get();
