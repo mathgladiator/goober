@@ -18,6 +18,11 @@
 # sudo. Point DNS at it before the first run so Caddy can get certificates.
 set -euo pipefail
 
+# The whole script is one function, read in full before any of it runs: bash reads a script
+# as it goes, so editing this file during a deploy (a git pull, say) would otherwise make the
+# rest of the run read from the middle of a line.
+main() {
+
 USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--with-rust]"
 TARGET="${1:?$USAGE}"
 DIR=""
@@ -94,3 +99,7 @@ echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
 
 echo "── installing on $TARGET"
 ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST; rm -rf $REMOTE"
+}
+
+main "$@"
+exit
