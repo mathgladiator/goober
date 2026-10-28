@@ -74,11 +74,13 @@ Static files (CSS, JS, fonts, favicons) go anywhere with content_put. Paths with
 starts with "_" are never served.
 
 ## Images and files [attachment_put, attachment_list, attachment_get, attachment_delete]
-attachment_put takes base64 bytes or an https url to fetch, plus name, alt, and visibility
-(public, or members). It answers with /attachment/$id.$ext; use that URL in pages:
+attachment_put takes base64 bytes, a file already on the site (file: "/hero.jpg"), or an https
+url to fetch, plus name, alt, and visibility (public, or members). A URL on this host's own
+domain is read from its files. It answers with /attachment/$id.$ext; use that URL in pages:
   ![A red truck](/attachment/3.jpg)      or   image: /attachment/3.jpg
 PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, and PDF, detected from the bytes. People can also upload
-at /attachment/ in a browser, as an owner of the tenant.
+at /attachment/ in a browser, as an owner of the tenant. If a call fails, nothing is stored:
+fix the call; never paste its arguments into a page.
 
 ## Boxes with templates
 A box route may name a template; browsers then get the box's JSON rendered through it, while
@@ -390,11 +392,15 @@ void Host::register_content_tools() {
 
   mcp_->add_tool(
       {"attachment_put",
-       "Stores an image or PDF and returns its URL, /attachment/$id.$ext, to use in pages. Give base64 bytes, or an "
-       "https url for the host to fetch. The type comes from the bytes: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF.",
+       "Stores an image or PDF and returns its URL, /attachment/$id.$ext, to use in pages. Give exactly one of: "
+       "base64 bytes; file, a file already on the tenant's site (like /hero-small.jpg, from content_list); or an "
+       "https url for the host to fetch (a URL on one of this host's own domains is read from its files). The type "
+       "comes from the bytes: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF. On failure, nothing is stored: don't "
+       "put this call's arguments in a page.",
        object_schema({{"tenant", tenant_prop},
                       {"base64", string_property("The file's bytes as base64.")},
                       {"url", string_property("An https URL to fetch the file from.")},
+                      {"file", string_property("A file on the tenant's site, like /hero-small.jpg.")},
                       {"name", string_property("A name for people, like truck.jpg.")},
                       {"alt", string_property("What the image shows, for screen readers and the markdown snippet.")},
                       {"visibility", enum_property("Who can fetch it.", {"public", "members"})}},
@@ -405,10 +411,42 @@ void Host::register_content_tools() {
          if (!known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves tenant " + *tenant);
          auto b64 = arg(args, "base64");
          auto url = arg(args, "url");
-         if (bool(b64) == bool(url)) return ToolResult::fail("give exactly one of base64 or url");
+         auto file = arg(args, "file");
+         if (int(bool(b64)) + int(bool(url)) + int(bool(file)) != 1) {
+           return ToolResult::fail("give exactly one of base64, file, or url");
+         }
+         // A URL on this host (one of its domains, or loopback) names one of its own files: read
+         // it, rather than fetch through the network what is already here.
+         if (url) {
+           std::string rest = url->starts_with("https://") ? url->substr(8) : url->starts_with("http://") ? url->substr(7) : "";
+           std::string authority = rest.substr(0, rest.find('/'));
+           std::string host = base::to_lower(authority.substr(0, authority.rfind(':') == std::string::npos || authority.ends_with("]")
+                                                                      ? authority.size()
+                                                                      : authority.rfind(':')));
+           auto cfg = config_.get();
+           auto own = cfg->domains.find(host);
+           bool loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+           if (!rest.empty() && (loopback || own != cfg->domains.end())) {
+             if (own != cfg->domains.end() && own->second.tenant != *tenant) {
+               return ToolResult::fail(host + " is tenant " + own->second.tenant + "'s, not " + *tenant + "'s");
+             }
+             file = rest.find('/') == std::string::npos ? std::string("/") : rest.substr(rest.find('/'));
+             url.reset();
+           } else if (!url->starts_with("https://")) {
+             return ToolResult::fail("only https URLs can be fetched; for a file already on the site, give file, like "
+                                     "\"/hero-small.jpg\"");
+           }
+         }
          std::string bytes, err;
          std::string name = arg(args, "name").value_or("");
-         if (b64) {
+         if (file) {
+           std::string path = file->substr(0, file->find_first_of("?#"));
+           while (path.starts_with("/")) path.erase(0, 1);
+           auto f = content_->get(*tenant, path);
+           if (!f) return ToolResult::fail("no file /" + path + " on tenant " + *tenant + "'s site (content_list shows them)");
+           bytes = std::move(f->data);
+           if (name.empty()) name = path.substr(path.rfind('/') + 1);
+         } else if (b64) {
            auto decoded = base::base64_decode(*b64);
            if (!decoded) return ToolResult::fail("base64 is not valid");
            bytes = std::move(*decoded);

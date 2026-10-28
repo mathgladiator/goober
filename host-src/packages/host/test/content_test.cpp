@@ -243,3 +243,23 @@ TEST_F(SiteRoutesTest, AttachmentUploadsTakeAFullMegabyte) {
   }
   EXPECT_EQ(flood, 413);
 }
+
+// An image already on the site becomes an attachment by its path, or by a URL on this host
+// (what an agent tried with http://127.0.0.1:8080/hero-small.jpg), without a network fetch.
+TEST_F(SiteRoutesTest, AttachmentsFromTheSitesOwnFiles) {
+  tool("content_put", {{"tenant", "playground"}, {"path", "hero-small.jpg"}, {"base64", base::base64_encode(kPng)}});
+  auto by_file = tool("attachment_put", {{"tenant", "playground"}, {"file", "/hero-small.jpg"}, {"alt", "The ranch"}});
+  ASSERT_FALSE(by_file.as_object().contains("error")) << json::dump(by_file);
+  EXPECT_EQ(by_file.at("name"), "hero-small.jpg");
+  EXPECT_EQ(by_file.at("content_type"), "image/png");  // from the bytes, not the name
+  auto by_url = tool("attachment_put", {{"tenant", "playground"}, {"url", "http://127.0.0.1:8080/hero-small.jpg"}});
+  ASSERT_FALSE(by_url.as_object().contains("error")) << json::dump(by_url);
+  auto by_domain = tool("attachment_put", {{"tenant", "playground"}, {"url", "https://localhost/hero-small.jpg?v=2"}});
+  ASSERT_FALSE(by_domain.as_object().contains("error")) << json::dump(by_domain);
+  auto missing = tool("attachment_put", {{"tenant", "playground"}, {"file", "/nope.jpg"}});
+  EXPECT_NE(std::string(missing.at("error").as_string()).find("content_list"), std::string::npos);
+  auto plain = tool("attachment_put", {{"tenant", "playground"}, {"url", "http://example.com/x.png"}});
+  EXPECT_NE(std::string(plain.at("error").as_string()).find("give file"), std::string::npos);
+  auto two = tool("attachment_put", {{"tenant", "playground"}, {"file", "/hero-small.jpg"}, {"base64", "AA=="}});
+  EXPECT_NE(std::string(two.at("error").as_string()).find("exactly one"), std::string::npos);
+}
