@@ -49,12 +49,34 @@ GLIBC="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
 
 echo "── packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
 # bubblewrap is the sandbox source projects build in (521.Source.md).
 # iproute2 and openssl: Stalwart's provisioning namespace, and its first certificate.
-apt-get install -y -qq caddy curl python3 tzdata ca-certificates bubblewrap iproute2 openssl >/dev/null
+PACKAGES=(caddy curl python3 tzdata ca-certificates bubblewrap iproute2 openssl)
 # A C toolchain: Rust's build scripts and proc macros (serde's derive) link for this machine.
-[[ "$WITH_RUST" == --with-rust ]] && apt-get install -y -qq build-essential >/dev/null
+[[ "$WITH_RUST" == --with-rust ]] && PACKAGES+=(build-essential)
+# The installed version, or "" when the package isn't installed.
+installed() {
+  local status version
+  read -r status version < <(dpkg-query -W -f='${db:Status-Abbrev} ${Version}\n' "$1" 2>/dev/null || true)
+  [[ "$status" == ii ]] && echo "$version" || true
+}
+declare -A BEFORE
+for p in "${PACKAGES[@]}"; do BEFORE[$p]="$(installed "$p")"; done
+echo "   apt-get update"
+apt-get update -qq
+# install also upgrades each one that has a newer version; what changed is listed below.
+echo "   apt-get install ${PACKAGES[*]}"
+apt-get install -y -qq "${PACKAGES[@]}" >/dev/null
+for p in "${PACKAGES[@]}"; do
+  now="$(installed "$p")"
+  if [[ -z "${BEFORE[$p]}" ]]; then
+    printf '   + %-16s %s (installed)\n' "$p" "$now"
+  elif [[ "${BEFORE[$p]}" != "$now" ]]; then
+    printf '   ↑ %-16s %s → %s\n' "$p" "${BEFORE[$p]}" "$now"
+  else
+    printf '   ✓ %-16s %s\n' "$p" "$now"
+  fi
+done
 
 echo "── user and directory"
 id "$RUN_AS" >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --create-home --shell /usr/sbin/nologin "$RUN_AS"
@@ -250,6 +272,18 @@ echo "── health"
 for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/goober/health" >/dev/null 2>&1 && break; sleep 0.2; done
 curl -fsS "http://127.0.0.1:$PORT/goober/health" && echo
 systemctl --no-pager --lines=0 status goober-host | head -3 || true
+
+echo "── versions"
+printf '   %-14s %s\n' "goober-host" "$("$BIN" --version | sed 's/^goober-host //')"
+printf '   %-14s %s\n' "caddy" "$(caddy version 2>/dev/null | cut -d' ' -f1)"
+if [[ "$WITH_RUST" == --with-rust && -x "$HOME_DIR/.cargo/bin/rustc" ]]; then
+  printf '   %-14s %s\n' "rustc" "$(sudo -u "$RUN_AS" -H "$HOME_DIR/.cargo/bin/rustc" --version | cut -d' ' -f2-)"
+  printf '   %-14s %s\n' "cargo" "$(sudo -u "$RUN_AS" -H "$HOME_DIR/.cargo/bin/cargo" --version | cut -d' ' -f2-)"
+  printf '   %-14s %s\n' "crates" "$(ls "$HOME_DIR/vendor" 2>/dev/null | tr '\n' ' ')"
+fi
+if [[ -z "$WITHOUT_MAIL" && -x /srv/stalwart/bin/stalwart ]]; then
+  printf '   %-14s %s\n' "stalwart" "$(/srv/stalwart/bin/stalwart --version 2>/dev/null)"
+fi
 
 echo "── checking everything this host needs"
 FAILED=()
