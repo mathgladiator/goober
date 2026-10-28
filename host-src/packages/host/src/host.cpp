@@ -219,6 +219,14 @@ uint16_t Host::start() {
       auto cfg = config_.get();
       return cfg->mail.inbound.enabled() ? uint64_t(cfg->mail.inbound.max_bytes) * 2 + (1 << 20) : 0;
     }
+    // Attachment uploads: as large as attachment_put takes with an operator's token, and an image
+    // of 1 MiB from a browser (whose session cookie the handler checks once the body is in).
+    if (target.substr(0, target.find('?')) == "/attachment/upload") {
+      server::http::Request probe;
+      probe.headers.emplace_back("authorization", std::string(authorization));
+      bool op = authorization.starts_with("Bearer ") && !bearer_operator(probe).empty();
+      return (op ? kOperatorAttachmentMaxBytes : kBrowserAttachmentMaxBytes) + kMultipartOverheadBytes;
+    }
     if (target.substr(0, target.find('?')) != kOperationsMcpPath || !authorization.starts_with("Bearer ")) return 0;
     server::http::Request probe;
     probe.headers.emplace_back("authorization", std::string(authorization));

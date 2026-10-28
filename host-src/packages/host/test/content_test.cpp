@@ -209,3 +209,37 @@ TEST_F(SiteRoutesTest, PagesWithRequirementsAndBoxRoutesWithTemplates) {
   EXPECT_EQ(as_html.headers["content-type"], "text/html; charset=utf-8");
   EXPECT_EQ(as_html.body, "<article>Job 7: 3 &lt;b&gt;hi&lt;/b&gt;</article>");
 }
+
+// Images up to 1 MiB from the attachments page, more with an operator's token; larger is
+// refused with what the limit is, past the host's general 1 MiB body limit either way.
+TEST_F(SiteRoutesTest, AttachmentUploadsTakeAFullMegabyte) {
+  std::string png = kPng + std::string((1 << 20) - kPng.size(), 'x');  // exactly 1 MiB
+  std::string body = "--XyZ\r\nContent-Disposition: form-data; name=\"alt\"\r\n\r\nA big one\r\n"
+                     "--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.png\"\r\n"
+                     "Content-Type: image/png\r\n\r\n" + png + "\r\n--XyZ--\r\n";
+  auto form = fetch(port, bhttp::verb::post, "/attachment/upload",
+                    {{"authorization", "Bearer test-token-0123456789"}, {"content-type", "multipart/form-data; boundary=XyZ"}},
+                    body);
+  ASSERT_EQ(form.status, 201) << form.body.substr(0, 200);
+  // An operator's token takes more, as attachment_put does.
+  std::string bigger = kPng + std::string((3 << 20), 'x');
+  auto raw = fetch(port, bhttp::verb::post, "/attachment/upload?name=b.png",
+                   {{"authorization", "Bearer test-token-0123456789"}, {"content-type", "image/png"}}, bigger);
+  EXPECT_EQ(raw.status, 201) << raw.body.substr(0, 200);
+  // Past the operator's limit: refused, saying why.
+  std::string huge = kPng + std::string((32 << 20) + 1, 'x');
+  auto over = fetch(port, bhttp::verb::post, "/attachment/upload?name=h.png",
+                    {{"authorization", "Bearer test-token-0123456789"}, {"content-type", "image/png"}}, huge);
+  EXPECT_EQ(over.status, 413);
+  // Without a token, a 1 MiB form is read and then needs a signed-in editor; far more isn't read.
+  auto anon = fetch(port, bhttp::verb::post, "/attachment/upload", {{"content-type", "multipart/form-data; boundary=XyZ"}}, body);
+  EXPECT_EQ(anon.status, 401);
+  // The host answers 413 and closes before reading it, so the sender may see the close first.
+  int flood = 0;
+  try {
+    flood = fetch(port, bhttp::verb::post, "/attachment/upload", {{"content-type", "image/png"}}, bigger).status;
+  } catch (const std::exception&) {
+    flood = 413;
+  }
+  EXPECT_EQ(flood, 413);
+}

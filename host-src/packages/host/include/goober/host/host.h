@@ -36,6 +36,10 @@ inline constexpr std::string_view kMailHookPath = "/internal/routes/mta/stalwart
 // How large an operator's request may be: a pushed site file or a box, as base64 in JSON.
 inline constexpr uint64_t kOperatorBodyMaxBytes = 64ull << 20;
 inline constexpr uint64_t kOperatorAttachmentMaxBytes = 32ull << 20;
+// An image an editor uploads from the attachments page, signed in with a browser session.
+inline constexpr uint64_t kBrowserAttachmentMaxBytes = 1ull << 20;
+// Room for a multipart form's boundaries and fields around the file.
+inline constexpr uint64_t kMultipartOverheadBytes = 64ull << 10;
 
 // A signed-in caller: a tenant identity in the domain's realm, or a host identity
 // whose roles come from identity.operators in the config.

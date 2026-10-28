@@ -128,6 +128,17 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
       up.fields = router::parse_query(req.query);
       up.name = up.fields["name"];
     }
+    uint64_t max = op.empty() ? kBrowserAttachmentMaxBytes : kOperatorAttachmentMaxBytes;
+    if (up.bytes.size() > max) {
+      err = "the file is " + std::to_string(up.bytes.size() / 1024) + " KiB; uploads here take up to " +
+            std::to_string(max >> 20) + " MiB";
+      if (from_browser) return finish(error_page(tenant, 400, request_id), json::dump(bj::object{{"why", err}}));
+      Response res;
+      res.status = 413;
+      res.headers.emplace_back("content-type", "application/json");
+      res.body = json::dump(bj::object{{"error", err}});
+      return finish(std::move(res), json::dump(bj::object{{"why", err}}));
+    }
     auto a = attachments_->put(tenant, up.bytes, up.name, up.fields["alt"], up.fields["visibility"], now, &err);
     if (!a) {
       if (from_browser) return finish(error_page(tenant, 400, request_id), json::dump(bj::object{{"why", err}}));
@@ -205,7 +216,7 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
                            "<title>Attachments</title><style>") +
                kManagerStyle + "</style></head><body><main><h1>Attachments</h1><p class=\"muted\">" +
                std::to_string(list.size()) + " for <strong>" + html_escape(tenant) + "</strong>. Up to " +
-               std::to_string(cfg->body_max_bytes / (1024 * 1024)) +
+               std::to_string(kBrowserAttachmentMaxBytes >> 20) +
                " MiB each: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF. <a href=\"/identity/account\">Account</a></p>"
                "<form class=\"up\" method=\"post\" action=\"/attachment/upload\" enctype=\"multipart/form-data\">"
                "<input type=\"file\" name=\"file\" required accept=\"image/*,application/pdf\">"
