@@ -9,6 +9,7 @@
 set -euo pipefail
 
 DIR="${1:-/srv/goober/host}"
+WITH_RUST="${2:-}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 BIN=/usr/local/bin/goober-host
 
@@ -25,7 +26,8 @@ GLIBC="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
 echo "── packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq caddy curl python3 tzdata ca-certificates >/dev/null
+# bubblewrap is the sandbox source projects build in (521.Source.md).
+apt-get install -y -qq caddy curl python3 tzdata ca-certificates bubblewrap >/dev/null
 
 echo "── user and directory"
 id goober >/dev/null 2>&1 || useradd --system --home-dir /srv/goober --create-home --shell /usr/sbin/nologin goober
@@ -36,6 +38,21 @@ install -m 0755 "$SRC/goober-host" "$BIN.new"
 mv "$BIN.new" "$BIN"
 mkdir -p /srv/goober/tools
 install -m 0755 "$SRC/setup.sh" /srv/goober/tools/setup.sh
+
+if [[ "$WITH_RUST" == --with-rust ]]; then
+  echo "── Rust for building boxes from source"
+  if [[ ! -x /srv/goober/.cargo/bin/cargo ]]; then
+    sudo -u goober -H sh -c 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --target wasm32-unknown-unknown' >/dev/null
+  fi
+  if [[ -f "$SRC/vendor.tar.gz" ]]; then
+    rm -rf /srv/goober/vendor.new
+    mkdir -p /srv/goober/vendor.new
+    tar -xzf "$SRC/vendor.tar.gz" -C /srv/goober/vendor.new --strip-components=1 --no-same-owner
+    rm -rf /srv/goober/vendor
+    mv /srv/goober/vendor.new /srv/goober/vendor
+    chown -R goober:goober /srv/goober/vendor
+  fi
+fi
 
 if [[ -f "$DIR/host.json" ]]; then
   echo "── upgrading: checking the config with the new binary, then restarting"
@@ -53,6 +70,24 @@ else
   systemctl daemon-reload
   systemctl enable --now goober-host goober-backup.timer
   systemctl reload caddy || systemctl restart caddy
+fi
+
+if [[ -d /srv/goober/vendor && -f "$DIR/host.json" ]]; then
+  # Builds read the vendored crates, and find cargo in the goober user's home.
+  if sudo -u goober python3 -c '
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+src = c.setdefault("source", {})
+if src.get("vendor") == "/srv/goober/vendor" and "cargo" in src:
+    sys.exit(1)
+src["vendor"] = "/srv/goober/vendor"
+src.setdefault("cargo", "/srv/goober/.cargo/bin/cargo")
+open(p, "w").write(json.dumps(c, indent=2) + "\n")
+' "$DIR/host.json"; then
+    echo "set source.vendor and source.cargo in host.json"
+    systemctl restart goober-host
+  fi
 fi
 
 echo "── health"

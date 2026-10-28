@@ -74,6 +74,18 @@ void Stmt::run() {
 
 int64_t Stmt::int64(int column) const { return sqlite3_column_int64(stmt_, column); }
 
+Stmt& Stmt::bind_blob(int index, std::string_view bytes) {
+  if (sqlite3_bind_blob64(stmt_, index, bytes.data(), sqlite3_uint64(bytes.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
+    fail(db_, "bind");
+  }
+  return *this;
+}
+
+std::string Stmt::blob(int column) const {
+  const auto* p = sqlite3_column_blob(stmt_, column);
+  return p ? std::string(reinterpret_cast<const char*>(p), size_t(sqlite3_column_bytes(stmt_, column))) : "";
+}
+
 std::string Stmt::text(int column) const {
   const auto* p = sqlite3_column_text(stmt_, column);
   return p ? std::string(reinterpret_cast<const char*>(p), size_t(sqlite3_column_bytes(stmt_, column))) : "";

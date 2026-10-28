@@ -22,6 +22,7 @@
 #include "goober/runtime_wasm/engine.h"
 #include "goober/server_http/server.h"
 #include "goober/site/site.h"
+#include "goober/source/source.h"
 #include "goober/wal/wal.h"
 
 namespace goober::host {
@@ -249,10 +250,16 @@ class Host {
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
   std::unique_ptr<class MailQueue> mail_;
+  // Source projects and their builds (source_tools.cpp, builder.cpp).
+  std::unique_ptr<source::Store> source_;
+  void register_source_tools();
+  void run_source_job(struct BuildJob& job, bool deploy);
   std::unique_ptr<class BackupService> backups_;
   std::thread backup_thread_;
   bool backups_manual_ = false;
   void run_backups();
+  // Last, so it is destroyed first: no build runs while the rest of the host goes away.
+  std::unique_ptr<class BuildJobs> jobs_;
 };
 
 }  // namespace goober::host

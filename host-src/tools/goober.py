@@ -11,6 +11,13 @@
     tools/goober.py attach <tenant> <url|file> [--name N] [--alt TEXT]
                                                   store an image and print its URL; an
                                                   attachment with the same name is reused
+    tools/goober.py source list                   the host's source projects (521)
+    tools/goober.py source pull <project> <dir> [rev]
+                                                  write a project's files into dir
+    tools/goober.py source push <dir> <message>   commit dir's changes to its project
+    tools/goober.py source new <project> <dir> [<template>]
+                                                  create a project and pull it into dir
+    tools/goober.py source build|deploy <project> [rev]
 
 The host comes from a config file: GOOBER_CONFIG, or else demo/host.json at the
 repo root. GOOBER_URL overrides the endpoint (default: the config's listen port on
@@ -93,6 +100,86 @@ def parse_value(v):
         return v
 
 
+# Source projects (design/machine/020.Source.md): a directory pulled from a project remembers
+# which project and revision it came from in .goober-source.json, so push can commit on top.
+SKIP_DIRS = {".git", "target", ".goober-cache"}
+MARK = ".goober-source.json"
+
+
+def local_files(root):
+    out = {}
+    for f in sorted(root.rglob("*")):
+        rel = f.relative_to(root)
+        if not f.is_file() or rel.as_posix() == MARK or any(part in SKIP_DIRS for part in rel.parts):
+            continue
+        out[rel.as_posix()] = f.read_bytes()
+    return out
+
+
+def pull(project, root, rev=0):
+    co = json.loads(call("source_checkout", {"project": project, "rev": rev, "max_bytes": 2000000}))
+    root.mkdir(parents=True, exist_ok=True)
+    missing = [f["path"] for f in co["files"] if "text" not in f]
+    contents = {f["path"]: f["text"].encode() for f in co["files"] if "text" in f}
+    for i in range(0, len(missing), 50):
+        for f in json.loads(call("source_read", {"project": project, "rev": co["rev"], "paths": missing[i:i + 50]})):
+            contents[f["path"]] = f["text"].encode() if "text" in f else base64.b64decode(f["base64"])
+    for rel in local_files(root):
+        if rel not in contents:
+            (root / rel).unlink()
+    for rel, data in contents.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    (root / MARK).write_text(json.dumps({"project": project, "rev": co["rev"]}) + "\n")
+    print(f"{project} revision {co['rev']}: {len(contents)} files in {root}")
+
+
+def source_cmd(args):
+    import hashlib
+    if not args or args[0] == "list":
+        for p in json.loads(call("source_list", {})):
+            print(f"{p['project']:24} head {p['head']:<5} deployed {p['deployed_rev'] or '-':<5} {p['description']}")
+    elif args[0] == "new":
+        project, root = args[1], pathlib.Path(args[2])
+        call("source_create", {"project": project, "template": args[3] if len(args) > 3 else "empty"})
+        pull(project, root)
+    elif args[0] == "pull":
+        pull(args[1], pathlib.Path(args[2]), int(args[3]) if len(args) > 3 else 0)
+    elif args[0] == "push":
+        root, message = pathlib.Path(args[1]), args[2]
+        mark = json.loads((root / MARK).read_text())
+        co = json.loads(call("source_checkout", {"project": mark["project"], "rev": mark["rev"], "max_bytes": 0}))
+        theirs = {f["path"]: f["sha256"] for f in co["files"]}
+        mine = local_files(root)
+        changes = []
+        for rel, data in mine.items():
+            if theirs.get(rel) != hashlib.sha256(data).hexdigest():
+                try:
+                    changes.append({"path": rel, "text": data.decode("utf-8")})
+                except UnicodeDecodeError:
+                    changes.append({"path": rel, "base64": base64.b64encode(data).decode()})
+        changes += [{"path": rel, "delete": True} for rel in theirs if rel not in mine]
+        if not changes:
+            print("nothing to push")
+            return
+        r = json.loads(call("source_commit", {"project": mark["project"], "base_rev": mark["rev"], "message": message,
+                                              "changes": changes}))
+        if not r.get("committed"):
+            sys.exit(f"refused: {r.get('error')}\nconflicts: {', '.join(r.get('conflicts', []))}; pull again and redo them")
+        mark["rev"] = r["rev"]
+        (root / MARK).write_text(json.dumps(mark) + "\n")
+        print(f"{mark['project']} revision {r['rev']}: {len(changes)} changes" + (" (on top of others' work)" if r["rebased"] else ""))
+    elif args[0] in ("build", "deploy"):
+        r = json.loads(call("source_" + args[0], {"project": args[1], "rev": int(args[2]) if len(args) > 2 else 0}))
+        while r["state"] in ("queued", "running"):
+            r = json.loads(call("source_job", {"job": r["job"]}))
+        print(r["log"], end="")
+        if r["state"] != "succeeded":
+            sys.exit(1)
+    else:
+        sys.exit("source list | new | pull | push | build | deploy")
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print(__doc__)
@@ -147,6 +234,8 @@ def main(argv):
         else:
             args["base64"] = base64.b64encode(pathlib.Path(source).read_bytes()).decode()
         print(json.loads(call("attachment_put", args))["url"])
+    elif cmd == "source":
+        source_cmd(argv[2:])
     else:
         sys.exit(f"unknown command {cmd}; try --help")
 

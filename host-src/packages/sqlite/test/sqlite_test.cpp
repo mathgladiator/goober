@@ -21,3 +21,16 @@ TEST(Sqlite, BindsStepsAndThrows) {
   EXPECT_FALSE(q.step());
   EXPECT_THROW(db.exec("NOT SQL"), std::runtime_error);
 }
+
+TEST(Sqlite, BlobsHoldAnyBytes) {
+  auto file = std::filesystem::path(GOOBER_TEST_TMP) / "sqlite-blob.db";
+  std::filesystem::remove(file);
+  goober::sqlite::Db db(file);
+  db.exec("CREATE TABLE b (data BLOB)");
+  std::string bytes("a\0b\xff\xfe", 5);
+  goober::sqlite::Stmt(db, "INSERT INTO b VALUES (?)").bind_blob(1, bytes).run();
+  goober::sqlite::Stmt s(db, "SELECT data, typeof(data) FROM b");
+  ASSERT_TRUE(s.step());
+  EXPECT_EQ(s.blob(0), bytes);
+  EXPECT_EQ(s.text(1), "blob");
+}

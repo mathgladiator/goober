@@ -19,6 +19,7 @@
 #include "http_util.h"
 #include "keys.h"
 #include "backups.h"
+#include "builder.h"
 #include "mailer.h"
 #include "network.h"
 #include "timer_state.h"
@@ -146,13 +147,15 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "Operate a goober host. Build products as boxes: call box_guide first. Build sites as a CMS: call "
       "site_guide first, then write pages (page_put, as "
       "markdown, an HTML fragment in a template, or a whole HTML document), templates (template_put), and images "
-      "(attachment_put, from base64 or a URL). Deploy WASM boxes (version_upload), query tenant databases "
-      "(db_list, db_query), and read logs.");
+      "(attachment_put, from base64 or a URL). Keep a product's source in the host and build and deploy it "
+      "from there (source_create, source_checkout, source_commit, source_deploy), or deploy WASM boxes directly "
+      "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status).");
   init_web();
   register_tools();
   register_content_tools();
   register_data_tools();
   register_web_tools();
+  register_source_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }

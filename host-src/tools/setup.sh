@@ -365,6 +365,16 @@ confirm WRITE "Write this to $CONFIG?" y
 umask 077
 printf '%s\n' "$JSON" >"$CONFIG"
 mkdir -p "$DIR/storage"
+# A dev box with cargo builds Rust boxes from source projects: vendor the crates they may use.
+if [[ $PROD != 1 ]] && command -v cargo >/dev/null && "$HERE/vendor.sh" "$DIR/vendor" >/dev/null 2>&1; then
+  python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["source"] = {"vendor": "vendor"}
+open(sys.argv[1], "w").write(json.dumps(c, indent=2) + "\n")
+' "$CONFIG"
+  good "vendored the Rust crates boxes may use into $DIR/vendor"
+fi
 # The AWS keys go into the key store through stdin, never a command line.
 if [[ -n "${AWS_KEY_ID:-}" && -n "${AWS_SECRET:-}" ]]; then
   printf '%s' "$AWS_KEY_ID" | "$BIN" key set aws_access_key_id --config "$CONFIG" >/dev/null

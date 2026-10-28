@@ -41,6 +41,8 @@ class Stmt {
   Stmt& bind(int index, int64_t value);
   Stmt& bind(int index, std::string_view value);
   Stmt& bind_null(int index);
+  // Bytes as a BLOB, whatever they hold.
+  Stmt& bind_blob(int index, std::string_view bytes);
 
   // Steps once: true when a row is ready, false when done.
   bool step();
@@ -49,6 +51,7 @@ class Stmt {
 
   int64_t int64(int column) const;
   std::string text(int column) const;
+  std::string blob(int column) const;
   bool is_null(int column) const;
 
  private:

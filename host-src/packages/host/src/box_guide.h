@@ -246,6 +246,18 @@ host-src/examples/boxes/shared/goober.rs, used by the terminal and desk boxes. A
 `crate-type = ["cdylib"]`, `serde_json`, and `#[unsafe(no_mangle)] pub extern "C" fn
 goober_route_x() -> i32`. Small boxes can be WAT; see host-src/examples/boxes/echo.
 
+## Keeping the source here
+
+You have no disk between conversations; the host does. Keep a product's source in a project:
+source_create (template rust-box, wat-box, or site), source_checkout, change files with
+source_commit (base_rev is the rev you read; a conflict lists files to read again), then
+source_deploy, which builds in the host's sandbox (no network; Rust crates are the host's
+vendored set: serde and serde_json) and deploys schemas, boxes, and site files.
+goober.project.json says what the project holds: {"boxes": ["."], "schemas": [...],
+"sites": [{"dir": "site", "tenant": "..."}]}. Route names are unique across the host, so
+name routes after the box. Read compiler errors in the job's log, fix, commit, deploy again.
+Next time, source_list and source_checkout pick up where you left off; source_revert goes back.
+
 ## A good product, briefly
 
 - Write the mission so a person can approve it in one read.
