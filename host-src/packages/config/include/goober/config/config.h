@@ -114,6 +114,14 @@ struct HostConfig {
   struct Mail {
     int64_t daily_max = 200;
     int64_t per_address_daily = 3;
+    // Mail in (design/machine/024.MailIn.md): Stalwart calls the host's MTA hook with the
+    // bearer token in token_file. Without a token file, the hook answers 404.
+    struct Inbound {
+      std::filesystem::path token_file;
+      int64_t max_bytes = 25LL << 20;  // the largest message any route takes
+      int64_t attachment_days = 30;    // how long received attachments are kept
+      bool enabled() const { return !token_file.empty(); }
+    } inbound;
   } mail;
   // Backups to S3 (design/human/663.Backups.md). Off unless backup.s3.bucket is set.
   struct Backup {

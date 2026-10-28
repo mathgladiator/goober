@@ -294,6 +294,19 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       speak OAuth (Grok) reach the operator tools (`design/machine/023.OperatorOAuth.md`).
 - [ ] Grok connecting through it for real. This needs the human.
 
+### Phase 13: mail in (038)
+- [x] `routes.mail.$address.receive` (exact, local@ on every domain, catch-all `*@`, params,
+      `{name : token}`), one box per address per domain; the MTA hook at
+      `/internal/routes/mta/stalwart` (loopback, no proxy headers, a bearer token from
+      `mail.inbound.token-file`); RCPT refused at the door, one recipient per message; DATA
+      parsed (MIME, charsets, attachments kept in the host), automatic mail dropped unless a
+      route opts in, the box's answer as the SMTP answer (250, 550, 451); signed reply
+      addresses minted by `send` with `reply`; attachments read by handle.
+- [ ] Stalwart installed and configured by setup and deploy, DNS records printed, an end-to-end
+      test against a real Stalwart (in progress).
+- [ ] Verified senders (038 § The sender is a verified claim): Stalwart's hook doesn't carry
+      SPF, DKIM, or DMARC results, so `sender` is null for now (in progress).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

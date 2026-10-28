@@ -101,3 +101,24 @@ TEST_F(RegistryTest, RefusesBadModules) {
   EXPECT_NE(err.find("goober_route_say_hello"), std::string::npos) << err;
   EXPECT_TRUE(reg->box_names().empty());
 }
+
+// Mail addresses are claimed once per domain across boxes (038).
+TEST_F(RegistryTest, MailAddressesAreClaimedOnce) {
+  auto mail = [](const std::string& box, const std::string& domain, const std::string& address, const std::string& route) {
+    return R"({"box":")" + box + R"(","domains":[")" + domain + R"("],"routes":{"mail":{")" + address +
+           R"(":{"receive":{"name":")" + route + R"(","public":true}}}}})";
+  };
+  std::string err;
+  ASSERT_TRUE(reg->upload(mail("desk", "kcmeatup.com", "support@", "desk_support"), module_for({"desk_support"}), &err)) << err;
+  EXPECT_FALSE(reg->upload(mail("other", "kcmeatup.com", "support@kcmeatup.com", "other_support"),
+                           module_for({"other_support"}), &err));
+  EXPECT_NE(err.find("already claimed by box desk"), std::string::npos) << err;
+  // Another domain is another address; a different local part is too.
+  EXPECT_TRUE(reg->upload(mail("other", "beef.example", "support@", "other_support"), module_for({"other_support"}), &err)) << err;
+  EXPECT_TRUE(reg->upload(mail("third", "kcmeatup.com", "orders@", "third_orders"), module_for({"third_orders"}), &err)) << err;
+  // One catch-all per domain.
+  ASSERT_TRUE(reg->upload(mail("inbox", "*", "*@", "inbox_all"), module_for({"inbox_all"}), &err)) << err;
+  EXPECT_FALSE(reg->upload(mail("inbox2", "kcmeatup.com", "*@", "inbox2_all"), module_for({"inbox2_all"}), &err));
+  // A route without its export is refused like any other.
+  EXPECT_FALSE(reg->upload(mail("x", "x.example", "x@", "x_route"), module_for({}), &err));
+}

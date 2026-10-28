@@ -52,6 +52,8 @@ void Host::identity_tick(int64_t now_ms) {
       int gone = identity_->prune(realm, now_ms);
       if (gone > 0) std::cerr << "goober-host: identity: deleted " << gone << " never-verified account(s) in " << realm << "\n";
     }
+    // Received attachments past mail.inbound.attachment-days, and expired reply tokens.
+    prune_mail(now_ms);
   }
 
   struct Delivery {

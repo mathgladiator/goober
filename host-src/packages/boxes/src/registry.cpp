@@ -1,4 +1,5 @@
 #include "goober/boxes/registry.h"
+#include "goober/mail_inbound/address.h"
 
 #include <algorithm>
 #include <set>
@@ -65,6 +66,7 @@ std::vector<std::string> exports_of(const manifest::Manifest& m) {
   for (const auto& t : m.timers) out.push_back(t.export_name());
   for (const auto& r : m.internal) out.push_back(r.export_name());
   for (const auto& r : m.identity) out.push_back(r.export_name());
+  for (const auto& r : m.mail) out.push_back(r.export_name());
   return out;
 }
 
@@ -153,13 +155,48 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   for (const auto& t : candidate->manifest.timers) mine.insert(t.name);
   for (const auto& r : candidate->manifest.internal) mine.insert(r.name);
   for (const auto& r : candidate->manifest.identity) mine.insert(r.name);
+  for (const auto& r : candidate->manifest.mail) mine.insert(r.name);
   for (const auto& [other, box] : current->boxes) {
     if (other == name) continue;
     for (const auto* list : {&box->manifest.routes, &box->manifest.tools, &box->manifest.timers, &box->manifest.internal,
-                              &box->manifest.identity}) {
+                              &box->manifest.identity, &box->manifest.mail}) {
       for (const auto& r : *list) {
         if (mine.count(r.name)) {
           *error = "route name \"" + r.name + "\" is already used by box " + other;
+          return false;
+        }
+      }
+    }
+  }
+  // Two boxes may not claim the same mail addresses on a domain they share (038): the
+  // address is the path, and one message goes to one route.
+  auto mail_domains = [](const manifest::Manifest& m, const manifest::HttpRoute& r) {
+    std::string err;
+    auto p = mail::inbound::parse_address_pattern(r.mail_address, &err);
+    if (p && !p->domain.empty()) return std::vector<std::string>{p->domain};
+    return m.domains;
+  };
+  auto overlap = [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    for (const auto& x : a) {
+      for (const auto& y : b) {
+        if (x == "*" || y == "*" || x == y) return true;
+      }
+    }
+    return false;
+  };
+  for (const auto& mine_route : candidate->manifest.mail) {
+    std::string err;
+    auto mp = mail::inbound::parse_address_pattern(mine_route.mail_address, &err);
+    for (const auto& [other, box] : current->boxes) {
+      if (other == name) continue;
+      for (const auto& theirs : box->manifest.mail) {
+        auto tp = mail::inbound::parse_address_pattern(theirs.mail_address, &err);
+        if (!mp || !tp) continue;
+        // Shapes compare with the domain left off: support@ and support@example.com collide too.
+        auto bare = [](const mail::inbound::AddressPattern& p) { return p.shape().substr(0, p.shape().rfind('@')); };
+        if (bare(*mp) == bare(*tp) && overlap(mail_domains(candidate->manifest, mine_route), mail_domains(box->manifest, theirs))) {
+          *error = "mail address " + mine_route.mail_address + " is already claimed by box " + other + " (" +
+                   theirs.mail_address + ")";
           return false;
         }
       }

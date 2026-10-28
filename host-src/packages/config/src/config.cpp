@@ -352,7 +352,21 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (!is_region(cfg->aws.region)) return *error = "aws.region isn't an AWS region", nullptr;
   }
   if (const auto* mail = get_object(root, "mail", &err)) {
-    if (!check_keys(*mail, {"daily-max", "per-address-daily"}, "mail", &err)) return *error = err, nullptr;
+    if (!check_keys(*mail, {"daily-max", "per-address-daily", "inbound"}, "mail", &err)) return *error = err, nullptr;
+    if (const auto* in = get_object(*mail, "inbound", &err)) {
+      if (!check_keys(*in, {"token-file", "max-bytes", "attachment-days"}, "mail.inbound", &err)) return *error = err, nullptr;
+      auto& inbound = cfg->mail.inbound;
+      if (auto v = get_string(*in, "token-file", &err)) {
+        inbound.token_file = *v;
+        if (inbound.token_file.is_relative()) inbound.token_file = base_dir / inbound.token_file;
+      }
+      if (auto v = get_int(*in, "max-bytes", &err)) inbound.max_bytes = *v;
+      if (auto v = get_int(*in, "attachment-days", &err)) inbound.attachment_days = *v;
+      if (inbound.max_bytes < 1024 || inbound.max_bytes > (25LL << 20) || inbound.attachment_days < 1 ||
+          inbound.attachment_days > 3650) {
+        return *error = "mail.inbound.max-bytes is 1024 to 26214400 (25 MiB), and attachment-days 1 to 3650", nullptr;
+      }
+    }
     if (auto v = get_int(*mail, "daily-max", &err)) cfg->mail.daily_max = *v;
     if (auto v = get_int(*mail, "per-address-daily", &err)) cfg->mail.per_address_daily = *v;
     if (cfg->mail.daily_max < 0 || cfg->mail.daily_max > 1000000 || cfg->mail.per_address_daily < 1 ||

@@ -332,7 +332,7 @@ TEST(Manifest, MailService) {
   refuse(R"({"m":{"mail":{},"base":"https://x.example"}})", "no base");
   refuse(R"({"m":{"mail":{"from":"x@y.z"}}})", "unknown field");
   refuse(R"({"m":{"mail":{"from-name":"Evil\" <x@y.z>"}}})", "from-name");
-  refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "one method is send");
+  refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "methods are send, and attachment");
   refuse(R"({"m":{"mail":{},"methods":{"send":{"budget":{"calls":50}}}}})", "1 to 10");
 }
 
@@ -361,4 +361,45 @@ TEST(Manifest, IdentityRoutes) {
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{}}}})", "name is required");
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","every-ms":5}}}})", "unknown field");
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","timeout-ms":0}}}})", "1 to 10000");
+}
+
+TEST(Manifest, MailRoutes) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"desk","domains":["kcmeatup.com","beef.example"],
+    "routes":{"mail":{
+      "support@kcmeatup.com":{"receive":{"name":"support_inbox","public":true,"max-bytes":10485760,"attachments":5}},
+      "reply+{ticket : token}@":{"receive":{"name":"ticket_reply","public":true,"attachments":0}},
+      "*@":{"receive":{"name":"catch_all","public":true,"automatic":true,"timeout-ms":3000}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->mail.size(), 3u);
+  const auto* support = &m->mail[0];
+  for (const auto& r : m->mail) {
+    if (r.name == "support_inbox") support = &r;
+  }
+  EXPECT_EQ(support->verb, "receive");
+  EXPECT_EQ(support->mail_address, "support@kcmeatup.com");
+  EXPECT_EQ(*support->max_body_bytes, 10485760);
+  EXPECT_EQ(support->mail_attachments, 5);
+  EXPECT_FALSE(support->mail_automatic);
+  EXPECT_TRUE(support->is_public);
+  for (const auto& r : m->mail) {
+    if (r.name == "catch_all") EXPECT_TRUE(r.mail_automatic);
+    if (r.name == "ticket_reply") EXPECT_EQ(*r.max_body_bytes, 10LL << 20);  // the default
+  }
+
+  auto refuse = [&](const std::string& routes, const char* why) {
+    std::string e;
+    std::string text = R"({"box":"t","domains":["kcmeatup.com"],"routes":{"mail":)" + routes + "}}";
+    EXPECT_FALSE(parse_manifest(text, &e)) << routes;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"a@":{"receive":{"name":"a"}}})", "public");
+  refuse(R"({"a@":{"receive":{"name":"a","public":true,"requirements":[]}}})", "public");
+  refuse(R"({"a@":{"send":{"name":"a","public":true}}})", "one verb is receive");
+  refuse(R"({"a@other.com":{"receive":{"name":"a","public":true}}})", "isn't one of the box's domains");
+  refuse(R"({"A@":{"receive":{"name":"a","public":true}}})", "can't be in a local part");
+  refuse(R"({"a+{x}@":{"receive":{"name":"a","public":true}},"a+{y}@":{"receive":{"name":"b","public":true}}})", "same addresses");
+  refuse(R"({"a@":{"receive":{"name":"a","public":true,"max-bytes":99999999}}})", "max-bytes");
+  refuse(R"({"a@":{"receive":{"name":"a","public":true,"attachments":101}}})", "attachments");
+  refuse(R"({"a@":{"receive":{"name":"a","public":true,"color":"red"}}})", "unknown field");
 }

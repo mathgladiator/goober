@@ -279,6 +279,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);
+  if (svc->mail && m.name == "attachment") return mail_attachment_call(ctx, request);
   if (svc->mail) return mail_call(ctx, *svc, m, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
@@ -360,12 +361,13 @@ bool plain_email(std::string_view s) {
 std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                             const bj::value& request) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
-  const char* kShape = "send takes {to, subject, text, reply_to?} or {to, template, vars?, reply_to?}";
+  const char* kShape = "send takes {to, subject, text, reply_to?} or {to, template, vars?, reply_to?}, and reply? to "
+                       "mint a reply address";
   if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
     if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
-        kv.key() != "template" && kv.key() != "vars") {
+        kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply") {
       return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
@@ -377,6 +379,17 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
               reply_to = base::to_lower(text_field("reply_to"));
   if (!plain_email(to)) return fail("to must be one email address");
   if (!reply_to.empty() && !plain_email(reply_to)) return fail("reply_to must be one email address");
+  // A reply address that is a capability (038): the host mints reply+<token>@domain on one of
+  // the box's token routes, and replies come back to that route with the claims.
+  std::string reply_address;
+  if (const auto* reply = r.if_contains("reply")) {
+    if (!reply_to.empty()) return fail("give reply or reply_to, not both");
+    if (!reply->is_object()) return fail("reply is {\"route\": \"ticket_reply\", \"params\": {\"ticket\": \"42\"}}");
+    std::string err;
+    auto minted = mint_reply_address(ctx, reply->as_object(), to, &err);
+    if (!minted) return fail(err);
+    reply_to = reply_address = *minted;
+  }
   // A template of the tenant's own (design/machine/022.MailTemplates.md), rendered now so a bad
   // one fails the call; never one of the host's, so no box can send what looks like a sign-in code.
   std::string html;
@@ -425,7 +438,9 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   e.within_ms = m.within_ms;
   std::string key = e.idempotency_key;
   ctx.pending.push_back(std::move(e));
-  return json::dump(bj::object{{"accepted", true}, {"key", key}});
+  bj::object accepted{{"accepted", true}, {"key", key}};
+  if (!reply_address.empty()) accepted["reply_to"] = reply_address;
+  return json::dump(accepted);
 }
 
 std::string Host::internal_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,

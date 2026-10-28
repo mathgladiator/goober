@@ -213,6 +213,12 @@ uint16_t Host::start() {
   // Operators push sites and boxes as base64 JSON: their bodies may be larger, once their
   // token checks out, before a byte of the body is read.
   opts.body_limit_for = [this](std::string_view target, std::string_view authorization) -> uint64_t {
+    // A whole message from Stalwart, as JSON: up to the largest a route takes, plus room for
+    // JSON's escapes. The token is checked again, fully, by the handler.
+    if (target.substr(0, target.find('?')) == kMailHookPath && authorization.starts_with("Bearer ")) {
+      auto cfg = config_.get();
+      return cfg->mail.inbound.enabled() ? uint64_t(cfg->mail.inbound.max_bytes) * 2 + (1 << 20) : 0;
+    }
     if (target.substr(0, target.find('?')) != kOperationsMcpPath || !authorization.starts_with("Bearer ")) return 0;
     server::http::Request probe;
     probe.headers.emplace_back("authorization", std::string(authorization));
@@ -426,6 +432,20 @@ void Host::handle(Request req, Responder respond) {
   };
 
   auto path = router::normalize_path(req.path);
+  // Stalwart's MTA hook: checked in full by handle_mail_hook (loopback, no proxy, its token).
+  if (path && path->path == kMailHookPath) {
+    pool_->post([this, req, finish] {
+      try {
+        handle_mail_hook(req, finish);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: mail in: " << e.what() << "\n";
+        server::http::Response res;
+        res.status = 500;
+        finish(std::move(res), R"({"mail_in":"failed"})");
+      }
+    });
+    return;
+  }
   // Floods and guessing are slowed per client address, before any work is queued.
   {
     std::string client = rate_key(client_address(req));

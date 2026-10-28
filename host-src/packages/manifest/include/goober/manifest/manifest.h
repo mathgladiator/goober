@@ -57,6 +57,13 @@ struct HttpRoute {
   // An identity route (design/machine/021.IdentityEvents.md), verb "identity", is called only by
   // the host, after a sign-in commits: "first-verified" or "signed-in".
   std::string identity_event;
+  // A mail route (038; design/machine/024.MailIn.md), verb "receive": its address pattern
+  // (support@example.com, support@, *@, reply+{ticket : token}@...), the attachments it takes
+  // (more is refused), and whether automatic mail (auto-replies, bounces) reaches it.
+  // max_body_bytes is its message size limit.
+  std::string mail_address;
+  int64_t mail_attachments = 0;
+  bool mail_automatic = false;
   // An internal route (039) is reachable only from the boxes it names.
   std::vector<std::string> callers;
   std::string export_name() const { return "goober_route_" + name; }
@@ -173,6 +180,7 @@ struct Manifest {
   std::vector<HttpRoute> timers;  // routes.timer.$key, with verb "timer"
   std::vector<HttpRoute> internal;  // routes.internal.$path.$verb, reachable only from callers
   std::vector<HttpRoute> identity;  // routes.identity.$event, with verb "identity"
+  std::vector<HttpRoute> mail;      // routes.mail.$address.receive, with verb "receive"
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

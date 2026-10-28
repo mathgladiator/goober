@@ -1,4 +1,5 @@
 #include "goober/manifest/manifest.h"
+#include "goober/mail_inbound/address.h"
 #include "goober/timers/cron.h"
 
 #include "goober/router/table.h"
@@ -274,6 +275,61 @@ bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manif
   return true;
 }
 
+// routes.mail.$address.receive (038.Mail.md; design/machine/024.MailIn.md). People who send
+// mail aren't signed in, so a mail route is public; what protects it is the sender's verified
+// claims and any token in the address.
+constexpr int64_t kMailMaxBytes = 25LL << 20;
+bool parse_mail(const bj::value& routes, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!routes.is_object()) return *error = "routes.mail must be an object", false;
+  std::string err;
+  std::set<std::string> shapes;
+  for (const auto& kv : routes.as_object()) {
+    std::string address(kv.key());
+    std::string where = "routes.mail." + address;
+    auto pattern = mail::inbound::parse_address_pattern(address, &err);
+    if (!pattern) return *error = where + ": " + err, false;
+    if (!shapes.insert(pattern->shape()).second) return *error = where + " claims the same addresses as another route", false;
+    if (!pattern->domain.empty() && !m->applies_to(pattern->domain)) {
+      return *error = where + ": " + pattern->domain + " isn't one of the box's domains", false;
+    }
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    for (const auto& verb : kv.value().as_object()) {
+      if (verb.key() != "receive") return *error = where + ": a mail route's one verb is receive", false;
+    }
+    const auto* receive = kv.value().as_object().if_contains("receive");
+    if (!receive || !receive->is_object()) return *error = where + ".receive must be an object", false;
+    const auto& def = receive->as_object();
+    where += ".receive";
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "name" || k == "public" || k == "max-bytes" || k == "attachments" || k == "automatic" || k == "timeout-ms") continue;
+      if (k == "requirements") return *error = where + ": senders aren't signed in, so a mail route is public", false;
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    HttpRoute r;
+    r.verb = "receive";
+    r.mail_address = address;
+    auto name = get_string(def, "name", &err);
+    if (!name || !base::is_valid_name(*name)) return *error = where + ": name is required, matching [a-z][a-z0-9_]*", false;
+    if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+    r.name = *name;
+    if (!goober::json::get_bool(def, "public", &err).value_or(false)) {
+      return *error = where + ": needs \"public\": true (anyone can send mail; the sender's claims and tokens are what protect it)", false;
+    }
+    r.is_public = true;
+    r.max_body_bytes = get_int(def, "max-bytes", &err).value_or(10LL << 20);
+    r.mail_attachments = get_int(def, "attachments", &err).value_or(0);
+    r.mail_automatic = goober::json::get_bool(def, "automatic", &err).value_or(false);
+    r.timeout_ms = get_int(def, "timeout-ms", &err);
+    if (!err.empty()) return *error = where + ": " + err, false;
+    if (*r.max_body_bytes < 1024 || *r.max_body_bytes > kMailMaxBytes) return *error = where + ".max-bytes must be 1024 to 26214400 (25 MiB)", false;
+    if (r.mail_attachments < 0 || r.mail_attachments > 100) return *error = where + ".attachments must be 0 to 100", false;
+    if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    m->mail.push_back(std::move(r));
+  }
+  return true;
+}
+
 bool valid_identifier(std::string_view s) {
   if (s.empty() || s.size() > 64 || (s[0] >= '0' && s[0] <= '9')) return false;
   for (char c : s) {
@@ -329,7 +385,7 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       if (const auto* methods = get_object(def, "methods", &err)) {
         for (const auto& mk : *methods) {
           std::string mw = where + ".methods." + std::string(mk.key());
-          if (mk.key() != "send") return *error = mw + ": a mail service's one method is send", false;
+          if (mk.key() != "send") return *error = mw + ": a mail service's methods are send, and attachment (always there)", false;
           if (!mk.value().is_object()) return *error = mw + " must be an object", false;
           for (const auto& f : mk.value().as_object()) {
             if (f.key() != "budget") return *error = mw + ": unknown field \"" + std::string(f.key()) + "\"", false;
@@ -342,6 +398,13 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       if (!err.empty()) return *error = where + ": " + err, false;
       if (send.budget_calls < 1 || send.budget_calls > 10) return *error = where + ".methods.send.budget.calls is 1 to 10", false;
       svc.methods["send"] = std::move(send);
+      // Reading a received message's attachment by handle (design/machine/024.MailIn.md § 4).
+      ExternalMethod attachment;
+      attachment.name = "attachment";
+      attachment.verb = "mail";
+      attachment.effect = "none";
+      attachment.budget_calls = 20;
+      svc.methods["attachment"] = std::move(attachment);
       m->external.push_back(std::move(svc));
       continue;
     }
@@ -920,6 +983,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
       }
       if (protocol == "identity") {
         if (!parse_identity(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
+      if (protocol == "mail") {
+        if (!parse_mail(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
       if (protocol != "http") {

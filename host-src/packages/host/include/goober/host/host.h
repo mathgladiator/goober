@@ -16,6 +16,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/mail_inbound/mime.h"
 #include "goober/mail_templates/templates.h"
 #include "goober/host/rate_limit.h"
 #include "goober/host/worker_pool.h"
@@ -30,6 +31,8 @@ namespace goober::host {
 
 inline constexpr std::string_view kVersion = "0.1.0";
 inline constexpr std::string_view kOperationsMcpPath = "/goober-operations-mcp";
+// Where Stalwart calls the host at each SMTP stage (038; 041 § /internal/).
+inline constexpr std::string_view kMailHookPath = "/internal/routes/mta/stalwart";
 // How large an operator's request may be: a pushed site file or a box, as base64 in JSON.
 inline constexpr uint64_t kOperatorBodyMaxBytes = 64ull << 20;
 inline constexpr uint64_t kOperatorAttachmentMaxBytes = 32ull << 20;
@@ -251,6 +254,32 @@ class Host {
   // A box's mail (design/machine/018.Mail.md): checked now, sent after commit through the outbox.
   std::string mail_call(struct CallContext& ctx, const manifest::ExternalService& svc,
                         const manifest::ExternalMethod& m, const boost::json::value& request);
+  // Mail in (mail_in.cpp; design/machine/024.MailIn.md): Stalwart's MTA hook, mail routes,
+  // reply tokens, and received attachments.
+ public:
+  struct MailMatch {
+    boxes::RouteRef ref;
+    std::string tenant, domain, to;
+    std::map<std::string, std::string> params;  // from the address, and a token's claims
+    std::vector<std::string> unused;
+    std::string reply_recipient;  // for a token: who the reply address was sent to
+  };
+  // The mail route that claims an address, with its params; nullopt with `why` when none does
+  // (or its token is forged or expired).
+  std::optional<MailMatch> match_mail(const std::string& address, std::string* why);
+  int prune_mail(int64_t now_ms);
+
+ private:
+  void handle_mail_hook(const server::http::Request& req, const Finish& finish);
+  std::string reply_key();
+  std::unique_ptr<sqlite::Db> open_mail_db();
+  std::optional<std::string> mint_reply_address(const struct CallContext& ctx, const boost::json::object& reply,
+                                                const std::string& recipient, std::string* error);
+  std::string mail_attachment_call(struct CallContext& ctx, const boost::json::value& request);
+  // The sender as a verified claim (038 § The sender is a verified claim), or "".
+  std::string verified_sender(const boost::json::object& hook_request, const struct mail::inbound::Message& message,
+                              const std::string& envelope_from);
+  std::mutex mail_in_mu_;
   // Delivers one outbox mail element through the mailer, within the config's mail limits.
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
