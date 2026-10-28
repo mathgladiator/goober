@@ -213,6 +213,8 @@ def main():
         print("── at the door (RCPT)")
         code, _, text = send(smtp_port, "nobody@elsewhere.example", message("hi"))
         check(code == 550, f"a domain goober doesn't serve is refused: {code} {text}")
+        code, _, text = send(smtp_port, "nobody@deploy-check.invalid", message("hi"), mail_from="")
+        check(code == 550, f"deploy's own check (a null sender, an address nobody serves) gets 550: {code} {text}")
         code, _, text = send(smtp_port, "reply+aaaaaaaaaaaaaaaaaaaaaaaa@example.test", message("hi"))
         check(code == 550, f"a forged reply token is refused: {code} {text}")
 

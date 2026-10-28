@@ -53,6 +53,8 @@ apt-get update -qq
 # bubblewrap is the sandbox source projects build in (521.Source.md).
 # iproute2 and openssl: Stalwart's provisioning namespace, and its first certificate.
 apt-get install -y -qq caddy curl python3 tzdata ca-certificates bubblewrap iproute2 openssl >/dev/null
+# A C toolchain: Rust's build scripts and proc macros (serde's derive) link for this machine.
+[[ "$WITH_RUST" == --with-rust ]] && apt-get install -y -qq build-essential >/dev/null
 
 echo "── user and directory"
 id "$RUN_AS" >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --create-home --shell /usr/sbin/nologin "$RUN_AS"
@@ -249,6 +251,56 @@ for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/goober/health" >/dev/
 curl -fsS "http://127.0.0.1:$PORT/goober/health" && echo
 systemctl --no-pager --lines=0 status goober-host | head -3 || true
 
+echo "── checking everything this host needs"
+FAILED=()
+check() {
+  local what="$1"; shift
+  if "$@" >/tmp/goober-check.$$ 2>&1; then
+    echo "  ✓ $what"
+  else
+    echo "  ✗ $what"
+    sed 's/^/      /' /tmp/goober-check.$$ | tail -n 15
+    FAILED+=("$what")
+  fi
+  rm -f /tmp/goober-check.$$
+}
+check "goober-host is running" systemctl is-active --quiet goober-host
+check "goober-host answers its health check" curl -fsS "http://127.0.0.1:$PORT/goober/health"
+check "Caddy is running" systemctl is-active --quiet caddy
+check "the nightly backup timer is on" systemctl is-active --quiet goober-backup.timer
+if [[ "$WITH_RUST" == --with-rust ]]; then
+  check "a C toolchain (cc) for crates' build scripts" sh -c 'command -v cc && cc --version | head -n 1'
+  check "bubblewrap, the build sandbox" sh -c 'command -v bwrap && bwrap --version'
+  wasm_target() { sudo -u "$RUN_AS" -H "$HOME_DIR/.cargo/bin/rustup" target list --installed | grep -x wasm32-unknown-unknown; }
+  check "cargo with the wasm32 target, for $RUN_AS" wasm_target
+  # The whole chain, as an agent's build meets it: the host's builder, its sandbox, offline.
+  check "a Rust box builds the way source_deploy builds it" sudo -u "$RUN_AS" -H "$BIN" toolchain --config "$DIR/host.json"
+fi
+if [[ -z "$WITHOUT_MAIL" ]]; then
+  check "Stalwart is running" systemctl is-active --quiet stalwart
+  check "the certificate timer is on" systemctl is-active --quiet goober-stalwart-tls.timer
+  hook_answers() {
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(cat "$HOST_TOKEN")" \
+      -H 'content-type: application/json' -d '{"context":{"stage":"ehlo"}}' \
+      "http://127.0.0.1:$PORT/internal/routes/mta/stalwart")"
+    echo "HTTP $code"
+    [[ "$code" == 200 ]]
+  }
+  check "the host takes Stalwart's hook" hook_answers
+  # SMTP on port 25, and Stalwart asking the host: an address nobody serves is refused at RCPT.
+  check "SMTP on port 25 refuses an address no box claims" python3 -I -c '
+import smtplib
+s = smtplib.SMTP("127.0.0.1", 25, local_hostname="deploy-check.invalid", timeout=60)
+s.ehlo()
+s.mail("")  # a null sender: nothing about it to look up
+code, text = s.rcpt("nobody@deploy-check.invalid")
+s.quit()
+print(code, text.decode())
+raise SystemExit(0 if code == 550 else 1)
+'
+fi
+
 cat <<EOF
 
 Done. Next, on this server:
@@ -266,3 +318,12 @@ $MAIL_DNS
 Then declare routes.mail in a box (box_guide, "Receiving mail").
 EOF
 fi
+
+if ((${#FAILED[@]})); then
+  echo
+  echo "✗ ${#FAILED[@]} check(s) failed: ${FAILED[*]}"
+  echo "  Everything else is installed; fix these (the output above says why) and deploy again."
+  exit 1
+fi
+echo
+echo "✓ every check passed"

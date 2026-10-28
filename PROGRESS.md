@@ -279,6 +279,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       revert, build, deploy, jobs (`design/machine/020.Source.md`).
 - [x] Sandboxed Rust builds (bubblewrap, offline, vendored crates), WAT, and prebuilt WASM;
       Rust on every deploy (`--without-rust` to skip); `goober.py source` for people.
+- [x] Deploys install a C toolchain for crates' build scripts, and end by checking everything:
+      services, timers, `goober-host toolchain` (a real sandboxed Rust build with a derive),
+      Stalwart on port 25 refusing an unserved address, and the mail hook; a failed check fails
+      the deploy.
 - [ ] Grok driving the loop over its remote MCP tool. This needs the human.
 
 ### Phase 12: identity events and mail templates (013, 038)

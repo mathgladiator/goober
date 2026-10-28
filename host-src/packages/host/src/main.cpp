@@ -15,6 +15,7 @@
 //   goober-host key list [--config host.json]
 //   goober-host backup key [--confirm] [--config host.json]      print the S3 backups' key
 //   goober-host backup list [--config host.json]                 restore points in the bucket
+//   goober-host toolchain [--config host.json]
 //   goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R]
 //                [--endpoint URL] [--prefix P]] [--key-file F] [--keep-keys] [--port N]
 //       a sandboxed devbox from S3; AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and
@@ -45,6 +46,11 @@
 #include "../src/backups.h"
 #include "../src/keys.h"
 
+namespace goober::host {
+// goober-host toolchain (toolchain.cpp): builds a Rust box the way source_deploy does.
+int run_toolchain_check(const std::string& config_path);
+}  // namespace goober::host
+
 namespace {
 
 constexpr const char* kUsage =
@@ -63,6 +69,7 @@ constexpr const char* kUsage =
     "       goober-host key list [--config host.json]\n"
     "       goober-host backup key [--confirm] [--config host.json]\n"
     "       goober-host backup list [--config host.json]\n"
+    "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
     "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n";
 
@@ -383,6 +390,7 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
+  if (positional.size() == 1 && positional[0] == "toolchain") return goober::host::run_toolchain_check(config_path);
   if (positional.size() == 2 && positional[0] == "backup" && (positional[1] == "key" || positional[1] == "list")) {
     return run_backup_cli(positional, config_path, flags);
   }

@@ -155,6 +155,7 @@ On a fresh Ubuntu 24.04+ or Debian 13+ machine (x86_64, sudo, DNS already pointi
 ```sh
 just deploy you@server            # or host-src/tools/deploy.sh you@server [/srv/goober/host]
 just deploy you@server --without-rust  # skip Rust (on by default, so agents can build Rust boxes there)
+just deploy you@server --without-mail  # skip Stalwart (on by default: mail in on port 25)
 just deploy server --user customer   # ssh in as customer (the same as customer@server)
 just deploy you@server --run-as acme # the host runs as the system user acme, in /srv/acme/host
 ```
@@ -165,6 +166,9 @@ curl, python3, tzdata, and bubblewrap (the build sandbox); creates a `goober` sy
 `goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (two
 weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
 own. Running it again upgrades: it checks the config with the new binary and restarts.
+It ends by checking everything the host needs, and fails the deploy if anything is missing:
+the services and timers, a C toolchain, cargo with the wasm32 target, a real Rust build in the
+sandbox (`goober-host toolchain`), Stalwart on port 25, and the mail hook.
 
 `you` in `you@server` (or `--user you`) is your ssh login, which needs sudo; ssh connects once,
 so a password is asked for once. `--run-as NAME` is a different account: the system user the
