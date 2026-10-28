@@ -8,6 +8,11 @@
 #include <boost/beast.hpp>
 
 #include "fuzz.h"
+#include <cstring>
+#include <filesystem>
+
+#include "goober/backup/backup.h"
+#include "goober/base/files.h"
 #include "goober/identity/identity.h"
 #include "goober/json/json.h"
 #include "goober/manifest/manifest.h"
@@ -18,6 +23,7 @@
 #include "goober/router/path.h"
 #include "goober/server_http/multipart.h"
 #include "goober/server_http/server.h"
+#include "goober/source/source.h"
 #include "goober/timers/cron.h"
 #include "goober/types/types.h"
 #include "goober/web/html.h"
@@ -260,4 +266,68 @@ TEST(Fuzz, HttpServer) {
             fuzz::iterations(300), [&](const std::string& in) { (void)send(in); });
   auto alive = send("GET /still HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
   EXPECT_NE(alive.find("get /still 0"), std::string::npos) << alive;
+}
+
+// Diffs between revisions of agents' source (design/machine/020.Source.md): bounded time and
+// memory on any pair of texts, and an empty diff only for equal ones.
+TEST(Fuzz, UnifiedDiff) {
+  fuzz::run("unified diff", {"one\ntwo\nthree\nfour\n", "a\n\nb\n\n\nc", "fn main() {\n    hi();\n}\n"},
+            {"\n", "x\n", "same\n", "\r\n", "two\n"}, fuzz::iterations(2000), [](const std::string& in) {
+              size_t cut = in.size() / 2;
+              std::string a = in.substr(0, cut), b = in.substr(cut);
+              std::string d = source::unified_diff(a, b, "a", "b");
+              if ((a == b) != d.empty()) throw std::runtime_error("diff emptiness disagrees with equality");
+            });
+}
+
+// Restore points and moments people type (design/machine/019.Backups.md §5).
+TEST(Fuzz, BackupNamesAndMoments) {
+  fuzz::run("backup names",
+            {"nightly/2026-10-27T03-30-00Z.tar.gz.sealed", "increments/2026-10-27T03-30-00Z/2026-10-27T09-00-00Z/MANIFEST.json.sealed",
+             "2026-10-26T18:00", "2026-10-26"},
+            {"/", "-", "T", "Z", ":", "nightly/", "increments/", ".sealed", "99", "0"}, fuzz::iterations(3000),
+            [](const std::string& in) {
+              (void)backup::parse_moment(in);
+              (void)backup::parse_stamp(in);
+              auto points = backup::restore_points({in, "nightly/2026-10-27T03-30-00Z.tar.gz.sealed"});
+              (void)backup::choose_point(points, 0);
+            });
+}
+
+// A delta or a sealed file from a bucket is checked before use: damage is an error, never a
+// crash or a write past the declared size.
+TEST(Fuzz, PageDeltasAndSealedFiles) {
+  auto dir = std::filesystem::path(GOOBER_TEST_TMP) / "fuzz-backup";
+  std::filesystem::create_directories(dir);
+  std::string db(4096 * 3, 'a');
+  std::memcpy(db.data(), "SQLite format 3\0\x10\x00", 18);
+  base::write_file_durable(dir / "base.db", db);
+  std::string err;
+  auto map = backup::map_pages(dir / "base.db", &err);
+  std::string changed = db;
+  changed[5000] = 'Z';
+  base::write_file_durable(dir / "now.db", changed);
+  backup::DeltaInfo info;
+  backup::write_delta(&*map, dir / "now.db", dir / "delta", &info, &err);
+  std::string delta = *base::read_file(dir / "delta");
+  backup::Key key = backup::new_key();
+  backup::seal_file(key, dir / "delta", dir / "sealed", &err);
+  std::string sealed = *base::read_file(dir / "sealed");
+  fuzz::run("page deltas", {delta}, {"\n", "{", "}", "\"bytes\":", "\"page_size\":", "0", "65536", "\xff\xff\xff\xff"},
+            fuzz::iterations(500), [&](const std::string& in) {
+              base::write_file_durable(dir / "d", in);
+              std::filesystem::path base = dir / "base.db";
+              std::string e;
+              if (backup::apply_delta(&base, dir / "d", dir / "out.db", &e) &&
+                  std::filesystem::file_size(dir / "out.db") > (1u << 26)) {
+                throw std::runtime_error("a delta grew a database past any sane size");
+              }
+            });
+  fuzz::run("sealed files", {sealed}, {"GOOBERS1", "\0", "\xff"}, fuzz::iterations(500), [&](const std::string& in) {
+    base::write_file_durable(dir / "s", in);
+    std::string e;
+    if (in != sealed && backup::unseal_file(key, dir / "s", dir / "plain", &e)) {
+      throw std::runtime_error("a changed sealed file was accepted");
+    }
+  });
 }

@@ -107,12 +107,20 @@ bool apply_delta(const fs::path* base, const fs::path& delta, const fs::path& ou
   if (!in || !std::getline(in, header)) return *error = "can't read " + delta.string(), false;
   std::string err;
   auto h = json::parse(header, &err);
-  if (!h || !h->is_object() || !h->as_object().contains("page_size") || !h->as_object().contains("bytes")) {
+  const bj::object* o = h ? h->if_object() : nullptr;
+  const bj::value* ps = o ? o->if_contains("page_size") : nullptr;
+  const bj::value* by = o ? o->if_contains("bytes") : nullptr;
+  const bj::value* sh = o ? o->if_contains("sha256") : nullptr;
+  auto whole = [](const bj::value* v) { return v && (v->is_uint64() || (v->is_int64() && v->as_int64() >= 0)); };
+  if (!whole(ps) || !whole(by) || !sh || !sh->is_string()) {
     return *error = delta.filename().string() + " isn't a page delta", false;
   }
-  uint64_t page_size = h->at("page_size").to_number<uint64_t>();
-  uint64_t bytes = h->at("bytes").to_number<uint64_t>();
-  std::string sha = std::string(h->at("sha256").as_string());
+  uint64_t page_size = ps->is_uint64() ? ps->as_uint64() : uint64_t(ps->as_int64());
+  uint64_t bytes = by->is_uint64() ? by->as_uint64() : uint64_t(by->as_int64());
+  std::string sha = std::string(sh->as_string());
+  // A delta never makes a file larger than 1 TiB: the bound keeps a damaged header from
+  // asking for an absurd file.
+  if (bytes > (1ull << 40)) return *error = delta.filename().string() + " declares an impossible size", false;
   if (page_size < 512 || page_size > 65536) return *error = delta.filename().string() + " has a bad page size", false;
   fs::path tmp = out_path.string() + ".applying";
   std::error_code ec;

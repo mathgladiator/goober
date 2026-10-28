@@ -39,7 +39,8 @@ struct Edit {
 std::optional<std::vector<Edit>> myers(const std::vector<std::string_view>& a, const std::vector<std::string_view>& b) {
   int n = int(a.size()), m = int(b.size());
   int max = n + m;
-  std::vector<int> v(2 * size_t(max) + 2, 0);
+  // Room for diagonals -max-1 to max+2, so every slice below stays inside.
+  std::vector<int> v(2 * size_t(max) + 4, 0);
   // Each step keeps only the diagonals it can read, -d-1 to d+1: memory grows with D squared,
   // not D times the files' length.
   std::vector<std::vector<int>> trace;

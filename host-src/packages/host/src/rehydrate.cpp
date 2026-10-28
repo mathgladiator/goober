@@ -69,7 +69,9 @@ std::optional<std::vector<backup::RestorePoint>> list_restore_points(aws::S3& s3
   return backup::restore_points(keys);
 }
 
-bool rehydrate(const RehydrateOptions& o, RehydrateReport* report, std::string* error) {
+namespace {
+
+bool rehydrate_inner(const RehydrateOptions& o, RehydrateReport* report, std::string* error) {
   std::error_code ec;
   if (fs::exists(o.dir) && !fs::is_empty(o.dir, ec)) return *error = o.dir.string() + " isn't empty", false;
   fs::create_directories(o.dir);
@@ -204,6 +206,17 @@ bool rehydrate(const RehydrateOptions& o, RehydrateReport* report, std::string* 
                                                    {"sandbox", true}}));
   fs::remove_all(work, ec);
   return true;
+}
+
+}  // namespace
+
+bool rehydrate(const RehydrateOptions& o, RehydrateReport* report, std::string* error) {
+  // A manifest of the wrong shape (an older or newer format) is an error, not a crash.
+  try {
+    return rehydrate_inner(o, report, error);
+  } catch (const std::exception& e) {
+    return *error = std::string("rehydrating failed: ") + e.what(), false;
+  }
 }
 
 }  // namespace goober::host
