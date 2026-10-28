@@ -289,8 +289,10 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] Mail templates for every mail, with defaults (a welcome for new addresses, a leaner one
       for returning), per-tenant and host-wide overrides, a layout, HTML with a text part,
       operator tools, and boxes sending their site's own templates (`design/machine/022.MailTemplates.md`).
-- [ ] Operator OAuth, so agents whose connectors only speak OAuth (Grok) reach
-      `/goober-operations-mcp` (in progress).
+- [x] Operator OAuth: `/oauth/operator`, an issuer in the host realm that only operators sign
+      in to, advertised by `/goober-operations-mcp`'s 401, so agents whose connectors only
+      speak OAuth (Grok) reach the operator tools (`design/machine/023.OperatorOAuth.md`).
+- [ ] Grok connecting through it for real. This needs the human.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

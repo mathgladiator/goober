@@ -79,6 +79,12 @@ std::string Host::bearer_operator(const Request& req) const {
   if (!cfg->operations_token.empty() && constant_time_equal(auth, "Bearer " + cfg->operations_token)) return "config";
   if (auth.starts_with("Bearer ")) {
     if (auto t = find_operator_token(cfg->storage, std::string_view(auth).substr(7))) return "token:" + t->name;
+    // An OAuth access token from the operator issuer (design/machine/023.OperatorOAuth.md), held
+    // by an address still in identity.operators: taking it out of the config ends its access.
+    if (auto b = identity_->bearer(identity::kHostRealm, std::string_view(auth).substr(7), base::now_unix_ms())) {
+      auto it = cfg->identity.operators.find(b->user.email);
+      if (it != cfg->identity.operators.end() && !it->second.empty()) return "oauth:" + b->user.email + ":" + b->client_id;
+    }
   }
   return "";
 }
@@ -93,8 +99,13 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
       return finish(std::move(res), R"({"why":"rate limited","bucket":"operator-auth"})");
     }
     auto res = json_response(
-        401, R"({"error":"a bearer token is required: mint one with goober-host token create, or set operations.token"})");
-    res.headers.emplace_back("www-authenticate", "Bearer");
+        401, R"({"error":"a bearer token is required: sign in with OAuth as a host operator, or mint one with goober-host token create"})");
+    // Where an MCP client learns to sign in (RFC 9728): the operator issuer.
+    bool sent = base::to_lower(req.header("authorization")).starts_with("bearer ");
+    res.headers.emplace_back("www-authenticate", std::string("Bearer") + (sent ? " error=\"invalid_token\"," : "") +
+                                                     " resource_metadata=\"" + origin_of(req) +
+                                                     "/.well-known/oauth-protected-resource" +
+                                                     std::string(kOperationsMcpPath) + "\"");
     return finish(std::move(res), R"({"why":"operations token"})");
   }
   if (req.method != "post") {

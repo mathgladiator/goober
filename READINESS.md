@@ -31,9 +31,11 @@
 
 ## 2. Dynamic content from Grok: yes, untried with Grok
 
-- **How Grok connects.** Mint an operator token on the server
-  (`goober-host token create --name grok`) and give Grok
-  `https://your.domain/goober-operations-mcp` with `Authorization: Bearer <token>`.
+- **How Grok connects.** Add `https://your.domain/goober-operations-mcp` as a connector and
+  choose OAuth. Grok sends you to the host operators' sign-in: your address must be in
+  `identity.operators`, and the code comes by mail. Allow it, and Grok gets the operator tools
+  (`design/machine/023.OperatorOAuth.md`). Clients that can send a header can instead use a
+  token from `goober-host token create --name grok`.
 - **The loop** (`design/human/521.Source.md`, `design/machine/020.Source.md`):
   1. `source_create` (a Rust box, a WAT box, or a site);
   2. `source_checkout`;

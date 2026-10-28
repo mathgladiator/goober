@@ -176,6 +176,11 @@ Then, on the server, mint an operator token
 (`sudo -u goober goober-host token create --config /srv/goober/host/host.json --name claude-code --claude`)
 and use it from your laptop: `GOOBER_URL=https://your.domain GOOBER_TOKEN=... tools/goober.py push playground site/`.
 
+Agents whose connectors only speak OAuth (Grok) need no token: give them
+`https://your.domain/goober-operations-mcp` and choose OAuth. They send you to sign in as a
+host operator (an address in `identity.operators`, by an emailed code) and ask you to allow
+them (`design/machine/023.OperatorOAuth.md`).
+
 For mail to reach anyone but you, answer yes to Amazon SES in setup (with a verified sending
 address, and your account out of SES's sandbox), or to SMTP with its password in a file the
 `goober` user can read (`chown root:goober`, `chmod 0640`).

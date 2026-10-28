@@ -124,6 +124,8 @@ Read these before doing design work:
     expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins.
   - `design/machine/022.MailTemplates.md`: every mail rendered from a template (subject, text,
     HTML, a layout), defaults for each host mail, overrides per tenant or host, and box templates.
+  - `design/machine/023.OperatorOAuth.md`: a second OAuth issuer, `/oauth/operator`, in the host
+    realm, so agents that only speak OAuth (Grok) sign an operator in and reach the operator tools.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

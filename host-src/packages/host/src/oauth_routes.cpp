@@ -1,7 +1,9 @@
 // The host-owned OAuth 2.1 endpoints (013.Identity.md § The implicit API; 999.Mobile.md
 // § Signing in; design/machine/009.OAuth.md): metadata, the authorization code flow
 // with a consent screen, the token and revocation endpoints, dynamic registration, and
-// the device flow. Each tenant realm is its own issuer.
+// the device flow. Each tenant realm is its own issuer, at the domain's origin. The host realm
+// is a second issuer under /oauth/operator, for agents reaching /goober-operations-mcp
+// (design/machine/023.OperatorOAuth.md): only addresses in identity.operators sign in to it.
 
 #include <iostream>
 
@@ -124,25 +126,40 @@ std::optional<identity::Client> Host::oauth_client(const std::string& tenant, co
   return identity_->client(tenant, client_id);
 }
 
-void Host::handle_oauth(const Request& req, const Finish& finish, const std::string& path, const std::string& domain,
+void Host::handle_oauth(const Request& req, const Finish& finish, const std::string& path_in, const std::string& domain,
                         const std::string& tenant) {
   auto cfg = config_.get();
+  // The operator issuer: the same endpoints under /oauth/operator, in the host realm.
+  const std::string kOperatorBase = "/oauth/operator";
+  bool op = path_in.starts_with(kOperatorBase + "/") || path_in == "/.well-known/oauth-authorization-server" + kOperatorBase ||
+            path_in == "/.well-known/openid-configuration" + kOperatorBase;
+  std::string path = path_in;
+  if (path_in.starts_with(kOperatorBase + "/.well-known/") || !path_in.starts_with(kOperatorBase + "/")) {
+    // RFC 8414 puts an issuer's metadata at /.well-known/oauth-authorization-server/$path;
+    // some clients look under the issuer instead, or for OpenID's name. All are the same.
+    if (op) path = "/.well-known/oauth-authorization-server";
+  } else {
+    path = "/oauth/" + path_in.substr(kOperatorBase.size() + 1);
+  }
+  const std::string realm = op ? std::string(identity::kHostRealm) : tenant;
+  const std::string base_path = op ? kOperatorBase : "/oauth";
   std::string request_id = req.header("goober-request-id");
   int64_t now = base::now_unix_ms();
   int64_t refresh_ms = cfg->identity.session_days * 24 * 3600 * 1000;
   std::string origin = origin_of(req);
+  const std::string issuer = op ? origin + kOperatorBase : origin;
   bool is_get = req.method == "get" || req.method == "head";
   bool is_post = req.method == "post";
   auto log = [](const char* what) { return json::dump(bj::object{{"oauth", what}}); };
 
   if (path == "/.well-known/oauth-authorization-server" && is_get) {
     bj::object meta{
-        {"issuer", origin},
-        {"authorization_endpoint", origin + "/oauth/authorize"},
-        {"token_endpoint", origin + "/oauth/token"},
-        {"revocation_endpoint", origin + "/oauth/revoke"},
-        {"registration_endpoint", origin + "/oauth/register"},
-        {"device_authorization_endpoint", origin + "/oauth/device"},
+        {"issuer", issuer},
+        {"authorization_endpoint", origin + base_path + "/authorize"},
+        {"token_endpoint", origin + base_path + "/token"},
+        {"revocation_endpoint", origin + base_path + "/revoke"},
+        {"registration_endpoint", origin + base_path + "/register"},
+        {"device_authorization_endpoint", origin + base_path + "/device"},
         {"response_types_supported", bj::array{"code"}},
         {"grant_types_supported",
          bj::array{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"}},
@@ -153,7 +170,17 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     };
     auto res = json_response(200, meta);
     res.headers.back() = {"cache-control", "no-cache"};
-    return finish(std::move(res), log("metadata"));
+    return finish(std::move(res), log(op ? "operator_metadata" : "metadata"));
+  }
+
+  // The operator endpoint is a protected resource of the operator issuer (RFC 9728).
+  if (path == "/.well-known/oauth-protected-resource" + std::string(kOperationsMcpPath) && is_get) {
+    auto res = json_response(200, bj::object{{"resource", origin + std::string(kOperationsMcpPath)},
+                                             {"authorization_servers", bj::array{bj::value(origin + kOperatorBase)}},
+                                             {"bearer_methods_supported", bj::array{"header"}},
+                                             {"resource_name", "goober operations on " + domain}});
+    res.headers.back() = {"cache-control", "no-cache"};
+    return finish(std::move(res), log("operator_protected_resource"));
   }
 
   // MCP authorization (RFC 9728): /mcp is a protected resource, signed in to by this realm.
@@ -182,14 +209,14 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     };
     auto to_client = [&](std::vector<std::pair<std::string, std::string>> params) {
       if (!state.empty()) params.emplace_back("state", state);
-      params.emplace_back("iss", origin);
+      params.emplace_back("iss", issuer);
       Response res;
       res.status = 303;
       res.headers.emplace_back("location", with_params(redirect_uri, params));
       res.headers.emplace_back("cache-control", "no-store");
       return res;
     };
-    auto client = oauth_client(tenant, client_id);
+    auto client = oauth_client(realm, client_id);
     if (!client) return bad("The app asking to sign in isn't registered here.");
     if (redirect_uri.empty() || !identity::redirect_allowed(*client, redirect_uri)) {
       return bad("The app asked to return somewhere it isn't registered to go.");
@@ -211,12 +238,14 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     if (is_post && !user_submitted(req, origin)) {
       return finish(error_page(tenant, 403, request_id), log("authorize_cross_origin"));
     }
+    // The operator issuer takes only a host operator's session; a tenant's, only a person's.
     auto who = browser_session(req, tenant);
-    if (!who || who->host) {
-      std::string back = "/oauth/authorize?" + (is_get ? req.query : req.body);
+    if (!who || who->host != op) {
+      std::string back = base_path + "/authorize?" + (is_get ? req.query : req.body);
       Response res;
       res.status = 303;
-      res.headers.emplace_back("location", "/identity/sign-in?return=" + base::percent_encode(back));
+      res.headers.emplace_back("location", std::string(op ? "/identity/sign-in/as-host" : "/identity/sign-in") +
+                                               "?return=" + base::percent_encode(back));
       res.headers.emplace_back("cache-control", "no-store");
       return finish(std::move(res), log("authorize_sign_in"));
     }
@@ -224,7 +253,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       if (get(p, "decision") != "allow") {
         return finish(to_client({{"error", "access_denied"}}), log("authorize_denied"));
       }
-      std::string code = identity_->issue_code(tenant, client_id, who->user.user_id, redirect_uri, challenge, now);
+      std::string code = identity_->issue_code(realm, client_id, who->user.user_id, redirect_uri, challenge, now);
       mail_new_grant(*who, *client, domain, where_from(redirect_uri));
       return finish(to_client({{"code", code}}),
                     json::dump(bj::object{{"oauth", "authorize_allowed"},
@@ -240,7 +269,11 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       }
     }
     std::string kind =
-        client->person
+        op ? "<p><strong>" + html_escape(client->name) + "</strong> is an <strong>agent</strong>" +
+                 (client->source == "dynamic" ? " that registered itself, so nobody here has checked it" : "") +
+                 ". It will act <strong>as a host operator</strong>: everything the operator tools can do on this "
+                 "host, on every site. It can change pages, boxes, data, keys, and backups.</p>"
+        : client->person
             ? "<p><strong>" + html_escape(client->name) + "</strong> is this site's own app. It will act <strong>as "
                   "you</strong>, the way you do in a browser.</p>"
             : "<p><strong>" + html_escape(client->name) + "</strong> is an <strong>agent</strong>" +
@@ -248,7 +281,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
                   ". It will act <strong>for you</strong>, but only on what this site lets agents do.</p>";
     std::string body =
         "<h1>Allow " + html_escape(client->name) + "?</h1>" +
-        "<p class=\"muted\">Signing in to <strong>" + html_escape(domain) + "</strong> as <strong>" +
+        "<p class=\"muted\">Signing in to <strong>" + html_escape(op ? "operate this host" : domain) + "</strong> as <strong>" +
         html_escape(who->user.email) + "</strong></p>" + kind + "<p>It comes from <strong>" +
         html_escape(where_from(redirect_uri)) + "</strong>" +
         (client->source == "dynamic" ? " <span class=\"error\">(unverified; it registered itself on " +
@@ -258,7 +291,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         roles_sentence(who->roles) +
         "</p><p class=\"muted\">Only allow it if you just started this sign-in yourself. You can remove it later "
         "from <a href=\"/identity/account\">your account</a>.</p>"
-        "<form method=\"post\" action=\"/oauth/authorize\">" +
+        "<form method=\"post\" action=\"" + base_path + "/authorize\">" +
         hidden +
         "<button name=\"decision\" value=\"allow\">Allow</button>"
         "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
@@ -273,19 +306,19 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     std::string client_id = get(p, "client_id");
     identity::OAuthError e;
     std::optional<identity::Tokens> t;
-    if (client_id.empty() || !oauth_client(tenant, client_id)) {
+    if (client_id.empty() || !oauth_client(realm, client_id)) {
       e = {"invalid_client", "unknown client"};
     } else if (grant == "authorization_code") {
-      t = identity_->exchange_code(tenant, client_id, get(p, "code"), get(p, "redirect_uri"), get(p, "code_verifier"),
+      t = identity_->exchange_code(realm, client_id, get(p, "code"), get(p, "redirect_uri"), get(p, "code_verifier"),
                                    now, refresh_ms, &e);
     } else if (grant == "refresh_token") {
-      t = identity_->refresh(tenant, client_id, get(p, "refresh_token"), now, refresh_ms, &e);
+      t = identity_->refresh(realm, client_id, get(p, "refresh_token"), now, refresh_ms, &e);
     } else if (grant == "urn:ietf:params:oauth:grant-type:device_code") {
-      t = identity_->poll_device(tenant, client_id, get(p, "device_code"), now, refresh_ms, &e);
+      t = identity_->poll_device(realm, client_id, get(p, "device_code"), now, refresh_ms, &e);
     } else {
       e = {"unsupported_grant_type", "use authorization_code, refresh_token, or the device_code grant"};
     }
-    bj::object extra{{"oauth", "token"}, {"grant", grant}, {"client_id", client_id}};
+    bj::object extra{{"oauth", op ? "operator_token" : "token"}, {"grant", grant}, {"client_id", client_id}};
     if (!t) {
       extra["error"] = e.code;
       return finish(oauth_error(e), json::dump(extra));
@@ -299,7 +332,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
 
   if (path == "/oauth/revoke" && is_post) {
     auto p = router::parse_query(req.body);
-    identity_->revoke_token(tenant, get(p, "client_id"), get(p, "token"), now);
+    identity_->revoke_token(realm, get(p, "client_id"), get(p, "token"), now);
     // RFC 7009 §2.2: 200 whether or not the token was valid.
     return finish(json_response(200, bj::object{}), log("revoke"));
   }
@@ -324,7 +357,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       }
     }
     std::string why;
-    auto c = identity_->register_client(tenant, name, uris, now, &why);
+    auto c = identity_->register_client(realm, name, uris, now, &why);
     if (!c) {
       return finish(json_response(400, bj::object{{"error", "invalid_client_metadata"}, {"error_description", why}}),
                     log("register_refused"));
@@ -348,17 +381,17 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     std::string client_id = get(p, "client_id");
     identity::OAuthError e;
     std::optional<identity::DeviceStart> d;
-    if (!oauth_client(tenant, client_id)) {
+    if (!oauth_client(realm, client_id)) {
       e = {"invalid_client", "unknown client"};
     } else {
-      d = identity_->start_device(tenant, client_id, now, &e);
+      d = identity_->start_device(realm, client_id, now, &e);
     }
     if (!d) return finish(oauth_error(e), log("device_refused"));
     // No verification_uri_complete: the person types the code on a page they reached
     // themselves (013 § Sign-in screen requirements).
     return finish(json_response(200, bj::object{{"device_code", d->device_code},
                                                 {"user_code", d->user_code},
-                                                {"verification_uri", origin + "/oauth/device/verify"},
+                                                {"verification_uri", origin + base_path + "/device/verify"},
                                                 {"expires_in", d->expires_in_s},
                                                 {"interval", d->interval_s}}),
                   json::dump(bj::object{{"oauth", "device_start"}, {"client_id", client_id}}));
@@ -367,10 +400,11 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
   if (path == "/oauth/device/verify" && (is_get || is_post)) {
     if (is_post && !user_submitted(req, origin)) return finish(error_page(tenant, 403, request_id), log("device_cross_origin"));
     auto who = browser_session(req, tenant);
-    if (!who || who->host) {
+    if (!who || who->host != op) {
       Response res;
       res.status = 303;
-      res.headers.emplace_back("location", "/identity/sign-in?return=%2Foauth%2Fdevice%2Fverify");
+      res.headers.emplace_back("location", std::string(op ? "/identity/sign-in/as-host" : "/identity/sign-in") +
+                                               "?return=" + base::percent_encode(base_path + "/device/verify"));
       res.headers.emplace_back("cache-control", "no-store");
       return finish(std::move(res), log("device_sign_in"));
     }
@@ -382,7 +416,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
               "</strong> as <strong>" + html_escape(who->user.email) + "</strong></p>" +
               (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
               "<p>Type the code the device or agent is showing you.</p>"
-              "<form method=\"post\" action=\"/oauth/device/verify\"><label for=\"code\">Code</label>"
+              "<form method=\"post\" action=\"" + base_path + "/device/verify\"><label for=\"code\">Code</label>"
               "<input id=\"code\" type=\"text\" name=\"user_code\" required autofocus autocomplete=\"off\" "
               "placeholder=\"WDJB-MJHT\" maxlength=\"9\"><input type=\"hidden\" name=\"step\" value=\"check\">"
               "<button>Continue</button></form><p class=\"muted\">Only continue if you started this sign-in "
@@ -390,7 +424,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     };
     if (is_get) return finish(enter(""), log("device_page"));
     std::string user_code = get(form, "user_code");
-    auto client = identity_->device_client(tenant, user_code, now);
+    auto client = identity_->device_client(realm, user_code, now);
     if (get(form, "step") == "check") {
       if (!client) return finish(enter("That code isn't waiting for anyone. Check it, or start again."), log("device_bad_code"));
       std::string body =
@@ -398,9 +432,10 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
           html_escape(domain) + "</strong> as <strong>" + html_escape(who->user.email) + "</strong></p><p><strong>" +
           html_escape(client->name) + "</strong> is an <strong>agent</strong> on a device without a browser" +
           (client->source == "dynamic" ? " <span class=\"error\">(unverified: it registered itself)</span>" : "") +
-          ". It will act <strong>for you</strong>, but only on what this site lets agents do.</p><p>" +
-          roles_sentence(who->roles) +
-          "</p><form method=\"post\" action=\"/oauth/device/verify\"><input type=\"hidden\" name=\"user_code\" "
+          (op ? ". It will act <strong>as a host operator</strong>: everything the operator tools can do on this host."
+              : ". It will act <strong>for you</strong>, but only on what this site lets agents do.") +
+          "</p><p>" + roles_sentence(who->roles) +
+          "</p><form method=\"post\" action=\"" + base_path + "/device/verify\"><input type=\"hidden\" name=\"user_code\" "
           "value=\"" + html_escape(user_code) + "\"><input type=\"hidden\" name=\"step\" value=\"decide\">"
           "<button name=\"decision\" value=\"allow\">Allow</button>"
           "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
@@ -408,7 +443,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     }
     bool allow = get(form, "decision") == "allow";
     std::string why;
-    if (!identity_->decide_device(tenant, user_code, who->user.user_id, allow, now, &why)) {
+    if (!identity_->decide_device(realm, user_code, who->user.user_id, allow, now, &why)) {
       return finish(enter(why), log("device_bad_code"));
     }
     if (allow && client) mail_new_grant(*who, *client, domain, "a device without a browser");
