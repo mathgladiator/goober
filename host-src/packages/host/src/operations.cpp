@@ -117,17 +117,27 @@ void Host::register_tools() {
   auto tenant_prop = string_property("A tenant name from the host config, like playground, or _host for host-wide "
                                      "content such as error-message/404.html.");
 
-  mcp_->add_tool({"host_health", "Uptime, request count, storage path, boxes, and startup notes.", object_schema({}, {}),
-                  [this](const bj::object&) {
+  mcp_->add_tool({"host_health",
+                  "Uptime, request count, storage path, boxes, startup notes, how mail leaves, and whether backups "
+                  "are healthy.",
+                  object_schema({}, {}), [this](const bj::object&) {
                     bj::array notes;
                     for (const auto& n : startup_notes_) notes.push_back(bj::value(n));
                     auto cfg = config_.get();
+                    auto backup = backup_status(false);
+                    bj::object backups{{"enabled", backup.at("enabled")}};
+                    for (const char* k : {"healthy", "last_nightly_at", "last_increment_at", "last_error", "key_warning"}) {
+                      if (auto* v = backup.if_contains(k)) backups[k] = *v;
+                    }
                     return ToolResult::ok(bj::object{{"version", std::string(kVersion)},
                                                      {"uptime_ms", base::now_unix_ms() - started_ms_},
                                                      {"requests", requests_.load()},
                                                      {"queued_jobs", pool_->queued()},
                                                      {"storage", cfg->storage.string()},
                                                      {"boxes", boxes_->active()->boxes.size()},
+                                                     {"sandbox", cfg->sandbox},
+                                                     {"mail", cfg->sandbox ? "dev (sandbox)" : cfg->identity.mailer},
+                                                     {"backups", std::move(backups)},
                                                      {"startup_notes", std::move(notes)}});
                   }});
 
