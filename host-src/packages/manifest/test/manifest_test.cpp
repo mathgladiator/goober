@@ -335,3 +335,30 @@ TEST(Manifest, MailService) {
   refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "one method is send");
   refuse(R"({"m":{"mail":{},"methods":{"send":{"budget":{"calls":50}}}}})", "1 to 10");
 }
+
+TEST(Manifest, IdentityRoutes) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"t","domains":["*"],
+    "routes":{"identity":{
+      "first-verified":{"name":"welcome","timeout-ms":2000},
+      "signed-in":{"name":"on_sign_in"}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->identity.size(), 2u);
+  EXPECT_EQ(m->identity[0].verb, "identity");
+  EXPECT_EQ(m->identity[0].identity_event, "first-verified");
+  EXPECT_EQ(m->identity[0].name, "welcome");
+  EXPECT_EQ(*m->identity[0].timeout_ms, 2000);
+  EXPECT_EQ(m->identity[1].identity_event, "signed-in");
+  EXPECT_TRUE(m->routes.empty());
+
+  auto refuse = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-out":{"name":"x"}}}})", "first-verified and signed-in");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","public":true}}}})", "only by the host");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{}}}})", "name is required");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","every-ms":5}}}})", "unknown field");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","timeout-ms":0}}}})", "1 to 10000");
+}

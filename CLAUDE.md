@@ -120,6 +120,8 @@ Read these before doing design work:
     page-level increments, assets, rotation, `goober-host rehydrate`, and the tests.
   - `design/machine/020.Source.md`: source projects over MCP: storage, concurrency,
     `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools.
+  - `design/machine/021.IdentityEvents.md`: accounts exist once an address is proved (invites
+    expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

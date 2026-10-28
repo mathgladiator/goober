@@ -250,7 +250,7 @@ bool Identity::put_client(std::string_view realm_name, const Client& c, int64_t 
   return true;
 }
 
-void Identity::prune(std::string_view realm_name, int64_t now_ms) {
+int Identity::prune(std::string_view realm_name, int64_t now_ms) {
   auto& r = realm(realm_name);
   std::lock_guard lock(r.mu);
   constexpr int64_t kDay = 24LL * 3600 * 1000;
@@ -266,6 +266,43 @@ void Identity::prune(std::string_view realm_name, int64_t now_ms) {
                     "(SELECT client_id FROM tokens) AND client_id NOT IN (SELECT client_id FROM authorization_codes) "
                     "AND client_id NOT IN (SELECT client_id FROM device_codes)");
   idle.bind(1, now_ms - 7 * kDay).run();
+  sqlite::Stmt events(r.db, "DELETE FROM events WHERE at < ?");
+  events.bind(1, now_ms - kEventTtlMs).run();
+  // Invites never taken up: the address was never proved, so the account doesn't stay.
+  Transaction tx(r.db);
+  std::vector<std::pair<int64_t, std::string>> stale;
+  sqlite::Stmt find(r.db, "SELECT id, email FROM users WHERE verified_at IS NULL AND created_at < ?");
+  find.bind(1, now_ms - kUnverifiedTtlMs);
+  while (find.step()) stale.emplace_back(find.int64(0), find.text(1));
+  for (const auto& [id, email] : stale) {
+    for (const char* sql : {"DELETE FROM roles WHERE user_id = ?", "UPDATE roles SET granted_by = NULL WHERE granted_by = ?",
+                            "DELETE FROM tokens WHERE user_id = ?", "DELETE FROM authorization_codes WHERE user_id = ?",
+                            "DELETE FROM device_codes WHERE user_id = ?", "DELETE FROM users WHERE id = ?"}) {
+      sqlite::Stmt d(r.db, sql);
+      d.bind(1, id).run();
+    }
+    audit(r.db, now_ms, std::nullopt, "user_expired", id, bj::object{{"email", email}, {"why", "never verified"}});
+  }
+  tx.commit();
+  return int(stale.size());
+}
+
+std::vector<Event> Identity::events_after(std::string_view realm_name, int64_t after_id, int limit) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  std::vector<Event> out;
+  sqlite::Stmt s(r.db, "SELECT id, kind, user_id, email, at FROM events WHERE id > ? ORDER BY id LIMIT ?");
+  s.bind(1, after_id).bind(2, int64_t(limit));
+  while (s.step()) out.push_back(Event{s.int64(0), s.text(1), s.int64(2), s.text(3), s.int64(4)});
+  return out;
+}
+
+int64_t Identity::last_event_id(std::string_view realm_name) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  // The sequence, not max(id): pruned events leave it where it was.
+  sqlite::Stmt s(r.db, "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)");
+  return s.step() ? s.int64(0) : 0;
 }
 
 std::optional<Client> Identity::register_client(std::string_view realm_name, std::string_view name,

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "goober/base/files.h"
+#include "goober/base/time.h"
 #include "goober/host/backup.h"
 #include "goober/host/host.h"
 
@@ -26,7 +27,7 @@ TEST(Backup, CopiesARunningHostAndRestoresIt) {
     host::Host h(config_for("storage"));
     h.start();
     ASSERT_TRUE(h.content().put("playground", "index.md", "# Home", &err)) << err;
-    ASSERT_TRUE(h.identity().grant("playground", "me@example.com", "owner", "test", 1, &err)) << err;
+    ASSERT_TRUE(h.identity().grant("playground", "me@example.com", "owner", "test", base::now_unix_ms(), &err)) << err;
     base::append_line(root / "storage/logs/access.log", "{}");
     // Backed up while the host is running and holding its databases open.
     host::BackupReport report;

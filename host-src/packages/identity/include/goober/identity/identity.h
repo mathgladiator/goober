@@ -33,6 +33,15 @@ inline constexpr int kCodesPerWindow = 5;
 // Wrong codes allowed per address per day, across all its codes.
 inline constexpr int kFailuresPerDay = 20;
 inline constexpr int64_t kFailureWindowMs = 24LL * 3600 * 1000;
+// An account whose address was never proved by a code (an invite, made by a grant) is
+// deleted, with its roles, this long after it was made.
+inline constexpr int64_t kUnverifiedTtlMs = 30LL * 24 * 3600 * 1000;
+// Identity events are kept this long for boxes' identity routes to read.
+inline constexpr int64_t kEventTtlMs = 7LL * 24 * 3600 * 1000;
+
+// What boxes' identity routes hear (design/machine/021.IdentityEvents.md).
+inline constexpr std::string_view kFirstVerified = "first-verified";  // an address proved for the first time
+inline constexpr std::string_view kSignedIn = "signed-in";            // every sign-in by an emailed code
 
 struct Mail {
   std::string to;
@@ -40,6 +49,12 @@ struct Mail {
   std::string text;
   std::string from_name;  // the sender's display name; "" means goober
   std::string reply_to;   // an address replies go to, or ""
+  // A host mail rendered from a template (design/machine/022.MailTemplates.md): the realm whose
+  // templates apply, the template's name, and its values. Without a name, subject and text go as they are.
+  std::string realm;
+  std::string template_name;
+  bj::object vars;
+  std::string html;  // an HTML alternative to text, or ""
 };
 using Mailer = std::function<void(const Mail&)>;
 
@@ -53,7 +68,17 @@ struct User {
 struct SignIn {
   std::string token;  // the raw session token; only its hash is stored
   User user;
-  bool created = false;  // the user was created by this sign-in
+  bool created = false;         // the user was created by this sign-in
+  bool first_verified = false;  // the address was proved for the first time by this sign-in
+};
+
+// One identity event, appended in the same transaction as the sign-in that caused it.
+struct Event {
+  int64_t id = 0;  // increasing within the realm, never reused
+  std::string kind;  // kFirstVerified or kSignedIn
+  int64_t user_id = 0;
+  std::string email;
+  int64_t at_ms = 0;
 };
 
 // OAuth 2.1 (013 § Sessions, schema, and the login API; design/machine/009.OAuth.md).
@@ -137,6 +162,8 @@ class Identity {
 
   // The user behind a live session token, or nullopt.
   std::optional<User> session(std::string_view realm, std::string_view token, int64_t now_ms);
+  // A user by id, with their roles; nullopt when gone or disabled.
+  std::optional<User> user(std::string_view realm, int64_t user_id);
   void end_session(std::string_view realm, std::string_view token, int64_t now_ms);
 
   // Operator actions, audited with actor null and detail {"by": by}.
@@ -196,8 +223,15 @@ class Identity {
                                     std::string_view device_code, int64_t now_ms, int64_t refresh_ms,
                                     OAuthError* error);
 
-  // Deletes expired codes and week-old dynamic clients that never signed anyone in.
-  void prune(std::string_view realm, int64_t now_ms);
+  // Deletes expired codes, week-old dynamic clients that never signed anyone in, events past
+  // kEventTtlMs, and accounts never proved within kUnverifiedTtlMs (with their roles).
+  // Returns how many accounts were deleted.
+  int prune(std::string_view realm, int64_t now_ms);
+
+  // Identity events after `after_id`, oldest first, at most `limit`; and the newest event's id
+  // (0 when there is none).
+  std::vector<Event> events_after(std::string_view realm, int64_t after_id, int limit);
+  int64_t last_event_id(std::string_view realm);
 
   // A user's browser sessions, for the account page: {id, expires_at}, and ending one.
   bj::array sessions(std::string_view realm, int64_t user_id, int64_t now_ms);

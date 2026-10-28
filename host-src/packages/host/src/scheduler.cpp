@@ -51,8 +51,7 @@ void Host::set_timers_inline(bool inline_fires) {
 }
 
 // The tenants a box's timers run for, each with the domain its fires say they came in on.
-static std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg,
-                                                                   const manifest::Manifest& m) {
+std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg, const manifest::Manifest& m) {
   std::map<std::string, std::string> out;
   for (const auto& [domain, entry] : cfg.domains) {
     if (m.applies_to(domain) && !out.count(entry.tenant)) out[entry.tenant] = domain;
@@ -479,6 +478,11 @@ void Host::run_timers() {
       timer_tick(base::now_unix_ms());
     } catch (const std::exception& e) {
       std::cerr << "goober-host: timers: " << e.what() << "\n";
+    }
+    try {
+      identity_tick(base::now_unix_ms());
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: identity events: " << e.what() << "\n";
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return timers_stopping_; });

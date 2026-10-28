@@ -54,6 +54,9 @@ struct HttpRoute {
   std::string at_field;
   std::string missed;  // "once" (a catch-up fire after downtime) or "skip"
   std::optional<int64_t> timeout_ms;
+  // An identity route (design/machine/021.IdentityEvents.md), verb "identity", is called only by
+  // the host, after a sign-in commits: "first-verified" or "signed-in".
+  std::string identity_event;
   // An internal route (039) is reachable only from the boxes it names.
   std::vector<std::string> callers;
   std::string export_name() const { return "goober_route_" + name; }
@@ -169,6 +172,7 @@ struct Manifest {
   std::vector<HttpRoute> tools;   // routes.mcp.$name.tool, with verb "tool"
   std::vector<HttpRoute> timers;  // routes.timer.$key, with verb "timer"
   std::vector<HttpRoute> internal;  // routes.internal.$path.$verb, reachable only from callers
+  std::vector<HttpRoute> identity;  // routes.identity.$event, with verb "identity"
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

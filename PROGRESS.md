@@ -38,9 +38,9 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | --- | --- | --- | --- |
 | 000 Introduction | partial | WASM boxes with no POSIX, manifests as perimeter, fuel and timeouts, SQLite storage, ephemeral solo boxes. | Shadow traffic, A/B, forking, per-box cost. |
 | 005 Goals | partial | One binary on a laptop; Caddy in front for production (setup writes a Caddyfile); identity from day one. | Mail as a channel, the bus, timers, versions with approvers, the approval queue, worst-case answers from the manifest. |
-| 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `routes.mcp`, `routes.timer`, `routes.internal`, `templates`, `types`, `data`, `external`. Per-route exports (005 §3 supersedes signals). 5xx is the host's (011). | `signal`, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, 4xx clamping. |
+| 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `routes.mcp`, `routes.timer`, `routes.internal`, `routes.identity` (021), `templates`, `types`, `data`, `external`. Per-route exports (005 §3 supersedes signals). 5xx is the host's (011). | `signal`, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, 4xx clamping. |
 | 012 Configs | none | | Box-less config manifests, header priority, rewrites. |
-| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, a separate origin for the screens (Q24). Rate limits, new-grant email, and browser sessions on the account page are built (013 review). |
+| 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. Addresses proved before an account stays (invites expire in 30 days), and sign-in events boxes hear (021). | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, a separate origin for the screens (Q24). Rate limits, new-grant email, and browser sessions on the account page are built (013 review). |
 | 015 Domains | none | Domains live in the host config (005 §6). | The registry table, primaries and redirects, verification, TLS ask hook. |
 | 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `{!email}`, `{!user_id}`, `{!tenant}`, `{!domain}` in `require`; `client_id` for agents and a `caller` block for internal calls in the request document; `!` names refused. | Substituting `!client_id` and the rest in requirements; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload. | Traffic decisions, given-up routes, static and rewrite conflicts. |
@@ -280,6 +280,13 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] Sandboxed Rust builds (bubblewrap, offline, vendored crates), WAT, and prebuilt WASM;
       `deploy.sh --with-rust`; `goober.py source` for people.
 - [ ] Grok driving the loop over its remote MCP tool. This needs the human.
+
+### Phase 12: identity events and mail templates (013, 038)
+- [x] Accounts exist once an address is proved; invites never taken up expire in 30 days;
+      sign-ins append `first-verified` and `signed-in` events; boxes hear them through
+      `routes.identity`, after commit, in order, with retries (`design/machine/021.IdentityEvents.md`).
+- [x] A site's `/mcp` with no tools for the caller says where the operator endpoint is.
+- [ ] Mail templates for every host mail, with defaults and per-site overrides (in progress).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

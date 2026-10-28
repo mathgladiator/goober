@@ -147,3 +147,59 @@ TEST_F(IdentityTest, WrongGuessesAreCountedAcrossCodesForADay) {
   id->start_email("playground", "eve@example.com", "localhost", true, t);
   EXPECT_TRUE(id->verify_email("playground", "eve@example.com", last_code(), true, t, kDay, &why)) << why;
 }
+
+TEST_F(IdentityTest, SignInsRecordEventsAndTheFirstProof) {
+  id->start_email("playground", "carol@example.com", "localhost", true, kNow);
+  EXPECT_EQ(mail.back().template_name, "sign-in-new");
+  EXPECT_EQ(mail.back().realm, "playground");
+  EXPECT_EQ(mail.back().vars.at("code").as_string(), last_code());
+  std::string why;
+  auto first = id->verify_email("playground", "carol@example.com", last_code(), true, kNow + 1, kDay, &why);
+  ASSERT_TRUE(first) << why;
+  EXPECT_TRUE(first->first_verified);
+  // Coming back: a shorter mail, and no second proof.
+  id->start_email("playground", "carol@example.com", "localhost", true, kNow + 2);
+  EXPECT_EQ(mail.back().template_name, "sign-in-returning");
+  auto again = id->verify_email("playground", "carol@example.com", last_code(), true, kNow + 3, kDay, &why);
+  ASSERT_TRUE(again) << why;
+  EXPECT_FALSE(again->first_verified);
+
+  auto events = id->events_after("playground", 0, 10);
+  ASSERT_EQ(events.size(), 3u);
+  EXPECT_EQ(events[0].kind, "first-verified");
+  EXPECT_EQ(events[1].kind, "signed-in");
+  EXPECT_EQ(events[2].kind, "signed-in");
+  EXPECT_EQ(events[2].email, "carol@example.com");
+  EXPECT_EQ(events[2].user_id, first->user.user_id);
+  EXPECT_EQ(events[2].at_ms, kNow + 3);
+  EXPECT_EQ(id->last_event_id("playground"), events[2].id);
+  EXPECT_EQ(id->events_after("playground", events[1].id, 10).size(), 1u);
+  // Old events go, and the last id stays where it was.
+  id->prune("playground", kNow + kEventTtlMs + 10);
+  EXPECT_TRUE(id->events_after("playground", 0, 10).empty());
+  EXPECT_EQ(id->last_event_id("playground"), events[2].id);
+}
+
+TEST_F(IdentityTest, InvitesNeverProvedAreDeletedAfterThirtyDays) {
+  std::string why;
+  ASSERT_TRUE(id->grant("playground", "invited@example.com", "editor", "test", kNow, &why)) << why;
+  ASSERT_TRUE(id->grant("playground", "taken@example.com", "editor", "test", kNow, &why)) << why;
+  // An invite taken up proves the address, and that is a first verification.
+  id->start_email("playground", "taken@example.com", "localhost", true, kNow + 1);
+  EXPECT_EQ(mail.back().template_name, "sign-in-new");
+  auto in = id->verify_email("playground", "taken@example.com", last_code(), true, kNow + 2, kDay, &why);
+  ASSERT_TRUE(in) << why;
+  EXPECT_FALSE(in->created);
+  EXPECT_TRUE(in->first_verified);
+
+  EXPECT_EQ(id->prune("playground", kNow + kUnverifiedTtlMs - 1), 0);
+  EXPECT_EQ(id->holders("playground", "editor"), 2);
+  EXPECT_EQ(id->prune("playground", kNow + kUnverifiedTtlMs + 1), 1);
+  EXPECT_EQ(id->holders("playground", "editor"), 1);
+  auto d = id->describe("playground", kNow + kUnverifiedTtlMs + 2);
+  const auto& users = d.at("users").as_array();
+  ASSERT_EQ(users.size(), 1u);
+  EXPECT_EQ(users[0].at("email").as_string(), "taken@example.com");
+  EXPECT_TRUE(users[0].at("verified").as_bool());
+  EXPECT_NE(goober::json::dump(d).find("user_expired"), std::string::npos);
+}

@@ -183,7 +183,9 @@ std::optional<bj::object> Host::backup_run(const std::string& what, int64_t now_
   return out;
 }
 
-bj::object Host::backup_status(bool with_points) { return backups_->status(with_points); }
+bj::object Host::backup_status(bool with_points, int64_t now_ms) {
+  return backups_->status(with_points, now_ms ? now_ms : base::now_unix_ms());
+}
 
 void Host::run_backups() {
   std::unique_lock lock(timer_thread_mu_);
@@ -222,7 +224,7 @@ uint16_t Host::start() {
   crawl_thread_ = std::thread([this] { run_crawls(); });
   if (!backups_manual_) backup_thread_ = std::thread([this] { run_backups(); });
   if (cfg->backup.enabled() && !cfg->sandbox) {
-    auto status = backups_->status(false);
+    auto status = backups_->status(false, base::now_unix_ms());
     if (status.contains("key_warning")) startup_notes_.push_back(std::string(status.at("key_warning").as_string()));
   }
   return server_->port();

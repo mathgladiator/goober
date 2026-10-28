@@ -555,7 +555,7 @@ int BackupService::run_assets(int64_t now_ms, std::string* error) {
   return uploaded;
 }
 
-bj::object BackupService::status(bool with_points) {
+bj::object BackupService::status(bool with_points, int64_t now_ms) {
   auto cfg = config_();
   bj::object out{{"enabled", cfg->backup.enabled() && !cfg->sandbox}};
   if (!cfg->backup.enabled()) {
@@ -597,7 +597,7 @@ bj::object BackupService::status(bool with_points) {
   }
   out["assets"] = assets;
   int64_t last = std::atoll(meta("last_nightly_ms").c_str());
-  out["healthy"] = last > 0 && base::now_unix_ms() - last < kDayMs + 2 * 3600000 && meta("last_error").empty();
+  out["healthy"] = last > 0 && now_ms - last < kDayMs + 2 * 3600000 && meta("last_error").empty();
   if (with_points) {
     std::string error;
     auto s3 = bucket(*cfg);

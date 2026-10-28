@@ -71,6 +71,9 @@ class Host {
   // returns how many fires ran, or nullopt with `error`.
   boost::json::array timers_due();
   std::optional<int> run_timer_now(const std::string& name, const std::string& tenant, std::string* error);
+  // Identity routes (design/machine/021.IdentityEvents.md): delivers sign-in events to the boxes
+  // that declare them, and hourly prunes the realms. The timer thread calls it each second.
+  void identity_tick(int64_t now_ms);
 
   // The outbox (035; design/machine/015.Network.md): delivers what's due and returns how
   // many were delivered. A host thread calls it every two seconds; tests call it directly.
@@ -89,7 +92,7 @@ class Host {
   void backup_tick(int64_t now_ms);
   // Runs "nightly", "increment", or "assets" now. nullopt with `error` when it couldn't.
   std::optional<boost::json::object> backup_run(const std::string& what, int64_t now_ms, std::string* error);
-  boost::json::object backup_status(bool with_points);
+  boost::json::object backup_status(bool with_points, int64_t now_ms = 0);  // 0: now
 
   // For tests and tools.
   config::ConfigHolder& config() { return config_; }

@@ -28,6 +28,13 @@ struct Host::TimerState {
   std::map<std::string, Rows> rows;                                // tenant|source
   std::map<std::string, std::unique_ptr<sqlite::Db>> progress;     // tenant -> timers.db
   bool inline_fires = false;
+  // Identity routes (identity_events.cpp): deliveries in flight, by tenant|box|route, and
+  // when the realms were last pruned.
+  std::set<std::string> identity_running;
+  int64_t identity_pruned_ms = 0;
 };
+
+// The tenants a box's timers and identity routes run for, each with a domain of its own.
+std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg, const manifest::Manifest& m);
 
 }  // namespace goober::host

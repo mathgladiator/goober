@@ -117,7 +117,8 @@ TEST_F(S3BackupTest, NightlyIncrementsAssetsAndRehydrate) {
     EXPECT_EQ(v.find("SQLite format 3"), std::string::npos) << k;
     EXPECT_TRUE(v.starts_with("GOOBERS1")) << k;
   }
-  auto status = host->backup_status(false);
+  // Health is judged in the test's own time, not the wall clock's.
+  auto status = host->backup_status(false, t0 + 30 * 60 * 1000);
   EXPECT_EQ(status.at("night"), "2026-10-27T04-00-00Z");
   EXPECT_EQ(status.at("healthy"), true);
   EXPECT_TRUE(status.contains("key_warning"));  // nobody has confirmed keeping the key yet

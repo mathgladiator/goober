@@ -116,6 +116,15 @@ once at the row's instant (Unix ms, or RFC 3339 UTC) and the host then sets the 
 active-field to 0 in the same transaction. Try one now with timer_run; see the plan with
 timers_list. Fires run once per tenant the box serves.
 
+### Identity routes (after a sign-in)
+"routes": {"identity": {
+  "first-verified": {"name": "welcome"},      an address proved for the first time
+  "signed-in": {"name": "on_sign_in"}}}      every sign-in, the first included
+Called by the host after the sign-in commits, as the person who signed in ({!user_id} is
+theirs). The body is {"event", "event_id", "user_id", "email", "at"}; event_id is the same on
+every retry, so record it if you must act once. Set up a new person's rows, or send a welcome
+through the mail service. Failures are retried in order, then given up after 8 tries.
+
 ## Data
 
 1. schema_put {"schema": "orders1", "tables": {"orders": {"columns": {

@@ -240,6 +240,40 @@ bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifes
   return true;
 }
 
+// routes.identity.$event (design/machine/021.IdentityEvents.md): the host calls the route
+// after a sign-in in the realm of a domain the box serves. Like timers, only the host calls it.
+bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!routes.is_object()) return *error = "routes.identity must be an object", false;
+  std::string err;
+  for (const auto& kv : routes.as_object()) {
+    std::string event(kv.key());
+    std::string where = "routes.identity." + event;
+    if (event != "first-verified" && event != "signed-in") {
+      return *error = where + ": the identity events are first-verified and signed-in", false;
+    }
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    const auto& def = kv.value().as_object();
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "name" || k == "timeout-ms") continue;
+      if (k == "requirements" || k == "public") return *error = where + ": identity routes are called only by the host, so they carry no " + k, false;
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    HttpRoute r;
+    r.verb = "identity";
+    r.identity_event = event;
+    auto name = get_string(def, "name", &err);
+    if (!name || !base::is_valid_name(*name)) return *error = where + ": name is required, matching [a-z][a-z0-9_]*", false;
+    if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+    r.name = *name;
+    r.timeout_ms = get_int(def, "timeout-ms", &err);
+    if (!err.empty()) return *error = where + ": " + err, false;
+    if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    m->identity.push_back(std::move(r));
+  }
+  return true;
+}
+
 bool valid_identifier(std::string_view s) {
   if (s.empty() || s.size() > 64 || (s[0] >= '0' && s[0] <= '9')) return false;
   for (char c : s) {
@@ -882,6 +916,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
       }
       if (protocol == "internal") {
         if (!parse_internal(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
+      if (protocol == "identity") {
+        if (!parse_identity(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
       if (protocol != "http") {

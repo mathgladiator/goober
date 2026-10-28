@@ -41,7 +41,8 @@ class BackupService {
   // Uploads what's queued and due; returns how many went up.
   int run_assets(int64_t now_ms, std::string* error);
 
-  boost::json::object status(bool with_points);
+  // Health is judged at now_ms (the wall clock, except in tests).
+  boost::json::object status(bool with_points, int64_t now_ms);
   // The backup key, made on first use (keys/system/backup_key). nullopt with `error` if the
   // key store can't be written.
   std::optional<backup::Key> key(std::string* error);

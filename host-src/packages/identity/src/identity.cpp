@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,  -- AUTOINCREMENT: a user_id is never reused
   email TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL,
-  disabled_at INTEGER
+  disabled_at INTEGER,
+  verified_at INTEGER                    -- when the address was first proved by a code; NULL for an invite
 );
 CREATE TABLE IF NOT EXISTS email_codes (
   id INTEGER PRIMARY KEY,
@@ -82,6 +83,13 @@ CREATE TABLE IF NOT EXISTS roles (
   granted_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, role)
 );
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- AUTOINCREMENT: an id is never reused, so cursors stay true
+  kind TEXT NOT NULL,                    -- 'first-verified' or 'signed-in'
+  user_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -102,6 +110,12 @@ void migrate(sqlite::Db& db) {
   if (!has("clients", "acts_as")) db.exec("ALTER TABLE clients ADD COLUMN acts_as TEXT NOT NULL DEFAULT 'agent'");
   if (!has("clients", "source")) db.exec("ALTER TABLE clients ADD COLUMN source TEXT NOT NULL DEFAULT 'host'");
   if (!has("tokens", "family")) db.exec("ALTER TABLE tokens ADD COLUMN family TEXT");
+  if (!has("users", "verified_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN verified_at INTEGER");
+    // Before the column, an account that ever signed in had proved its address.
+    db.exec("UPDATE users SET verified_at = created_at WHERE id IN "
+            "(SELECT subject FROM audit WHERE action = 'sign_in') OR id IN (SELECT user_id FROM tokens)");
+  }
   db.exec(
       "INSERT OR IGNORE INTO clients (client_id, name, redirect_uris, kind, secret_hash, created_at, acts_as, source) "
       "VALUES ('goober-sign-in', 'the sign-in page', '[]', 'public', NULL, 0, 'person', 'host')");
@@ -148,9 +162,13 @@ void Identity::start_email(std::string_view realm_name, std::string_view email_i
   if (!looks_like_email(email)) return;
   auto& r = realm(realm_name);
   std::string code;
+  bool returning = false;
   {
     std::lock_guard lock(r.mu);
     if (!signup && !user_id_for(r.db, email)) return;
+    sqlite::Stmt known(r.db, "SELECT 1 FROM users WHERE email = ? AND verified_at IS NOT NULL");
+    known.bind(1, email);
+    returning = known.step();
     sqlite::Stmt recent(r.db, "SELECT count(*) FROM email_codes WHERE email = ? AND expires_at > ?");
     recent.bind(1, email).bind(2, now_ms);
     if (recent.step() && recent.int64(0) >= kCodesPerWindow) return;
@@ -160,10 +178,17 @@ void Identity::start_email(std::string_view realm_name, std::string_view email_i
     sqlite::Stmt s(r.db, "INSERT INTO email_codes (email, code_hash, expires_at) VALUES (?, ?, ?)");
     s.bind(1, email).bind(2, code_hash(email, code)).bind(3, now_ms + kCodeTtlMs).run();
   }
-  mailer_(Mail{email, "Your sign-in code for " + std::string(where),
-               "Your sign-in code for " + std::string(where) + " is " + code +
-                   ".\n\nIt was asked for by the sign-in page, and it expires in 10 minutes.\n"
-                   "Type it into the sign-in page you already have open. Never share this code with anyone.\n"});
+  // The text here is the fallback; the host renders the realm's sign-in template over it
+  // (design/machine/022.MailTemplates.md): a welcome for a new address, a shorter note for one
+  // already proved.
+  Mail m{email, "Your sign-in code for " + std::string(where),
+         "Your sign-in code for " + std::string(where) + " is " + code +
+             ".\n\nIt was asked for by the sign-in page, and it expires in 10 minutes.\n"
+             "Type it into the sign-in page you already have open. Never share this code with anyone.\n"};
+  m.realm = std::string(realm_name);
+  m.template_name = returning ? "sign-in-returning" : "sign-in-new";
+  m.vars = bj::object{{"code", code}, {"site", std::string(where)}, {"email", email}, {"expires_minutes", kCodeTtlMs / 60000}};
+  mailer_(m);
 }
 
 std::optional<SignIn> Identity::verify_email(std::string_view realm_name, std::string_view email_in,
@@ -208,7 +233,8 @@ std::optional<SignIn> Identity::verify_email(std::string_view realm_name, std::s
     id = create_user(r.db, email, now_ms);
     out.created = true;
     audit(r.db, now_ms, *id, "user_created", *id, bj::object{{"email", email}});
-  } else {
+  }
+  {
     sqlite::Stmt disabled(r.db, "SELECT disabled_at FROM users WHERE id = ?");
     disabled.bind(1, *id);
     if (disabled.step() && !disabled.is_null(0)) {
@@ -216,6 +242,16 @@ std::optional<SignIn> Identity::verify_email(std::string_view realm_name, std::s
       return *why = kNope, std::nullopt;
     }
   }
+  // The code proved the address: the first time, the account is kept from now on.
+  sqlite::Stmt prove(r.db, "UPDATE users SET verified_at = ? WHERE id = ? AND verified_at IS NULL");
+  prove.bind(1, now_ms).bind(2, *id).run();
+  out.first_verified = r.db.changes() > 0;
+  auto event = [&](std::string_view kind) {
+    sqlite::Stmt e(r.db, "INSERT INTO events (kind, user_id, email, at) VALUES (?, ?, ?, ?)");
+    e.bind(1, kind).bind(2, *id).bind(3, email).bind(4, now_ms).run();
+  };
+  if (out.first_verified) event(kFirstVerified);
+  event(kSignedIn);
   uint8_t raw[32];
   base::os_random_fill(raw);
   out.token = base::hex_encode(std::string_view(reinterpret_cast<char*>(raw), sizeof(raw)));
@@ -241,6 +277,15 @@ std::optional<User> Identity::session(std::string_view realm_name, std::string_v
   User u{s.int64(0), s.text(1), std::string(realm_name), {}};
   u.roles = roles_of(r.db, u.user_id);
   return u;
+}
+
+std::optional<User> Identity::user(std::string_view realm_name, int64_t user_id) {
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  sqlite::Stmt s(r.db, "SELECT email FROM users WHERE id = ? AND disabled_at IS NULL");
+  s.bind(1, user_id);
+  if (!s.step()) return std::nullopt;
+  return User{user_id, s.text(0), std::string(realm_name), roles_of(r.db, user_id)};
 }
 
 void Identity::end_session(std::string_view realm_name, std::string_view token, int64_t now_ms) {
@@ -340,7 +385,7 @@ bj::value Identity::describe(std::string_view realm_name, int64_t now_ms) {
   bj::array users;
   sqlite::Stmt s(r.db,
                  "SELECT u.id, u.email, u.created_at, u.disabled_at, (SELECT count(*) FROM tokens t WHERE "
-                 "t.user_id = u.id AND t.revoked_at IS NULL AND t.expires_at > ?) FROM users u ORDER BY u.id");
+                 "t.user_id = u.id AND t.revoked_at IS NULL AND t.expires_at > ?), u.verified_at FROM users u ORDER BY u.id");
   s.bind(1, now_ms);
   while (s.step()) {
     bj::array roles;
@@ -349,6 +394,7 @@ bj::value Identity::describe(std::string_view realm_name, int64_t now_ms) {
                                {"email", s.text(1)},
                                {"created_at", s.int64(2)},
                                {"disabled", !s.is_null(3)},
+                               {"verified", !s.is_null(5)},
                                {"roles", std::move(roles)},
                                {"live_sessions", s.int64(4)}});
   }

@@ -60,10 +60,21 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   }
   auto active = boxes_->active();
   std::optional<manifest::Caller> caller = manifest::Caller{std::to_string(who->user.user_id), false, who->roles};
+  size_t allowed = 0;
+  for (const auto& [name, ref] : active->tools_for(domain)) {
+    allowed += manifest::check_access(*ref.route, &*caller, {}, tenant) == manifest::Access::kAllowed;
+  }
+  // An agent that finds nothing here was most often meant for the operator endpoint: say so,
+  // rather than leave an empty list to be read as a broken connection.
+  std::string none = allowed > 0 ? ""
+                                 : " This site offers this person no tools here (its boxes declare none, or none their "
+                                   "roles allow). To build and operate the site (pages, templates, uploads, boxes), "
+                                   "connect to " + origin_of(req) + std::string(kOperationsMcpPath) +
+                                   " with an operator token from `goober-host token create`.";
   mcp::McpServer server(
       "goober", std::string(kVersion),
       "Tools from " + domain + ", acting for " + who->user.email + (who->agent ? " as an agent" : "") +
-          ". Each tool says what it does; inputs are checked before anything runs.");
+          ". Each tool says what it does; inputs are checked before anything runs." + none);
   std::string audit_tool;
   int audit_status = 0;
   std::string audit_input, audit_result;
