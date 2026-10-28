@@ -66,6 +66,31 @@ std::optional<std::string> read_file(const fs::path& path) {
   return ss.str();
 }
 
+std::optional<fs::path> write_private_file(const fs::path& dir, std::string_view prefix, std::string_view text) {
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  uint8_t rnd[12];
+  os_random_fill(rnd);
+  static const char* kHex = "0123456789abcdef";
+  std::string name(prefix);
+  for (uint8_t b : rnd) name += {kHex[b >> 4], kHex[b & 15]};
+  fs::path file = dir / name;
+  int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (fd < 0) return std::nullopt;
+  size_t done = 0;
+  while (done < text.size()) {
+    ssize_t w = ::write(fd, text.data() + done, text.size() - done);
+    if (w <= 0) break;
+    done += size_t(w);
+  }
+  ::close(fd);
+  if (done != text.size()) {
+    fs::remove(file, ec);
+    return std::nullopt;
+  }
+  return file;
+}
+
 bool write_file_durable(const fs::path& path, std::string_view data) {
   std::error_code ec;
   fs::create_directories(path.parent_path(), ec);

@@ -2,6 +2,10 @@
 
 #include "goober/base/encoding.h"
 
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+
 namespace goober::base {
 namespace {
 
@@ -58,36 +62,114 @@ void compress(uint32_t state[8], const uint8_t block[64]) {
 
 }  // namespace
 
-std::array<uint8_t, 32> sha256(std::string_view data) {
-  uint32_t state[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                       0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+Sha256::Sha256() { reset(); }
+
+void Sha256::reset() {
+  static constexpr uint32_t kInit[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  for (int i = 0; i < 8; ++i) state_[i] = kInit[i];
+  buffered_ = 0;
+  total_ = 0;
+}
+
+void Sha256::update(std::string_view data) {
   const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
-  size_t full = data.size() / 64;
-  for (size_t i = 0; i < full; ++i) compress(state, bytes + i * 64);
+  size_t n = data.size();
+  total_ += n;
+  if (buffered_ > 0) {
+    size_t take = std::min(n, sizeof(buffer_) - buffered_);
+    std::memcpy(buffer_ + buffered_, bytes, take);
+    buffered_ += take;
+    bytes += take;
+    n -= take;
+    if (buffered_ < sizeof(buffer_)) return;
+    compress(state_, buffer_);
+    buffered_ = 0;
+  }
+  for (; n >= 64; bytes += 64, n -= 64) compress(state_, bytes);
+  std::memcpy(buffer_, bytes, n);
+  buffered_ = n;
+}
 
+std::array<uint8_t, 32> Sha256::finish() {
   uint8_t tail[128] = {};
-  size_t rest = data.size() % 64;
-  for (size_t i = 0; i < rest; ++i) tail[i] = bytes[full * 64 + i];
-  tail[rest] = 0x80;
-  size_t tail_len = rest < 56 ? 64 : 128;
-  uint64_t bits = uint64_t(data.size()) * 8;
+  std::memcpy(tail, buffer_, buffered_);
+  tail[buffered_] = 0x80;
+  size_t tail_len = buffered_ < 56 ? 64 : 128;
+  uint64_t bits = total_ * 8;
   for (int i = 0; i < 8; ++i) tail[tail_len - 1 - i] = uint8_t(bits >> (8 * i));
-  compress(state, tail);
-  if (tail_len == 128) compress(state, tail + 64);
-
+  compress(state_, tail);
+  if (tail_len == 128) compress(state_, tail + 64);
   std::array<uint8_t, 32> out{};
   for (int i = 0; i < 8; ++i) {
-    out[i * 4] = uint8_t(state[i] >> 24);
-    out[i * 4 + 1] = uint8_t(state[i] >> 16);
-    out[i * 4 + 2] = uint8_t(state[i] >> 8);
-    out[i * 4 + 3] = uint8_t(state[i]);
+    out[i * 4] = uint8_t(state_[i] >> 24);
+    out[i * 4 + 1] = uint8_t(state_[i] >> 16);
+    out[i * 4 + 2] = uint8_t(state_[i] >> 8);
+    out[i * 4 + 3] = uint8_t(state_[i]);
   }
+  reset();
   return out;
+}
+
+std::array<uint8_t, 32> sha256(std::string_view data) {
+  Sha256 h;
+  h.update(data);
+  return h.finish();
 }
 
 std::string sha256_hex(std::string_view data) {
   auto digest = sha256(data);
   return hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+std::optional<std::string> sha256_file_hex(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return std::nullopt;
+  Sha256 h;
+  std::string buf(1 << 16, '\0');
+  while (in) {
+    in.read(buf.data(), std::streamsize(buf.size()));
+    h.update(std::string_view(buf.data(), size_t(in.gcount())));
+  }
+  if (in.bad()) return std::nullopt;
+  auto digest = h.finish();
+  return hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
+std::array<uint8_t, 32> hmac_sha256(std::string_view key, std::string_view data) {
+  // RFC 2104: a key longer than a block is hashed first; then inner and outer pads.
+  uint8_t block[64] = {};
+  if (key.size() > 64) {
+    auto k = sha256(key);
+    std::memcpy(block, k.data(), k.size());
+  } else {
+    std::memcpy(block, key.data(), key.size());
+  }
+  uint8_t ipad[64], opad[64];
+  for (int i = 0; i < 64; ++i) {
+    ipad[i] = block[i] ^ 0x36;
+    opad[i] = block[i] ^ 0x5c;
+  }
+  Sha256 inner;
+  inner.update(std::string_view(reinterpret_cast<char*>(ipad), 64));
+  inner.update(data);
+  auto inner_digest = inner.finish();
+  Sha256 outer;
+  outer.update(std::string_view(reinterpret_cast<char*>(opad), 64));
+  outer.update(std::string_view(reinterpret_cast<const char*>(inner_digest.data()), inner_digest.size()));
+  return outer.finish();
+}
+
+std::string hmac_sha256_hex(std::string_view key, std::string_view data) {
+  auto mac = hmac_sha256(key, data);
+  return hex_encode(std::string_view(reinterpret_cast<const char*>(mac.data()), mac.size()));
+}
+
+bool equal_constant_time(std::string_view a, std::string_view b) {
+  if (a.size() != b.size()) return false;
+  unsigned char diff = 0;
+  for (size_t i = 0; i < a.size(); ++i) diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+  return diff == 0;
 }
 
 uint32_t crc32(std::string_view data) {

@@ -20,8 +20,22 @@ void close_both(int p[2]) {
 }
 }  // namespace
 
+std::string curl_quoted(std::string_view value) {
+  std::string out = "\"";
+  for (char c : value) {
+    if (c == '\\' || c == '"') out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
 ProcessResult run_process(const std::vector<std::string>& argv_in, const std::string& input, size_t max_out,
                           int64_t timeout_ms) {
+  return run_process(argv_in, input, max_out, timeout_ms, ProcessOptions());
+}
+
+ProcessResult run_process(const std::vector<std::string>& argv_in, const std::string& input, size_t max_out,
+                          int64_t timeout_ms, const ProcessOptions& options) {
   ProcessResult r;
   if (argv_in.empty()) return r;
   int in[2] = {-1, -1}, out[2] = {-1, -1}, err[2] = {-1, -1};
@@ -36,13 +50,28 @@ ProcessResult run_process(const std::vector<std::string>& argv_in, const std::st
   posix_spawn_file_actions_adddup2(&actions, in[0], 0);
   posix_spawn_file_actions_adddup2(&actions, out[1], 1);
   posix_spawn_file_actions_adddup2(&actions, err[1], 2);
+  if (options.cwd) posix_spawn_file_actions_addchdir_np(&actions, options.cwd->c_str());
+  posix_spawnattr_t attr;
+  posix_spawnattr_init(&attr);
+  if (options.own_group) {
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+  }
   std::vector<std::string> args = argv_in;
   std::vector<char*> argv;
   for (auto& a : args) argv.push_back(a.data());
   argv.push_back(nullptr);
+  std::vector<std::string> env_strings;
+  std::vector<char*> envp;
+  if (options.env) {
+    env_strings = *options.env;
+    for (auto& e : env_strings) envp.push_back(e.data());
+    envp.push_back(nullptr);
+  }
   pid_t pid = 0;
-  int rc = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+  int rc = posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), options.env ? envp.data() : environ);
   posix_spawn_file_actions_destroy(&actions);
+  posix_spawnattr_destroy(&attr);
   close(in[0]);
   close(out[1]);
   close(err[1]);
@@ -100,15 +129,16 @@ ProcessResult run_process(const std::vector<std::string>& argv_in, const std::st
       ssize_t got = read(err[0], buf, sizeof buf);
       if (got <= 0) {
         err_open = false;
-      } else if (r.err.size() < 4096) {
-        r.err.append(buf, size_t(std::min<ssize_t>(got, ssize_t(4096 - r.err.size()))));
+      } else if (r.err.size() < options.max_err) {
+        r.err.append(buf, size_t(std::min<ssize_t>(got, ssize_t(options.max_err - r.err.size()))));
       }
     }
   }
   if (in[1] >= 0) close(in[1]);
   close(out[0]);
   close(err[0]);
-  if (r.truncated || r.timed_out) kill(pid, SIGKILL);
+  // A process group goes down whole: a build's compilers with the build.
+  if (r.truncated || r.timed_out) kill(options.own_group ? -pid : pid, SIGKILL);
   int status = 0;
   waitpid(pid, &status, 0);
   if (WIFEXITED(status)) r.exit_code = WEXITSTATUS(status);

@@ -2,6 +2,7 @@
 
 #include <filesystem>
 
+#include "goober/base/chacha20.h"
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
@@ -22,6 +23,76 @@ TEST(Hash, Sha256KnownVectors) {
 }
 
 TEST(Hash, Crc32KnownVector) { EXPECT_EQ(crc32("123456789"), 0xCBF43926u); }
+
+TEST(Hash, Sha256InPiecesMatchesWhole) {
+  std::string data;
+  for (int i = 0; i < 1000; ++i) data += char(i * 7 + 3);
+  for (size_t split : {size_t(0), size_t(1), size_t(55), size_t(56), size_t(63), size_t(64), size_t(65), size_t(999)}) {
+    Sha256 h;
+    h.update(std::string_view(data).substr(0, split));
+    h.update(std::string_view(data).substr(split));
+    auto digest = h.finish();
+    EXPECT_EQ(hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), 32)), sha256_hex(data)) << split;
+  }
+  // finish() starts over: the next digest is of new bytes alone.
+  Sha256 h;
+  h.update("ignored");
+  h.finish();
+  h.update("abc");
+  auto digest = h.finish();
+  EXPECT_EQ(hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), 32)),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+TEST(Hash, Sha256OfAFile) {
+  auto dir = std::filesystem::path(GOOBER_TEST_TMP) / "base-sha-file";
+  std::filesystem::create_directories(dir);
+  ASSERT_TRUE(write_file_durable(dir / "a", std::string(200000, 'a')));
+  EXPECT_EQ(sha256_file_hex(dir / "a"), sha256_hex(std::string(200000, 'a')));
+  EXPECT_FALSE(sha256_file_hex(dir / "missing"));
+}
+
+// RFC 4231 test cases 1, 2, and 6 (a key longer than a block).
+TEST(Hash, HmacSha256KnownVectors) {
+  EXPECT_EQ(hmac_sha256_hex(std::string(20, '\x0b'), "Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+  EXPECT_EQ(hmac_sha256_hex("Jefe", "what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+  EXPECT_EQ(hmac_sha256_hex(std::string(131, '\xaa'), "Test Using Larger Than Block-Size Key - Hash Key First"),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+}
+
+TEST(Hash, EqualConstantTime) {
+  EXPECT_TRUE(equal_constant_time("abc", "abc"));
+  EXPECT_FALSE(equal_constant_time("abc", "abd"));
+  EXPECT_FALSE(equal_constant_time("abc", "ab"));
+  EXPECT_TRUE(equal_constant_time("", ""));
+}
+
+// RFC 8439 §2.4.2: the sunscreen text under key 00..1f, nonce 0:0:4a:0, counter 1.
+TEST(ChaCha20, Rfc8439Vector) {
+  std::array<uint8_t, 32> key{};
+  for (int i = 0; i < 32; ++i) key[i] = uint8_t(i);
+  std::array<uint8_t, 12> nonce{0, 0, 0, 0, 0, 0, 0, 0x4a, 0, 0, 0, 0};
+  std::string text =
+      "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  std::string expected =
+      "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c"
+      "359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d";
+  std::string whole = text;
+  ChaCha20(key, nonce, 1).apply(reinterpret_cast<uint8_t*>(whole.data()), whole.size());
+  EXPECT_EQ(hex_encode(whole), expected);
+  // In pieces that split blocks anywhere, the same stream.
+  std::string pieces = text;
+  ChaCha20 c(key, nonce, 1);
+  c.apply(reinterpret_cast<uint8_t*>(pieces.data()), 1);
+  c.apply(reinterpret_cast<uint8_t*>(pieces.data()) + 1, 70);
+  c.apply(reinterpret_cast<uint8_t*>(pieces.data()) + 71, pieces.size() - 71);
+  EXPECT_EQ(pieces, whole);
+  // And back.
+  ChaCha20(key, nonce, 1).apply(reinterpret_cast<uint8_t*>(pieces.data()), pieces.size());
+  EXPECT_EQ(pieces, text);
+}
 
 TEST(Encoding, Base64RoundTrip) {
   for (std::string s : {"", "f", "fo", "foo", "foob", "fooba", "foobar"}) {

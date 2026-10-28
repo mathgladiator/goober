@@ -19,6 +19,12 @@ std::optional<std::string> read_file(const std::filesystem::path& path);
 // Returns false on any failure.
 bool write_file_durable(const std::filesystem::path& path, std::string_view data);
 
+// Writes text to a new file in dir (created if needed) with a random name starting with
+// prefix, readable by the host's user only from the moment it exists: for secrets handed to
+// another program, like curl's config. The caller removes it. nullopt on failure.
+std::optional<std::filesystem::path> write_private_file(const std::filesystem::path& dir, std::string_view prefix,
+                                                        std::string_view text);
+
 // Removes the file and fsyncs its directory. Removing a missing file succeeds.
 bool remove_file_durable(const std::filesystem::path& path);
 

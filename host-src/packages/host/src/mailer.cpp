@@ -1,8 +1,6 @@
 #include "mailer.h"
 
 #include <iostream>
-#include <fcntl.h>
-#include <unistd.h>
 
 #include <chrono>
 #include <ctime>
@@ -25,16 +23,6 @@ std::string header_value(std::string v) {
     if (c == '\r' || c == '\n') c = ' ';
   }
   return v;
-}
-
-// A value for curl's config file: double-quoted, with \ and " escaped.
-std::string curl_quoted(const std::string& v) {
-  std::string out = "\"";
-  for (char c : v) {
-    if (c == '\\' || c == '"') out += '\\';
-    out += c;
-  }
-  return out + "\"";
 }
 
 }  // namespace
@@ -153,20 +141,10 @@ bool SmtpQueue::deliver(const config::HostConfig& cfg, const identity::Mail& mai
     auto password = base::read_file(smtp.password_file);
     if (!password) return *error = "can't read identity.smtp.password-file", false;
     while (!password->empty() && (password->back() == '\n' || password->back() == '\r')) password->pop_back();
-    conf = cfg.storage / "mail" / (".curl-" + id);
-    std::error_code mkdir_error;
-    std::filesystem::create_directories(conf.parent_path(), mkdir_error);
-    std::string text = "user = " + curl_quoted(smtp.username + ":" + *password) + "\n";
-    // Created 0600 from the start, so the password is never readable by anyone else.
-    int fd = open(conf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0) return *error = "can't write the curl config", false;
-    bool ok = write(fd, text.data(), text.size()) == ssize_t(text.size());
-    close(fd);
-    if (!ok) {
-      std::error_code ec;
-      std::filesystem::remove(conf, ec);
-      return *error = "can't write the curl config", false;
-    }
+    auto written = base::write_private_file(cfg.storage / "mail", ".curl-",
+                                            "user = " + base::curl_quoted(smtp.username + ":" + *password) + "\n");
+    if (!written) return *error = "can't write the curl config", false;
+    conf = *written;
     argv.push_back("-K");
     argv.push_back(conf.string());
   }

@@ -7,8 +7,6 @@
 
 #include "network.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 
 #include <iostream>
 
@@ -40,16 +38,6 @@ std::string text_of(const bj::value& v) {
   if (v.is_string()) return std::string(v.as_string());
   if (v.is_null()) return "";
   return json::dump(v);
-}
-
-// A config-file value for curl: double-quoted, with \ and " escaped.
-std::string curl_quoted(const std::string& v) {
-  std::string out = "\"";
-  for (char c : v) {
-    if (c == '\\' || c == '"') out += '\\';
-    out += c;
-  }
-  return out + "\"";
 }
 
 }  // namespace
@@ -166,21 +154,15 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
         return out;
       }
     }
-    conf += "header = " + curl_quoted(k + ": " + v) + "\n";
+    conf += "header = " + base::curl_quoted(k + ": " + v) + "\n";
   }
-  if (!content_type.empty()) conf += "header = " + curl_quoted("Content-Type: " + content_type) + "\n";
-  uint8_t rnd[12];
-  base::os_random_fill(rnd);
-  std::error_code mkdir_error;
-  fs::create_directories(scratch, mkdir_error);
-  fs::path conf_file = scratch / (".call-" + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd)));
-  int fd = ::open(conf_file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-  if (fd < 0 || ::write(fd, conf.data(), conf.size()) != ssize_t(conf.size())) {
-    if (fd >= 0) ::close(fd);
+  if (!content_type.empty()) conf += "header = " + base::curl_quoted("Content-Type: " + content_type) + "\n";
+  auto written = base::write_private_file(scratch, ".call-", conf);
+  if (!written) {
     out.error = "can't prepare the call";
     return out;
   }
-  ::close(fd);
+  fs::path conf_file = *written;
   std::string upper = verb;
   for (auto& c : upper) c = char(std::toupper(static_cast<unsigned char>(c)));
   std::vector<std::string> argv = {"curl", "-q", "-g", "--path-as-is", "--noproxy", "*", "-sS", "-i", "--max-redirs", "0",
