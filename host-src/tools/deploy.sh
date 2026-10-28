@@ -2,8 +2,11 @@
 # Deploys goober to a server over ssh: builds the server binary here, copies it, and runs
 # tools/server-bootstrap.sh there (Caddy, a goober user, setup, systemd units, backups).
 #
-#   tools/deploy.sh user@server [DIR] [--with-rust]
+#   tools/deploy.sh user@server [DIR] [--user NAME] [--with-rust]
 #
+# --user NAME is the system user the host runs as on the server (default goober). Its home
+# is /srv/NAME, and DIR must be under it (default /srv/NAME/host). The ssh login is the
+# user@ in the target, which is a different account.
 # --with-rust also installs a Rust toolchain (rustup, for the goober user, with the
 # wasm32-unknown-unknown target) and the vendored crates (tools/vendor.sh), so agents can
 # build Rust boxes from source projects on the server (521.Source.md).
@@ -13,12 +16,26 @@
 # sudo. Point DNS at it before the first run so Caddy can get certificates.
 set -euo pipefail
 
-TARGET="${1:?usage: tools/deploy.sh user@server [DIR] [--with-rust]}"
-DIR="/srv/goober/host"
+USAGE="usage: tools/deploy.sh user@server [DIR] [--user NAME] [--with-rust]"
+TARGET="${1:?$USAGE}"
+DIR=""
+RUN_AS="goober"
 WITH_RUST=""
-for a in "${@:2}"; do
-  if [[ "$a" == --with-rust ]]; then WITH_RUST=--with-rust; else DIR="$a"; fi
+shift
+while (($#)); do
+  case "$1" in
+    --with-rust) WITH_RUST=--with-rust ;;
+    --user) RUN_AS="${2:?$USAGE}"; shift ;;
+    --user=*) RUN_AS="${1#--user=}" ;;
+    -*) echo "unknown option $1; $USAGE" >&2; exit 2 ;;
+    *) DIR="$1" ;;
+  esac
+  shift
 done
+# Checked here and again on the server: a plain system user name, never root.
+[[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$RUN_AS" != root ]] ||
+  { echo "--user must be a lowercase user name other than root, like goober" >&2; exit 2; }
+DIR="${DIR:-/srv/$RUN_AS/host}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST_SRC="$(dirname "$HERE")"
 
@@ -44,4 +61,4 @@ REMOTE="$(ssh "$TARGET" 'mktemp -d /tmp/goober-deploy.XXXXXXXX')"
 scp -q "${FILES[@]}" "$TARGET:$REMOTE/"
 
 echo "── installing on $TARGET"
-ssh -t "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") $WITH_RUST; rm -rf $REMOTE"
+ssh -t "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST; rm -rf $REMOTE"
