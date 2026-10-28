@@ -2,16 +2,17 @@
 # Deploys goober to a server over ssh: builds the server binary here, copies it, and runs
 # tools/server-bootstrap.sh there (Caddy, a goober user, setup, systemd units, backups).
 #
-#   tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--with-rust]
+#   tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust]
 #
 # --user LOGIN is who ssh logs in as on the server (the same as LOGIN@server; without
 # either, ssh uses your local name). That account needs sudo.
 # --run-as NAME is the system user the host runs as on the server (default goober). Its
 # home is /srv/NAME, and DIR must be under it (default /srv/NAME/host).
 # ssh connects once and reuses the connection, so a password is asked for once, not per step.
-# --with-rust also installs a Rust toolchain (rustup, for the host's user, with the
-# wasm32-unknown-unknown target) and the vendored crates (tools/vendor.sh), so agents can
-# build Rust boxes from source projects on the server (521.Source.md).
+# Rust is part of every deploy, so agents can build Rust boxes from source projects on the
+# server (521.Source.md): rustup for the host's user with the wasm32-unknown-unknown target,
+# and the crates boxes may use, vendored on the server (tools/vendor.sh). --without-rust
+# skips it.
 # DIR is the host directory on the server (default /srv/NAME/host). The first run walks
 # through setup interactively on the server; later runs replace the binary and restart.
 # The server needs Ubuntu 24.04 or newer, or Debian 13 or newer (glibc 2.38), x86_64, and
@@ -23,16 +24,17 @@ set -euo pipefail
 # rest of the run read from the middle of a line.
 main() {
 
-USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--with-rust]"
+USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust]"
 TARGET="${1:?$USAGE}"
 DIR=""
 LOGIN=""
 RUN_AS="goober"
-WITH_RUST=""
+WITH_RUST="--with-rust"
 shift
 while (($#)); do
   case "$1" in
-    --with-rust) WITH_RUST=--with-rust ;;
+    --with-rust) WITH_RUST=--with-rust ;;  # the default; kept so older commands still work
+    --without-rust) WITH_RUST="" ;;
     --user) LOGIN="${2:?$USAGE}"; shift ;;
     --user=*) LOGIN="${1#--user=}" ;;
     --run-as) RUN_AS="${2:?$USAGE}"; shift ;;
@@ -62,12 +64,9 @@ trap 'rm -rf "$STAGE"' EXIT
 strip -o "$STAGE/goober-host" "$HOST_SRC/build/server/packages/host/goober-host"
 cp "$HERE/setup.sh" "$HERE/server-bootstrap.sh" "$STAGE/"
 FILES=("$STAGE/goober-host" "$STAGE/setup.sh" "$STAGE/server-bootstrap.sh")
-if [[ -n "$WITH_RUST" ]]; then
-  echo "── vendoring the crates boxes may use"
-  "$HERE/vendor.sh" "$STAGE/vendor"
-  tar -czf "$STAGE/vendor.tar.gz" -C "$STAGE" vendor
-  FILES+=("$STAGE/vendor.tar.gz")
-fi
+# The server vendors the crates itself, with its own cargo: no Rust needed here.
+cp "$HERE/vendor.sh" "$STAGE/"
+FILES+=("$STAGE/vendor.sh")
 
 # One ssh connection for every step, its socket in the private staging directory.
 SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$STAGE/ssh-%C" -o ControlPersist=120)

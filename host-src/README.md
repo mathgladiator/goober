@@ -154,7 +154,7 @@ On a fresh Ubuntu 24.04+ or Debian 13+ machine (x86_64, sudo, DNS already pointi
 
 ```sh
 just deploy you@server            # or host-src/tools/deploy.sh you@server [/srv/goober/host]
-just deploy you@server --with-rust  # also Rust and vendored crates, to build source projects there
+just deploy you@server --without-rust  # skip Rust (on by default, so agents can build Rust boxes there)
 just deploy server --user customer   # ssh in as customer (the same as customer@server)
 just deploy you@server --run-as acme # the host runs as the system user acme, in /srv/acme/host
 ```

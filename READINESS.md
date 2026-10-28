@@ -45,8 +45,8 @@
   The host builds Rust in a sandbox with no network, so Grok needs no laptop, and the source
   stays in the machine for the next conversation. `source_revert` goes back. You can pull,
   edit, and push the same project from a terminal with `goober.py source`.
-- **For Rust on the server:** `just deploy you@server --with-rust` installs the toolchain and
-  the vendored crates (serde, serde_json). WAT boxes and sites need nothing.
+- **For Rust on the server:** every `just deploy` installs the toolchain and vendors the crates
+  (serde, serde_json) on the server; `--without-rust` skips it. WAT boxes and sites need nothing.
 - **Proof.** `source_tools_test`. A Rust template was built, deployed, and serving on the demo
   host.
 - **Watch for.**
@@ -141,7 +141,7 @@ each ranch's site weekly.
 
 ## Before real people use it
 
-1. Deploy to the new machine (`just deploy you@server --with-rust`). Answer SES and S3 in
+1. Deploy to the new machine (`just deploy you@server`). Answer SES and S3 in
    setup, then **store the backup key in your password manager** and run
    `goober-host backup key --confirm`.
 2. In AWS:

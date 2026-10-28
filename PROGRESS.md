@@ -85,7 +85,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 ## Production readiness, honestly
 
 Fine for **one person on a laptop**, and for a **personal VPS behind Caddy**
-(`just deploy you@server [--with-rust]`: Ubuntu 24.04+ or Debian 13+, a `goober` user,
+(`just deploy you@server [--without-rust]`: Ubuntu 24.04+ or Debian 13+, a `goober` user,
 systemd, bubblewrap, local nightly copies, and S3 backups when setup is given a bucket;
 written and dry-run here, not yet run against a real server), with these caveats:
 
@@ -278,7 +278,7 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
 - [x] The `source` package and the operator tools: create, checkout, commit, log, diff,
       revert, build, deploy, jobs (`design/machine/020.Source.md`).
 - [x] Sandboxed Rust builds (bubblewrap, offline, vendored crates), WAT, and prebuilt WASM;
-      `deploy.sh --with-rust`; `goober.py source` for people.
+      Rust on every deploy (`--without-rust` to skip); `goober.py source` for people.
 - [ ] Grok driving the loop over its remote MCP tool. This needs the human.
 
 ### Phase 12: identity events and mail templates (013, 038)

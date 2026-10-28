@@ -8,7 +8,7 @@
 #   - later times: restarts the host on the new binary.
 set -euo pipefail
 
-#   server-bootstrap.sh [DIR] [--user NAME] [--with-rust]
+#   server-bootstrap.sh [DIR] [--user NAME] [--with-rust]   (deploy.sh passes --with-rust unless --without-rust)
 DIR=""
 RUN_AS="goober"
 WITH_RUST=""
@@ -63,19 +63,30 @@ install -m 0755 "$SRC/setup.sh" "$HOME_DIR/tools/setup.sh"
 
 if [[ "$WITH_RUST" == --with-rust ]]; then
   echo "── Rust for building boxes from source"
-  if [[ ! -x "$HOME_DIR/.cargo/bin/cargo" ]]; then
+  CARGO_BIN="$HOME_DIR/.cargo/bin"
+  if [[ ! -x "$CARGO_BIN/cargo" ]]; then
     sudo -u "$RUN_AS" -H sh -c 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --target wasm32-unknown-unknown' >/dev/null
   fi
-  if [[ -f "$SRC/vendor.tar.gz" ]]; then
-    # Unpacked as root in a directory only root can reach, then moved in whole: nothing in
-    # the user's own directory can redirect where root writes.
+  # Every deploy: the wasm target is there (a no-op when it is). The toolchain's version stays
+  # where it is; `rustup update` as the user moves it.
+  sudo -u "$RUN_AS" -H "$CARGO_BIN/rustup" target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+  echo "   $(sudo -u "$RUN_AS" -H "$CARGO_BIN/cargo" --version)"
+  # The crates boxes may use, vendored fresh by the host's user (it has cargo and the network),
+  # then copied by root into a root-owned directory the builds read but can't change. A failure
+  # (no network) keeps the crates from the last deploy.
+  install -m 0755 "$SRC/vendor.sh" "$HOME_DIR/tools/vendor.sh"
+  USER_STAGE="$(sudo -u "$RUN_AS" mktemp -d -p "$HOME_DIR" vendor-stage.XXXXXXXX)"
+  if sudo -u "$RUN_AS" -H env PATH="$CARGO_BIN:$PATH" bash "$HOME_DIR/tools/vendor.sh" "$USER_STAGE/vendor"; then
     STAGE_VENDOR="$(mktemp -d)"
-    tar -xzf "$SRC/vendor.tar.gz" -C "$STAGE_VENDOR" --strip-components=1 --no-same-owner
+    cp -R --no-dereference --preserve=mode,timestamps "$USER_STAGE/vendor/." "$STAGE_VENDOR/"
     chown -R root:root "$STAGE_VENDOR"
     chmod -R a+rX,go-w "$STAGE_VENDOR"
     rm -rf "$HOME_DIR/vendor"
     mv -T "$STAGE_VENDOR" "$HOME_DIR/vendor"
+  else
+    echo "   couldn't vendor the crates; keeping what was there"
   fi
+  rm -rf "$USER_STAGE"
 fi
 
 if [[ -f "$DIR/host.json" ]]; then
