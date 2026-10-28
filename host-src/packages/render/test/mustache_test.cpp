@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "goober/render/mustache.h"
 
 using namespace goober;
@@ -87,4 +89,30 @@ TEST(Mustache, OutputAndPartialsAreBounded) {
   std::string err;
   EXPECT_FALSE(render_mustache("{{> p0}}", boost::json::object{}, o, &err));
   EXPECT_FALSE(err.empty());
+}
+
+// Security review 4 (S4-1, S4-3): nesting is bounded, so rendering can't exhaust the stack,
+// and parsing is linear, so a long one-line template can't pin a thread.
+TEST(Mustache, HostileTemplatesAreBounded) {
+  std::string deep;
+  for (int i = 0; i < 10000; ++i) deep += "{{#now}}";
+  for (int i = 0; i < 10000; ++i) deep += "{{/now}}";
+  std::string err;
+  auto data = json::parse(R"({"now":true})", &err);
+  EXPECT_FALSE(render_mustache(deep, *data, {}, &err));
+  EXPECT_NE(err.find("nest deeper"), std::string::npos) << err;
+
+  std::string ok_depth;
+  for (int i = 0; i < 64; ++i) ok_depth += "{{#now}}";
+  ok_depth += "x";
+  for (int i = 0; i < 64; ++i) ok_depth += "{{/now}}";
+  EXPECT_EQ(R(ok_depth, R"({"now":true})"), "x");
+
+  std::string wide;
+  for (int i = 0; i < 100000; ++i) wide += "{{a}}";
+  auto start = std::chrono::steady_clock::now();
+  EXPECT_TRUE(render_mustache(wide, *json::parse(R"({"a":"b"})", &err), {}, &err)) << err;
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+  // Standalone lines still work right after a standalone tag.
+  EXPECT_EQ(R("{{#a}}\n  {{/a}}\nz", R"({"a":true})"), "z");
 }

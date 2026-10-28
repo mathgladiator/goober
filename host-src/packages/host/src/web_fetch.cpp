@@ -430,6 +430,14 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
       cached = std::move(c);
     }
   }
+  // Where the cached page ended up after redirects must pass the caller's rules too.
+  if (cached) {
+    auto final_url = web::parse_url(cached->page.url);
+    if (!final_url || !host_allowed(*final_url, o, &why)) {
+      page.error = final_url ? why : "the cached page can't be read";
+      return page;
+    }
+  }
   if (cached && (o.cached_only || base::now_unix_ms() - cached->page.fetched_ms < o.max_age_ms)) return cached->page;
   if (o.cached_only) {
     page.error = "not fetched yet";

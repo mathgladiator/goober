@@ -224,6 +224,9 @@ class Host {
   bool timers_stopping_ = false;
   void run_timers();
   sqlite::Db& timer_progress(const std::string& tenant);
+  std::function<bool(db::Session&, std::string*)> disable_fired_row(const manifest::DataStrategy* source,
+                                                                    const manifest::HttpRoute& t,
+                                                                    const boost::json::object& row);
   // The polite robot and its crawls (crawler.cpp, web_fetch.cpp).
   std::unique_ptr<class WebFetcher> web_;
   std::thread crawl_thread_;

@@ -14,6 +14,9 @@ BIN=/usr/local/bin/goober-host
 
 die() { echo "✗ $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root"
+# DIR lives under goober's home, so nothing outside it is ever given to the goober user.
+[[ "$DIR" =~ ^/srv/goober/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "$DIR" != *..* ]] ||
+  die "DIR must be a directory under /srv/goober, like /srv/goober/host"
 [[ "$(uname -m)" == x86_64 ]] || die "the binary is built for x86_64"
 GLIBC="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
 [[ "$(printf '%s\n2.38\n' "$GLIBC" | sort -V | head -1)" == 2.38 ]] ||
@@ -26,7 +29,7 @@ apt-get install -y -qq caddy curl python3 tzdata ca-certificates >/dev/null
 
 echo "── user and directory"
 id goober >/dev/null 2>&1 || useradd --system --home-dir /srv/goober --create-home --shell /usr/sbin/nologin goober
-install -d -o goober -g goober -m 0750 "$(dirname "$DIR")" "$DIR"
+install -d -o goober -g goober -m 0750 /srv/goober "$DIR"
 
 echo "── binary"
 install -m 0755 "$SRC/goober-host" "$BIN.new"

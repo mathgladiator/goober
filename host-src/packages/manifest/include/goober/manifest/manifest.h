@@ -104,6 +104,13 @@ struct DataStrategy {
   std::string timezone_field;
   std::string active_field;
   bool runnable() const { return pattern == "sql"; }
+  // Whether any grant lets the box write.
+  bool may_write() const {
+    for (const auto& [_, g] : tables) {
+      if (g.insert || g.update_all || !g.update.empty() || g.remove) return true;
+    }
+    return false;
+  }
   // Strategies whose schema the host applies to the database: sql and by_timer.
   bool applies_schema() const { return pattern == "sql" || pattern == "by_timer"; }
   // The database's name for a tenant, with {!tenant} filled in.

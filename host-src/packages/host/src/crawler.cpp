@@ -228,6 +228,11 @@ int Host::crawl_step() {
       auto page = web_->fetch(n.url, o);
       if (page.retry_after_ms && page.status == 0) continue;  // not this site's turn
       ++fetched;
+      // A redirect may leave the crawl's scope; what's there isn't the crawl's to read.
+      if (page.error.empty() && n.kind == "page") {
+        auto final_url = web::parse_url(page.url);
+        if (!final_url || !scope.allows(*final_url)) page.error = "redirected out of the crawl's scope, to " + page.url.substr(0, 200);
+      }
       std::string title;
       std::vector<std::pair<std::string, int64_t>> found;  // new frontier entries
       std::vector<std::pair<std::string, std::string>> records;
@@ -484,22 +489,37 @@ void Host::register_web_tools() {
                     if (!find.step()) return ToolResult::fail("no crawl with that id");
                     std::string err;
                     auto spec = json::parse(find.text(0), &err);
-                    db.exec("BEGIN IMMEDIATE");
-                    for (const char* sql : {"DELETE FROM frontier WHERE crawl_id = ?", "DELETE FROM records WHERE crawl_id = ?"}) {
-                      sqlite::Stmt d(db, sql);
-                      d.bind(1, id).run();
-                    }
-                    Scope sc = scope_of(spec->as_object());
-                    for (const auto& seed : sc.seeds) {
-                      sqlite::Stmt f(db, "INSERT OR IGNORE INTO frontier (crawl_id, url, depth, kind, state) VALUES (?, ?, 0, 'page', 'pending')");
-                      f.bind(1, id).bind(2, seed.str()).run();
-                    }
-                    // Fetched again, not served from the cache: a rerun is for seeing changes.
+                    if (!spec || !spec->is_object()) return ToolResult::fail("the crawl's spec can't be read");
                     auto& o = spec->as_object();
-                    o["max_age_ms"] = 60000;
-                    sqlite::Stmt up(db, "UPDATE crawls SET state = 'running', fetched = 0, spec = ?, updated_ms = ? WHERE id = ?");
-                    up.bind(1, json::dump(*spec)).bind(2, base::now_unix_ms()).bind(3, id).run();
-                    db.exec("COMMIT");
+                    // One transaction on the robot's shared connection: rolled back on any failure,
+                    // so a failed rerun never leaves it open under every later crawl step.
+                    db.exec("BEGIN IMMEDIATE");
+                    try {
+                      for (const char* sql : {"DELETE FROM frontier WHERE crawl_id = ?", "DELETE FROM records WHERE crawl_id = ?"}) {
+                        sqlite::Stmt d(db, sql);
+                        d.bind(1, id).run();
+                      }
+                      Scope sc = scope_of(o);
+                      std::set<std::string> sitemaps;
+                      bool with_sitemaps = o.contains("sitemaps") && o.at("sitemaps").is_bool() && o.at("sitemaps").as_bool();
+                      for (const auto& seed : sc.seeds) {
+                        sqlite::Stmt f(db, "INSERT OR IGNORE INTO frontier (crawl_id, url, depth, kind, state) VALUES (?, ?, 0, 'page', 'pending')");
+                        f.bind(1, id).bind(2, seed.str()).run();
+                        if (with_sitemaps) sitemaps.insert(seed.origin() + "/sitemap.xml");
+                      }
+                      for (const auto& s : sitemaps) {
+                        sqlite::Stmt f(db, "INSERT OR IGNORE INTO frontier (crawl_id, url, depth, kind, state) VALUES (?, ?, 0, 'sitemap', 'pending')");
+                        f.bind(1, id).bind(2, s).run();
+                      }
+                      // Fetched again, not served from the cache: a rerun is for seeing changes.
+                      o["max_age_ms"] = 60000;
+                      sqlite::Stmt up(db, "UPDATE crawls SET state = 'running', fetched = 0, spec = ?, updated_ms = ? WHERE id = ?");
+                      up.bind(1, json::dump(*spec)).bind(2, base::now_unix_ms()).bind(3, id).run();
+                      db.exec("COMMIT");
+                    } catch (const std::exception& e) {
+                      db.exec("ROLLBACK");
+                      return ToolResult::fail(std::string("the rerun failed: ") + e.what());
+                    }
                     return ToolResult::ok(bj::object{{"crawl", id}, {"state", "running"}});
                   }});
   mcp_->add_tool(

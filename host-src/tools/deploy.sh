@@ -23,8 +23,11 @@ strip -o "$STAGE/goober-host" "$HOST_SRC/build/server/packages/host/goober-host"
 cp "$HERE/setup.sh" "$HERE/server-bootstrap.sh" "$STAGE/"
 
 echo "── copying to $TARGET"
-ssh "$TARGET" 'rm -rf /tmp/goober-deploy && mkdir -p /tmp/goober-deploy'
-scp -q "$STAGE/goober-host" "$STAGE/setup.sh" "$STAGE/server-bootstrap.sh" "$TARGET:/tmp/goober-deploy/"
+# A fresh private directory (mktemp: 0700, owned by the ssh user), so nobody else on the
+# server can swap what root is about to run.
+REMOTE="$(ssh "$TARGET" 'mktemp -d /tmp/goober-deploy.XXXXXXXX')"
+[[ "$REMOTE" =~ ^/tmp/goober-deploy\.[A-Za-z0-9]+$ ]] || { echo "unexpected staging directory: $REMOTE" >&2; exit 1; }
+scp -q "$STAGE/goober-host" "$STAGE/setup.sh" "$STAGE/server-bootstrap.sh" "$TARGET:$REMOTE/"
 
 echo "── installing on $TARGET"
-ssh -t "$TARGET" "sudo bash /tmp/goober-deploy/server-bootstrap.sh '$DIR'"
+ssh -t "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR"); rm -rf $REMOTE"

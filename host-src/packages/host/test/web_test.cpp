@@ -67,7 +67,7 @@ class Site {
     pages_["/"] = {200, "text/html", R"(<html><head><title>Hill Ranch</title>
 <meta name="generator" content="WooCommerce 8"></head><body><h1>Hill Ranch</h1>
 <a href="/beef">Beef</a> <a href="pork">Pork</a> <a href="/private/ledger">Books</a>
-<a href="https://elsewhere.example/">Friends</a> <a href="/old" rel="nofollow">Old</a></body></html>)",
+<a href="https://elsewhere.example/">Friends</a> <a href="/old" rel="nofollow">Old</a> <a href="/away">Away</a></body></html>)",
                    {{"etag", "\"v1\""}}};
     pages_["/beef"] = {200, "text/html", R"(<html><body>
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Quarter beef",
@@ -84,6 +84,8 @@ class Site {
                               "<urlset><url><loc>" + base + "/lamb</loc></url><url><loc>https://elsewhere.example/x</loc>"
                               "</url></urlset>", {}};
     pages_["/lamb"] = {200, "text/html", "<p>Lamb shares</p>", {}};
+    // A redirect to another name for this machine: another site, as far as rules go.
+    pages_["/away"] = {302, "text/html", "", {{"location", "http://localhost:" + std::to_string(port()) + "/beef"}}};
   }
   uint16_t port() const { return server_->port(); }
   std::string url(const std::string& path) const { return "http://127.0.0.1:" + std::to_string(port()) + path; }
@@ -298,6 +300,7 @@ TEST_F(WebTest, CrawlsFollowLinksWithinScopeAndRecordWhatTheyFind) {
   EXPECT_EQ(site.count("/private/ledger"), 0);                    // robots.txt
   auto errors = json::dump(tool("crawl_pages", {{"crawl", id}, {"state", "error"}}));
   EXPECT_NE(errors.find("robots.txt"), std::string::npos) << errors;
+  EXPECT_NE(errors.find("out of the crawl's scope"), std::string::npos) << errors;  // /away went elsewhere
 
   auto products = tool("crawl_records", {{"crawl", id}, {"kind", "Product"}});
   ASSERT_EQ(products.as_array().size(), 1u) << json::dump(products);
@@ -335,6 +338,11 @@ TEST_F(WebTest, BoxesFetchThroughTheirWebService) {
   tool("web_fetch", {{"url", "http://localhost:" + std::to_string(site.port()) + "/beef"}});
   std::string other = box_wat(R"({"url":"http://localhost:)" + std::to_string(site.port()) + R"(/beef"})");
   ASSERT_TRUE(host->boxes().upload(manifest("scout", "scout"), other, &err)) << err;
+  r = post(port, "/scout");
+  EXPECT_NE(r.body.find("web.hosts doesn't include localhost"), std::string::npos) << r.body;
+  // Nor through a cached redirect: /away is on a listed host, but it ended up on localhost.
+  tool("web_fetch", {{"url", site.url("/away")}});
+  ASSERT_TRUE(host->boxes().upload(manifest("scout", "scout"), box_wat(R"({"url":")" + site.url("/away") + R"("})"), &err)) << err;
   r = post(port, "/scout");
   EXPECT_NE(r.body.find("web.hosts doesn't include localhost"), std::string::npos) << r.body;
 

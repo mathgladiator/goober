@@ -74,6 +74,12 @@ class Session {
   // the same transaction as the box's writes to that strategy's database, with no grants.
   bool host_exec(const manifest::DataStrategy& strategy, std::string_view sql, const bj::value& params,
                  std::string* error);
+  // The host will write to this strategy's database too (the outbox, a timer turning its row
+  // off): its transaction takes the write lock from the start, like a strategy that grants writes.
+  void expect_writes(const manifest::DataStrategy& strategy);
+  // Commits this strategy's database after every other, so it commits only if they did (the
+  // outbox lives there: enqueued only if the request's writes landed).
+  void commit_last(const manifest::DataStrategy& strategy);
   bool commit(std::string* error);
   void rollback();
   // How many statements ran, for the access log.
@@ -86,6 +92,8 @@ class Session {
   };
   Databases& dbs_;
   std::string tenant_;
+  std::set<std::string> expect_writes_;  // strategy names
+  std::string commit_last_;              // an open_ key, "tenant/database"
   const std::vector<manifest::DataStrategy>& strategies_;
   const SchemaStore& schemas_;
   std::map<std::string, Open> open_;  // by "$tenant/$database"

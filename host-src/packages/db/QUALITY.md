@@ -15,5 +15,9 @@ operator queries.
 - **What the host declared is recorded in the database** (`goober_schemas`,
   `goober_columns`, `goober_indexes`), so comparisons never depend on parsing SQL.
 - **Every statement is bounded** by a row limit and a step budget.
-- **A request's writes land together or not at all**: a session rolls back unless it is
-  committed, including when it is destroyed.
+- **A request's writes to one database land together or not at all**: a session rolls back
+  unless it is committed, including when it is destroyed. Across databases, each commits on
+  its own (no two-phase commit). The outbox's database commits last, so an element is never
+  enqueued for writes that didn't land.
+- **A strategy that may write takes the write lock with its first statement**, so a read
+  followed by a write never fails with SQLITE_BUSY_SNAPSHOT under concurrent writers.

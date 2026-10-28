@@ -713,10 +713,14 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   auth.strategy = st;
   sqlite3* raw = open.db->raw();
   if (!broken_.empty()) return fail(broken_);
+  // A strategy that may write takes the write lock with its first statement, read or not: a
+  // read transaction that later writes fails at once (SQLITE_BUSY_SNAPSHOT) if anyone else
+  // committed in between, and no busy timeout helps.
+  bool immediate = st->may_write() || expect_writes_.count(st->name);
   auto result = run_statement(raw, sql, params, auth, st->row_limit, st->step_budget, [&](bool readonly) {
     if (open.in_transaction) return std::string();
     char* msg = nullptr;
-    if (sqlite3_exec(raw, readonly ? "BEGIN" : "BEGIN IMMEDIATE", nullptr, nullptr, &msg) != SQLITE_OK) {
+    if (sqlite3_exec(raw, readonly && !immediate ? "BEGIN" : "BEGIN IMMEDIATE", nullptr, nullptr, &msg) != SQLITE_OK) {
       std::string why = msg ? msg : "begin failed";
       sqlite3_free(msg);
       return "database " + database + " is busy: " + why;
@@ -735,21 +739,35 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   return json::dump(result);
 }
 
+void Session::expect_writes(const manifest::DataStrategy& strategy) { expect_writes_.insert(strategy.name); }
+
+void Session::commit_last(const manifest::DataStrategy& strategy) {
+  commit_last_ = strategy.tenant_for(tenant_) + "/" + strategy.database_for(tenant_);
+}
+
 bool Session::commit(std::string* error) {
   if (!broken_.empty()) {
     *error = broken_;
     rollback();
     return false;
   }
-  bool ok = true;
+  // Each database commits on its own, so a request writing several isn't atomic across them:
+  // a failed commit rolls back the ones not yet committed, not the ones before it. The
+  // commit_last database goes last, so it lands only if all the others did.
+  std::vector<std::pair<const std::string*, Open*>> order;
   for (auto& [name, open] : open_) {
-    if (!open.in_transaction) continue;
+    if (name != commit_last_) order.emplace_back(&name, &open);
+  }
+  if (auto it = open_.find(commit_last_); it != open_.end()) order.emplace_back(&it->first, &it->second);
+  bool ok = true;
+  for (auto [name, open] : order) {
+    if (!open->in_transaction) continue;
     char* msg = nullptr;
-    if (ok && sqlite3_exec(open.db->raw(), "COMMIT", nullptr, nullptr, &msg) == SQLITE_OK) {
-      open.in_transaction = false;
+    if (ok && sqlite3_exec(open->db->raw(), "COMMIT", nullptr, nullptr, &msg) == SQLITE_OK) {
+      open->in_transaction = false;
       continue;
     }
-    if (ok) *error = "committing database " + name + ": " + (msg ? msg : "failed");
+    if (ok) *error = "committing database " + *name + ": " + (msg ? msg : "failed");
     sqlite3_free(msg);
     ok = false;
   }

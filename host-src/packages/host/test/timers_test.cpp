@@ -142,3 +142,56 @@ TEST_F(TimersTest, OperatorsSeeThePlanAndFireNow) {
   EXPECT_FALSE(host->run_timer_now("morning", "elsewhere", &err));
   EXPECT_FALSE(host->run_timer_now("nope", "playground", &err));
 }
+
+// Quality review 4: two boxes with the same strategy name keep their own rows.
+TEST_F(TimersTest, RowsBelongToTheirBox) {
+  std::string err;
+  ASSERT_TRUE(host->schemas().put(R"({"schema":"notes1","tables":{
+    "ticks":{"columns":{"what":{"type":"string","max-length":40}}},
+    "reminders":{"columns":{"remind_at":{"type":"int64"},
+                            "on":{"type":"boolean","default":true}}}}})", &err)) << err;
+  const char* wat = R"wat((module
+    (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "w")
+    (data (i32.const 16) "INSERT INTO ticks (what) VALUES (?)")
+    (data (i32.const 64) "[\22nudge\22]")
+    (func (export "goober_route_nudge") (result i32)
+      (drop (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 35) (i32.const 64) (i32.const 9)))
+      (i32.const 0))))wat";
+  // Its strategy is named remind_t, like clock's, over another database.
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"notes","domains":["*"],
+    "data":{"sqlite3":{
+      "w":{"schema":"notes1","database":"notes","pattern":"sql","tables":{"ticks":{"read":true,"insert":true}}},
+      "remind_t":{"schema":"notes1","database":"notes","pattern":"by_timer","table":"reminders","active-field":"on"}}},
+    "routes":{"timer":{"nudge":{"name":"nudge","source":"remind_t","at-field":"remind_at"}}}})", wat, &err)) << err;
+  auto schema = host->schemas().get("notes1");
+  ASSERT_TRUE(host->databases().open("playground", "notes", &*schema, &err)) << err;
+  ASSERT_TRUE(host->databases().operate("playground", "notes",
+      "INSERT INTO reminders (remind_at) VALUES (" + std::to_string(utc(2026, 10, 27, 9, 0)) + ")",
+      nullptr, 10, true, &err)) << err;
+  auto notes_count = [&] {
+    auto r = host->databases().operate("playground", "notes", "SELECT count(*) FROM ticks WHERE what = 'nudge'", nullptr, 10,
+                                       false, &err);
+    return r ? r->at("rows").at(0).at(0).as_int64() : -1;
+  };
+  host->timer_tick(utc(2026, 10, 27, 10, 30, 1));
+  EXPECT_EQ(count("remind"), 1);  // clock's reminder, from clock's own rows
+  EXPECT_EQ(notes_count(), 1);    // notes' reminder, from notes' own rows
+  host->timer_tick(utc(2026, 10, 27, 10, 30, 2));
+  host->timer_tick(utc(2026, 10, 27, 10, 30, 20));
+  EXPECT_EQ(notes_count(), 1);  // turned off
+  EXPECT_EQ(count("remind"), 1);
+  auto on = host->databases().operate("playground", "notes", "SELECT \"on\" FROM reminders", nullptr, 10, false, &err);
+  EXPECT_EQ(on->at("rows").at(0).at(0), 0);
+}
+
+// Firing an at-field timer now turns its rows off too, so the schedule doesn't fire them again.
+TEST_F(TimersTest, FiringAtFieldTimersNowTurnsRowsOff) {
+  std::string err;
+  auto fired = host->run_timer_now("remind", "playground", &err);
+  ASSERT_TRUE(fired) << err;
+  EXPECT_EQ(*fired, 1);
+  host->timer_tick(utc(2026, 10, 27, 10, 30, 1));
+  EXPECT_EQ(count("remind"), 1);
+}

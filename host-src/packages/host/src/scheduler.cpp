@@ -60,6 +60,36 @@ static std::vector<std::pair<std::string, std::string>> tenants_of(const config:
   return {out.begin(), out.end()};
 }
 
+namespace {
+
+std::string rows_cache_key(const std::string& tenant, const std::string& box, const std::string& source) {
+  return tenant + "|" + box + "|" + source;
+}
+
+}  // namespace
+
+// An at-field fire turns its row off in the fire's own transaction, matched by the row's own
+// primary key value (a string stays a string) and its at value, so a row moved meanwhile stays on.
+std::function<bool(db::Session&, std::string*)> Host::disable_fired_row(const manifest::DataStrategy* source,
+                                                                        const manifest::HttpRoute& t,
+                                                                        const bj::object& row) {
+  auto schema = schemas_->get(source->schema);
+  std::string pk = "id";
+  if (auto* table = schema ? schema->table(source->table) : nullptr) {
+    for (const auto& c : table->columns) {
+      if (c.primary_key) pk = c.name;
+    }
+  }
+  const bj::value* key = row.if_contains(pk);
+  const bj::value* at = row.if_contains(t.at_field);
+  bj::array params{key ? *key : bj::value(nullptr), at ? *at : bj::value(nullptr)};
+  std::string sql = "UPDATE " + sql_name(source->table) + " SET " + sql_name(source->active_field) + " = 0 WHERE " +
+                    sql_name(pk) + " = ? AND " + sql_name(t.at_field) + " IS ?";
+  return [source, sql, params](db::Session& session, std::string* error) {
+    return session.host_exec(*source, sql, params, error);
+  };
+}
+
 void Host::timer_tick(int64_t now_ms) {
   auto cfg = config_.get();
   auto active = boxes_->active();
@@ -151,7 +181,8 @@ void Host::timer_tick(int64_t now_ms) {
           }
           if (!source) continue;
           // The source's rows, read again every few seconds.
-          std::string rows_key = tenant + "|" + source->name;
+          // Per box: strategy names are only unique within one manifest.
+          std::string rows_key = rows_cache_key(tenant, box->manifest.box, source->name);
           auto& cache = st.rows[rows_key];
           if (cache.read_at == 0 || now_ms - cache.read_at >= kRowsRefreshMs) {
             cache.read_at = now_ms;
@@ -238,29 +269,7 @@ void Host::timer_tick(int64_t now_ms) {
       CallOptions options;
       options.timeout_ms = t.timeout_ms;
       options.no_response_ok = true;
-      if (!t.at_field.empty() && d.source) {
-        // Fire, then disable, in the same transaction; a row moved meanwhile stays on.
-        const auto* source = d.source;
-        const bj::value at = d.row.as_object().at(t.at_field);
-        std::string pk_value = d.row_key;
-        options.before_commit = [source, at, pk_value, &t, this](db::Session& session, std::string* error) {
-          auto schema = schemas_->get(source->schema);
-          std::string pk = "id";
-          if (auto* table = schema ? schema->table(source->table) : nullptr) {
-            for (const auto& c : table->columns) {
-              if (c.primary_key) pk = c.name;
-            }
-          }
-          std::string sql = "UPDATE " + sql_name(source->table) + " SET " + sql_name(source->active_field) + " = 0 WHERE " +
-                            sql_name(pk) + " = ? AND " + sql_name(t.at_field) + " IS ?";
-          bj::value key = bj::string(pk_value);
-          try {
-            key = bj::value(std::stoll(pk_value));
-          } catch (...) {
-          }
-          return session.host_exec(*source, sql, bj::array{key, at}, error);
-        };
-      }
+      if (!t.at_field.empty() && d.source) options.before_commit = disable_fired_row(d.source, t, d.row.as_object());
       auto call = call_box(d.ref, doc, d.tenant, request_id, std::nullopt, options);
       bool ok = (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk && call.result.status < 500) ||
                 call.result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
@@ -284,7 +293,7 @@ void Host::timer_tick(int64_t now_ms) {
       if (!t.at_field.empty()) {
         if (ok) {
           timers_->retry_after.erase(d.key);
-          timers_->rows.erase(d.tenant + "|" + d.source->name);  // read again: the row is off now
+          timers_->rows.erase(rows_cache_key(d.tenant, d.ref.box->manifest.box, d.source->name));  // read again: the row is off now
         } else {
           timers_->retry_after[d.key] = base::now_unix_ms() + kRetryMs;
         }
@@ -339,7 +348,7 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
           bool mine = it->first.starts_with(tenant + "|" + name + "|");
           it = mine ? timers_->next_due.erase(it) : std::next(it);
         }
-        if (!t.source.empty()) timers_->rows.erase(tenant + "|" + t.source);
+        if (!t.source.empty()) timers_->rows.erase(rows_cache_key(tenant, box_name, t.source));
       }
       int fired = 0;
       std::vector<bj::value> rows{nullptr};
@@ -364,6 +373,43 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
           rows.push_back(std::move(o));
         }
       }
+      // The keys this fire holds, so the scheduler doesn't fire the same rows meanwhile.
+      std::vector<std::string> keys;
+      std::string pk = "id";
+      const manifest::DataStrategy* source = nullptr;
+      for (const auto& d : box->manifest.data) {
+        if (d.name == t.source && d.pattern == "by_timer") source = &d;
+      }
+      if (source) {
+        auto schema = schemas_->get(source->schema);
+        if (auto* table = schema ? schema->table(source->table) : nullptr) {
+          for (const auto& c : table->columns) {
+            if (c.primary_key) pk = c.name;
+          }
+        }
+      }
+      for (const auto& row : rows) {
+        std::string row_key;
+        if (const bj::value* v = row.is_object() ? row.as_object().if_contains(pk) : nullptr) {
+          row_key = v->is_string() ? std::string(v->as_string()) : json::dump(*v);
+        }
+        keys.push_back(tenant + "|" + name + "|" + row_key);
+      }
+      {
+        std::lock_guard lock(timers_->mu);
+        for (const auto& key : keys) {
+          if (timers_->running.count(key)) return *error = "timer " + name + " is firing right now; try again", std::nullopt;
+        }
+        for (const auto& key : keys) timers_->running.insert(key);
+      }
+      struct Release {
+        Host* host;
+        const std::vector<std::string>& keys;
+        ~Release() {
+          std::lock_guard lock(host->timers_->mu);
+          for (const auto& key : keys) host->timers_->running.erase(key);
+        }
+      } release{this, keys};
       for (const auto& row : rows) {
         std::string domain;
         for (const auto& [tn, dm] : tenants_of(*config_.get(), box->manifest)) {
@@ -379,11 +425,16 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
         CallOptions options;
         options.timeout_ms = t.timeout_ms;
         options.no_response_ok = true;
+        if (!t.at_field.empty() && source && row.is_object()) options.before_commit = disable_fired_row(source, t, row.as_object());
         auto call = call_box(boxes::RouteRef{box, &t}, doc, tenant, request_id, std::nullopt, options);
         if (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk ||
             call.result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse) {
           ++fired;
         }
+      }
+      {
+        std::lock_guard lock(timers_->mu);
+        if (source) timers_->rows.erase(rows_cache_key(tenant, box_name, source->name));
       }
       return fired;
     }

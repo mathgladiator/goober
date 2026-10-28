@@ -32,7 +32,11 @@ class Parser {
  public:
   explicit Parser(std::string_view t) : t_(t) {}
 
+  static constexpr size_t kMaxDepth = 64;
+  static constexpr size_t kMaxBytes = 1 << 20;
+
   bool parse(std::vector<Node>* out, std::string* error) {
+    if (t_.size() > kMaxBytes) return fail(error, "a template is at most " + std::to_string(kMaxBytes) + " bytes");
     std::vector<std::vector<Node>*> stack{out};
     std::vector<std::string> open;
     size_t pos = 0;
@@ -56,9 +60,12 @@ class Parser {
 
       // Standalone: only blanks between the line's start and the tag, and between the tag and
       // the line's end. Text before the tag on its line that holds an earlier tag isn't blank.
-      size_t line_start = at == 0 ? 0 : t_.rfind('\n', at - 1);
-      line_start = line_start == std::string_view::npos ? 0 : (at == 0 ? 0 : line_start + 1);
-      bool before_blank = line_start >= pos;
+      // Only the text since the last tag is searched, so parsing stays linear in the template.
+      size_t nl = t_.substr(pos, at - pos).rfind('\n');
+      size_t line_start = nl != std::string_view::npos       ? pos + nl + 1
+                          : pos == 0 || t_[pos - 1] == '\n' ? pos
+                                                            : std::string_view::npos;
+      bool before_blank = line_start != std::string_view::npos;
       for (size_t i = line_start; before_blank && i < at; ++i) before_blank = is_blank(t_[i]);
       size_t after = end;
       while (after < t_.size() && is_blank(t_[after])) ++after;
@@ -84,6 +91,8 @@ class Parser {
           Node n;
           n.kind = sigil == '#' ? Node::Kind::kSection : Node::Kind::kInverted;
           n.text = name;
+          // Rendering recurses once per open section: bounded, so no template can exhaust the stack.
+          if (open.size() >= kMaxDepth) return fail(error, "sections nest deeper than " + std::to_string(kMaxDepth));
           stack.back()->push_back(std::move(n));
           stack.push_back(&stack.back()->back().children);
           open.push_back(name);

@@ -628,6 +628,20 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   std::optional<db::Session> session;
   if (!m.data.empty()) {
     session.emplace(*databases_, tenant, m.data, *schemas_);
+    // The host writes too: the outbox, in the first strategy that applies a schema, and a
+    // timer's at-field row. Those transactions take the write lock from the start, and the
+    // outbox's database commits after the box's others (015 §4).
+    bool outbox = false;
+    for (const auto& s : m.external) outbox |= s.has_outbox();
+    for (const auto& d : m.data) {
+      if (!d.applies_schema()) continue;
+      if (options.before_commit) session->expect_writes(d);
+      if (outbox) {
+        session->expect_writes(d);
+        session->commit_last(d);
+        outbox = false;
+      }
+    }
     input.sql = [&session](std::string_view strategy, std::string_view sql, std::string_view params) {
       return session->run(strategy, sql, params);
     };
