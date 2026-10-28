@@ -292,3 +292,33 @@ TEST_F(SiteRoutesTest, UploadUrlsTakeOnePutAndCutOffBase64IsNamed) {
   ASSERT_TRUE(refused.as_object().contains("error")) << json::dump(refused).substr(0, 200);
   EXPECT_NE(std::string(refused.at("error").as_string()).find("cut off"), std::string::npos) << json::dump(refused);
 }
+
+// Without code to PUT with, an agent sends the base64 in pieces against a ticket.
+TEST_F(SiteRoutesTest, UploadsInPiecesForAgentsWithoutCode) {
+  auto t = tool("attachment_upload_url", {{"tenant", "playground"}, {"name", "banner.png"}, {"alt", "Banner"}});
+  std::string url(t.at("upload_url").as_string());
+  std::string png = png_of(600000);
+  std::string b64 = base::base64_encode(png);
+  size_t step = 120000;  // a multiple of 4
+  bj::value last;
+  for (size_t at = 0; at < b64.size(); at += step) {
+    bool done = at + step >= b64.size();
+    last = tool("attachment_upload_part", {{"ticket", url}, {"base64", b64.substr(at, step)}, {"done", done}});
+    ASSERT_FALSE(last.as_object().contains("error")) << json::dump(last);
+    if (!done) EXPECT_EQ(last.at("received_bytes").as_int64(), int64_t((at + step) / 4 * 3));
+  }
+  EXPECT_EQ(last.at("name"), "banner.png");
+  EXPECT_EQ(last.at("size").as_int64(), int64_t(png.size()));
+  EXPECT_EQ(last.at("pieces").as_int64(), int64_t((b64.size() + step - 1) / step));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, std::string(last.at("url").as_string())).body, png);
+  // The ticket is spent.
+  auto spent = tool("attachment_upload_part", {{"ticket", url}, {"base64", "AAAA"}, {"done", true}});
+  EXPECT_NE(std::string(spent.at("error").as_string()).find("unknown, used, or expired"), std::string::npos);
+  // A piece that isn't a multiple of 4 is refused before anything is kept.
+  auto t2 = tool("attachment_upload_url", {{"tenant", "playground"}});
+  auto odd = tool("attachment_upload_part", {{"ticket", t2.at("upload_url")}, {"base64", "AAAAA"}});
+  EXPECT_NE(std::string(odd.at("error").as_string()).find("multiple of 4"), std::string::npos);
+  // attachment_put says how much base64 arrived, and refuses past its limit by name.
+  auto small = tool("attachment_put", {{"tenant", "playground"}, {"base64", base::base64_encode(kPng)}});
+  EXPECT_EQ(small.at("base64_chars_received").as_int64(), int64_t(base::base64_encode(kPng).size()));
+}

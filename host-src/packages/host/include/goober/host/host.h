@@ -293,6 +293,8 @@ class Host {
   struct UploadTicket {
     std::string tenant, name, alt, visibility, by;
     int64_t expires_ms = 0;
+    std::string parts;  // bytes sent so far by attachment_upload_part
+    int part_count = 0;
   };
   std::string issue_upload_ticket(UploadTicket t);
   // The ticket's terms if it is live and for this tenant; with consume, it can't be used again.
@@ -301,6 +303,7 @@ class Host {
  private:
   std::mutex upload_tickets_mu_;
   std::map<std::string, UploadTicket> upload_tickets_;
+  uint64_t upload_part_bytes_ = 0;  // held across every ticket's parts, at most 64 MiB
   std::unique_ptr<class MailQueue> mail_;
   // Every mail the host sends is rendered from these (design/machine/022.MailTemplates.md).
   std::unique_ptr<mail::templates::Store> mail_templates_;

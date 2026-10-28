@@ -307,11 +307,19 @@ std::string Host::issue_upload_ticket(UploadTicket t) {
   std::string ticket = base::hex_encode(std::string_view(reinterpret_cast<char*>(raw), sizeof raw));
   std::lock_guard lock(upload_tickets_mu_);
   int64_t now = base::now_unix_ms();
-  std::erase_if(upload_tickets_, [&](const auto& kv) { return kv.second.expires_ms <= now; });
+  for (auto it = upload_tickets_.begin(); it != upload_tickets_.end();) {
+    if (it->second.expires_ms > now) {
+      ++it;
+      continue;
+    }
+    upload_part_bytes_ -= it->second.parts.size();
+    it = upload_tickets_.erase(it);
+  }
   // A bound on what's outstanding: the oldest goes first.
   while (upload_tickets_.size() >= 100) {
     auto oldest = std::min_element(upload_tickets_.begin(), upload_tickets_.end(),
                                    [](const auto& a, const auto& b) { return a.second.expires_ms < b.second.expires_ms; });
+    upload_part_bytes_ -= oldest->second.parts.size();
     upload_tickets_.erase(oldest);
   }
   upload_tickets_[base::sha256_hex(ticket)] = std::move(t);
@@ -325,7 +333,10 @@ std::optional<Host::UploadTicket> Host::upload_ticket(const std::string& ticket,
     return std::nullopt;
   }
   UploadTicket t = it->second;
-  if (consume) upload_tickets_.erase(it);
+  if (consume) {
+    upload_part_bytes_ -= it->second.parts.size();
+    upload_tickets_.erase(it);
+  }
   return t;
 }
 

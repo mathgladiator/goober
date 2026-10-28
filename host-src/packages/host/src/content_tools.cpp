@@ -8,6 +8,7 @@
 
 #include "backups.h"
 #include "goober/base/encoding.h"
+#include "goober/base/hash.h"
 #include "goober/base/process.h"
 #include "goober/base/names.h"
 #include "goober/base/time.h"
@@ -81,7 +82,9 @@ domain is read from its files. It answers with /attachment/$id.$ext; use that UR
 PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, and PDF, detected from the bytes. People can also upload
 at /attachment/ in a browser, as an owner of the tenant. base64 suits small files: for anything
 over about 100 KB, give url or file, or call attachment_upload_url and PUT the bytes to the URL
-it returns (curl -T photo.jpg '<url>'), once, within 15 minutes. If a call fails, nothing is stored:
+it returns (curl -T photo.jpg '<url>'), once, within 15 minutes. Without code, send the base64
+in pieces: attachment_upload_part {ticket: the upload_url, base64: the next 100000 characters},
+then done: true with the last piece. If a call fails, nothing is stored:
 fix the call; never paste its arguments into a page.
 
 ## Boxes with templates
@@ -451,6 +454,12 @@ void Host::register_content_tools() {
            bytes = std::move(f->data);
            if (name.empty()) name = path.substr(path.rfind('/') + 1);
          } else if (b64) {
+           // 32 MiB of file is at most this much base64; past it, say so rather than try.
+           constexpr size_t kMaxBase64 = (kOperatorAttachmentMaxBytes + 2) / 3 * 4;
+           if (b64->size() > kMaxBase64) {
+             return ToolResult::fail("base64 exceeds " + std::to_string(kMaxBase64) + " characters (32 MiB of file): " +
+                                     std::to_string(b64->size()) + " arrived");
+           }
            auto decoded = base::base64_decode(*b64);
            if (!decoded) {
              return ToolResult::fail("base64 is not valid (" + std::to_string(b64->size()) +
@@ -475,13 +484,79 @@ void Host::register_content_tools() {
                                     arg(args, "visibility").value_or("public"), base::now_unix_ms(), &err);
          if (!a) return ToolResult::fail(err);
          backups_->nudge();  // queued for the bucket at the next backup tick
-         return ToolResult::ok(attachment_json(*a, nullptr));
+         auto out = attachment_json(*a, nullptr);
+         // What arrived, so an agent can tell its own side cut a long argument short.
+         if (b64) out["base64_chars_received"] = int64_t(b64->size());
+         return ToolResult::ok(std::move(out));
+       }});
+
+  mcp_->add_tool(
+      {"attachment_upload_part",
+       "Sends a file in pieces, so no one tool call carries it all: get a ticket from attachment_upload_url, then "
+       "call this with each piece of the file's base64, in order, and done: true on the last. Each piece but the "
+       "last must be a multiple of 4 characters long (split the base64 every 100000 characters, say). The last call "
+       "stores the attachment and answers what attachment_put answers. Up to 32 MiB, within the ticket's 15 minutes.",
+       object_schema({{"ticket", string_property("The upload_url from attachment_upload_url, or just its ticket.")},
+                      {"base64", string_property("The next piece of the file's base64.")},
+                      {"done", boolean_property("true on the last piece: store the file.")}},
+                     {"ticket", "base64"}),
+       [this](const bj::object& args) {
+         std::string ticket = arg(args, "ticket").value_or("");
+         if (auto at = ticket.find("ticket="); at != std::string::npos) ticket = ticket.substr(at + 7);
+         ticket = ticket.substr(0, ticket.find_first_of("&# "));
+         std::string piece = arg(args, "base64").value_or("");
+         bool done = false;
+         if (const auto* d = args.if_contains("done"); d && d->is_bool()) done = d->as_bool();
+         if (!done && piece.size() % 4 != 0) {
+           return ToolResult::fail("a piece's base64 must be a multiple of 4 characters long, but the last; this one is " +
+                                   std::to_string(piece.size()));
+         }
+         auto bytes = base::base64_decode(piece);
+         if (!bytes) {
+           return ToolResult::fail("this piece's base64 is not valid (" + std::to_string(piece.size()) +
+                                   " characters arrived); send it again");
+         }
+         UploadTicket t;
+         {
+           std::lock_guard lock(upload_tickets_mu_);
+           auto it = upload_tickets_.find(base::sha256_hex(ticket));
+           if (it == upload_tickets_.end() || it->second.expires_ms <= base::now_unix_ms()) {
+             return ToolResult::fail("this ticket is unknown, used, or expired; ask attachment_upload_url for a new one");
+           }
+           if (it->second.parts.size() + bytes->size() > kOperatorAttachmentMaxBytes) {
+             upload_part_bytes_ -= it->second.parts.size();
+             upload_tickets_.erase(it);
+             return ToolResult::fail("the file passed 32 MiB; the ticket is gone");
+           }
+           if (upload_part_bytes_ + bytes->size() > (64ull << 20)) {
+             return ToolResult::fail("the host is holding 64 MiB of pieces already; finish or abandon other uploads first");
+           }
+           it->second.parts += *bytes;
+           it->second.part_count += 1;
+           upload_part_bytes_ += bytes->size();
+           if (!done) {
+             return ToolResult::ok(bj::object{{"received_bytes", int64_t(it->second.parts.size())},
+                                              {"pieces", int64_t(it->second.part_count)},
+                                              {"next", "send the next piece, or done: true with the last"}});
+           }
+           t = std::move(it->second);
+           upload_part_bytes_ -= t.parts.size();
+           upload_tickets_.erase(it);
+         }
+         std::string err;
+         auto a = attachments_->put(t.tenant, t.parts, t.name, t.alt, t.visibility, base::now_unix_ms(), &err);
+         if (!a) return ToolResult::fail(err + " (" + std::to_string(t.part_count) + " pieces)");
+         backups_->nudge();
+         auto out = attachment_json(*a, nullptr);
+         out["pieces"] = int64_t(t.part_count);
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool(
       {"attachment_upload_url",
        "A one-time URL to upload one image or PDF (up to 32 MiB) with a plain HTTP PUT of its bytes, for files too "
        "big to pass as base64 in a tool call (over about 100 KB). From code or a shell: curl -T photo.jpg '<url>'. "
+       "Without code, send the base64 in pieces with attachment_upload_part and this ticket. "
        "It works once, for 15 minutes, for this tenant; the upload answers with the attachment's url, as "
        "attachment_put does.",
        object_schema({{"tenant", tenant_prop},
