@@ -250,4 +250,8 @@ TEST_F(HostTest, MailTemplatesThroughMcp) {
   EXPECT_FALSE(gone.at("result").as_object().contains("isError") && gone.at("result").at("isError").as_bool());
   auto unknown = tool("mail_template_list", {{"tenant", "nobody"}});
   EXPECT_TRUE(unknown.at("result").at("isError").as_bool());
+  // Each call is a line in the access log: the tool, its tenant, and whether it failed.
+  auto log = base::read_file(root / "storage/logs/access.log").value_or("");
+  EXPECT_NE(log.find("\"tool\":\"mail_template_put\",\"arg_tenant\":\"playground\""), std::string::npos) << log.substr(0, 500);
+  EXPECT_NE(log.find("\"tool\":\"mail_template_list\",\"arg_tenant\":\"nobody\",\"tool_error\":true"), std::string::npos);
 }

@@ -116,8 +116,27 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   current_operator() = operator_name;
   auto reply = mcp_->handle(req.body);
   current_operator().clear();
-  finish(json_response(reply.status, std::move(reply.body)),
-         json::dump(bj::object{{"operations", "mcp"}, {"operator", operator_name}}));
+  // Which tool, for which tenant: what an operator (or an agent acting as one) did is in the
+  // access log, one line a call.
+  bj::object extra{{"operations", "mcp"}, {"operator", operator_name}};
+  std::string perr;
+  if (auto call = json::parse(req.body, &perr); call && call->is_object()) {
+    const auto& c = call->as_object();
+    if (const auto* m = c.if_contains("method"); m && m->is_string()) extra["mcp_method"] = m->as_string();
+    if (const auto* p = c.if_contains("params"); p && p->is_object()) {
+      if (const auto* n = p->as_object().if_contains("name"); n && n->is_string()) extra["tool"] = n->as_string();
+      if (const auto* a = p->as_object().if_contains("arguments"); a && a->is_object()) {
+        for (const char* k : {"tenant", "path", "project", "box", "name"}) {
+          if (const auto* v = a->as_object().if_contains(k); v && v->is_string() && v->as_string().size() <= 200) {
+            extra[std::string("arg_") + k] = v->as_string();
+          }
+        }
+      }
+    }
+  }
+  bool failed = reply.body.find("\"isError\":true") != std::string::npos;
+  if (failed) extra["tool_error"] = true;
+  finish(json_response(reply.status, std::move(reply.body)), json::dump(extra));
 }
 
 void Host::register_tools() {

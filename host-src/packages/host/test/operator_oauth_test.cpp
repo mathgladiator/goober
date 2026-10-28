@@ -10,6 +10,7 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
+#include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 #include "goober/router/path.h"
@@ -175,6 +176,11 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
   ASSERT_EQ(tools.status, 200) << tools.body;
   EXPECT_GT(parse(tools.body)["result"].at("tools").as_array().size(), 60u);
 
+  // The access log says which tool the agent called, as whom.
+  auto log = base::read_file(root / "storage/logs/access.log").value_or("");
+  EXPECT_NE(log.find("\"mcp_method\":\"tools/list\""), std::string::npos);
+  EXPECT_NE(log.find("\"operator\":\"oauth:boss@example.com:"), std::string::npos);
+
   // The operator's token is only for operating: the site's /mcp doesn't take it.
   auto site = fetch(port, bhttp::verb::post, "/mcp", {{"content-type", "application/json"}, {"authorization", "Bearer " + access}},
                     kListTools);
@@ -187,6 +193,18 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
                              .body);
   ASSERT_TRUE(refreshed.contains("access_token")) << json::dump(refreshed);
   std::string fresh(refreshed["access_token"].as_string());
+  // goober-host operator revoke: every login and grant the operator holds ends at once.
+  auto again = parse(fetch(port, bhttp::verb::post, "/oauth/operator/token", kForm,
+                           "grant_type=refresh_token&client_id=" + client_id + "&refresh_token=" +
+                               std::string(refreshed["refresh_token"].as_string()))
+                         .body);
+  ASSERT_TRUE(again.contains("access_token")) << json::dump(again);
+  std::string live(again["access_token"].as_string());
+  EXPECT_GT(host->identity().revoke_sessions(identity::kHostRealm, "boss@example.com", "test", base::now_unix_ms()), 0);
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/goober-operations-mcp",
+                  {{"content-type", "application/json"}, {"authorization", "Bearer " + live}}, kListTools)
+                .status,
+            401);
   fetch(port, bhttp::verb::post, "/oauth/operator/revoke", kForm, "client_id=" + client_id + "&token=" + fresh);
   auto after = fetch(port, bhttp::verb::post, "/goober-operations-mcp",
                      {{"content-type", "application/json"}, {"authorization", "Bearer " + fresh}}, kListTools);

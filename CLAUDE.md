@@ -11,6 +11,8 @@ account: every human doc's status, what is faked or missing, and a checklist Cla
 through. Keep it true with every change, and grow the code along that plan, not beyond it.
 `READINESS.md` answers, briefly, how ready goober is for the human's experiments (static
 hosting, Grok deploying boxes, agent outreach, the meat index); keep it true too.
+`HUMAN.md` is the human's one-page check while Grok runs the host (is it up, what Grok did,
+errors, backups and mail, redeploy, stop Grok, undo); keep every command in it working.
 
 ## The host (`host-src/`)
 

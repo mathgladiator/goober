@@ -59,6 +59,7 @@ constexpr const char* kUsage =
     "       goober-host token create [--config host.json] [--name NAME] [--claude] [--local]\n"
     "       goober-host token list [--config host.json]\n"
     "       goober-host token revoke NAME_OR_ID [--config host.json]\n"
+    "       goober-host operator revoke EMAIL [--config host.json]   (ends every operator login and OAuth grant)\n"
     "       goober-host db list [TENANT] [--config host.json]\n"
     "       goober-host db describe TENANT DATABASE [--config host.json]\n"
     "       goober-host db query TENANT DATABASE SQL [--config host.json]\n"
@@ -391,6 +392,18 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
   if (positional.size() == 1 && positional[0] == "toolchain") return goober::host::run_toolchain_check(config_path);
+  if (positional.size() == 3 && positional[0] == "operator" && positional[1] == "revoke") {
+    // Every login and token a host operator holds, ended: browser sessions and the OAuth grants
+    // agents got through /oauth/operator (Grok's). Minted tokens are `token revoke`.
+    std::string err;
+    auto config = goober::config::load_config(config_path, &err);
+    if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+    goober::identity::Identity id(config->storage / "identity", [](const goober::identity::Mail&) {});
+    int n = id.revoke_sessions(goober::identity::kHostRealm, positional[2], "cli", goober::base::now_unix_ms());
+    std::cout << "ended " << n << " session(s) and token(s) for " << positional[2]
+              << "; minted operator tokens are listed by `goober-host token list`\n";
+    return 0;
+  }
   if (positional.size() == 2 && positional[0] == "backup" && (positional[1] == "key" || positional[1] == "list")) {
     return run_backup_cli(positional, config_path, flags);
   }
