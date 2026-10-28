@@ -7,6 +7,7 @@
 #include "goober/base/names.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
+#include "build_id.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
 #include "goober/json/json.h"
@@ -160,6 +161,7 @@ void Host::register_tools() {
                       if (auto* v = backup.if_contains(k)) backups[k] = *v;
                     }
                     return ToolResult::ok(bj::object{{"version", std::string(kVersion)},
+                                                     {"build", kBuildCommit},
                                                      {"uptime_ms", base::now_unix_ms() - started_ms_},
                                                      {"requests", requests_.load()},
                                                      {"queued_jobs", pool_->queued()},

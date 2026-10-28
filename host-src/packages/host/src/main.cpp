@@ -41,6 +41,7 @@
 
 #include "goober/base/time.h"
 #include "goober/host/backup.h"
+#include "build_id.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
 #include "../src/backups.h"
@@ -378,7 +379,7 @@ int main(int argc, char** argv) {
       if (a == "--key-file") flags.key_file = v;
       if (a == "--port") flags.port = uint16_t(std::atoi(v.c_str()));
     } else if (a == "--version") {
-      std::cout << "goober-host " << goober::host::kVersion << "\n";
+      std::cout << "goober-host " << goober::host::kVersion << " (" << kBuildCommit << ")\n";
       return 0;
     } else if (!a.starts_with("-")) {
       positional.push_back(a);

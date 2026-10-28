@@ -17,3 +17,13 @@ file(READ "${CMAKE_SOURCE_DIR}/examples/boxes/shared/goober.rs" GOOBER_RUST_BIND
 configure_file(src/rust_binding.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/rust_binding.h" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/examples/boxes/shared/goober.rs")
 target_include_directories(goober_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+# The commit each build came from (host_health, goober-host --version), checked on every build.
+add_custom_target(goober_build_id
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_id.h
+          -P ${CMAKE_SOURCE_DIR}/cmake/BuildId.cmake
+  BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/build_id.h
+  COMMENT "build id")
+add_dependencies(goober_host goober_build_id)
+add_dependencies(goober-host goober_build_id)
+target_include_directories(goober-host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")

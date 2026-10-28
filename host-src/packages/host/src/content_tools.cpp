@@ -407,7 +407,7 @@ void Host::register_content_tools() {
        object_schema({{"tenant", tenant_prop},
                       {"base64", string_property("The file's bytes as base64.")},
                       {"url", string_property("An https URL to fetch the file from.")},
-                      {"file", string_property("A file on the tenant's site, like /hero-small.jpg.")},
+                      {"file", string_property("A file already on the tenant's site (not your machine), like /hero-small.jpg.")},
                       {"name", string_property("A name for people, like truck.jpg.")},
                       {"alt", string_property("What the image shows, for screen readers and the markdown snippet.")},
                       {"visibility", enum_property("Who can fetch it.", {"public", "members"})}},
@@ -450,7 +450,11 @@ void Host::register_content_tools() {
            std::string path = file->substr(0, file->find_first_of("?#"));
            while (path.starts_with("/")) path.erase(0, 1);
            auto f = content_->get(*tenant, path);
-           if (!f) return ToolResult::fail("no file /" + path + " on tenant " + *tenant + "'s site (content_list shows them)");
+           if (!f) {
+             return ToolResult::fail("no file /" + path + " on tenant " + *tenant + "'s site (content_list shows them). "
+                                     "file is a path on the site, not on your machine: for a file you hold, use "
+                                     "attachment_upload_url (PUT its bytes) or attachment_upload_part.");
+           }
            bytes = std::move(f->data);
            if (name.empty()) name = path.substr(path.rfind('/') + 1);
          } else if (b64) {

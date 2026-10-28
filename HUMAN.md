@@ -12,6 +12,10 @@ curl -s https://kcmeatup.com/goober/health        # {"ok":true}
 
 Then open the site in a browser. If health fails, go to section 5.
 
+Which code is running: `host_health` (ask Grok) reports `build`, the git commit, and on the
+server `goober-host --version` prints it too. It should match `git log -1 --oneline` on the
+machine you deployed from.
+
 ## 2. What has Grok done? (on the server)
 
 Every operator tool call is one line in the access log: when, who, which tool, which tenant,
@@ -78,6 +82,10 @@ sudo systemctl stop goober-host
 ```
 
 To let Grok back in, connect it again; it signs you in by email code.
+
+**Grok doesn't see a tool that exists** (after a deploy added it): Grok keeps the tool list
+it fetched when it connected. Disconnect and reconnect the connector; then ask it to list
+the tools again.
 
 ## 7. Undo something Grok broke
 
