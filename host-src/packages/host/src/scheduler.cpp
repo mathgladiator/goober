@@ -112,6 +112,7 @@ void Host::timer_tick(int64_t now_ms) {
     const manifest::DataStrategy* source = nullptr;
   };
   std::vector<Due> due;
+  std::set<std::string> seen;  // every key planned this tick; the rest are gone
   {
     std::lock_guard lock(st.mu);
     for (const auto& [box_name, box] : active->boxes) {
@@ -148,7 +149,15 @@ void Host::timer_tick(int64_t now_ms) {
           // A cron fire: due at `next`, computed once and kept until it fires.
           auto plan_cron = [&](const std::string& key, const std::string& row_key, const std::chrono::time_zone* zone,
                                bj::value row) {
+            seen.insert(key);
+            // A new box version's schedule, or a row's new zone, plans the key again.
+            std::string plan = t.cron + "|" + std::string(zone ? zone->name() : "");
             auto it = st.next_due.find(key);
+            if (it != st.next_due.end() && st.plan[key] != plan) {
+              st.next_due.erase(it);
+              it = st.next_due.end();
+            }
+            st.plan[key] = plan;
             if (it == st.next_due.end()) {
               int64_t next = cron->next(now_ms, zone).value_or(INT64_MAX);
               // Catch up once on what was missed while the host was down (045 "missed").
@@ -168,7 +177,14 @@ void Host::timer_tick(int64_t now_ms) {
           if (t.source.empty()) {
             std::string key = tenant + "|" + t.name + "|";
             if (t.every_ms) {
+              seen.insert(key);
+              std::string plan = "every|" + std::to_string(*t.every_ms);
               auto it = st.next_due.find(key);
+              if (it != st.next_due.end() && st.plan[key] != plan) {
+                st.next_due.erase(it);
+                it = st.next_due.end();
+              }
+              st.plan[key] = plan;
               if (it == st.next_due.end()) it = st.next_due.emplace(key, now_ms + *t.every_ms).first;
               if (it->second <= now_ms && !st.running.count(key)) {
                 due.push_back(Due{ref, tenant, domain, key, "", it->second, nullptr, nullptr});
@@ -220,6 +236,7 @@ void Host::timer_tick(int64_t now_ms) {
             if (!key_value) continue;
             std::string row_key = key_value->is_string() ? std::string(key_value->as_string()) : json::dump(*key_value);
             std::string key = tenant + "|" + t.name + "|" + row_key;
+            seen.insert(key);
             if (!t.at_field.empty()) {
               const bj::value* at = row.if_contains(t.at_field);
               std::optional<int64_t> when;
@@ -242,6 +259,18 @@ void Host::timer_tick(int64_t now_ms) {
       }
     }
     for (const auto& d : due) st.running.insert(d.key);
+    // Timers removed, boxes gone, and rows deleted leave no ghosts in the plan.
+    for (auto it = st.next_due.begin(); it != st.next_due.end();) {
+      if (seen.count(it->first) || st.running.count(it->first)) {
+        ++it;
+        continue;
+      }
+      st.plan.erase(it->first);
+      it = st.next_due.erase(it);
+    }
+    for (auto it = st.retry_after.begin(); it != st.retry_after.end();) {
+      it = seen.count(it->first) || it->second > now_ms ? std::next(it) : st.retry_after.erase(it);
+    }
   }
 
   for (auto& d : due) {

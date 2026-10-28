@@ -412,7 +412,7 @@ void Host::register_web_tools() {
                                              {"description", "Never URLs matching these, like *?sort=*."}})},
             {"max_pages", mcp::integer_property("At most this many pages (default 100, at most 5000).")},
             {"max_depth", mcp::integer_property("Links followed from a seed (default 3, at most 10).")},
-            {"sitemaps", mcp::boolean_property("Read the sites' sitemaps (from robots.txt and /sitemap.xml) for URLs.")},
+            {"sitemaps", mcp::boolean_property("Read each seed site's /sitemap.xml (and the sitemaps it indexes) for URLs.")},
             {"extract", extract_prop}},
            {"seeds"}),
        [this](const bj::object& args) {

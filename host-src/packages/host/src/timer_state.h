@@ -18,6 +18,7 @@ namespace goober::host {
 struct Host::TimerState {
   std::mutex mu;
   std::map<std::string, int64_t> next_due;     // tenant|timer|row -> when it's next due
+  std::map<std::string, std::string> plan;     // what each next_due was computed from: schedule and zone
   std::map<std::string, int64_t> retry_after;  // a failed fire's backoff
   std::set<std::string> running;               // fires in flight: the next is skipped (045)
   struct Rows {

@@ -191,7 +191,12 @@ bool HostWal::append_records(uint64_t id, const Bundle& bundle, std::string* err
     buf += encode_record(change.kind == FileChange::Kind::kWrite ? kWrite : kDelete, id, change.path, change.data);
   }
   buf += encode_record(kCommit, id, "", "");
+  struct stat before {};
+  bool sized = ::fstat(fd_, &before) == 0;
   if (!write_all(fd_, buf) || ::fsync(fd_) != 0) {
+    // A part-written bundle would end the log for recovery, which stops at the first torn
+    // record, losing every bundle committed after it: cut it off.
+    if (sized && ::ftruncate(fd_, before.st_size) == 0) ::fsync(fd_);
     *error = "cannot write the host WAL";
     return false;
   }

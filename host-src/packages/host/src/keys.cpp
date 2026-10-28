@@ -76,13 +76,18 @@ bool KeyStore::set(std::string_view scope, std::string_view tenant, std::string_
     fs::remove(tmp, ec);
     return *error = "can't write the key", false;
   }
+  // The rename is durable only once the directory is.
+  int dir = ::open(f->parent_path().c_str(), O_RDONLY | O_CLOEXEC);
+  if (dir >= 0) {
+    ::fsync(dir);
+    ::close(dir);
+  }
   return true;
 }
 
 bool KeyStore::remove(std::string_view scope, std::string_view tenant, std::string_view name) {
   auto f = file(scope, tenant, name);
-  std::error_code ec;
-  return f && fs::remove(*f, ec);
+  return f && fs::exists(*f) && base::remove_file_durable(*f);
 }
 
 std::optional<std::string> KeyStore::resolve(std::string_view credentials, std::string_view tenant) const {

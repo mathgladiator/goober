@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include "goober/host/host.h"
@@ -194,4 +195,28 @@ TEST_F(TimersTest, FiringAtFieldTimersNowTurnsRowsOff) {
   EXPECT_EQ(*fired, 1);
   host->timer_tick(utc(2026, 10, 27, 10, 30, 1));
   EXPECT_EQ(count("remind"), 1);
+}
+
+// Code review 4: a new version's schedule takes effect at once, and removed rows leave no
+// ghosts in the plan.
+TEST_F(TimersTest, PlansFollowTheScheduleAndTheRows) {
+  host->timer_tick(utc(2026, 10, 27, 10, 0));
+  auto due_for = [&](const std::string& timer) {
+    std::vector<std::string> out;
+    for (const auto& p : host->timers_due()) {
+      if (p.at("timer").as_string() == timer) out.push_back(std::string(p.at("next_due").as_string()));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  EXPECT_EQ(due_for("morning").front(), "2026-10-27T11:00:00.000Z");  // 6am in Chicago
+  std::string manifest = kManifest;
+  manifest.replace(manifest.find("0 6 * * *"), 9, "0 7 * * *");
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(manifest, kClock, &err)) << err;
+  host->timer_tick(utc(2026, 10, 27, 10, 0, 5));
+  EXPECT_EQ(due_for("morning").front(), "2026-10-27T12:00:00.000Z");  // now 7am
+  exec("DELETE FROM people WHERE name = 'Kenji'");
+  host->timer_tick(utc(2026, 10, 27, 10, 5));  // past the rows' refresh
+  EXPECT_EQ(due_for("morning").size(), 1u);    // Chicago only; Mars never had a plan
 }
