@@ -155,7 +155,8 @@ On a fresh Ubuntu 24.04+ or Debian 13+ machine (x86_64, sudo, DNS already pointi
 ```sh
 just deploy you@server            # or host-src/tools/deploy.sh you@server [/srv/goober/host]
 just deploy you@server --with-rust  # also Rust and vendored crates, to build source projects there
-just deploy you@server --user acme  # run as the system user acme, in /srv/acme/host
+just deploy server --user customer   # ssh in as customer (the same as customer@server)
+just deploy you@server --run-as acme # the host runs as the system user acme, in /srv/acme/host
 ```
 
 It builds the `server` preset here (a release binary with libstdc++ linked in, needing only
@@ -165,8 +166,9 @@ curl, python3, tzdata, and bubblewrap (the build sandbox); creates a `goober` sy
 weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
 own. Running it again upgrades: it checks the config with the new binary and restarts.
 
-`you` in `you@server` is your ssh login, which needs sudo. `--user NAME` is a different account:
-the system user the host runs as and owns its files (default `goober`, home `/srv/NAME`, so the
+`you` in `you@server` (or `--user you`) is your ssh login, which needs sudo; ssh connects once,
+so a password is asked for once. `--run-as NAME` is a different account: the system user the
+host runs as and owns its files (default `goober`, home `/srv/NAME`, so the
 default directory is `/srv/NAME/host`). An existing account is used only if it is a system user
 whose home is `/srv/NAME`, never root or a person's login. The examples here use the default.
 

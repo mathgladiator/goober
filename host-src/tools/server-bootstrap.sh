@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs on the server, as root, from tools/deploy.sh. Installs or upgrades goober:
 #   - checks the system (glibc 2.38+, systemd), installs Caddy, curl, python3, tzdata;
-#   - creates the system user (--user NAME, default goober, home /srv/NAME) and DIR, owned by it;
+#   - creates the system user (deploy.sh --run-as NAME, default goober, home /srv/NAME) and DIR, owned by it;
 #   - installs /usr/local/bin/goober-host;
 #   - first time: runs setup.sh as that user (interactive), then installs the systemd units,
 #     the nightly backup timer, and the Caddyfile;
@@ -27,7 +27,7 @@ BIN=/usr/local/bin/goober-host
 die() { echo "✗ $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$RUN_AS" != root ]] ||
-  die "--user must be a lowercase user name other than root, like goober"
+  die "--run-as must be a lowercase user name other than root, like goober"
 HOME_DIR="/srv/$RUN_AS"
 DIR="${DIR:-$HOME_DIR/host}"
 # DIR lives under the user's home, so nothing outside it is ever given to that user.
@@ -38,7 +38,7 @@ DIR="${DIR:-$HOME_DIR/host}"
 if id "$RUN_AS" >/dev/null 2>&1; then
   IFS=: read -r _ _ EXISTING_UID _ _ EXISTING_HOME _ < <(getent passwd "$RUN_AS")
   [[ "$EXISTING_UID" -ne 0 && "$EXISTING_HOME" == "$HOME_DIR" ]] ||
-    die "user $RUN_AS exists with home $EXISTING_HOME; choose another name, or one whose home is $HOME_DIR"
+    die "user $RUN_AS exists with home $EXISTING_HOME; choose another --run-as, or one whose home is $HOME_DIR"
 fi
 [[ "$(uname -m)" == x86_64 ]] || die "the binary is built for x86_64"
 GLIBC="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"

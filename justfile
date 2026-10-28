@@ -115,7 +115,7 @@ reload dir=dir:
     @pkill -HUP -f -- "[g]oober-host --config {{trim_start_match(dir, "dir=")}}/host.json" && echo "reloaded" || echo "no running host for {{trim_start_match(dir, "dir=")}}"
 
 # Install or upgrade goober on a server over ssh (Ubuntu 24.04+ / Debian 13+), with Caddy and backups.
-# Extra arguments pass through: a DIR, --user NAME (the account the host runs as), --with-rust.
+# Extra arguments pass through: a DIR, --user LOGIN (ssh), --run-as NAME (the host's account), --with-rust.
 deploy target *args:
     {{host_src}}/tools/deploy.sh {{target}} {{args}}
 
