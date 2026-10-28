@@ -22,6 +22,12 @@ struct Sniffed {
 // The type of the bytes, or nullopt when they aren't PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF.
 std::optional<Sniffed> sniff(std::string_view bytes);
 
+// Whether the bytes run to the end of their format: PNG's IEND chunk, JPEG's end-of-image
+// marker, GIF's trailer, WebP's RIFF length, PDF's %%EOF, an SVG's closing tag. A file cut
+// off on its way (a truncated base64 argument, say) has the right start and no end. AVIF and
+// ICO aren't checked. On false, `why` says what is missing.
+bool looks_complete(std::string_view bytes, const Sniffed& type, std::string* why);
+
 struct Attachment {
   int64_t id = 0;
   std::string state;  // writing, stored, failed, or deleted

@@ -58,6 +58,22 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
   std::string rest = path.size() > 12 ? path.substr(12) : "";  // after "/attachment/"
   std::optional<SignedIn> who = caller(req, tenant);
   std::string op = bearer_operator(req);
+  // A one-time upload URL (attachment_upload_url) stands in for the operator who asked for it.
+  std::optional<UploadTicket> ticket;
+  if (rest == "upload" && (req.method == "put" || req.method == "post")) {
+    auto q = router::parse_query(req.query);
+    if (auto t = q.find("ticket"); t != q.end()) {
+      ticket = upload_ticket(t->second, tenant, true);
+      if (!ticket) {
+        Response res;
+        res.status = 403;
+        res.headers.emplace_back("content-type", "application/json");
+        res.body = R"({"error":"this upload URL is unknown, already used, expired, or for another site; ask attachment_upload_url for a new one"})";
+        return finish(std::move(res), R"({"why":"bad upload ticket"})");
+      }
+      op = "ticket:" + ticket->by;
+    }
+  }
   bool is_editor = !op.empty() || (who && (who->host || std::find(who->roles.begin(), who->roles.end(), "owner") !=
                                                             who->roles.end()));
   bj::object extra{{"attachment", rest.empty() ? "manager" : rest}};
@@ -115,7 +131,7 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
   }
   bool from_browser = req.header("accept").find("text/html") != std::string::npos && op.empty();
 
-  if (is_post && rest == "upload") {
+  if ((is_post || (ticket && req.method == "put")) && rest == "upload") {
     std::string err;
     Upload up;
     std::string type = base::to_lower(req.header("content-type"));
@@ -127,6 +143,12 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
       up.bytes = req.body;
       up.fields = router::parse_query(req.query);
       up.name = up.fields["name"];
+    }
+    if (ticket) {
+      // The ticket's terms, as attachment_upload_url was asked.
+      if (!ticket->name.empty()) up.name = ticket->name;
+      up.fields["alt"] = ticket->alt;
+      up.fields["visibility"] = ticket->visibility;
     }
     uint64_t max = op.empty() ? kBrowserAttachmentMaxBytes : kOperatorAttachmentMaxBytes;
     if (up.bytes.size() > max) {
@@ -160,11 +182,16 @@ void Host::handle_attachment(const Request& req, const Finish& finish, const std
     res.status = 201;
     res.headers.emplace_back("content-type", "application/json");
     res.headers.emplace_back("location", a->url());
+    // What attachment_put answers, so an agent that uploaded by URL reads the same thing.
     res.body = json::dump(bj::object{{"id", a->id},
                                      {"url", a->url()},
+                                     {"markdown", "![" + a->alt + "](" + a->url() + ")"},
                                      {"content_type", a->content_type},
                                      {"size", a->size},
-                                     {"sha256", a->sha256}});
+                                     {"sha256", a->sha256},
+                                     {"name", a->name},
+                                     {"alt", a->alt},
+                                     {"visibility", a->visibility}});
     return finish(std::move(res), json::dump(extra));
   }
 

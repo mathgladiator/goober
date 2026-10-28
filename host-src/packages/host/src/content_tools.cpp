@@ -79,7 +79,9 @@ url to fetch, plus name, alt, and visibility (public, or members). A URL on this
 domain is read from its files. It answers with /attachment/$id.$ext; use that URL in pages:
   ![A red truck](/attachment/3.jpg)      or   image: /attachment/3.jpg
 PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, and PDF, detected from the bytes. People can also upload
-at /attachment/ in a browser, as an owner of the tenant. If a call fails, nothing is stored:
+at /attachment/ in a browser, as an owner of the tenant. base64 suits small files: for anything
+over about 100 KB, give url or file, or call attachment_upload_url and PUT the bytes to the URL
+it returns (curl -T photo.jpg '<url>'), once, within 15 minutes. If a call fails, nothing is stored:
 fix the call; never paste its arguments into a page.
 
 ## Boxes with templates
@@ -395,8 +397,10 @@ void Host::register_content_tools() {
        "Stores an image or PDF and returns its URL, /attachment/$id.$ext, to use in pages. Give exactly one of: "
        "base64 bytes; file, a file already on the tenant's site (like /hero-small.jpg, from content_list); or an "
        "https url for the host to fetch (a URL on one of this host's own domains is read from its files). The type "
-       "comes from the bytes: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF. On failure, nothing is stored: don't "
-       "put this call's arguments in a page.",
+       "comes from the bytes: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF. base64 suits small files (under about "
+       "100 KB): larger ones can be cut off on their way into a tool call, so give url or file, or upload with "
+       "attachment_upload_url. A file that arrives cut off is refused, saying how many bytes arrived. On failure, "
+       "nothing is stored: don't put this call's arguments in a page.",
        object_schema({{"tenant", tenant_prop},
                       {"base64", string_property("The file's bytes as base64.")},
                       {"url", string_property("An https URL to fetch the file from.")},
@@ -448,7 +452,11 @@ void Host::register_content_tools() {
            if (name.empty()) name = path.substr(path.rfind('/') + 1);
          } else if (b64) {
            auto decoded = base::base64_decode(*b64);
-           if (!decoded) return ToolResult::fail("base64 is not valid");
+           if (!decoded) {
+             return ToolResult::fail("base64 is not valid (" + std::to_string(b64->size()) +
+                                     " characters arrived; an argument cut off on its way looks like this). For files "
+                                     "over about 100 KB, give url or file, or upload with attachment_upload_url.");
+           }
            bytes = std::move(*decoded);
          } else {
            auto fetched = fetch_https(*url, size_t(kOperatorAttachmentMaxBytes), &err);
@@ -468,6 +476,45 @@ void Host::register_content_tools() {
          if (!a) return ToolResult::fail(err);
          backups_->nudge();  // queued for the bucket at the next backup tick
          return ToolResult::ok(attachment_json(*a, nullptr));
+       }});
+
+  mcp_->add_tool(
+      {"attachment_upload_url",
+       "A one-time URL to upload one image or PDF (up to 32 MiB) with a plain HTTP PUT of its bytes, for files too "
+       "big to pass as base64 in a tool call (over about 100 KB). From code or a shell: curl -T photo.jpg '<url>'. "
+       "It works once, for 15 minutes, for this tenant; the upload answers with the attachment's url, as "
+       "attachment_put does.",
+       object_schema({{"tenant", tenant_prop},
+                      {"name", string_property("A name for people, like truck.jpg.")},
+                      {"alt", string_property("What the image shows, for screen readers and the markdown snippet.")},
+                      {"visibility", enum_property("Who can fetch it.", {"public", "members"})}},
+                     {"tenant"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         std::string visibility = arg(args, "visibility").value_or("public");
+         if (visibility != "public" && visibility != "members") return ToolResult::fail("visibility is public or members");
+         auto cfg = config_.get();
+         // The tenant's own domain: the platform domain if it is the tenant's, else its first real name.
+         std::string domain;
+         for (const auto& [d, e] : cfg->domains) {
+           if (e.tenant != *tenant) continue;
+           bool real = d.find('.') != std::string::npos && d.find_first_not_of("0123456789.") != std::string::npos;
+           if (d == cfg->platform_domain || (domain.empty() && real)) domain = d;
+           if (domain.empty()) domain = d;
+         }
+         bool secure = cfg->identity.cookie_secure && !cfg->local;
+         std::string origin = (secure ? "https://" : "http://") + domain +
+                              (secure || cfg->listen_port == 80 ? "" : ":" + std::to_string(cfg->listen_port));
+         int64_t expires = base::now_unix_ms() + 15 * 60 * 1000;
+         std::string ticket = issue_upload_ticket(UploadTicket{*tenant, arg(args, "name").value_or(""), arg(args, "alt").value_or(""),
+                                                               visibility, current_operator(), expires});
+         std::string url = origin + "/attachment/upload?ticket=" + ticket;
+         return ToolResult::ok(bj::object{{"upload_url", url},
+                                          {"method", "PUT"},
+                                          {"max_bytes", int64_t(kOperatorAttachmentMaxBytes)},
+                                          {"expires_at", base::format_utc_ms(expires)},
+                                          {"example", "curl -sS -T photo.jpg '" + url + "'"}});
        }});
 
   mcp_->add_tool({"attachment_list",

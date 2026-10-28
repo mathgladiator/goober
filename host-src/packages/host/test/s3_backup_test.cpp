@@ -23,7 +23,7 @@ int64_t utc(int y, int mo, int d, int h, int mi) {
 }
 
 const aws::Credentials kCreds{"AKIDTEST", "test-secret", ""};
-const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(2000, 'p');
+const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(2000, 'p') + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12);
 
 class S3BackupTest : public ::testing::Test {
  protected:

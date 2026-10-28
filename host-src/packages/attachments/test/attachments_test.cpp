@@ -6,7 +6,7 @@ using namespace goober;
 namespace fs = std::filesystem;
 
 namespace {
-const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + std::string("rest-of-png", 11);
+const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + std::string("rest-of-png", 11) + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12);
 }
 
 TEST(Sniff, DetectsFromBytesOnly) {
@@ -35,7 +35,7 @@ TEST(Attachments, PutGetListRemoveAndNeverReuseIds) {
   EXPECT_EQ(a->url(), "/attachment/1.png");
   EXPECT_EQ(a->visibility, "public");
   EXPECT_EQ(*store.read("t", 1), kPng);
-  auto b = store.put("t", "GIF89a....", "x", "", "members", 2000, &err);
+  auto b = store.put("t", "GIF89a....;", "x", "", "members", 2000, &err);
   ASSERT_TRUE(b) << err;
   EXPECT_EQ(store.list("t").size(), 2u);
   EXPECT_EQ(store.list("t")[0].id, 2);
@@ -62,4 +62,37 @@ TEST(Attachments, ReferencesComeFromTextContent) {
   EXPECT_EQ(refs.size(), 2u);
   EXPECT_EQ(refs[1], (std::vector<std::string>{"index.md"}));
   EXPECT_EQ(refs[12], (std::vector<std::string>{"css/site.css"}));
+}
+
+// A file cut off on its way has the right start and no end: refused, saying so.
+TEST(Attachments, CutOffFilesAreRefused) {
+  std::string why;
+  auto check = [&](const std::string& bytes) {
+    auto t = attachments::sniff(bytes);
+    EXPECT_TRUE(t) << bytes.substr(0, 8);
+    return t && attachments::looks_complete(bytes, *t, &why);
+  };
+  EXPECT_TRUE(check(kPng));
+  EXPECT_FALSE(check(kPng.substr(0, kPng.size() - 12)));
+  EXPECT_NE(why.find("IEND"), std::string::npos);
+  EXPECT_TRUE(check(std::string("\xFF\xD8\xFF\xE0", 4) + std::string(100, 'j') + "\xFF\xD9"));
+  EXPECT_FALSE(check(std::string("\xFF\xD8\xFF\xE0", 4) + std::string(100, 'j')));
+  EXPECT_TRUE(check(std::string("GIF89a") + std::string(40, 'g') + ";"));
+  EXPECT_FALSE(check(std::string("GIF89a") + std::string(40, 'g')));
+  std::string webp = std::string("RIFF\x10\x00\x00\x00WEBP", 12) + std::string(12, 'w');  // 24 bytes, RIFF says 16 + 8
+  EXPECT_TRUE(check(webp));
+  EXPECT_FALSE(check(webp.substr(0, 20)));
+  EXPECT_TRUE(check("%PDF-1.4\n1 0 obj\nendobj\n%%EOF\n"));
+  EXPECT_FALSE(check("%PDF-1.4\n1 0 obj\n"));
+  EXPECT_TRUE(check("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>\n"));
+  EXPECT_FALSE(check("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></sv"));
+
+  auto dir = std::filesystem::path(GOOBER_TEST_TMP) / "attachments_cut";
+  std::filesystem::remove_all(dir);
+  wal::HostWal w(dir);
+  attachments::Store store(w);
+  std::string err;
+  EXPECT_FALSE(store.put("t", kPng.substr(0, kPng.size() - 5), "cut.png", "", "", 1, &err));
+  EXPECT_NE(err.find("looks cut off"), std::string::npos) << err;
+  EXPECT_NE(err.find("bytes arrived"), std::string::npos) << err;
 }

@@ -89,6 +89,41 @@ std::optional<Sniffed> sniff(std::string_view b) {
   return std::nullopt;
 }
 
+bool looks_complete(std::string_view b, const Sniffed& type, std::string* why) {
+  auto tail = [&](size_t n) { return b.substr(b.size() > n ? b.size() - n : 0); };
+  const std::string& t = type.content_type;
+  if (t == "image/png") {
+    // The last chunk is IEND: length 0, "IEND", and its CRC.
+    if (b.size() >= 20 && b.substr(b.size() - 8, 4) == "IEND") return true;
+    return *why = "the PNG has no IEND chunk at its end", false;
+  }
+  if (t == "image/jpeg") {
+    if (tail(64).find("\xFF\xD9") != std::string_view::npos) return true;
+    return *why = "the JPEG has no end-of-image marker (FF D9) at its end", false;
+  }
+  if (t == "image/gif") {
+    if (tail(16).find('\x3B') != std::string_view::npos) return true;
+    return *why = "the GIF has no trailer (3B) at its end", false;
+  }
+  if (t == "image/webp") {
+    uint32_t riff = uint32_t(uint8_t(b[4])) | uint32_t(uint8_t(b[5])) << 8 | uint32_t(uint8_t(b[6])) << 16 |
+                    uint32_t(uint8_t(b[7])) << 24;
+    if (uint64_t(riff) + 8 <= b.size()) return true;
+    return *why = "the WebP is shorter than its RIFF header says (" + std::to_string(uint64_t(riff) + 8) + " bytes)", false;
+  }
+  if (t == "application/pdf") {
+    if (tail(2048).find("%%EOF") != std::string_view::npos) return true;
+    return *why = "the PDF has no %%EOF at its end", false;
+  }
+  if (t == "image/svg+xml") {
+    std::string end = base::to_lower(tail(256));
+    while (!end.empty() && std::isspace(static_cast<unsigned char>(end.back()))) end.pop_back();
+    if (end.ends_with("</svg>") || end.ends_with("/>")) return true;
+    return *why = "the SVG doesn't end with </svg>", false;
+  }
+  return true;
+}
+
 std::optional<Attachment> Store::put(std::string_view tenant, std::string_view bytes, std::string_view name,
                                      std::string_view alt, std::string_view visibility, int64_t now_ms,
                                      std::string* error) {
@@ -100,6 +135,12 @@ std::optional<Attachment> Store::put(std::string_view tenant, std::string_view b
   if (bytes.empty()) return *error = "the attachment is empty", std::nullopt;
   auto type = sniff(bytes);
   if (!type) return *error = "not an image or PDF: attachments must be PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF", std::nullopt;
+  std::string why;
+  if (!looks_complete(bytes, *type, &why)) {
+    return *error = "the file looks cut off: " + why + " (" + std::to_string(bytes.size()) +
+                    " bytes arrived). Nothing was stored.",
+           std::nullopt;
+  }
   std::string clean_name(name.substr(0, 200));
   for (auto& c : clean_name) {
     if (static_cast<unsigned char>(c) < 0x20) c = ' ';

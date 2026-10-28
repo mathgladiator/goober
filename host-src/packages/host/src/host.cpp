@@ -225,6 +225,15 @@ uint16_t Host::start() {
       server::http::Request probe;
       probe.headers.emplace_back("authorization", std::string(authorization));
       bool op = authorization.starts_with("Bearer ") && !bearer_operator(probe).empty();
+      if (auto q = target.find('?'); !op && q != std::string_view::npos) {
+        auto params = router::parse_query(std::string(target.substr(q + 1)));
+        // A live ticket (not used up here: the handler takes it once the body is in).
+        if (auto t = params.find("ticket"); t != params.end()) {
+          std::lock_guard lock(upload_tickets_mu_);
+          auto it = upload_tickets_.find(base::sha256_hex(t->second));
+          op = it != upload_tickets_.end() && it->second.expires_ms > base::now_unix_ms();
+        }
+      }
       return (op ? kOperatorAttachmentMaxBytes : kBrowserAttachmentMaxBytes) + kMultipartOverheadBytes;
     }
     if (target.substr(0, target.find('?')) != kOperationsMcpPath || !authorization.starts_with("Bearer ")) return 0;
@@ -292,6 +301,34 @@ std::string Host::reload() {
 void Host::drain_mail() { mail_->drain(); }
 
 // Every mail is queued, so a sign-in answers in the same time whether or not one goes out.
+std::string Host::issue_upload_ticket(UploadTicket t) {
+  uint8_t raw[24];
+  base::os_random_fill(raw);
+  std::string ticket = base::hex_encode(std::string_view(reinterpret_cast<char*>(raw), sizeof raw));
+  std::lock_guard lock(upload_tickets_mu_);
+  int64_t now = base::now_unix_ms();
+  std::erase_if(upload_tickets_, [&](const auto& kv) { return kv.second.expires_ms <= now; });
+  // A bound on what's outstanding: the oldest goes first.
+  while (upload_tickets_.size() >= 100) {
+    auto oldest = std::min_element(upload_tickets_.begin(), upload_tickets_.end(),
+                                   [](const auto& a, const auto& b) { return a.second.expires_ms < b.second.expires_ms; });
+    upload_tickets_.erase(oldest);
+  }
+  upload_tickets_[base::sha256_hex(ticket)] = std::move(t);
+  return ticket;
+}
+
+std::optional<Host::UploadTicket> Host::upload_ticket(const std::string& ticket, const std::string& tenant, bool consume) {
+  std::lock_guard lock(upload_tickets_mu_);
+  auto it = upload_tickets_.find(base::sha256_hex(ticket));
+  if (it == upload_tickets_.end() || it->second.expires_ms <= base::now_unix_ms() || it->second.tenant != tenant) {
+    return std::nullopt;
+  }
+  UploadTicket t = it->second;
+  if (consume) upload_tickets_.erase(it);
+  return t;
+}
+
 // A mail naming a template is rendered from the tenant's templates here, so the queue sends
 // what was rendered; any other mail is wrapped in the tenant's layout for its HTML part.
 void Host::send_mail(const identity::Mail& mail) {

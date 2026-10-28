@@ -44,7 +44,10 @@ Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target,
   return r;
 }
 
-const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + "not-really-a-png";
+const std::string kIend = std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12);
+const std::string kPng = std::string("\x89PNG\r\n\x1a\n", 8) + "not-really-a-png" + kIend;
+// A PNG-shaped file of exactly `size` bytes: the signature, filler, and the IEND chunk.
+std::string png_of(size_t size) { return std::string("\x89PNG\r\n\x1a\n", 8) + std::string(size - 20, 'x') + kIend; }
 
 const char* kJobWat = R"((module
   (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
@@ -213,7 +216,7 @@ TEST_F(SiteRoutesTest, PagesWithRequirementsAndBoxRoutesWithTemplates) {
 // Images up to 1 MiB from the attachments page, more with an operator's token; larger is
 // refused with what the limit is, past the host's general 1 MiB body limit either way.
 TEST_F(SiteRoutesTest, AttachmentUploadsTakeAFullMegabyte) {
-  std::string png = kPng + std::string((1 << 20) - kPng.size(), 'x');  // exactly 1 MiB
+  std::string png = png_of(1 << 20);  // exactly 1 MiB
   std::string body = "--XyZ\r\nContent-Disposition: form-data; name=\"alt\"\r\n\r\nA big one\r\n"
                      "--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.png\"\r\n"
                      "Content-Type: image/png\r\n\r\n" + png + "\r\n--XyZ--\r\n";
@@ -222,12 +225,12 @@ TEST_F(SiteRoutesTest, AttachmentUploadsTakeAFullMegabyte) {
                     body);
   ASSERT_EQ(form.status, 201) << form.body.substr(0, 200);
   // An operator's token takes more, as attachment_put does.
-  std::string bigger = kPng + std::string((3 << 20), 'x');
+  std::string bigger = png_of(3 << 20);
   auto raw = fetch(port, bhttp::verb::post, "/attachment/upload?name=b.png",
                    {{"authorization", "Bearer test-token-0123456789"}, {"content-type", "image/png"}}, bigger);
   EXPECT_EQ(raw.status, 201) << raw.body.substr(0, 200);
   // Past the operator's limit: refused, saying why.
-  std::string huge = kPng + std::string((32 << 20) + 1, 'x');
+  std::string huge = png_of((32 << 20) + 1);
   auto over = fetch(port, bhttp::verb::post, "/attachment/upload?name=h.png",
                     {{"authorization", "Bearer test-token-0123456789"}, {"content-type", "image/png"}}, huge);
   EXPECT_EQ(over.status, 413);
@@ -262,4 +265,30 @@ TEST_F(SiteRoutesTest, AttachmentsFromTheSitesOwnFiles) {
   EXPECT_NE(std::string(plain.at("error").as_string()).find("give file"), std::string::npos);
   auto two = tool("attachment_put", {{"tenant", "playground"}, {"file", "/hero-small.jpg"}, {"base64", "AA=="}});
   EXPECT_NE(std::string(two.at("error").as_string()).find("exactly one"), std::string::npos);
+}
+
+// Big files don't travel as base64 in a tool call: an upload URL takes one PUT of the bytes.
+TEST_F(SiteRoutesTest, UploadUrlsTakeOnePutAndCutOffBase64IsNamed) {
+  auto ticket = tool("attachment_upload_url", {{"tenant", "playground"}, {"name", "hero.png"}, {"alt", "The ranch"}});
+  ASSERT_FALSE(ticket.as_object().contains("error")) << json::dump(ticket);
+  std::string url(ticket.at("upload_url").as_string());
+  EXPECT_EQ(ticket.at("method"), "PUT");
+  std::string target = url.substr(url.find("/attachment/upload"));
+  std::string big = png_of(2 << 20);  // past the 1 MiB a browser gets, and no token needed
+  auto put = fetch(port, bhttp::verb::put, target, {{"content-type", "application/octet-stream"}}, big);
+  ASSERT_EQ(put.status, 201) << put.body.substr(0, 300);
+  std::string err;
+  auto a = json::parse(put.body, &err);
+  EXPECT_EQ(a->at("name"), "hero.png");
+  EXPECT_EQ(a->at("alt"), "The ranch");
+  EXPECT_EQ(fetch(port, bhttp::verb::get, std::string(a->at("url").as_string())).body, big);
+  // Once only.
+  EXPECT_EQ(fetch(port, bhttp::verb::put, target, {}, kPng).status, 403);
+  EXPECT_EQ(fetch(port, bhttp::verb::put, "/attachment/upload?ticket=0123abcd", {}, kPng).status, 403);
+
+  // base64 cut short on its way: refused, saying so, nothing stored.
+  std::string cut = base::base64_encode(png_of(300000)).substr(0, 190000);
+  auto refused = tool("attachment_put", {{"tenant", "playground"}, {"base64", cut}});
+  ASSERT_TRUE(refused.as_object().contains("error")) << json::dump(refused).substr(0, 200);
+  EXPECT_NE(std::string(refused.at("error").as_string()).find("cut off"), std::string::npos) << json::dump(refused);
 }

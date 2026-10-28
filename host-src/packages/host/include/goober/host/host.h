@@ -287,6 +287,20 @@ class Host {
   // Delivers one outbox mail element through the mailer, within the config's mail limits.
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);
   size_t max_queued_ = 1024;  // box jobs waiting for a thread, past which requests get 503
+  // One-time upload URLs (attachment_upload_url): a ticket, kept by its hash, lets one PUT or
+  // POST to /attachment/upload store one attachment in one tenant, for 15 minutes.
+ public:
+  struct UploadTicket {
+    std::string tenant, name, alt, visibility, by;
+    int64_t expires_ms = 0;
+  };
+  std::string issue_upload_ticket(UploadTicket t);
+  // The ticket's terms if it is live and for this tenant; with consume, it can't be used again.
+  std::optional<UploadTicket> upload_ticket(const std::string& ticket, const std::string& tenant, bool consume);
+
+ private:
+  std::mutex upload_tickets_mu_;
+  std::map<std::string, UploadTicket> upload_tickets_;
   std::unique_ptr<class MailQueue> mail_;
   // Every mail the host sends is rendered from these (design/machine/022.MailTemplates.md).
   std::unique_ptr<mail::templates::Store> mail_templates_;
