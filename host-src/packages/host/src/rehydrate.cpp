@@ -24,7 +24,7 @@ bool download_unsealed(aws::S3& s3, const backup::Key& key, const std::string& o
                        const fs::path& out, std::string* error) {
   fs::path sealed = work / "download.sealed";
   if (!s3.get_file(object, sealed, error)) return *error = object + ": " + *error, false;
-  bool ok = backup::unseal_file(key, sealed, out, error);
+  bool ok = backup::unseal_file(key, sealed, out, error, object);
   std::error_code ec;
   fs::remove(sealed, ec);
   return ok;
@@ -212,11 +212,25 @@ bool rehydrate_inner(const RehydrateOptions& o, RehydrateReport* report, std::st
 
 bool rehydrate(const RehydrateOptions& o, RehydrateReport* report, std::string* error) {
   // A manifest of the wrong shape (an older or newer format) is an error, not a crash.
+  std::error_code ec;
+  bool existed = fs::exists(o.dir, ec);
+  if (existed && !fs::is_empty(o.dir, ec)) return *error = o.dir.string() + " isn't empty", false;
+  bool ok = false;
   try {
-    return rehydrate_inner(o, report, error);
+    ok = rehydrate_inner(o, report, error);
   } catch (const std::exception& e) {
-    return *error = std::string("rehydrating failed: ") + e.what(), false;
+    *error = std::string("rehydrating failed: ") + e.what();
   }
+  // A half-done rehydrate holds the production keys and people's data: nothing of it stays.
+  // DIR was empty or missing at the start (rehydrate_inner refuses anything else).
+  if (!ok) {
+    if (existed) {
+      for (const auto& e : fs::directory_iterator(o.dir, ec)) fs::remove_all(e.path(), ec);
+    } else {
+      fs::remove_all(o.dir, ec);
+    }
+  }
+  return ok;
 }
 
 }  // namespace goober::host

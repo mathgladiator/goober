@@ -173,3 +173,23 @@ TEST(Names, RestorePointsAreNightsAndTheirIncrements) {
 
 }  // namespace
 }  // namespace goober::backup
+
+namespace goober::backup {
+namespace {
+
+// Review 5, finding 6: a sealed file is bound to its name, so one object can't stand in for
+// another (an asset over another tenant's, an old night over a new one).
+TEST(Seal, FilesAreBoundToTheirNames) {
+  auto d = dir("seal-context");
+  Key key = new_key();
+  ASSERT_TRUE(base::write_file_durable(d / "plain", "tenant a's picture"));
+  std::string err;
+  ASSERT_TRUE(seal_file(key, d / "plain", d / "sealed", &err, "assets/a/1.png.sealed")) << err;
+  EXPECT_TRUE(unseal_file(key, d / "sealed", d / "back", &err, "assets/a/1.png.sealed")) << err;
+  EXPECT_FALSE(unseal_file(key, d / "sealed", d / "moved", &err, "assets/b/7.png.sealed"));
+  EXPECT_FALSE(fs::exists(d / "moved"));
+  EXPECT_FALSE(unseal_file(key, d / "sealed", d / "bare", &err));
+}
+
+}  // namespace
+}  // namespace goober::backup

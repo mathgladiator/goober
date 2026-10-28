@@ -41,6 +41,10 @@ class FakeAws {
     std::lock_guard lock(mu_);
     buckets_[bucket][key] = std::move(bytes);
   }
+  void remove_object(const std::string& bucket, const std::string& key) {
+    std::lock_guard lock(mu_);
+    buckets_[bucket].erase(key);
+  }
   std::vector<std::string> mails() {
     std::lock_guard lock(mu_);
     return mails_;

@@ -17,8 +17,15 @@ mkdir -p "$WORK/src"
 touch "$WORK/src/lib.rs"
 printf '[package]\nname = "goober-vendor-set"\nversion = "0.1.0"\nedition = "2024"\n[lib]\npath = "src/lib.rs"\n[dependencies]\n%s\n' \
   "$CRATES" >"$WORK/Cargo.toml"
+# Only ever replace what this script made (it leaves a marker), never a directory that happens
+# to be named.
+if [[ -e "$DEST" && ! -f "$DEST/.goober-vendor" && -n "$(ls -A "$DEST" 2>/dev/null)" ]]; then
+  echo "$DEST exists and isn't a vendor directory made by this script; choose another" >&2
+  exit 1
+fi
 rm -rf "$DEST.new"
 (cd "$WORK" && { cargo vendor --versioned-dirs "$DEST.new" >/dev/null 2>&1 || cargo vendor --offline --versioned-dirs "$DEST.new" >/dev/null; })
 rm -rf "$DEST"
 mv "$DEST.new" "$DEST"
+touch "$DEST/.goober-vendor"
 echo "vendored $(ls "$DEST" | wc -l) crates into $DEST"

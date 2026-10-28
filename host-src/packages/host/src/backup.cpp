@@ -62,6 +62,8 @@ bool copy_tree(const fs::path& from, const fs::path& to, bool backup, const Back
 
 bool backed_up(const std::string& r, const BackupOptions& options) {
   if (r.starts_with("logs/") || r.starts_with("mail/") || r.starts_with("tmp/") || r.starts_with("backup/")) return false;
+  // Build caches are rebuilt from source; they'd make every nightly hundreds of MB larger.
+  if (r.starts_with("source/cache/")) return false;
   if (!options.assets && r.starts_with("objects/") && r.find("/attachments/") != std::string::npos) return false;
   if (r.find(".tmp") != std::string::npos || r.ends_with(".unsealing") || r.ends_with(".applying")) return false;
   return !(r.ends_with(".db-wal") || r.ends_with(".db-shm") || r.ends_with(".db-journal"));

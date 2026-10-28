@@ -38,6 +38,25 @@ std::string display_name(const std::string& name) {
   return out.empty() ? "goober" : out;
 }
 
+// A header value as RFC 2047 encoded words when it isn't plain ASCII: SES and SMTP servers
+// refuse raw UTF-8 in headers. Each word stays under 75 characters.
+std::string encoded_words(const std::string& v) {
+  bool ascii = true;
+  for (unsigned char c : v) ascii &= c >= 0x20 && c < 0x7f;
+  if (ascii) return v;
+  std::string out;
+  size_t i = 0;
+  while (i < v.size()) {
+    // 45 bytes of UTF-8 become 60 of base64; never split a character.
+    size_t n = std::min<size_t>(45, v.size() - i);
+    while (n > 0 && i + n < v.size() && (static_cast<unsigned char>(v[i + n]) & 0xC0) == 0x80) --n;
+    if (n == 0) n = std::min<size_t>(45, v.size() - i);
+    out += (out.empty() ? "" : " ") + std::string("=?UTF-8?B?") + base::base64_encode(v.substr(i, n)) + "?=";
+    i += n;
+  }
+  return out;
+}
+
 std::string mime_message(const std::string& from, const identity::Mail& mail, int64_t now_ms, const std::string& id) {
   std::time_t secs = now_ms / 1000;
   std::tm tm{};
@@ -51,13 +70,27 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
     if (mail.text[i] == '\n' && (i == 0 || mail.text[i - 1] != '\r')) text += '\r';
     text += mail.text[i];
   }
+  // A line past 998 bytes breaks SMTP (RFC 5322): then the body goes as base64, in short lines.
+  bool long_line = false;
+  for (size_t start = 0, nl; start < text.size(); start = nl + 2) {
+    nl = text.find("\r\n", start);
+    if (nl == std::string::npos) nl = text.size();
+    long_line |= nl - start > 998;
+  }
+  std::string encoding = "8bit";
+  if (long_line) {
+    std::string b64 = base::base64_encode(text);
+    text.clear();
+    for (size_t i = 0; i < b64.size(); i += 76) text += b64.substr(i, 76) + "\r\n";
+    encoding = "base64";
+  }
   std::string reply_to = mail.reply_to.empty() ? "" : "Reply-To: " + header_value(mail.reply_to) + "\r\n";
-  return "From: \"" + display_name(mail.from_name) + "\" <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) +
-         "\r\n" + reply_to + "Subject: " + header_value(mail.subject) + "\r\nDate: " + date + "\r\nMessage-ID: <" + id +
-         "@" + domain +
-         ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
-         "Content-Transfer-Encoding: 8bit\r\n\r\n" +
-         text;
+  std::string name = display_name(mail.from_name);
+  std::string from_name = encoded_words(name) == name ? "\"" + name + "\"" : encoded_words(name);
+  return "From: " + from_name + " <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) + "\r\n" + reply_to +
+         "Subject: " + encoded_words(header_value(mail.subject)) + "\r\nDate: " + date + "\r\nMessage-ID: <" + id + "@" +
+         domain + ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
+         "Content-Transfer-Encoding: " + encoding + "\r\n\r\n" + text;
 }
 
 MailQueue::MailQueue(ConfigFn config, CredentialsFn credentials, DevFn dev)

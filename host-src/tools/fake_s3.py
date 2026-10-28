@@ -102,8 +102,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             (box / f"{n}.eml").write_bytes(raw)
             return self.reply(200, json.dumps({"MessageId": f"fake-{n}"}).encode(), "application/json")
         path = urllib.parse.unquote(raw_path)
+        # The path as AWS would canonicalize it, worked out here on its own: a client that
+        # encodes keys differently from S3 fails here, not first against real AWS.
+        if urllib.parse.quote(path, safe="/-_.~") != raw_path:
+            return self.error(400, "PathNotCanonical")
         bucket, _, key = path.lstrip("/").partition("/")
-        if not bucket or ".." in key.split("/"):
+        if not bucket or ".." in path.split("/") or "." in path.split("/"):
             return self.error(400, "InvalidRequest")
         base = self.root / bucket
         if self.command == "GET" and not key:

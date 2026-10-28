@@ -42,7 +42,10 @@ SesResult ses_send(const SesMessage& message, const Credentials& creds, const st
     return out;
   }
   out.error = reply.error;
-  out.permanent = reply.status >= 400 && reply.status < 500 && reply.status != 429 && reply.status != 408;
+  // 403 is credentials or an identity not yet verified: an operator fixes those, so it waits
+  // and tries again rather than dropping the mail.
+  out.permanent = reply.status >= 400 && reply.status < 500 && reply.status != 429 && reply.status != 408 &&
+                  reply.status != 403;
   return out;
 }
 

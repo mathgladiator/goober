@@ -137,7 +137,7 @@ struct SesMessage {
 
 struct SesResult {
   bool sent = false;
-  bool permanent = false;  // a refusal asking again won't change (a 4xx other than 429)
+  bool permanent = false;  // a refusal asking again won't change (a 4xx other than 403, 408, or 429)
   std::string message_id;
   std::string error;
   int status = 0;

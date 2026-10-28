@@ -22,7 +22,7 @@ included; keeps agents' source code itself, building Rust in a sandbox and deplo
 revision; and is operated by an agent over MCP with 70 tools. It deploys to a fresh server
 with one command and backs itself up to S3: sealed nightlies kept 14 days, database
 increments every 15 minutes, and attachments, any moment of which rehydrates into a
-sandboxed devbox. It has had four rounds of internal review and fuzzing. Two example products run on it end to end:
+sandboxed devbox. It has had five rounds of internal review and fuzzing. Two example products run on it end to end:
 an ad landing page that collects emails and surveys, and a ranch CRM and meat index fed by
 the crawler. `READINESS.md` says what that means for the human's experiments. It is **not yet** the system the human docs describe: there are
 no approvals, no host write sets, no bus, no generated code, no domain registry, no
@@ -206,6 +206,9 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       templates that could crash the host, a box sending a stored key to its own server,
       services reaching private addresses, timers firing another box's rows, and a
       multi-database commit that could enqueue mail for writes that didn't land.
+- [x] A fifth review (2026-10-28), of the backup, source, and mail code: twelve findings fixed
+      (013 V1 to V12), the worst a build script that could make the host read a key file and
+      echo it into a job log. The suite (260 tests) passes under ASan and UBSan.
 
 ### Phase 5: the rest of the HTTP contract (037)
 - [x] ETags and 304 on box GETs (from the answer's bytes; the box still runs).

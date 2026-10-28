@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -63,7 +64,7 @@ class BackupService {
   std::recursive_mutex mu_;  // one stream at a time, and the state database
   std::unique_ptr<sqlite::Db> state_;
   int64_t scanned_ms_ = 0;
-  bool nudged_ = false;
+  std::atomic<bool> nudged_{false};  // set from request threads without the lock
 };
 
 }  // namespace goober::host

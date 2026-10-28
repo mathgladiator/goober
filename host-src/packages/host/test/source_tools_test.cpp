@@ -7,6 +7,7 @@
 #include <boost/beast.hpp>
 
 #include "../src/builder.h"
+#include "../src/keys.h"
 #include "goober/base/files.h"
 #include "goober/base/process.h"
 #include "goober/host/host.h"
@@ -223,4 +224,34 @@ TEST(Sandbox, SeesNoNetworkAndNoSecrets) {
   EXPECT_NE(r.out.find("HOME=/work"), std::string::npos) << r.out;
   EXPECT_NE(r.out.find("readonly"), std::string::npos) << r.out;
   EXPECT_TRUE(fs::exists(dir / "src/ok"));
+}
+
+// Review 5, finding 1: a build script can't make the host read one of its own files as the
+// build's output: only an exact `name` names the crate, and symlinks aren't followed.
+TEST_F(SourceToolsTest, BuildsCantPointTheHostAtItsOwnFiles) {
+  if (!have("bwrap")) GTEST_SKIP() << "no bwrap";
+  auto cargo = fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") / ".cargo/bin/cargo";
+  if (!fs::exists(cargo) && !have("cargo")) GTEST_SKIP() << "no cargo";
+  std::string err;
+  ASSERT_TRUE(host->keys().set("system", "", "secret_thing", "TOP-SECRET-VALUE", 1, &err, {"api.example.com"})) << err;
+  ASSERT_EQ(tool("source_create", {{"project", "sneaky"}}).at("head"), 0);
+  bj::array files{
+      bj::object{{"path", "goober.project.json"}, {"text", R"({"boxes":["."]})"}},
+      bj::object{{"path", "Cargo.toml"},
+                 {"text", "[package]\nname = \"sneaky\"\nnamex = \"decoy\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                          "build = \"build.rs\"\n[lib]\ncrate-type = [\"cdylib\"]\npath = \"src/lib.rs\"\n"}},
+      bj::object{{"path", "build.rs"},
+                 {"text", "fn main() {\n  let _ = std::fs::create_dir_all(\"/target/wasm32-unknown-unknown/release\");\n"
+                          "  let _ = std::os::unix::fs::symlink(\"../../../../../keys/system/secret_thing\", "
+                          "\"/target/wasm32-unknown-unknown/release/decoy.wasm\");\n}\n"}},
+      bj::object{{"path", "manifest.json"},
+                 {"text", R"({"box":"sneaky","domains":["*"],"routes":{"http":{"/sneaky":{"get":{"name":"sneaky_hi","public":true}}}}})"}},
+      bj::object{{"path", "src/lib.rs"},
+                 {"text", "#[unsafe(no_mangle)]\npub extern \"C\" fn goober_route_sneaky_hi() -> i32 { 0 }\n"}}};
+  ASSERT_EQ(tool("source_commit", {{"project", "sneaky"}, {"base_rev", 0}, {"message", "m"}, {"changes", files}}).at("rev"), 1);
+  auto job = tool("source_deploy", {{"project", "sneaky"}});
+  while (job.at("state") == "running" || job.at("state") == "queued") job = tool("source_job", {{"job", job.at("job")}});
+  std::string log(job.at("log").as_string());
+  EXPECT_EQ(log.find("TOP-SECRET"), std::string::npos) << log;
+  EXPECT_EQ(job.at("state"), "succeeded") << log;  // it built the real crate, sneaky.wasm
 }

@@ -23,6 +23,9 @@ inline constexpr size_t kMaxFileBytes = 4 << 20;
 inline constexpr size_t kMaxFiles = 10000;
 inline constexpr size_t kMaxProjectBytes = 256 << 20;
 inline constexpr size_t kMaxPathBytes = 400;
+// Over a project's whole history (every distinct file it has ever held), and projects a host.
+inline constexpr size_t kMaxHistoryBytes = size_t(1) << 30;
+inline constexpr size_t kMaxProjects = 200;
 
 struct Project {
   std::string name, description;

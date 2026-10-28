@@ -2,6 +2,10 @@
 
 #include "builder.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cstdlib>
 #include <fstream>
 
@@ -71,7 +75,10 @@ std::string crate_name(const std::string& toml) {
       section = line;
       continue;
     }
+    // Exactly the key `name`: `namex = "decoy"` is another key, which cargo ignores.
     if (!line.starts_with("name")) continue;
+    size_t after = line.find_first_not_of(" \t", 4);
+    if (after == std::string::npos || line[after] != '=') continue;
     auto q1 = line.find('"'), q2 = line.rfind('"');
     if (q1 == std::string::npos || q2 <= q1) continue;
     std::string value = line.substr(q1 + 1, q2 - q1 - 1);
@@ -128,6 +135,48 @@ std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error
 
 std::string joined(const std::string& dir, const std::string& name) { return dir == "." ? name : dir + "/" + name; }
 
+// The build's output, read only if it is a regular file under the target directory reached
+// without a symlink: a build script can't point the host at one of its own files (the
+// key store, say) and have its bytes come back in an upload error.
+std::optional<std::string> read_artifact(const fs::path& target, const fs::path& file, std::string* error) {
+  std::error_code ec;
+  for (fs::path p = file; p != target && p.has_relative_path() && p != p.parent_path(); p = p.parent_path()) {
+    if (fs::is_symlink(p, ec)) return *error = "the build's output is a symlink, which the host doesn't follow", std::nullopt;
+  }
+  auto real = fs::weakly_canonical(file, ec);
+  auto root = fs::weakly_canonical(target, ec);
+  if (ec || !real.string().starts_with(root.string() + "/")) return *error = "the build's output isn't under its target", std::nullopt;
+  int fd = ::open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return *error = "cargo succeeded, but the crate's .wasm isn't there: is it a cdylib?", std::nullopt;
+  struct stat st {};
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (64 << 20)) {
+    ::close(fd);
+    return *error = "the build's output isn't a WebAssembly file of at most 64 MiB", std::nullopt;
+  }
+  std::string bytes(size_t(st.st_size), '\0');
+  bool ok = ::read(fd, bytes.data(), bytes.size()) == ssize_t(bytes.size());
+  ::close(fd);
+  // Only WebAssembly goes on to the upload: anything else would be parsed as text, and its
+  // bytes could be quoted back in the error.
+  if (!ok || !bytes.starts_with(std::string_view("\0asm", 4))) {
+    return *error = "the build's output isn't WebAssembly", std::nullopt;
+  }
+  return bytes;
+}
+
+// The cache holds compiled dependencies; past this it is wiped and rebuilt.
+constexpr uintmax_t kMaxTargetBytes = 2ull << 30;
+
+uintmax_t tree_bytes(const fs::path& root) {
+  uintmax_t total = 0;
+  std::error_code ec;
+  for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (it->is_regular_file(ec) && !it->is_symlink(ec)) total += it->file_size(ec);
+  }
+  return total;
+}
+
 }  // namespace
 
 std::vector<std::string> sandboxed(const std::vector<std::string>& command, const config::HostConfig& cfg,
@@ -154,7 +203,8 @@ std::vector<std::string> sandboxed(const std::vector<std::string>& command, cons
   for (const char* p : {"/etc/alternatives", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d"}) {
     if (fs::exists(p)) a.insert(a.end(), {"--ro-bind", p, p});
   }
-  a.insert(a.end(), {"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"});
+  // /tmp is memory: bounded, so a build can't fill the machine's RAM through it.
+  a.insert(a.end(), {"--proc", "/proc", "--dev", "/dev", "--size", std::to_string(512 << 20), "--tmpfs", "/tmp"});
   if (!cargo_dir.starts_with("/usr/")) a.insert(a.end(), {"--ro-bind", cargo_dir, cargo_dir});
   if (!rustup_home.empty()) a.insert(a.end(), {"--ro-bind", rustup_home, rustup_home, "--setenv", "RUSTUP_HOME", rustup_home});
   if (!cfg.source.vendor.empty()) a.insert(a.end(), {"--ro-bind", cfg.source.vendor, "/vendor"});
@@ -229,9 +279,16 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
   auto spec = read_spec(*spec_text, &err);
   if (!spec) return fail(err);
 
-  // The revision's files, written out for the compiler.
+  // The revision's files, written out for the compiler, and gone however the build ends.
   std::error_code ec;
   fs::remove_all(work, ec);
+  struct Cleanup {
+    fs::path p;
+    ~Cleanup() {
+      std::error_code e;
+      fs::remove_all(p, e);
+    }
+  } cleanup{work};
   fs::path src = work / "src";
   fs::create_directories(src);
   for (const auto& f : *files) {
@@ -319,8 +376,13 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
       if (!r.started) return fail("couldn't run the build");
       if (r.timed_out) return fail("the build took longer than " + std::to_string(cfg.source.build_timeout_ms / 1000) + " s");
       if (r.exit_code != 0) return fail("cargo failed (exit " + std::to_string(r.exit_code) + ")");
-      auto wasm = base::read_file(target / "wasm32-unknown-unknown" / "release" / (crate + ".wasm"));
-      if (!wasm) return fail("cargo succeeded but " + crate + ".wasm isn't there: is the crate a cdylib?");
+      auto wasm = read_artifact(target, target / "wasm32-unknown-unknown" / "release" / (crate + ".wasm"), &err);
+      // A build may fill its cache: keep it bounded.
+      if (tree_bytes(target) > kMaxTargetBytes) {
+        fs::remove_all(target, ec);
+        out.log += "(the build cache passed 2 GiB and was cleared)\n";
+      }
+      if (!wasm) return fail(err);
       b.module = std::move(*wasm);
     } else {
       return fail("box " + dir + " has no Cargo.toml, box.wat, or box.wasm");

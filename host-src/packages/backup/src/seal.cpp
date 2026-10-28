@@ -55,7 +55,17 @@ Key new_key() {
   return k;
 }
 
-bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error) {
+// The name a file is sealed under, length first, so no two (name, contents) pairs collide.
+void bind_context(base::HmacSha256& mac, std::string_view context) {
+  uint64_t n = context.size();
+  char len[8];
+  for (int i = 0; i < 8; ++i) len[i] = char(n >> (56 - 8 * i));
+  mac.update(std::string_view(len, 8));
+  mac.update(context);
+}
+
+bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error,
+               std::string_view context) {
   std::ifstream in(in_path, std::ios::binary);
   if (!in) return *error = "can't read " + in_path.string(), false;
   std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
@@ -71,6 +81,7 @@ bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path
   out.write(salt.data(), salt.size());
   mac.update(kMagic);
   mac.update(salt);
+  bind_context(mac, context);
   std::string buf(kChunk, '\0');
   while (in) {
     in.read(buf.data(), std::streamsize(buf.size()));
@@ -88,7 +99,8 @@ bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path
   return true;
 }
 
-bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error) {
+bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error,
+                 std::string_view context) {
   std::error_code ec;
   auto size = fs::file_size(in_path, ec);
   if (ec) return *error = "can't read " + in_path.string(), false;
@@ -106,6 +118,7 @@ bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_pa
   // First pass: the tag. Nothing is decrypted until the whole file is known to be authentic.
   base::HmacSha256 mac(bytes(mac_key));
   mac.update(head);
+  bind_context(mac, context);
   std::string buf(kChunk, '\0');
   for (uint64_t left = body; left > 0;) {
     size_t n = size_t(std::min<uint64_t>(left, buf.size()));
@@ -118,7 +131,7 @@ bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_pa
   in.read(tag.data(), kTag);
   auto expected = mac.finish();
   if (!in || !base::equal_constant_time(tag, bytes(expected))) {
-    return *error = in_path.filename().string() + " fails its check: the wrong backup key, or a damaged file", false;
+    return *error = in_path.filename().string() + " fails its check: the wrong backup key, a damaged file, or one moved from another name", false;
   }
   // Second pass: decrypt into a temporary file, renamed into place when whole.
   in.clear();
@@ -130,7 +143,11 @@ bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_pa
   for (uint64_t left = body; left > 0;) {
     size_t n = size_t(std::min<uint64_t>(left, buf.size()));
     in.read(buf.data(), std::streamsize(n));
-    if (!in) return *error = "reading " + in_path.string() + " failed", false;
+    if (!in) {
+      out.close();
+      fs::remove(tmp, ec);
+      return *error = "reading " + in_path.string() + " failed", false;
+    }
     cipher.apply(reinterpret_cast<uint8_t*>(buf.data()), n);
     out.write(buf.data(), std::streamsize(n));
     left -= n;

@@ -185,6 +185,13 @@ TEST_F(S3BackupTest, NightlyIncrementsAssetsAndRehydrate) {
   wrong.key = backup::new_key();
   EXPECT_FALSE(host::rehydrate(wrong, &report, &err));
   EXPECT_NE(err.find("wrong backup key"), std::string::npos) << err;
+  EXPECT_FALSE(fs::exists(root / "wrong"));
+  // A rehydrate that fails after unpacking the night leaves nothing behind: no keys, no data.
+  for (const auto& [k, v] : fake.objects("backups")) {
+    if (k.ends_with(".pages.sealed")) fake.remove_object("backups", k);
+  }
+  EXPECT_FALSE(host::rehydrate(rehydrate_options("broken", 0), &report, &err));
+  EXPECT_FALSE(fs::exists(root / "broken")) << err;
   // Nor does anything rehydrate into a directory that isn't empty.
   EXPECT_FALSE(host::rehydrate(rehydrate_options("devbox", 0), &report, &err));
 }

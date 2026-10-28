@@ -136,6 +136,8 @@ Reply perform(const Request& req, const Credentials& creds, const fs::path& scra
       // Another file system: copy, then drop the original.
       ec.clear();
       fs::copy_file(*out_file, req.download, fs::copy_options::overwrite_existing, ec);
+      std::error_code rm;
+      fs::remove(*out_file, rm);
     }
     if (ec) {
       cleanup();

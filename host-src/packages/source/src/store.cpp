@@ -82,6 +82,9 @@ bool Store::create(const std::string& name, const std::string& description, int6
   if (!valid_project_name(name)) return *error = "a project name is like ranches or beef-share-site", false;
   if (description.size() > 2000) return *error = "a description is at most 2000 bytes", false;
   std::lock_guard lock(mu_);
+  sqlite::Stmt count(*db_, "SELECT count(*) FROM projects");
+  count.step();
+  if (count.int64(0) >= int64_t(kMaxProjects)) return *error = "a host keeps at most " + std::to_string(kMaxProjects) + " projects", false;
   sqlite::Stmt s(*db_, "INSERT OR IGNORE INTO projects (name, description, created_ms, updated_ms) VALUES (?, ?, ?, ?)");
   s.bind(1, name).bind(2, description).bind(3, now_ms).bind(4, now_ms).run();
   if (db_->changes() == 0) return *error = "a project named " + name + " already exists", false;
@@ -209,6 +212,21 @@ std::optional<CommitResult> Store::commit(const std::string& name, int64_t base,
   size_t total = 0;
   for (const auto& [_, e] : tree) total += size_t(e.second);
   if (total > kMaxProjectBytes) return *error = "a project holds at most " + std::to_string(kMaxProjectBytes >> 20) + " MiB", std::nullopt;
+  // History is kept forever, so it is bounded too: every distinct file the project has held.
+  {
+    sqlite::Stmt h(*db_, "SELECT coalesce(sum(size), 0) FROM blobs WHERE sha256 IN (SELECT DISTINCT sha256 FROM trees WHERE project = ?)");
+    h.bind(1, name);
+    h.step();
+    size_t history = size_t(h.int64(0));
+    for (const auto& [path, c] : by_path) {
+      if (c->content) history += c->content->size();
+    }
+    if (history > kMaxHistoryBytes) {
+      return *error = name + "'s history would pass " + std::to_string(kMaxHistoryBytes >> 30) +
+                      " GiB: large files belong in attachments, not source",
+             std::nullopt;
+    }
+  }
 
   Txn txn(*db_);
   int64_t rev = *head + 1;

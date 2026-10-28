@@ -89,3 +89,23 @@ cat > "$dir/stdin"
   for (const auto& e : fs::directory_iterator(root / "storage/mail")) ADD_FAILURE() << e.path();
   EXPECT_NE(base::read_file(root / "storage/logs/mail.log")->find(R"("status":"sent")"), std::string::npos);
 }
+
+// Review 5, finding 9: headers that aren't ASCII are encoded words, and a body with a line
+// past 998 bytes goes as base64, so a mail server never refuses either.
+TEST(Mailer, NonAsciiHeadersAndLongLines) {
+  identity::Mail m{"a@b.c", "Café ☕ tomorrow", "short\n" + std::string(2000, 'x') + "\n", "Rancho Peña", ""};
+  auto text = host::mime_message("no-reply@example.com", m, 0, "id");
+  EXPECT_NE(text.find("Subject: =?UTF-8?B?"), std::string::npos) << text;
+  EXPECT_NE(text.find("From: =?UTF-8?B?"), std::string::npos) << text;
+  EXPECT_NE(text.find("Content-Transfer-Encoding: base64"), std::string::npos);
+  for (size_t start = 0, nl; start < text.size(); start = nl + 2) {
+    nl = text.find("\r\n", start);
+    if (nl == std::string::npos) nl = text.size();
+    EXPECT_LE(nl - start, 998u);
+  }
+  identity::Mail plain{"a@b.c", "Hello", "hi\n", "Beef Share", ""};
+  auto p = host::mime_message("no-reply@example.com", plain, 0, "id");
+  EXPECT_NE(p.find("From: \"Beef Share\" <no-reply@example.com>"), std::string::npos);
+  EXPECT_NE(p.find("Subject: Hello\r\n"), std::string::npos);
+  EXPECT_NE(p.find("Content-Transfer-Encoding: 8bit"), std::string::npos);
+}

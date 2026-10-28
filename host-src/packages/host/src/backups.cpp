@@ -154,15 +154,12 @@ void BackupService::confirm_key() {
   set_meta("key_confirmed_ms", std::to_string(base::now_unix_ms()));
 }
 
-void BackupService::nudge() {
-  std::lock_guard lock(mu_);
-  nudged_ = true;
-}
+void BackupService::nudge() { nudged_ = true; }
 
 bool BackupService::seal_and_put(aws::S3& s3, const backup::Key& key, const fs::path& file, const std::string& object,
                                  std::string* error) {
   fs::path sealed = file.string() + ".sealed";
-  bool ok = backup::seal_file(key, file, sealed, error) && s3.put_file(object, sealed, error);
+  bool ok = backup::seal_file(key, file, sealed, error, object) && s3.put_file(object, sealed, error);
   std::error_code ec;
   fs::remove(sealed, ec);
   return ok;
@@ -181,13 +178,12 @@ void BackupService::tick(int64_t now_ms) {
   // Tonight's slot: today at nightly-at, or yesterday's if that hasn't come yet.
   int64_t slot = now_ms / kDayMs * kDayMs + int64_t(cfg->backup.nightly_minute) * 60000;
   if (slot > now_ms) slot -= kDayMs;
-  int64_t last_nightly = 0, last_attempt = 0, last_increment = 0;
-  {
-    std::lock_guard lock(mu_);
-    last_nightly = std::atoll(meta("last_nightly_ms").c_str());
-    last_attempt = std::atoll(meta("last_nightly_attempt_ms").c_str());
-    last_increment = std::atoll(meta("last_increment_ms").c_str());
-  }
+  // What's due is decided under the same lock the stream runs under, so an operator's
+  // backup_run finishing just before can't make this tick run the same nightly again.
+  std::lock_guard lock(mu_);
+  int64_t last_nightly = std::atoll(meta("last_nightly_ms").c_str());
+  int64_t last_attempt = std::atoll(meta("last_nightly_attempt_ms").c_str());
+  int64_t last_increment = std::atoll(meta("last_increment_ms").c_str());
   try {
     if (last_nightly < slot) {
       // The first nightly runs at once (increments need a night); a failed one again in a while.
@@ -566,7 +562,15 @@ bj::object BackupService::status(bool with_points) {
     out["note"] = "Backups are off: set backup.s3 {bucket, region} in the config and the AWS keys (goober-host key set).";
     return out;
   }
-  std::lock_guard lock(mu_);
+  // Its own connection, and no lock: status answers while a nightly is uploading.
+  fs::create_directories(cfg->storage / "backup");
+  sqlite::Db reader(cfg->storage / "backup" / "state.db");
+  reader.exec(kSchema);
+  auto meta = [&](const char* k) {
+    sqlite::Stmt s(reader, "SELECT v FROM meta WHERE k = ?");
+    s.bind(1, k);
+    return s.step() ? s.text(0) : std::string();
+  };
   auto when = [&](const char* k) -> bj::value {
     auto v = meta(k);
     return v.empty() ? bj::value(nullptr) : bj::value(base::format_utc_ms(std::atoll(v.c_str())));
@@ -586,7 +590,7 @@ bj::object BackupService::status(bool with_points) {
                          "--confirm`.";
   }
   bj::object assets;
-  sqlite::Stmt s(state(), "SELECT state, count(*), min(queued_ms) FROM assets GROUP BY state");
+  sqlite::Stmt s(reader, "SELECT state, count(*), min(queued_ms) FROM assets GROUP BY state");
   while (s.step()) {
     assets[s.text(0)] = s.int64(1);
     if (s.text(0) == "queued") assets["oldest_queued_at"] = base::format_utc_ms(s.int64(2));

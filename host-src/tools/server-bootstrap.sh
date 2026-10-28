@@ -45,12 +45,14 @@ if [[ "$WITH_RUST" == --with-rust ]]; then
     sudo -u goober -H sh -c 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --target wasm32-unknown-unknown' >/dev/null
   fi
   if [[ -f "$SRC/vendor.tar.gz" ]]; then
-    rm -rf /srv/goober/vendor.new
-    mkdir -p /srv/goober/vendor.new
-    tar -xzf "$SRC/vendor.tar.gz" -C /srv/goober/vendor.new --strip-components=1 --no-same-owner
+    # Unpacked as root in a directory only root can reach, then moved in whole: nothing in
+    # goober's own directory can redirect where root writes.
+    STAGE_VENDOR="$(mktemp -d)"
+    tar -xzf "$SRC/vendor.tar.gz" -C "$STAGE_VENDOR" --strip-components=1 --no-same-owner
+    chown -R root:root "$STAGE_VENDOR"
+    chmod -R a+rX,go-w "$STAGE_VENDOR"
     rm -rf /srv/goober/vendor
-    mv /srv/goober/vendor.new /srv/goober/vendor
-    chown -R goober:goober /srv/goober/vendor
+    mv -T "$STAGE_VENDOR" /srv/goober/vendor
   fi
 fi
 

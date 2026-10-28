@@ -33,7 +33,8 @@ struct BackupOptions {
 };
 
 // Whether a path in storage belongs in a backup: not logs, the dev mail outbox, the mail
-// limits ledger, temporary files, the backup service's own state, or SQLite's sidecars.
+// limits ledger, temporary files, the backup service's own state, source build caches, or
+// SQLite's sidecars.
 bool backed_up(const std::string& rel, const BackupOptions& options);
 
 // A consistent copy of one SQLite database while it is in use, durably written.

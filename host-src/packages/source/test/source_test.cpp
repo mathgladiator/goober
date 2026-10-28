@@ -107,6 +107,10 @@ TEST(Source, PathsAndLimits) {
   EXPECT_FALSE(s->commit("p", 1, {{"dir", "x"}}, "m", "me", 2, &err));  // a file where a directory is
   EXPECT_NE(err.find("directory"), std::string::npos) << err;
   EXPECT_TRUE(s->commit("p", 1, {{"dir", "x"}, {"dir/file", std::nullopt}}, "m", "me", 2, &err)) << err;
+  // A host keeps a bounded number of projects.
+  for (size_t i = 1; i < kMaxProjects; ++i) ASSERT_TRUE(s->create("q" + std::to_string(i), "", 1, &err)) << err;
+  EXPECT_FALSE(s->create("one-too-many", "", 1, &err));
+  EXPECT_NE(err.find("at most"), std::string::npos) << err;
 }
 
 TEST(Diff, MatchesDiffU) {

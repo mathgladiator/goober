@@ -27,9 +27,14 @@ std::optional<Key> parse_key(std::string_view hex);
 std::string key_hex(const Key& key);
 Key new_key();
 
-bool seal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error);
+// `context` (the object's name in the bucket) is bound into the tag but not stored: a sealed
+// file moved to another name, an asset over another tenant's or an old night over a new
+// one, fails its check.
+bool seal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error,
+               std::string_view context = {});
 // Checks the tag before writing a byte: out appears only if the whole file is authentic.
-bool unseal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error);
+bool unseal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error,
+                 std::string_view context = {});
 
 // ---- Pages ----
 
