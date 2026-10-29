@@ -194,6 +194,10 @@ class Host {
   // The upload check for a manifest's data: schemas stored, grants within them, and
   // every tenant's existing databases able to take them (008 §3).
   bool check_data(const manifest::Manifest& m, std::string* error) const;
+  // Schemas a deploy is about to store, seen by check_data on this thread only, so a project's
+  // boxes are checked against its new schemas before anything is stored (source_deploy).
+  static thread_local const std::map<std::string, db::Schema>* pending_schemas_;
+  std::optional<db::Schema> schema_named(const std::string& name) const;
   bool check_calls(const manifest::Manifest& m, std::string* error) const;
   // The operator behind the MCP call running on this thread ("config" or "token:$name").
   static std::string& current_operator();
@@ -293,7 +297,7 @@ class Host {
   struct UploadTicket {
     std::string tenant, name, alt, visibility, by;
     int64_t expires_ms = 0;
-    std::string parts;  // bytes sent so far by attachment_upload_part
+    std::string parts = {};  // bytes sent so far by attachment_upload_part
     int part_count = 0;
   };
   std::string issue_upload_ticket(UploadTicket t);

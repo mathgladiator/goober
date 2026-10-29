@@ -142,8 +142,8 @@ std::vector<std::string> BoxRegistry::load_all() {
   return warnings;
 }
 
-bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle,
-                           std::string* error) {
+bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
+                           bool dry_run) {
   auto current = active();
   auto next = std::make_shared<ActiveSet>();
   next->boxes = current->boxes;
@@ -204,6 +204,7 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   }
   next->boxes[name] = candidate;
   if (!next->build(error)) return false;
+  if (dry_run) return true;
   if (!wal_.commit(bundle, error)) return false;
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
@@ -212,6 +213,16 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
 
 std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, std::string_view module,
                                                 std::string_view types_text, std::string* error) {
+  return upload_or_check(manifest_text, module, types_text, false, error);
+}
+
+bool BoxRegistry::check(std::string_view manifest_text, std::string_view module, std::string_view types_text,
+                        std::string* error) {
+  return upload_or_check(manifest_text, module, types_text, true, error).has_value();
+}
+
+std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manifest_text, std::string_view module,
+                                                         std::string_view types_text, bool dry_run, std::string* error) {
   std::lock_guard lock(mu_);
   auto m = manifest::parse_manifest(manifest_text, error);
   if (!m) return std::nullopt;
@@ -241,7 +252,7 @@ std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, 
   if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
   UploadResult result{version, m->warnings};
   auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled, *t});
-  if (!activate(candidate, bundle, error)) return std::nullopt;
+  if (!activate(candidate, bundle, error, dry_run)) return std::nullopt;
   return result;
 }
 

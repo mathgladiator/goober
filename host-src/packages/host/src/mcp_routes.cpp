@@ -71,8 +71,16 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
                                    "roles allow). To build and operate the site (pages, templates, uploads, boxes), "
                                    "connect to " + origin_of(req) + std::string(kOperationsMcpPath) +
                                    " with an operator token from `goober-host token create`.";
+  // The server's version names the tool set it offers this caller (each tool's box version), so
+  // a client that keeps tool lists by server version fetches again after a deploy.
+  std::string tool_set;
+  for (const auto& [name, ref] : active->tools_for(domain)) {
+    if (manifest::check_access(*ref.route, &*caller, {}, tenant) == manifest::Access::kAllowed) {
+      tool_set += name + "@" + ref.box->version + "\n";
+    }
+  }
   mcp::McpServer server(
-      "goober", std::string(kVersion),
+      "goober", std::string(kVersion) + "+" + base::sha256_hex(tool_set).substr(0, 12),
       "Tools from " + domain + ", acting for " + who->user.email + (who->agent ? " as an agent" : "") +
           ". Each tool says what it does; inputs are checked before anything runs." + none);
   std::string audit_tool;
@@ -84,7 +92,7 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
     bj::object schema{{"type", "object"}, {"properties", bj::object{}}, {"additionalProperties", false}};
     std::string input_type = types::json_type_name(ref.route->input);
     if (!input_type.empty() && ref.box->types) schema = ref.box->types->json_schema(input_type).as_object();
-    server.add_tool(mcp::Tool{
+    mcp::Tool listed{
         name, ref.route->description, schema, [&, ref, input_type, name](const bj::object& args) -> mcp::ToolResult {
           audit_tool = name;
           audit_input = json::dump(args);
@@ -126,7 +134,10 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
           }
           if (parsed) return mcp::ToolResult::ok(std::move(*parsed));
           return mcp::ToolResult::ok(bj::value(r.body));
-        }});
+        }};
+    server.add_tool(std::move(listed));
+    // Which box version answers this tool, so a caller can tell what it is looking at.
+    server.set_tool_meta(name, bj::object{{"goober/box", ref.box->manifest.box}, {"goober/version", ref.box->version}});
   }
   auto reply = server.handle(req.body);
   Response res;

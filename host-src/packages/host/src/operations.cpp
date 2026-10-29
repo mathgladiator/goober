@@ -339,6 +339,63 @@ void Host::register_tools() {
                     return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
                   }});
 
+  mcp_->add_tool(
+      {"mcp_tools_preview",
+       "What a domain's /mcp lists right now: every box tool there, with its box, active version, requirements, and "
+       "typed input, and, for a person (email), whether they see it and why not. Use it when an MCP client shows "
+       "tools that don't match a deploy: /mcp builds its list from the active versions on every request, so a "
+       "different list means a different domain, a person whose roles hide the tool, or the client's own copy.",
+       object_schema({{"domain", string_property("A domain from the host config, like kcmeatup.com.")},
+                      {"email", string_property("A person of that domain's realm, to see the list as they do.")}},
+                     {"domain"}),
+       [this](const bj::object& args) {
+         auto domain = base::to_lower(arg(args, "domain").value_or(""));
+         auto cfg = config_.get();
+         auto entry = cfg->domains.find(domain);
+         if (entry == cfg->domains.end()) return ToolResult::fail(domain + " isn't a domain in the host config");
+         const std::string& tenant = entry->second.tenant;
+         std::optional<manifest::Caller> caller;
+         std::string email = base::to_lower(arg(args, "email").value_or(""));
+         if (!email.empty()) {
+           auto realm = identity_->describe(tenant, base::now_unix_ms());
+           for (const auto& u : realm.at("users").as_array()) {
+             if (u.at("email").as_string() != email) continue;
+             std::vector<std::string> roles;
+             for (const auto& r : u.at("roles").as_array()) roles.emplace_back(r.as_string());
+             caller = manifest::Caller{std::string(u.at("user_id").as_string()), false, roles};
+           }
+           if (!caller) return ToolResult::fail(email + " has no account in tenant " + tenant + "'s realm");
+         }
+         auto active = boxes_->active();
+         bj::array tools;
+         for (const auto& [name, ref] : active->tools_for(domain)) {
+           bj::array reqs;
+           for (const auto& clause : ref.route->requirements) {
+             bj::array c;
+             for (const auto& role : clause) c.push_back(bj::value(role));
+             reqs.push_back(std::move(c));
+           }
+           bj::object t{{"name", name},
+                        {"box", ref.box->manifest.box},
+                        {"version", ref.box->version},
+                        {"requirements", std::move(reqs)},
+                        {"input", ref.route->input.empty() ? bj::value(nullptr) : bj::value(ref.route->input)}};
+           if (caller) {
+             auto access = manifest::check_access(*ref.route, &*caller, {}, tenant);
+             t["listed"] = access == manifest::Access::kAllowed;
+             if (access != manifest::Access::kAllowed) t["why_not"] = "their roles meet none of the requirements";
+           }
+           tools.push_back(std::move(t));
+         }
+         bj::object out{{"domain", domain}, {"tenant", tenant}, {"tools", std::move(tools)}};
+         if (caller) {
+           bj::array roles;
+           for (const auto& r : caller->roles) roles.push_back(bj::value(r));
+           out["as"] = bj::object{{"email", email}, {"roles", std::move(roles)}};
+         }
+         return ToolResult::ok(std::move(out));
+       }});
+
   mcp_->add_tool({"box_list", "Lists active boxes with their versions, domains, and routes.", object_schema({}, {}),
                   [this](const bj::object&) {
                     bj::array out;

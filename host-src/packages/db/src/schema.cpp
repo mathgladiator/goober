@@ -194,6 +194,21 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
   return s;
 }
 
+std::optional<Schema> SchemaStore::check(std::string_view text, std::string* error) const {
+  auto s = parse_schema(text, error);
+  if (!s) return std::nullopt;
+  if (auto existing = get(s->name)) {
+    std::string err;
+    auto a = json::parse(existing->text, &err);
+    auto b = json::parse(text, &err);
+    if (a && b && *a == *b) return existing;
+    return *error = "schema " + s->name + " is already stored with different content; a schema is a version, so "
+                    "give the new one a new name, like " + s->name + "_2",
+           std::nullopt;
+  }
+  return s;
+}
+
 std::optional<Schema> SchemaStore::put(std::string_view text, std::string* error) {
   auto s = parse_schema(text, error);
   if (!s) return std::nullopt;

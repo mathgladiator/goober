@@ -196,6 +196,20 @@ TEST_F(AgentsTest, AgentsCallBoxToolsOverMcp) {
   ASSERT_EQ(tools.size(), 1u);  // admin_only is hidden from someone who isn't an admin
   EXPECT_EQ(tools[0].at("name"), "add_order");
   EXPECT_EQ(tools[0].at("inputSchema").at("required").at(0), "n");
+  // Each tool says which box version answers it, and the server's version names the tool set,
+  // so it changes when a deploy changes what this caller sees.
+  std::string version(host->boxes().active()->boxes.at("orders")->version);
+  EXPECT_EQ(std::string(tools[0].at("_meta").at("goober/version").as_string()), version);
+  EXPECT_EQ(tools[0].at("_meta").at("goober/box"), "orders");
+  std::string server_version(init.at("result").at("serverInfo").at("version").as_string());
+  std::string err2;
+  std::string changed = std::string(kManifest);
+  changed.replace(changed.find("Adds an order."), 14, "Adds an order!");
+  ASSERT_TRUE(host->boxes().upload(changed, kWat, kTypes, &err2)) << err2;
+  auto again = rpc("initialize", {{"protocolVersion", "2025-06-18"}});
+  EXPECT_NE(std::string(again.at("result").at("serverInfo").at("version").as_string()), server_version);
+  auto relisted = rpc("tools/list", {});
+  EXPECT_EQ(relisted.at("result").at("tools").at(0).at("description"), "Adds an order!");  // no cache: the new version
 
   auto call = rpc("tools/call", {{"name", "add_order"}, {"arguments", bj::object{{"n", 2}}}});
   ASSERT_TRUE(call.at("result").at("isError").is_bool()) << json::dump(call);

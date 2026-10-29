@@ -305,7 +305,9 @@ TEST_F(SiteRoutesTest, UploadsInPiecesForAgentsWithoutCode) {
     bool done = at + step >= b64.size();
     last = tool("attachment_upload_part", {{"ticket", url}, {"base64", b64.substr(at, step)}, {"done", done}});
     ASSERT_FALSE(last.as_object().contains("error")) << json::dump(last);
-    if (!done) EXPECT_EQ(last.at("received_bytes").as_int64(), int64_t((at + step) / 4 * 3));
+    if (!done) {
+      EXPECT_EQ(last.at("received_bytes").as_int64(), int64_t((at + step) / 4 * 3));
+    }
   }
   EXPECT_EQ(last.at("name"), "banner.png");
   EXPECT_EQ(last.at("size").as_int64(), int64_t(png.size()));

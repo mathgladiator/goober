@@ -85,7 +85,9 @@ To let Grok back in, connect it again; it signs you in by email code.
 
 **Grok doesn't see a tool that exists** (after a deploy added it): Grok keeps the tool list
 it fetched when it connected. Disconnect and reconnect the connector; then ask it to list
-the tools again.
+the tools again. For a site's own `/mcp` (box tools), the operator tool `mcp_tools_preview`
+with the domain and a person's email shows what that person's list is right now, which box
+version each tool comes from, and why any is hidden.
 
 ## 7. Undo something Grok broke
 

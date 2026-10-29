@@ -255,3 +255,44 @@ TEST_F(SourceToolsTest, BuildsCantPointTheHostAtItsOwnFiles) {
   EXPECT_EQ(log.find("TOP-SECRET"), std::string::npos) << log;
   EXPECT_EQ(job.at("state"), "succeeded") << log;  // it built the real crate, sneaky.wasm
 }
+
+// Directory Engineer's report: a deploy with a new schema and a box the host refuses stored the
+// schema anyway, for good. Now everything is checked first, by build and deploy alike.
+TEST_F(SourceToolsTest, NothingIsStoredUnlessEverythingChecksOut) {
+  ASSERT_EQ(tool("source_create", {{"project", "dir"}}).at("head"), 0);
+  std::string schema = R"({"schema":"locations_v3","tables":{"locations":{"columns":{"name":{"type":"string"}}}}})";
+  std::string bad = R"({"box":"kc_dir","domains":["*"],
+    "data":{"sqlite3":{"w":{"schema":"locations_v3","database":"dir","pattern":"sql","tables":{"locations":{"read":true}}}}},
+    "routes":{"http":{"/search":{"get":{"name":"search","public":true,
+      "query":{"limit":{"type":"int32","default":20}}}}}}})";
+  std::string wat = R"((module (memory (export "memory") 1) (func (export "goober_route_search") (result i32) (i32.const 0))))";
+  auto c = tool("source_commit", {{"project", "dir"}, {"base_rev", 0}, {"message", "search"},
+                                  {"changes", bj::array{
+                                      bj::object{{"path", "goober.project.json"}, {"text", R"({"boxes":["."],"schemas":["locations_v3.schema.json"]})"}},
+                                      bj::object{{"path", "locations_v3.schema.json"}, {"text", schema}},
+                                      bj::object{{"path", "manifest.json"}, {"text", bad}},
+                                      bj::object{{"path", "box.wat"}, {"text", wat}}}}});
+  ASSERT_EQ(c.at("rev"), 1) << json::dump(c);
+  // The build says what the deploy would say.
+  auto built = tool("source_build", {{"project", "dir"}});
+  EXPECT_EQ(built.at("state"), "failed");
+  std::string log(built.at("log").as_string());
+  EXPECT_NE(log.find("unknown type \"int32\": in a schema, write {\"type\": \"integer\", \"format\": \"int32\"}"), std::string::npos) << log;
+  auto deployed = tool("source_deploy", {{"project", "dir"}});
+  EXPECT_EQ(deployed.at("state"), "failed");
+  EXPECT_NE(std::string(deployed.at("log").as_string()).find("nothing was stored or deployed"), std::string::npos);
+  // The schema wasn't stored, so the fixed revision can still use the name, and change it.
+  EXPECT_FALSE(host->schemas().get("locations_v3"));
+  std::string good = bad;
+  good.replace(good.find(R"({"type":"int32","default":20})"), 29, R"({"type":"integer","format":"int32","default":20})");
+  std::string schema2 = R"({"schema":"locations_v3","tables":{"locations":{"columns":{"name":{"type":"string"},"city":{"type":"string","nullable":true}}}}})";
+  auto c2 = tool("source_commit", {{"project", "dir"}, {"base_rev", 1}, {"message", "fix"},
+                                   {"changes", bj::array{bj::object{{"path", "manifest.json"}, {"text", good}},
+                                                         bj::object{{"path", "locations_v3.schema.json"}, {"text", schema2}}}}});
+  ASSERT_EQ(c2.at("rev"), 2) << json::dump(c2);
+  EXPECT_EQ(tool("source_build", {{"project", "dir"}}).at("state"), "succeeded");
+  auto ok = tool("source_deploy", {{"project", "dir"}});
+  ASSERT_EQ(ok.at("state"), "succeeded") << json::dump(ok);
+  ASSERT_TRUE(host->schemas().get("locations_v3"));
+  EXPECT_TRUE(host->schemas().get("locations_v3")->table("locations")->column("city"));
+}

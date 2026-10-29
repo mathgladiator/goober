@@ -140,7 +140,9 @@ TEST_F(S3BackupTest, NightlyIncrementsAssetsAndRehydrate) {
   EXPECT_TRUE(files);
   // The notes delta holds a few pages, not the whole database.
   for (const auto& [k, v] : fake.objects("backups")) {
-    if (k.ends_with(".pages.sealed")) EXPECT_LT(v.size(), 64u * 1024) << k;
+    if (k.ends_with(".pages.sealed")) {
+      EXPECT_LT(v.size(), 64u * 1024) << k;
+    }
   }
   // Nothing new: no new restore point.
   size_t before = fake.objects("backups").size();

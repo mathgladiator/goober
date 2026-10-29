@@ -36,12 +36,15 @@ class McpServer {
  public:
   McpServer(std::string name, std::string version, std::string instructions);
   void add_tool(Tool tool);
+  // A tool's _meta in tools/list (MCP 2025-06-18), like which box version answers it.
+  void set_tool_meta(const std::string& name, bj::object meta) { meta_[name] = std::move(meta); }
   HttpReply handle(std::string_view body) const;
 
  private:
   bj::value dispatch(const bj::object& request, bool* is_notification) const;
   std::string name_, version_, instructions_;
   std::map<std::string, Tool> tools_;
+  std::map<std::string, bj::object> meta_;
 };
 
 // Builds {"type":"object","properties":{...},"required":[...]}.

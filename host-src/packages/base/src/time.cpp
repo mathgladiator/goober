@@ -25,7 +25,7 @@ std::string format_utc_ms(int64_t unix_ms) {
   }
   std::tm tm{};
   gmtime_r(&seconds, &tm);
-  char buf[40];
+  char buf[96];  // room for any int in each field, so the compiler can see nothing is cut
   std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900,
                 tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, millis);
   return buf;

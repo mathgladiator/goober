@@ -79,7 +79,8 @@ Route, tool, and timer names are [a-z][a-z0-9_]*, unique across the whole host.
   "name": "get_order",
   "requirements": [["owner"], ["admin"]],   or "public": true (exactly one of the two)
   "agents": true,                           let agent tokens call it (default: people only)
-  "query": {"include": {"type": "boolean", "default": false}},   only these reach the box, typed
+  "query": {"include": {"type": "boolean", "default": false},     only these reach the box, typed
+            "limit": {"type": "integer", "format": "int32", "default": 20}},
   "request-headers": ["idempotency-key"],   only these reach the box
   "body": "json:OrderUpdate",               or "text" / "binary"; checked before the box wakes
   "max-body-bytes": 65536,
@@ -87,6 +88,12 @@ Route, tool, and timer names are [a-z][a-z0-9_]*, unique across the whole host.
   "template": "order",                      browsers asking for HTML get the JSON rendered
   "cors": ["https://app.example.com"]       browser pages there may call it with a bearer token
 }}}}
+Query parameters are OpenAPI schemas (036), one value each: {"type": "string"} (maxLength,
+minLength, enum, format date or date-time), {"type": "integer", "format": "int32"|"int64"}
+(minimum, maximum; int64 reaches the box as a string), {"type": "number", "format":
+"float"|"double"}, {"type": "boolean"}. "int32" alone is the path shorthand ({id : int32}),
+not a query type. Every query parameter is optional: when a request leaves one out, the box
+gets its "default", or nothing at all. A value that doesn't fit is a 400 before the box runs.
 Answers: 2xx and 4xx as you send them; 5xx is the host's (your body is replaced and your writes
 roll back); a redirect (301/302/303/307/308) must point at a path on this site, like
 Location: /thanks?ok=1 (an absolute URL, even to this site, is a 500); "response":

@@ -255,3 +255,30 @@ TEST_F(HostTest, MailTemplatesThroughMcp) {
   EXPECT_NE(log.find("\"tool\":\"mail_template_put\",\"arg_tenant\":\"playground\""), std::string::npos) << log.substr(0, 500);
   EXPECT_NE(log.find("\"tool\":\"mail_template_list\",\"arg_tenant\":\"nobody\",\"tool_error\":true"), std::string::npos);
 }
+
+// mcp_tools_preview: what a domain's /mcp lists, and for a person, what they see and why not.
+TEST_F(HostTest, McpToolsPreviewShowsWhatAPersonSees) {
+  const char* manifest = R"({"box":"loc","domains":["*"],"routes":{"mcp":{
+    "list_locations":{"tool":{"description":"Lists.","requirements":[[]]}},
+    "import_locations":{"tool":{"description":"Imports.","requirements":[["owner"]]}}}}})";
+  const char* wat = R"((module (memory (export "memory") 1)
+    (func (export "goober_route_list_locations") (result i32) (i32.const 0))
+    (func (export "goober_route_import_locations") (result i32) (i32.const 0))))";
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(manifest, wat, &err)) << err;
+  ASSERT_TRUE(host->identity().grant("playground", "helper@example.com", "staff", "test", 1'900'000'000'000, &err)) << err;
+  auto all = tool("mcp_tools_preview", {{"domain", "localhost"}}).at("result").at("structuredContent");
+  ASSERT_EQ(all.at("tools").as_array().size(), 2u);
+  EXPECT_EQ(std::string(all.at("tools").at(0).at("version").as_string()), host->boxes().active()->boxes.at("loc")->version);
+  auto as = tool("mcp_tools_preview", {{"domain", "localhost"}, {"email", "helper@example.com"}}).at("result").at("structuredContent");
+  for (const auto& t : as.at("tools").as_array()) {
+    if (t.at("name") == "list_locations") {
+      EXPECT_TRUE(t.at("listed").as_bool());
+    }
+    if (t.at("name") == "import_locations") {
+      EXPECT_FALSE(t.at("listed").as_bool());
+      EXPECT_NE(std::string(t.at("why_not").as_string()).find("roles"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(tool("mcp_tools_preview", {{"domain", "nope.example"}}).at("result").at("isError").as_bool());
+}

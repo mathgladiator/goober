@@ -49,7 +49,9 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) 
   } else if (method == "tools/list") {
     bj::array tools;
     for (const auto& [name, tool] : tools_) {
-      tools.push_back(bj::object{{"name", name}, {"description", tool.description}, {"inputSchema", tool.input_schema}});
+      bj::object t{{"name", name}, {"description", tool.description}, {"inputSchema", tool.input_schema}};
+      if (auto m = meta_.find(name); m != meta_.end()) t["_meta"] = m->second;
+      tools.push_back(std::move(t));
     }
     result = bj::object{{"tools", std::move(tools)}};
   } else if (method == "tools/call") {

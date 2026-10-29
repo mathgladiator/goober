@@ -47,14 +47,14 @@ struct Mail {
   std::string to;
   std::string subject;
   std::string text;
-  std::string from_name;  // the sender's display name; "" means goober
-  std::string reply_to;   // an address replies go to, or ""
+  std::string from_name = {};  // the sender's display name; "" means goober
+  std::string reply_to = {};   // an address replies go to, or ""
   // A host mail rendered from a template (design/machine/022.MailTemplates.md): the realm whose
   // templates apply, the template's name, and its values. Without a name, subject and text go as they are.
-  std::string realm;
-  std::string template_name;
-  bj::object vars;
-  std::string html;  // an HTML alternative to text, or ""
+  std::string realm = {};
+  std::string template_name = {};
+  bj::object vars = {};
+  std::string html = {};  // an HTML alternative to text, or ""
 };
 using Mailer = std::function<void(const Mail&)>;
 

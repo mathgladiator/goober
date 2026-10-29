@@ -81,6 +81,9 @@ class BoxRegistry {
   }
   std::optional<UploadResult> upload(std::string_view manifest_text, std::string_view module,
                                      std::string_view types_text, std::string* error);
+  // Everything upload checks (the manifest, types, the host's check, the module, and conflicts
+  // with the active boxes), without storing or activating anything.
+  bool check(std::string_view manifest_text, std::string_view module, std::string_view types_text, std::string* error);
 
   // Makes an existing version active.
   bool promote(const std::string& box, const std::string& version, std::string* error);
@@ -94,7 +97,10 @@ class BoxRegistry {
  private:
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;
   // Checks the candidate against every other active box, then swaps it in.
-  bool activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error);
+  bool activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
+                bool dry_run = false);
+  std::optional<UploadResult> upload_or_check(std::string_view manifest_text, std::string_view module,
+                                              std::string_view types_text, bool dry_run, std::string* error);
 
   wal::HostWal& wal_;
   runtime::wasm::Engine& engine_;

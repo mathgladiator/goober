@@ -88,6 +88,15 @@ bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
   return true;
 }
 
+thread_local const std::map<std::string, db::Schema>* Host::pending_schemas_ = nullptr;
+
+std::optional<db::Schema> Host::schema_named(const std::string& name) const {
+  if (pending_schemas_) {
+    if (auto it = pending_schemas_->find(name); it != pending_schemas_->end()) return it->second;
+  }
+  return schemas_->get(name);
+}
+
 bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
   std::set<std::string> tenants;
   for (const auto& [d, e] : config_.get()->domains) tenants.insert(e.tenant);
@@ -95,7 +104,7 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
   for (const auto& st : m.data) {
     if (!st.applies_schema()) continue;
     std::string where = "data.sqlite3." + st.name;
-    auto schema = schemas_->get(st.schema);
+    auto schema = schema_named(st.schema);
     if (!schema) return *error = where + ": schema " + st.schema + " isn't stored on this host; store it with schema_put first", false;
     if (st.pattern == "by_timer") {
       // The scheduler reads these columns as they are (045), so they must exist.
@@ -127,7 +136,7 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
       for (const auto& other : box->manifest.data) {
         if (!other.applies_schema() || other.database != st.database) continue;
         if (!other.tenant.empty() && !st.tenant.empty() && other.tenant != st.tenant) continue;
-        if (auto s = schemas_->get(other.schema)) together.push_back(&held.emplace_back(std::move(*s)));
+        if (auto s = schema_named(other.schema)) together.push_back(&held.emplace_back(std::move(*s)));
       }
     }
     if (!together.empty()) {

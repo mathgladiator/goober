@@ -322,6 +322,41 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
     job.state = "failed";
     return;
   }
+  // Everything is checked before anything is stored: each schema (new, or the same as the one
+  // stored under its name), then each box against those schemas and the active boxes, exactly
+  // as an upload would check it. A build runs the same checks, so a green build deploys.
+  std::string err;
+  {
+    std::map<std::string, db::Schema> pending;
+    bool ok = true;
+    for (const auto& [file, text] : built.schemas) {
+      auto s = schemas_->check(text, &err);
+      if (!s) {
+        job.log += "✗ schema " + file + ": " + err + "\n";
+        ok = false;
+        continue;
+      }
+      pending[s->name] = *s;
+    }
+    pending_schemas_ = &pending;
+    struct Clear {
+      ~Clear() { pending_schemas_ = nullptr; }
+    } clear;
+    for (const auto& b : built.boxes) {
+      if (!boxes_->check(b.manifest, b.module, b.types, &err)) {
+        job.log += "✗ box " + b.box + ": " + err + "\n";
+        ok = false;
+      } else {
+        job.log += "✓ box " + b.box + " checks out\n";
+      }
+    }
+    if (!ok) {
+      job.log += deploy ? "nothing was stored or deployed: fix the above, commit, and deploy again\n"
+                        : "the build would fail to deploy: fix the above\n";
+      job.state = "failed";
+      return;
+    }
+  }
   if (!deploy) {
     bj::array boxes;
     for (const auto& b : built.boxes) boxes.push_back(bj::object{{"box", b.box}, {"bytes", int64_t(b.module.size())}});
@@ -330,7 +365,6 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
     return;
   }
   // Schemas first, so the boxes that use them can be checked against them; then boxes; then sites.
-  std::string err;
   bj::array schemas, boxes, sites;
   for (const auto& [file, text] : built.schemas) {
     auto s = schemas_->put(text, &err);

@@ -171,7 +171,17 @@ bool parse_into(const bj::value& v, const std::string& where, bool scalars_only,
       allowed.insert({"items", "maxItems", "minItems"});
     }
   } else {
-    return fail(error, where + ": unknown type \"" + t + "\"");
+    // A path parameter's shorthand (036): say what it is in a schema.
+    static const std::map<std::string, std::string> kShorthand = {
+        {"int32", R"({"type": "integer", "format": "int32"})"}, {"int64", R"({"type": "integer", "format": "int64"})"},
+        {"float", R"({"type": "number", "format": "float"})"},  {"double", R"({"type": "number", "format": "double"})"},
+        {"int", R"({"type": "integer", "format": "int32"})"},   {"bool", R"({"type": "boolean"})"}};
+    if (auto s = kShorthand.find(t); s != kShorthand.end()) {
+      return fail(error, where + ": unknown type \"" + t + "\": in a schema, write " + s->second + " (\"" + t +
+                             "\" alone is the shorthand for path parameters, like {id : int64})");
+    }
+    return fail(error, where + ": unknown type \"" + t + "\" (the types are string, integer, number, boolean, object, "
+                           "and array)");
   }
   for (const auto& kv : o) {
     std::string k(kv.key());

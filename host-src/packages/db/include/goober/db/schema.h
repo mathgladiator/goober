@@ -61,6 +61,8 @@ class SchemaStore {
   explicit SchemaStore(wal::HostWal& wal) : wal_(wal) {}
   // Stores a schema. The same name with different content is refused; the same content is a no-op.
   std::optional<Schema> put(std::string_view text, std::string* error);
+  // What put would answer, without storing anything: the schema, or why it would be refused.
+  std::optional<Schema> check(std::string_view text, std::string* error) const;
   std::optional<Schema> get(std::string_view name) const;
   std::vector<std::string> list() const;
 
