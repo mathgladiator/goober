@@ -84,6 +84,9 @@ struct Event {
 // OAuth 2.1 (013 § Sessions, schema, and the login API; design/machine/009.OAuth.md).
 inline constexpr int64_t kAuthorizationCodeTtlMs = 60 * 1000;
 inline constexpr int64_t kAccessTokenTtlMs = 60 * 60 * 1000;
+// A spent refresh token used again this soon after it was rotated is a client racing itself
+// (two sessions, or a retry after a lost reply), not a thief: it gets tokens, not a revoked grant.
+inline constexpr int64_t kRefreshReuseGraceMs = 60 * 1000;
 inline constexpr int64_t kDeviceCodeTtlMs = 10 * 60 * 1000;
 inline constexpr int64_t kDevicePollIntervalMs = 5 * 1000;
 

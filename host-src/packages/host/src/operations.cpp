@@ -340,6 +340,110 @@ void Host::register_tools() {
                   }});
 
   mcp_->add_tool(
+      {"route_check",
+       "Which handler answers a request to a domain: the host itself (its reserved paths), a box route (its box, "
+       "version, route name, pattern, parameters, and who may call it), or the site's pages and files. Lists every "
+       "other box route whose path also fits, so a shadowed route shows up. Every box whose domains cover the domain "
+       "(\"*\" covers all of them) shares one route table there: the same verb and shape (literals, with every "
+       "parameter as {}) in two boxes is refused at upload, and otherwise a literal segment beats a parameter at the "
+       "first place two patterns differ, across boxes.",
+       object_schema({{"domain", string_property("A domain from the host config, like kcmeatup.com.")},
+                      {"path", string_property("The request path, like /places/joes.")},
+                      {"verb", string_property("get (the default), post, put, patch, or delete.")}},
+                     {"domain", "path"}),
+       [this](const bj::object& args) {
+         auto domain = base::to_lower(arg(args, "domain").value_or(""));
+         auto cfg = config_.get();
+         auto entry = cfg->domains.find(domain);
+         if (entry == cfg->domains.end()) return ToolResult::fail(domain + " isn't a domain in the host config");
+         const std::string& tenant = entry->second.tenant;
+         std::string verb = base::to_lower(arg(args, "verb").value_or("get"));
+         if (verb == "head") verb = "get";
+         auto path = router::normalize_path(arg(args, "path").value_or(""));
+         if (!path) return ToolResult::fail("not a path the host would accept");
+         const std::string& p = path->path;
+         bj::object out{{"domain", domain}, {"tenant", tenant}, {"verb", verb}, {"path", p}};
+         // In the order the host checks them (Host::handle).
+         std::string host_part;
+         if (p == kMailHookPath) host_part = "the mail hook (Stalwart only)";
+         else if (p == "/goober/health") host_part = "the health check";
+         else if (p == kOperationsMcpPath) host_part = "the operator MCP endpoint";
+         else if (p == "/mcp") host_part = "the site's MCP endpoint (box tools)";
+         else if (p == "/oauth" || p.starts_with("/oauth/") || p.starts_with("/.well-known/")) host_part = "OAuth";
+         else if (p.starts_with("/identity/")) host_part = "sign-in and accounts";
+         else if (p == "/attachment" || p.starts_with("/attachment/")) host_part = "attachments";
+         if (!host_part.empty()) {
+           out["served_by"] = "host";
+           out["handler"] = host_part;
+           out["note"] = "a host-owned path: no box route or page is consulted";
+           return ToolResult::ok(std::move(out));
+         }
+         auto active = boxes_->active();
+         const auto& table = active->table_for(domain);
+         auto describe = [](const boxes::RouteRef& ref) {
+           bj::array reqs;
+           for (const auto& clause : ref.route->requirements) {
+             bj::array c;
+             for (const auto& role : clause) c.push_back(bj::value(role));
+             reqs.push_back(std::move(c));
+           }
+           return bj::object{{"box", ref.box->manifest.box},
+                             {"version", ref.box->version},
+                             {"route", ref.route->name},
+                             {"verb", ref.route->verb},
+                             {"pattern", ref.route->pattern.source},
+                             {"public", ref.route->is_public},
+                             {"requirements", std::move(reqs)}};
+         };
+         auto m = table.match(path->segments, verb);
+         bj::array also, other_verbs;
+         for (const auto& [v, ref] : table.fitting(path->segments)) {
+           if (m.value && ref == m.value) continue;
+           (v == verb ? also : other_verbs).push_back(describe(*ref));
+         }
+         out["also_fits"] = std::move(also);
+         out["other_verbs"] = std::move(other_verbs);
+         if (m.value) {
+           out["served_by"] = "box";
+           auto route = describe(*m.value);
+           bj::object params;
+           for (const auto& [k, v] : m.params) params[k] = v;
+           route["params"] = std::move(params);
+           out["route"] = std::move(route);
+           return ToolResult::ok(std::move(out));
+         }
+         if (m.method_not_allowed || verb != "get") {
+           out["served_by"] = "nobody";
+           out["status"] = 405;
+           out["note"] = m.method_not_allowed ? "box routes fit this path, but not with this verb"
+                                              : "pages answer only get";
+           return ToolResult::ok(std::move(out));
+         }
+         // Pages and files, resolved as a visit is: name.md, name.html, name/index.md, name/index.html, the file.
+         std::string rel = p.substr(1);
+         while (!rel.empty() && rel.back() == '/') rel.pop_back();
+         std::vector<std::string> candidates = rel.empty() ? std::vector<std::string>{"index.md", "index.html"}
+                                                           : std::vector<std::string>{rel + ".md", rel + ".html",
+                                                                                      rel + "/index.md", rel + "/index.html"};
+         out["served_by"] = "content";
+         for (const auto& c : candidates) {
+           if (auto page = site_->load(tenant, c)) {
+             out["file"] = page->path;
+             out["kind"] = site::kind_name(page->kind);
+             return ToolResult::ok(std::move(out));
+           }
+         }
+         if (!rel.empty() && content_->get(tenant, rel)) {
+           out["file"] = rel;
+           out["kind"] = "file";
+           return ToolResult::ok(std::move(out));
+         }
+         out["status"] = 404;
+         out["note"] = "no box route, page, or file answers it";
+         return ToolResult::ok(std::move(out));
+       }});
+
+  mcp_->add_tool(
       {"mcp_tools_preview",
        "What a domain's /mcp lists right now: every box tool there, with its box, active version, requirements, and "
        "typed input, and, for a person (email), whether they see it and why not. Use it when an MCP client shows "

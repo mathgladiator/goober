@@ -73,6 +73,13 @@ The request document is JSON:
   "routes": {"http": {...}, "mcp": {...}, "timer": {...}}
 }
 Route, tool, and timer names are [a-z][a-z0-9_]*, unique across the whole host.
+Paths: every box whose "domains" covers a domain ("*" covers every domain on the host, every
+tenant's) shares one route table there. The same verb and shape (literal segments as written,
+every parameter as {}, whatever its type) in two boxes is refused at upload, never shadowed.
+Otherwise a literal segment beats a parameter at the first place two patterns differ, across
+boxes too: /places/new in one box wins over /places/{slug} in another. The host's own paths
+(/mcp, /oauth/, /.well-known/, /identity/, /attachment/, /goober/) come before any box, and
+pages answer only GETs no box route takes. route_check(domain, path, verb) names the answer.
 
 ### HTTP routes
 "routes": {"http": {"/orders/{order_id : int64}": {"get": {
@@ -299,7 +306,8 @@ goober_route_x() -> i32`. Small boxes can be WAT; see host-src/examples/boxes/ec
 
 You have no disk between conversations; the host does. Keep a product's source in a project:
 source_create (template rust-box, wat-box, or site), source_checkout, change files with
-source_commit (base_rev is the rev you read; a conflict lists files to read again), then
+source_commit (base_rev is the rev you read; a conflict lists files to read again; agent names
+you in the log when several agents share one sign-in), then
 source_deploy, which builds in the host's sandbox (no network; Rust crates are the host's
 vendored set: serde and serde_json) and deploys schemas, boxes, and site files.
 goober.project.json says what the project holds: {"boxes": ["."], "schemas": [...],

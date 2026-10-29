@@ -471,7 +471,7 @@ std::optional<Tokens> Identity::refresh(std::string_view realm_name, std::string
   Transaction tx(r.db);
   std::string hash = hash_secret(refresh_token);
   sqlite::Stmt find(r.db,
-                    "SELECT client_id, user_id, is_agent, expires_at, rotated_to, revoked_at, family FROM tokens "
+                    "SELECT client_id, user_id, is_agent, expires_at, rotated_to, revoked_at, family, rotated_at FROM tokens "
                     "WHERE token_hash = ? AND kind = 'refresh'");
   find.bind(1, hash);
   if (!find.step()) return fail("invalid_grant", "unknown refresh token");
@@ -482,9 +482,11 @@ std::optional<Tokens> Identity::refresh(std::string_view realm_name, std::string
   bool rotated = !find.is_null(4);
   bool revoked = !find.is_null(5);
   std::string family = find.is_null(6) ? "" : find.text(6);
+  int64_t rotated_at = find.is_null(7) ? 0 : find.int64(7);
   if (token_client != client_id) return fail("invalid_grant", "refresh token issued to another client");
   if (revoked) return fail("invalid_grant", "refresh token revoked");
-  if (rotated) {
+  bool raced = rotated && rotated_at > 0 && now_ms - rotated_at <= kRefreshReuseGraceMs;
+  if (rotated && !raced) {
     // Reuse: two parties hold this grant, so neither keeps it.
     int n = revoke_family(r.db, family, now_ms);
     audit(r.db, now_ms, std::nullopt, "refresh_reused", user_id,
@@ -500,13 +502,16 @@ std::optional<Tokens> Identity::refresh(std::string_view realm_name, std::string
   // at its next refresh rather than never.
   agent = agent || !c->person;
   auto t = issue_tokens(r, client_id, user_id, agent, family, now_ms, refresh_ms);
-  sqlite::Stmt mark(r.db, "UPDATE tokens SET rotated_to = ? WHERE token_hash = ?");
-  mark.bind(1, hash_secret(t->refresh_token)).bind(2, hash).run();
-  // The access tokens the old refresh token bought end with it.
-  sqlite::Stmt old(r.db,
-                   "UPDATE tokens SET revoked_at = ? WHERE family = ? AND kind = 'access' AND revoked_at IS NULL "
-                   "AND token_hash != ?");
-  old.bind(1, now_ms).bind(2, family).bind(3, hash_secret(t->access_token)).run();
+  if (raced) {
+    // The first rotation stands; this caller gets its own pair in the same grant.
+    audit(r.db, now_ms, std::nullopt, "refresh_raced", user_id, bj::object{{"client_id", client_id}});
+  } else {
+    sqlite::Stmt mark(r.db, "UPDATE tokens SET rotated_to = ?, rotated_at = ? WHERE token_hash = ?");
+    mark.bind(1, hash_secret(t->refresh_token)).bind(2, now_ms).bind(3, hash).run();
+  }
+  // The grant's other access tokens run out on their own (an hour at most): ending them here
+  // cut off a second session sharing the grant, which then refreshed with the spent token and
+  // lost the whole grant (Grok's connectors, 2026-10-28).
   tx.commit();
   return t;
 }

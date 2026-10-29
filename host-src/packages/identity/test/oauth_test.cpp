@@ -130,13 +130,21 @@ TEST_F(OAuthTest, RefreshRotatesAndReuseRevokesTheGrant) {
   auto t2 = id->refresh("playground", "dumb-terminal", t1->refresh_token, kNow + 5000, 30 * kDay, &e);
   ASSERT_TRUE(t2) << e.description;
   EXPECT_NE(t2->refresh_token, t1->refresh_token);
-  EXPECT_FALSE(id->bearer("playground", t1->access_token, kNow + 6000));  // the old access token ended
+  // A second session sharing the grant keeps its access token until it runs out.
+  EXPECT_TRUE(id->bearer("playground", t1->access_token, kNow + 6000));
   EXPECT_TRUE(id->bearer("playground", t2->access_token, kNow + 6000));
-  // Someone replays the first refresh token: both sides lose the grant.
-  EXPECT_FALSE(id->refresh("playground", "dumb-terminal", t1->refresh_token, kNow + 7000, 30 * kDay, &e));
+  // The same refresh token again within the grace is a client racing itself: it gets tokens.
+  auto raced = id->refresh("playground", "dumb-terminal", t1->refresh_token, kNow + 5000 + kRefreshReuseGraceMs, 30 * kDay, &e);
+  ASSERT_TRUE(raced) << e.description;
+  EXPECT_TRUE(id->bearer("playground", t2->access_token, kNow + 6000 + kRefreshReuseGraceMs));
+  EXPECT_TRUE(id->bearer("playground", raced->access_token, kNow + 6000 + kRefreshReuseGraceMs));
+  // After it, a replay is two parties holding one grant: both lose it.
+  int64_t late = kNow + 5001 + kRefreshReuseGraceMs;
+  EXPECT_FALSE(id->refresh("playground", "dumb-terminal", t1->refresh_token, late, 30 * kDay, &e));
   EXPECT_EQ(e.code, "invalid_grant");
-  EXPECT_FALSE(id->bearer("playground", t2->access_token, kNow + 8000));
-  EXPECT_FALSE(id->refresh("playground", "dumb-terminal", t2->refresh_token, kNow + 9000, 30 * kDay, &e));
+  EXPECT_FALSE(id->bearer("playground", t2->access_token, late + 1));
+  EXPECT_FALSE(id->bearer("playground", raced->access_token, late + 1));
+  EXPECT_FALSE(id->refresh("playground", "dumb-terminal", t2->refresh_token, late + 2, 30 * kDay, &e));
   // Another client can't use someone else's refresh token.
   auto t3 = code_flow();
   EXPECT_FALSE(id->refresh("playground", "other", t3->refresh_token, kNow + 5000, kDay, &e));

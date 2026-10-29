@@ -52,6 +52,16 @@ class RouteTable {
     return best;
   }
 
+  // Every route whose path fits these segments, any verb, in the order added: what a match
+  // chose among, for explaining a choice (route_check).
+  std::vector<std::pair<std::string, const T*>> fitting(const std::vector<std::string>& segments) const {
+    std::vector<std::pair<std::string, const T*>> out;
+    for (const auto& e : entries_) {
+      if (fits(e.pattern, segments)) out.emplace_back(e.verb, &e.value);
+    }
+    return out;
+  }
+
   size_t size() const { return entries_.size(); }
 
  private:

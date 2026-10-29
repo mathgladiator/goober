@@ -242,14 +242,15 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
   EXPECT_EQ(bad.status, 401);
   EXPECT_EQ(bad.headers["www-authenticate"], "Bearer error=\"invalid_token\"");
 
-  // Refresh rotates; the old refresh token then revokes the grant.
+  // Refresh rotates; the old refresh token used again at once is a client racing itself, and
+  // neither session loses the grant (the identity tests cover a replay after the grace).
   auto t2 = token("grant_type=refresh_token&client_id=dumb-terminal&refresh_token=" + str(t, "refresh_token"));
   ASSERT_EQ(t2["_status"], 200);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/mine", {{"authorization", "Bearer " + str(t2, "access_token")}}).status, 200);
-  auto reuse = token("grant_type=refresh_token&client_id=dumb-terminal&refresh_token=" + str(t, "refresh_token"));
-  EXPECT_EQ(reuse["_status"], 400);
-  EXPECT_EQ(reuse["error"], "invalid_grant");
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/mine", {{"authorization", "Bearer " + str(t2, "access_token")}}).status, 401);
+  auto raced = token("grant_type=refresh_token&client_id=dumb-terminal&refresh_token=" + str(t, "refresh_token"));
+  EXPECT_EQ(raced["_status"], 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/mine", {{"authorization", "Bearer " + str(t2, "access_token")}}).status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/mine", {{"authorization", "Bearer " + str(t, "access_token")}}).status, 200);
 
   // The desktop app's loopback redirect may use any port; sign-out revokes.
   auto t3 = token("grant_type=authorization_code&client_id=dumb-terminal&code=" + consent("http://127.0.0.1:43123/callback") +

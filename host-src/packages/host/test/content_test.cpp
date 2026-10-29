@@ -366,4 +366,16 @@ TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
   EXPECT_NE(salt.find("<meta name=\"description\" content=\"Salt &amp; &quot;pepper&quot;\">"), std::string::npos) << salt;
   EXPECT_EQ(salt.find("color:red} Salt"), std::string::npos);
   EXPECT_NE(salt.find("© " + base::format_utc_ms(base::now_unix_ms()).substr(0, 4) + " localhost"), std::string::npos);
+
+  // Every entity survives a fragment's round trip: stored, read back, and served, never decoded
+  // (an escaped <script> stays text).
+  const std::string kEntities = "<p>&amp; &lt; &gt; &quot; &#39; &lt;script&gt;alert(1)&lt;/script&gt;</p>";
+  auto put5 = tool("page_put", {{"tenant", "playground"}, {"path", "/entities"}, {"format", "fragment"}, {"body", kEntities}});
+  ASSERT_FALSE(put5.as_object().contains("error")) << json::dump(put5);
+  EXPECT_EQ(std::string(tool("page_get", {{"tenant", "playground"}, {"path", "/entities"}}).at("body").as_string()), kEntities);
+  EXPECT_NE(std::string(tool("page_render", {{"tenant", "playground"}, {"path", "/entities"}}).at("body").as_string()).find(kEntities),
+            std::string::npos);
+  auto served = fetch(port, bhttp::verb::get, "/entities").body;
+  EXPECT_NE(served.find(kEntities), std::string::npos) << served;
+  EXPECT_EQ(served.find("<script>alert"), std::string::npos);
 }

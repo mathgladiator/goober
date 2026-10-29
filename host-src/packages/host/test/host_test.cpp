@@ -282,3 +282,38 @@ TEST_F(HostTest, McpToolsPreviewShowsWhatAPersonSees) {
   }
   EXPECT_TRUE(tool("mcp_tools_preview", {{"domain", "nope.example"}}).at("result").at("isError").as_bool());
 }
+
+TEST_F(HostTest, RouteCheckSaysWhoAnswersAPath) {
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(
+      R"({"box":"places","domains":["*"],"routes":{"http":{"/places/{slug : string}":{"get":{"name":"place","public":true}}}}})",
+      R"((module (memory (export "memory") 1) (func (export "goober_route_place") (result i32) (i32.const 0))))", &err))
+      << err;
+  ASSERT_TRUE(host->boxes().upload(
+      R"({"box":"admin","domains":["*"],"routes":{"http":{"/places/new":{"get":{"name":"new_place","requirements":[["owner"]]}}}}})",
+      R"((module (memory (export "memory") 1) (func (export "goober_route_new_place") (result i32) (i32.const 0))))", &err))
+      << err;
+  // The same verb and shape in a second box is refused at upload, never shadowed.
+  EXPECT_FALSE(host->boxes().upload(
+      R"({"box":"rival","domains":["*"],"routes":{"http":{"/places/{name : string}":{"get":{"name":"rival_place","public":true}}}}})",
+      R"((module (memory (export "memory") 1) (func (export "goober_route_rival_place") (result i32) (i32.const 0))))", &err));
+  EXPECT_NE(err.find("conflicts with another box"), std::string::npos) << err;
+
+  auto check = [&](const std::string& path, const std::string& verb = "get") {
+    return tool("route_check", {{"domain", "localhost"}, {"path", path}, {"verb", verb}}).at("result").at("structuredContent");
+  };
+  // A literal beats a parameter across boxes, and the loser is listed.
+  auto lit = check("/places/new");
+  EXPECT_EQ(lit.at("served_by"), "box");
+  EXPECT_EQ(lit.at("route").at("box"), "admin");
+  EXPECT_EQ(lit.at("route").at("route"), "new_place");
+  ASSERT_EQ(lit.at("also_fits").as_array().size(), 1u);
+  EXPECT_EQ(lit.at("also_fits").at(0).at("box"), "places");
+  auto param = check("/places/joes");
+  EXPECT_EQ(param.at("route").at("box"), "places");
+  EXPECT_EQ(param.at("route").at("params").at("slug"), "joes");
+  EXPECT_EQ(check("/places/joes", "post").at("status"), 405);
+  EXPECT_EQ(check("/identity/sign-in").at("served_by"), "host");
+  EXPECT_EQ(check("/nothing-here").at("status"), 404);
+  EXPECT_TRUE(tool("route_check", {{"domain", "nope.example"}, {"path", "/"}}).at("result").at("isError").as_bool());
+}

@@ -74,6 +74,12 @@ TEST(Table, LiteralBeatsParameter) {
   m = t.match({"jobs", "new"}, "post");
   EXPECT_FALSE(m.value);
   EXPECT_TRUE(m.method_not_allowed);
+  // What the match chose among: both /jobs routes fit /jobs/new.
+  auto fits = t.fitting({"jobs", "new"});
+  ASSERT_EQ(fits.size(), 2u);
+  EXPECT_EQ(*fits[0].second, "slug");
+  EXPECT_EQ(*fits[1].second, "new");
+  EXPECT_TRUE(t.fitting({"nope"}).empty());
 }
 
 TEST(Table, ConflictsOnShape) {

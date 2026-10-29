@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   is_agent INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
   rotated_to TEXT,
+  rotated_at INTEGER,                    -- when rotated_to was set: a raced refresh's grace
   revoked_at INTEGER,
   family TEXT                            -- one grant: its access and refresh tokens, revoked together
 );
@@ -110,6 +111,7 @@ void migrate(sqlite::Db& db) {
   if (!has("clients", "acts_as")) db.exec("ALTER TABLE clients ADD COLUMN acts_as TEXT NOT NULL DEFAULT 'agent'");
   if (!has("clients", "source")) db.exec("ALTER TABLE clients ADD COLUMN source TEXT NOT NULL DEFAULT 'host'");
   if (!has("tokens", "family")) db.exec("ALTER TABLE tokens ADD COLUMN family TEXT");
+  if (!has("tokens", "rotated_at")) db.exec("ALTER TABLE tokens ADD COLUMN rotated_at INTEGER");
   if (!has("users", "verified_at")) {
     db.exec("ALTER TABLE users ADD COLUMN verified_at INTEGER");
     // Before the column, an account that ever signed in had proved its address.

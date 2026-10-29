@@ -95,7 +95,17 @@ sudo grep '"mcp":"tools/list"' /srv/goober/host/storage/logs/access.log | tail -
 No line after a reconnect means the client didn't ask; an old list there means the host
 served it. For a site's own `/mcp` (box tools), the operator tool `mcp_tools_preview`
 with the domain and a person's email shows what that person's list is right now, which box
-version each tool comes from, and why any is hidden.
+version each tool comes from, and why any is hidden. `route_check` with a domain and a path
+says which box, page, or host path answers it.
+
+**Grok's connectors drop and ask to sign in again:** look for refused refreshes:
+
+```sh
+sudo grep '"grant":"refresh_token"' /srv/goober/host/storage/logs/access.log | grep '"error"' | tail -n 5
+```
+
+`"why"` says the reason: a spent token used more than a minute after it was replaced revokes
+the grant (two parties holding one grant), and Grok must sign in again.
 
 ## 7. Undo something Grok broke
 

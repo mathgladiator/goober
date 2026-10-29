@@ -328,6 +328,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     bj::object extra{{"oauth", op ? "operator_token" : "token"}, {"grant", grant}, {"client_id", client_id}};
     if (!t) {
       extra["error"] = e.code;
+      extra["why"] = e.description;
       return finish(oauth_error(e), json::dump(extra));
     }
     return finish(json_response(200, bj::object{{"access_token", t->access_token},

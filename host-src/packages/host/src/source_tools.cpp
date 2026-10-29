@@ -172,6 +172,8 @@ void Host::register_source_tools() {
        mcp::object_schema({{"project", project_prop},
                            {"base_rev", mcp::integer_property("The revision these changes start from.")},
                            {"message", mcp::string_property("What changed and why, in a sentence or two.")},
+                           {"agent", mcp::string_property("Which agent is committing, like \"Engineer A\": recorded "
+                                                          "beside the operator you signed in as, as said, unchecked.")},
                            {"changes", bj::value(bj::object{{"type", "array"},
                                                             {"items", bj::object{{"type", "object"}}},
                                                             {"description", "Up to 500 changes."}})}},
@@ -202,10 +204,21 @@ void Host::register_source_tools() {
            }
            changes.push_back(std::move(change));
          }
+         // Agents sharing one operator sign-in name themselves; the name is theirs to say, so the
+         // log shows it as said, after the operator the host checked.
+         std::string author = current_operator();
+         if (auto agent = arg(args, "agent"); agent && !agent->empty()) {
+           if (agent->size() > 60 || std::any_of(agent->begin(), agent->end(), [](char c) {
+                 return static_cast<unsigned char>(c) < 0x20 || c == 0x7f;
+               })) {
+             return ToolResult::fail("agent is a name of up to 60 printable characters");
+           }
+           author += " (agent: " + *agent + ")";
+         }
          std::string err;
          std::vector<std::string> conflicts;
          auto r = source_->commit(name, int_arg(args, "base_rev", -1), changes, arg(args, "message").value_or(""),
-                                  current_operator(), base::now_unix_ms(), &err, &conflicts);
+                                  author, base::now_unix_ms(), &err, &conflicts);
          if (!r) {
            if (conflicts.empty()) return ToolResult::fail(err);
            bj::array paths;

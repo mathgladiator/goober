@@ -110,6 +110,7 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
   std::string howdy = wat;
   howdy.replace(howdy.find("\"hello\""), 7, "\"howdy\"");
   auto committed = tool("source_commit", {{"project", "greeter"}, {"base_rev", 1}, {"message", "Say howdy"},
+                                          {"agent", "Engineer A"},
                                           {"changes", bj::array{bj::object{{"path", "box.wat"}, {"text", howdy}}}}});
   ASSERT_EQ(committed.at("rev"), 2) << json::dump(committed);
   deployed = tool("source_deploy", {{"project", "greeter"}});
@@ -127,7 +128,7 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
   EXPECT_NE(std::string(diff.as_string()).find("+  (data (i32.const 16) \"howdy\")"), std::string::npos) << diff;
   auto log = tool("source_log", {{"project", "greeter"}});
   EXPECT_EQ(log.at(0).at("message"), "Say howdy");
-  EXPECT_EQ(log.at(0).at("by"), "config");  // the operator behind the token
+  EXPECT_EQ(log.at(0).at("by"), "config (agent: Engineer A)");  // the operator behind the token, and who said they were
 
   // Going back is a new revision, deployed like any other.
   auto back = tool("source_revert", {{"project", "greeter"}, {"rev", 1}});
