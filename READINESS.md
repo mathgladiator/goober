@@ -1,9 +1,10 @@
 # Readiness
 
-> How ready goober is for the human's experiments, as of 2026-10-27 (evening). Short on
+> How ready goober is for the human's experiments, as of 2026-10-28 (night). Short on
 > purpose: `PROGRESS.md` has the full account, and each line here names where the proof lives.
 > "Tested" means automated checks pass against a running host on this machine, with stand-ins
-> for AWS. Nothing here has met a real server, real AWS, a real ad, or Grok yet.
+> for AWS. kcmeatup.com is live on a real server, and Grok deploys to it over OAuth; real mail
+> in, real S3, and a real ad haven't happened yet.
 
 | question | ready? | in one line |
 | --- | --- | --- |
@@ -16,6 +17,7 @@
 | 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction, built for hundreds of sites, not millions. |
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
 | 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
+| 7. An agent people reach by email | **Yes, to build tomorrow** | Mail from the site's own address, in the person's thread, with unsubscribe; model calls through the outbox with result routes. `design/machine/026.KcMeatUp.md` § 3 is the plan. |
 
 ## 1. Static content: yes
 
@@ -144,6 +146,25 @@ each ranch's site weekly.
   all here, with the real Stalwart. On the server: add the MX records deploy prints, and open
   inbound TCP 25 at your provider (many block it until asked). Senders aren't verified yet:
   From is only a string (Q39).
+
+## 7. An agent people reach by email: ready to build
+
+- **What the host gives a box:**
+  - mail in on addresses it declares, with reply tokens;
+  - mail out from its own address (`"mail": {"from": "hello@kcmeatup.com"}`), threaded with
+    `in_reply_to` and `references`;
+  - a one-click unsubscribe the host enforces for every box of the tenant;
+  - model calls with `effect` outbox, up to two minutes, whose answer comes back on a result
+    route;
+  - 20 mails a day to someone who wrote in, and 3 for outreach.
+- **Proof.** `MailTest.OutreachThreadsAndUnsubscribesForGood`,
+  `MailTest.RepliesInAThreadThePersonStartedGetMoreRoom`,
+  `NetworkTest.ResultRoutesHearHowADeliveryWent`, and `just mail-e2e` with the real Stalwart.
+- **Watch for.**
+  - SES must have kcmeatup.com verified as a domain, or mail from `hello@` dies.
+  - Senders aren't verified (Q39), so a mail's From is only a claim.
+  - Bounces and complaints don't reach the box yet.
+  - The host has no spend cap on model calls: the box must count its own.
 
 ## Before real people use it
 

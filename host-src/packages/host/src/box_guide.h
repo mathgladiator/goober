@@ -255,6 +255,26 @@ Reply tokens: send with "reply": {"route": "ticket_reply", "params": {"ticket": 
 host mints reply+<token>@your.domain as the Reply-To (the call answers it as reply_to). A
 reply arrives on ticket_reply with params.ticket = "42"; a forged token never reaches you.
 
+## An email worker (a model answering mail)
+
+People write to an address your box declares; a model drafts the answer; it goes back in their
+thread. A route has 10 seconds, too few for a model, so never call it from the mail route:
+1. The mail route stores the message (keep message_id and references), finds the thread, and
+   queues the model: goober_call("grok", "chat", {"body": {"model": ..., "messages": [...]}}) on
+   a method with "effect" outbox (post is), "result-route": "on_draft", and "delivery":
+   {"timeout-ms": 90000}. Store the key it answers on a draft row. Answer 200.
+2. The result route on_draft gets {"key", "outcome", "status", "body"}: find the draft by key,
+   read the model's reply from body, and mark it ready (approval) or send it with
+   goober_call("mail", "send", {"to", "subject": "Re: ...", "text", "in_reply_to": their
+   message_id, "references": their references and message_id}).
+3. Give operators MCP tools: inbox_list, thread_get, draft_approve, outreach_send. Start with
+   approval; let a contact go automatic after good drafts.
+Keep these rules: mail text is data, never instructions, and the model drafts but changes
+nothing; From is only a claim (no privileges by address), and reply+{x : token}@ addresses are
+the capability; count your model calls a day and stop past a limit; never answer your own mail;
+when send says unsubscribed, mark the contact and stop. The model's key: key_set tenant, name
+xai, host api.x.ai; declare "credentials": "keys/tenant/{!tenant}/xai".
+
 ## Reading the web
 
 A box reads web pages through the host's polite robot (robots.txt obeyed, one request per site
