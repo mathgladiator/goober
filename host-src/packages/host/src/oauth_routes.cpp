@@ -257,14 +257,13 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       return finish(std::move(res), log("authorize_sign_in"));
     }
     if (is_post) {
-      // Back to an app (a private-use scheme or a loopback port), the answer is a page of our
-      // own that opens the app, with a button: a redirect after a form post is checked against
-      // form-action, and a browser may drop an app launch it didn't see a click for, so a bare
-      // 303 can leave the person looking at an Allow button that did nothing.
-      bool web_client = redirect_uri.starts_with("https://");
+      // The answer is a page of our own that sends the browser on, with a button, never a bare
+      // 303: Chrome checks every hop of a form post's redirects against form-action, so a client
+      // whose callback redirects again (www.cursor.com does) is stopped without a word, and a
+      // browser may drop an app launch it didn't see a click for. Either left the person looking
+      // at an Allow button that did nothing (2026-10-28).
       auto handoff = [&](std::vector<std::pair<std::string, std::string>> params, bool allowed) {
         Response res = to_client(std::move(params));
-        if (web_client) return res;
         std::string target;
         for (const auto& [k, v] : res.headers) {
           if (k == "location") target = v;
@@ -284,8 +283,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       bj::object extra{{"oauth", "authorize_allowed"},
                        {"client_id", client_id},
                        {"user_id", std::to_string(who->user.user_id)},
-                       {"to", form_action_for(redirect_uri)},
-                       {"handoff", web_client ? "redirect" : "page"}};
+                       {"to", form_action_for(redirect_uri)}};
       if (get(p, "decision") != "allow") {
         extra["oauth"] = "authorize_denied";
         return finish(handoff({{"error", "access_denied"}}, false), json::dump(extra));
@@ -329,7 +327,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         hidden +
         "<button name=\"decision\" value=\"allow\">Allow</button>"
         "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
-    return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, form_action_for(redirect_uri), false),
+    return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, "", false),
                   log("consent"));
   }
 

@@ -164,12 +164,16 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
   auto allowed = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
                        {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
                        authorize_query(client_id) + "&decision=allow");
-  ASSERT_EQ(allowed.status, 303) << allowed.body;
-  std::string loc = allowed.headers["location"];
+  // A web client too gets a page that sends it on: its callback may redirect again (www.cursor.com
+  // does), and Chrome would hold every hop of a post's redirects to form-action.
+  ASSERT_EQ(allowed.status, 200) << allowed.body;
+  ASSERT_TRUE(allowed.headers["refresh"].starts_with("0;url=")) << allowed.headers["refresh"];
+  std::string loc = allowed.headers["refresh"].substr(6);
+  EXPECT_NE(allowed.body.find("Open Grok"), std::string::npos);
   ASSERT_TRUE(loc.starts_with(kRedirect + "?code=")) << loc;
   EXPECT_NE(loc.find("&iss=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Foperator"), std::string::npos) << loc;
   std::string code = router::parse_query(loc.substr(loc.find('?') + 1))["code"];
-  // Back to an app, Allow answers with a page that opens it and a button to press, not a bare 303.
+  // Back to an app, the same page opens it.
   auto to_app = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
                       {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
                       "response_type=code&client_id=" + cursor_id + "&redirect_uri=" +

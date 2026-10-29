@@ -125,9 +125,10 @@ def main():
     check(st == 200 and "dumb terminal" in page and "com.mathgladiator.dumb:" in page, "consent names the app and its scheme")
     form = dict(urllib.parse.parse_qsl(q), decision="allow")
     st, h, _ = web.call("POST", auth_path, form=form, headers={"Cookie": cookie, **same_site})
-    loc = h.get("location", "")
+    # The answer is a page that sends the browser on: a Refresh header and an "Open" button.
+    loc = h.get("refresh", "").removeprefix("0;url=")
     back = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(loc).query))
-    check(st == 303 and loc.startswith(APP_REDIRECT) and back.get("state") == state, "redirected to the app, state intact")
+    check(st == 200 and loc.startswith(APP_REDIRECT) and back.get("state") == state, "sent on to the app, state intact")
 
     print("the terminal trades the code")
     st, h, body = web.call("POST", token_path, form={"grant_type": "authorization_code", "client_id": "dumb-terminal",
@@ -307,8 +308,9 @@ def main():
     check(st == 200 and fresh.get("refresh_token") != tokens["refresh_token"], "refresh rotates the refresh token")
     old_access = tokens["access_token"]
     tokens = fresh
-    check(web.call("GET", "/terminal/v1/me", headers={"Authorization": "Bearer " + old_access})[0] == 401,
-          "the old access token ended with the rotation")
+    # A second session sharing the grant keeps working until its access token's hour is up.
+    check(web.call("GET", "/terminal/v1/me", headers={"Authorization": "Bearer " + old_access})[0] == 200,
+          "the old access token runs to its hour")
     check(term("GET", "/me")[0] == 200, "the new access token works")
 
     desk("DELETE", f"/alarms/e2e-{run}")

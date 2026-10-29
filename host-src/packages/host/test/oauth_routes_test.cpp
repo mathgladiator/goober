@@ -115,10 +115,9 @@ class OAuthRoutesTest : public ::testing::Test {
     return "response_type=code&client_id=dumb-terminal&redirect_uri=" + q(redirect) + "&code_challenge=" + kChallenge +
            "&code_challenge_method=S256&state=xyz";
   }
-  // Where an Allow sent the browser: a web client by a 303, an app by a page that opens it (a
-  // refresh, and a button for when the browser wants a click).
+  // Where an Allow sent the browser: a page that sends it on (a refresh, and a button for when
+  // the browser wants a click), never a bare 303.
   static std::string handed_to(Reply& r) {
-    if (r.status == 303) return r.headers["location"];
     EXPECT_EQ(r.status, 200) << r.body;
     std::string refresh = r.headers["refresh"];
     EXPECT_TRUE(refresh.starts_with("0;url=")) << refresh;
@@ -173,7 +172,8 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
   EXPECT_NE(page.body.find("the app that opens com.mathgladiator.dumb: links"), std::string::npos);
   EXPECT_NE(page.body.find("as you"), std::string::npos);
   EXPECT_NE(page.body.find("<code>owner</code>"), std::string::npos);
-  EXPECT_NE(page.headers["content-security-policy"].find("form-action 'self' com.mathgladiator.dumb:"), std::string::npos);
+  // The form posts here and the answer is our own page, so form-action needs nothing else.
+  EXPECT_NE(page.headers["content-security-policy"].find("form-action 'self';"), std::string::npos);
   EXPECT_EQ(page.headers["x-frame-options"], "DENY");
 
   // A forged consent never lands.
