@@ -182,3 +182,26 @@ TEST(Config, RefusesBadSesBackupAndSource) {
     EXPECT_FALSE(err.empty()) << bad;
   }
 }
+
+TEST(Config, ThePanelHasADomainOfItsOwn) {
+  std::string err;
+  auto cfg = parse_config(
+      R"({"domains":{"kcmeatup.com":{"tenant":"kc"}},"operations":{"domain":"Ops.KCMeatUp.com","listen":"127.0.0.1:9443"}})",
+      "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_EQ(cfg->operations_domain, "ops.kcmeatup.com");
+  EXPECT_EQ(cfg->panel_domain(), "ops.kcmeatup.com");
+  EXPECT_EQ(cfg->operations_listen_address, "127.0.0.1");
+  EXPECT_EQ(cfg->operations_listen_port, 9443);
+  EXPECT_FALSE(parse_config(R"({"domains":{"kcmeatup.com":{"tenant":"kc"}},"operations":{"domain":"kcmeatup.com"}})",
+                            "/", &err));
+  EXPECT_NE(err.find("tenant's domain"), std::string::npos) << err;
+  EXPECT_FALSE(parse_config(R"({"operations":{"domain":"not a name"}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"operations":{"listen":"9443"}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"operations":{"listen":"127.0.0.1:99999"}})", "/", &err));
+  auto none = parse_config("{}", "/", &err);
+  ASSERT_TRUE(none) << err;
+  EXPECT_EQ(none->panel_domain(), "");
+  EXPECT_EQ(goober::config::local_mode(none)->panel_domain(), "ops.localhost");
+  EXPECT_FALSE(none->operations_listen_port);
+}

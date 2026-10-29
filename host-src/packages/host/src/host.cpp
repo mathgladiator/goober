@@ -120,6 +120,15 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
     : config_file_(std::move(config_file)), config_(config) {
   started_ms_ = base::now_unix_ms();
   wal_ = std::make_unique<wal::HostWal>(config->storage);
+  // The change log sees every bundle from here on (design/machine/028.Panel.md § 5).
+  changes_ = std::make_unique<operations::ChangeLog>(config->storage / "operations" / "changes.db", config->storage);
+  wal_->set_observer([this](const wal::Bundle& b) { record_bundle(b); });
+  traffic_ = std::make_unique<operations::Traffic>(
+      config->storage / "operations" / "traffic.db", config->storage / "logs",
+      [this](const std::string& domain) -> std::optional<std::string> {
+        if (auto r = config_.get()->resolve_host(domain)) return r->second.tenant;
+        return std::nullopt;
+      });
   const auto& rec = wal_->recovery();
   for (const auto& f : rec.failed) startup_notes_.push_back("host WAL: set aside " + f + " (see wal/failed/)");
   if (rec.replayed_bundles || rec.discarded_bundles || rec.torn_tail) {
@@ -152,7 +161,9 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "markdown, an HTML fragment in a template, or a whole HTML document), templates (template_put), and images "
       "(attachment_put, from base64 or a URL). Keep a product's source in the host and build and deploy it "
       "from there (source_create, source_checkout, source_commit, source_deploy), or deploy WASM boxes directly "
-      "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status).");
+      "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status). "
+      "See traffic, heat, and data flow (traffic, hot_boxes, box_graph), and what changed and who changed it "
+      "(changes, change_get, operator_actions).");
   init_web();
   register_tools();
   register_content_tools();
@@ -161,6 +172,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_mail_out_tools();
   register_web_tools();
   register_source_tools();
+  register_panel_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -247,7 +259,20 @@ uint16_t Host::start() {
   server_ = std::make_unique<server::http::Server>(
       opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond)); });
   server_->start();
+  // The panel's own listener (operations.listen): every request on it is the panel's.
+  if (cfg->operations_listen_port) {
+    server::http::ServerOptions panel_opts;
+    panel_opts.address = cfg->operations_listen_address;
+    panel_opts.port = *cfg->operations_listen_port;
+    panel_opts.threads = 1;
+    panel_opts.body_max_bytes = uint64_t(cfg->body_max_bytes);
+    panel_opts.body_limit_for = opts.body_limit_for;
+    panel_server_ = std::make_unique<server::http::Server>(
+        panel_opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond), true); });
+    panel_server_->start();
+  }
   timer_thread_ = std::thread([this] { run_timers(); });
+  traffic_thread_ = std::thread([this] { run_traffic(); });
   outbox_thread_ = std::thread([this] { run_outbox(); });
   crawl_thread_ = std::thread([this] { run_crawls(); });
   if (!backups_manual_) backup_thread_ = std::thread([this] { run_backups(); });
@@ -269,7 +294,9 @@ void Host::stop() {
     if (outbox_thread_.joinable()) outbox_thread_.join();
     if (crawl_thread_.joinable()) crawl_thread_.join();
     if (backup_thread_.joinable()) backup_thread_.join();
+    if (traffic_thread_.joinable()) traffic_thread_.join();
   }
+  if (panel_server_) panel_server_->stop_accepting();
   if (!server_) {
     if (pool_) pool_->shutdown();
     return;
@@ -286,6 +313,10 @@ void Host::stop() {
   pool_->shutdown();
   server_->stop();
   server_.reset();
+  if (panel_server_) {
+    panel_server_->stop();
+    panel_server_.reset();
+  }
 }
 
 std::string Host::reload() {
@@ -440,7 +471,9 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
   return res;
 }
 
-void Host::handle(Request req, Responder respond) {
+uint16_t Host::panel_port() const { return panel_server_ ? panel_server_->port() : 0; }
+
+void Host::handle(Request req, Responder respond, bool panel_listener) {
   ++requests_;
   int64_t started = base::monotonic_us();
   std::string request_id = new_request_id();
@@ -491,8 +524,10 @@ void Host::handle(Request req, Responder respond) {
   };
 
   auto path = router::normalize_path(req.path);
+  // The panel's origin serves the panel alone (design/machine/028.Panel.md § 1).
+  bool panel = is_panel_request(req, panel_listener);
   // Stalwart's MTA hook: checked in full by handle_mail_hook (loopback, no proxy, its token).
-  if (path && path->path == kMailHookPath) {
+  if (!panel && path && path->path == kMailHookPath) {
     pool_->post([this, req, finish] {
       try {
         handle_mail_hook(req, finish);
@@ -540,6 +575,18 @@ void Host::handle(Request req, Responder respond) {
   }
   if (path && path->path == kOperationsMcpPath) {
     pool_->post([this, req, finish] { handle_operations(req, finish); });
+    return;
+  }
+  if (panel) {
+    if (!path) return finish(error_page("", 400, request_id), R"({"why":"bad path","panel":"page"})");
+    pool_->post([this, req, finish, p = path->path, domain] {
+      try {
+        handle_panel(req, finish, p, domain);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: panel: " << e.what() << "\n";
+        finish(error_page("", 500, req.header("goober-request-id")), R"({"why":"panel failed","panel":"page"})");
+      }
+    });
     return;
   }
   if (!resolved) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");

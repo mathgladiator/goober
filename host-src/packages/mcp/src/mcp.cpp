@@ -15,7 +15,7 @@ McpServer::McpServer(std::string name, std::string version, std::string instruct
 
 void McpServer::add_tool(Tool tool) { tools_[tool.name] = std::move(tool); }
 
-bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) const {
+bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, const Allowed& allowed) const {
   auto id_it = request.find("id");
   *is_notification = id_it == request.end();
   bj::value id = *is_notification ? bj::value(nullptr) : id_it->value();
@@ -49,6 +49,7 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) 
   } else if (method == "tools/list") {
     bj::array tools;
     for (const auto& [name, tool] : tools_) {
+      if (allowed && !allowed(name)) continue;
       bj::object t{{"name", name}, {"description", tool.description}, {"inputSchema", tool.input_schema}};
       if (auto m = meta_.find(name); m != meta_.end()) t["_meta"] = m->second;
       tools.push_back(std::move(t));
@@ -57,16 +58,15 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) 
   } else if (method == "tools/call") {
     auto n = params.find("name");
     if (n == params.end() || !n->value().is_string()) return error_body(id, -32602, "tools/call needs a name");
-    auto tool = tools_.find(std::string(n->value().get_string()));
-    if (tool == tools_.end()) return error_body(id, -32602, "unknown tool: " + std::string(n->value().get_string()));
+    std::string name(n->value().get_string());
+    if (allowed && tools_.count(name) && !allowed(name)) {
+      return error_body(id, -32602, "tool " + name + " is not allowed for this caller: its access is read-only");
+    }
     bj::object args;
     if (auto a = params.find("arguments"); a != params.end() && a->value().is_object()) args = a->value().get_object();
-    ToolResult out;
-    try {
-      out = tool->second.run(args);
-    } catch (const std::exception& e) {
-      out = ToolResult::fail(std::string("tool failed: ") + e.what());
-    }
+    auto called = call(name, args);
+    if (!called) return error_body(id, -32602, "unknown tool: " + name);
+    ToolResult out = std::move(*called);
     std::string text = out.value.is_string() ? std::string(out.value.get_string()) : goober::json::pretty(out.value);
     result = bj::object{{"content", bj::array{bj::object{{"type", "text"}, {"text", text}}}}, {"isError", out.is_error}};
     // An object result is also given as structured content, for clients that read it.
@@ -77,7 +77,17 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification) 
   return bj::object{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}};
 }
 
-HttpReply McpServer::handle(std::string_view body) const {
+std::optional<ToolResult> McpServer::call(const std::string& name, const bj::object& args) const {
+  auto tool = tools_.find(name);
+  if (tool == tools_.end()) return std::nullopt;
+  try {
+    return tool->second.run(args);
+  } catch (const std::exception& e) {
+    return ToolResult::fail(std::string("tool failed: ") + e.what());
+  }
+}
+
+HttpReply McpServer::handle(std::string_view body, const Allowed& allowed) const {
   std::string err;
   auto parsed = goober::json::parse(body, &err);
   if (!parsed) return {400, goober::json::dump(error_body(nullptr, -32700, err))};
@@ -89,14 +99,14 @@ HttpReply McpServer::handle(std::string_view body) const {
         out.push_back(error_body(nullptr, -32600, "invalid request"));
         continue;
       }
-      auto reply = dispatch(item.get_object(), &note);
+      auto reply = dispatch(item.get_object(), &note, allowed);
       if (!note) out.push_back(std::move(reply));
     }
     if (out.empty()) return {202, ""};
     return {200, goober::json::dump(out)};
   }
   if (!parsed->is_object()) return {400, goober::json::dump(error_body(nullptr, -32600, "invalid request"))};
-  auto reply = dispatch(parsed->get_object(), &note);
+  auto reply = dispatch(parsed->get_object(), &note, allowed);
   if (note) return {202, ""};
   return {200, goober::json::dump(reply)};
 }

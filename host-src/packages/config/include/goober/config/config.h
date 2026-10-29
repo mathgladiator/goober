@@ -81,6 +81,13 @@ struct HostConfig {
   // A bearer token for the operator MCP endpoint, kept in the config. Optional:
   // tokens minted with `goober-host token create` live in storage instead.
   std::string operations_token;
+  // The operator panel (design/machine/028.Panel.md): served on this domain, which is never a
+  // tenant's, and/or on a listener of its own (operations.listen; port 0 is any free port).
+  std::string operations_domain;
+  std::string operations_listen_address = "127.0.0.1";
+  std::optional<uint16_t> operations_listen_port;
+  // The panel's domain: operations.domain, or ops.localhost in local mode, or "" (off).
+  std::string panel_domain() const { return !operations_domain.empty() ? operations_domain : local ? "ops.localhost" : ""; }
   IdentityConfig identity;
   // Set by --local, never by the file: see local_mode().
   bool local = false;

@@ -125,7 +125,7 @@ Response Host::identity_page(const std::string& tenant, int status, const std::s
 }
 
 void Host::handle_identity(const Request& req, const Finish& finish, const std::string& path,
-                           const std::string& domain, const std::string& tenant) {
+                           const std::string& domain, const std::string& tenant, bool host_only) {
   auto cfg = config_.get();
   std::string request_id = req.header("goober-request-id");
   auto query = router::parse_query(req.query);
@@ -195,14 +195,14 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
   int64_t now = base::now_unix_ms();
 
   if ((path == "/identity/sign-in" || path == "/identity/sign-in/as-host") && is_get) {
-    bool as_host = path == "/identity/sign-in/as-host";
+    bool as_host = host_only || path == "/identity/sign-in/as-host";
     return finish(page(200, as_host ? "Host sign-in" : "Sign in",
                        sign_in_form(safe_return(get(query, "return")), as_host, "")),
                   as_host ? R"({"identity":"host_sign_in_page"})" : R"({"identity":"sign_in_page"})");
   }
   if (path == "/identity/email/start" && is_post) {
     std::string email = base::to_lower(get(form, "email"));
-    bool as_host = get(form, "as") == "host";
+    bool as_host = host_only || get(form, "as") == "host";
     std::string ret = safe_return(get(form, "return"));
     if (as_host) {
       bool is_operator = cfg->identity.operators.count(email) > 0;
@@ -214,7 +214,7 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
   }
   if (path == "/identity/email/verify" && is_post) {
     std::string email = base::to_lower(get(form, "email"));
-    bool as_host = get(form, "as") == "host";
+    bool as_host = host_only || get(form, "as") == "host";
     std::string ret = safe_return(get(form, "return"));
     std::string why;
     int64_t session_ms = cfg->identity.session_days * 24 * 3600 * 1000;

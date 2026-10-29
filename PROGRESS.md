@@ -66,7 +66,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
 | 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. | The panel UI, rollups, counters, traces, queues, client classes, user-data-free logs. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log (minutes 48 h, hours 400 days), the heat map, data-flow graphs, the change log from the WAL, operator actions, and a read-only database explorer; `host:observer` read-only over MCP too. | Approvals, tuning instances and queues, counters, traces, cost, memory and queue depth, client classes, `principal_kind`. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
@@ -341,9 +341,22 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       `nav-key`; `@auth` variants; ETags after expansion; `partial_put`, `partial_get`,
       `partial_list`, `partial_delete`, and `route_check`'s `partials`.
 
+### Phase 17: the operator panel (028)
+- [x] The panel on `operations.domain` (never a tenant's) or `operations.listen`, signed in as a
+      host identity with `host:owner`, `host:operator`, or `host:observer`; look-only.
+- [x] Traffic rollups derived from the access and egress logs (`operations` package): a
+      tailer with a cursor, rotation-safe, backfilled from the logs on first start.
+- [x] The change log from the host WAL's observer, and operator actions linked to their changes.
+- [x] Tools `traffic`, `hot_boxes`, `box_graph`, `changes`, `change_get`, `operator_actions`; the
+      read-tool set, which is all `host:observer` may call over MCP.
+- [x] Views: overview, traffic, data flow, boxes, one box, change log with diffs, database.
+- [ ] On kcmeatup.com: an `A` record and Caddy line for `ops.kcmeatup.com`, and
+      `operations.domain` in host.json (the human's step).
+- [ ] Approvals (305), tuning, counters, traces, and cost.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),
-mail routes (038), the upload verb (060), the key vault (064), the panel, approvals, deployments,
+mail routes (038), the upload verb (060), the key vault (064), approvals, deployments,
 bundles, working sets (300 to 320), stability (330), quotas (390), the cluster (400),
 and contraction (420). Each waits for the human to pull it forward.

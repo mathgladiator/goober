@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -38,10 +39,14 @@ class McpServer {
   void add_tool(Tool tool);
   // A tool's _meta in tools/list (MCP 2025-06-18), like which box version answers it.
   void set_tool_meta(const std::string& name, bj::object meta) { meta_[name] = std::move(meta); }
-  HttpReply handle(std::string_view body) const;
+  // Which tools a caller may see and call; an empty filter allows every tool.
+  using Allowed = std::function<bool(const std::string& tool)>;
+  HttpReply handle(std::string_view body, const Allowed& allowed = {}) const;
+  // Calls one tool directly, as tools/call would; nullopt for a tool that doesn't exist.
+  std::optional<ToolResult> call(const std::string& tool, const bj::object& arguments) const;
 
  private:
-  bj::value dispatch(const bj::object& request, bool* is_notification) const;
+  bj::value dispatch(const bj::object& request, bool* is_notification, const Allowed& allowed) const;
   std::string name_, version_, instructions_;
   std::map<std::string, Tool> tools_;
   std::map<std::string, bj::object> meta_;

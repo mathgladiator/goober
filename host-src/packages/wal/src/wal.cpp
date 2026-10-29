@@ -224,6 +224,13 @@ bool HostWal::commit(const Bundle& bundle, std::string* error) {
   std::lock_guard lock(mu_);
   uint64_t id = next_id_++;
   if (!append_records(id, bundle, error)) return false;
+  // Durable now, and the old files are still on disk for the observer to read.
+  if (observer_) {
+    try {
+      observer_(bundle);
+    } catch (...) {
+    }
+  }
   if (!apply(bundle, error)) {
     // The bundle is committed; recovery will retry it on the next start, so the log
     // keeps it until then.

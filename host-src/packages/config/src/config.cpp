@@ -92,6 +92,24 @@ bool is_email(std::string_view s) {
   return s.find('@', at + 1) == std::string_view::npos;
 }
 
+// Like ops.example.com: labels of letters, digits, and hyphens, at least two of them.
+bool is_dns_name(std::string_view s) {
+  if (s.size() > 253 || s.find('.') == std::string_view::npos) return false;
+  size_t label = 0;
+  for (size_t i = 0; i <= s.size(); ++i) {
+    char c = i < s.size() ? s[i] : '.';
+    if (c == '.') {
+      if (label == 0 || label > 63 || s[i - 1] == '-' || s[i - label] == '-') return false;
+      label = 0;
+    } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+      ++label;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Like us-east-1 or eu-central-2.
 bool is_region(std::string_view s) {
   if (s.empty() || s.size() > 32) return false;
@@ -185,8 +203,34 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     }
   }
   if (const auto* ops = get_object(root, "operations", &err)) {
-    if (!check_keys(*ops, {"token"}, "operations", &err)) return *error = err, nullptr;
+    if (!check_keys(*ops, {"token", "domain", "listen"}, "operations", &err)) return *error = err, nullptr;
     if (auto v = get_string(*ops, "token", &err)) cfg->operations_token = *v;
+    if (auto v = get_string(*ops, "domain", &err)) {
+      std::string d = base::to_lower(*v);
+      if (!is_dns_name(d)) return *error = "operations.domain must be a DNS name, like ops.example.com", nullptr;
+      cfg->operations_domain = d;
+    }
+    if (auto v = get_string(*ops, "listen", &err)) {
+      // address:port, the address in brackets when it is IPv6.
+      auto colon = v->rfind(':');
+      std::string address = colon == std::string::npos ? "" : v->substr(0, colon);
+      if (address.size() > 2 && address.front() == '[' && address.back() == ']') address = address.substr(1, address.size() - 2);
+      int64_t port = -1;
+      if (colon != std::string::npos && colon + 1 < v->size() && v->size() - colon <= 6) {
+        port = 0;
+        for (char c : v->substr(colon + 1)) port = c >= '0' && c <= '9' && port >= 0 ? port * 10 + (c - '0') : -1;
+      }
+      if (address.empty() || port < 0 || port > 65535) {
+        return *error = "operations.listen must be address:port, like 127.0.0.1:9443", nullptr;
+      }
+      cfg->operations_listen_address = address;
+      cfg->operations_listen_port = uint16_t(port);
+    }
+  }
+  if (cfg->domains.count(cfg->operations_domain)) {
+    *error = "operations.domain " + cfg->operations_domain +
+             " is also a tenant's domain: the panel needs a domain of its own, like ops." + cfg->operations_domain;
+    return nullptr;
   }
   if (!cfg->operations_token.empty() && cfg->operations_token.size() < 16) {
     *error = "operations.token must be at least 16 characters, or left out";

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Goober Panel</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/panel.css">
+<script src="/panel.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">goober <span>panel</span></a>
+  <nav id="nav">
+    <a href="#/" data-view="overview">Overview</a>
+    <a href="#/traffic" data-view="traffic">Traffic</a>
+    <a href="#/flow" data-view="flow">Data flow</a>
+    <a href="#/boxes" data-view="boxes">Boxes</a>
+    <a href="#/changes" data-view="changes">Changes</a>
+    <a href="#/db" data-view="db">Database</a>
+  </nav>
+  <div class="who" id="who"></div>
+</header>
+<main id="main"><p class="muted">Loading…</p></main>
+<footer class="foot muted" id="foot">Look-only. Changes go through the operator MCP tools.</footer>
+</body>
+</html>

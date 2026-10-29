@@ -19,6 +19,10 @@ server say the same.
 
 ## 2. What has Grok done? (on the server)
 
+Easiest: open the panel, https://ops.kcmeatup.com/ (once it is set up: READINESS.md § 8).
+Changes shows every deploy, page, partial, and schema write, with diffs and who made it, and
+Changes → actions shows every tool Grok called. Without the panel:
+
 Every operator tool call is one line in the access log: when, who, which tool, which tenant,
 and whether it failed.
 

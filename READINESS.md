@@ -1,6 +1,6 @@
 # Readiness
 
-> How ready goober is for the human's experiments, as of 2026-10-28 (night). Short on
+> How ready goober is for the human's experiments, as of 2026-10-29. Short on
 > purpose: `PROGRESS.md` has the full account, and each line here names where the proof lives.
 > "Tested" means automated checks pass against a running host on this machine, with stand-ins
 > for AWS. kcmeatup.com is live on a real server, and Grok deploys to it over OAuth; real mail
@@ -18,6 +18,7 @@
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
 | 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
 | 7. An agent people reach by email | **Yes, to build tomorrow** | Mail from the site's own address, in the person's thread, with unsubscribe; model calls through the outbox with result routes. `design/machine/026.KcMeatUp.md` § 3 is the plan. |
+| 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
 
 ## 1. Static content: yes
 
@@ -181,3 +182,24 @@ each ranch's site weekly.
    - Q24, a separate origin for the sign-in screens, before strangers sign in;
    - Q29 to Q38 in `design/QUESTIONS.md`.
 6. Get an outside security review before anything holds other people's money or secrets.
+
+## 8. See what's happening: yes, once its domain is set up
+
+- **What works.** The operator panel, a web page of its own:
+  - traffic over 1 hour to 30 days, with p50 and p99;
+  - boxes as a heat map, and each box's routes, versions, logs, and manifest;
+  - the data flow as a graph, from tenants to boxes to databases and services;
+  - the change log, with line diffs for pages and partials, and manifest diffs for deploys;
+  - every operator call (Grok's included), linked to what it changed;
+  - a database explorer with a read-only SQL box.
+
+  It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`).
+- **To turn it on at kcmeatup.com.**
+  - Add an `A` record for `ops.kcmeatup.com`.
+  - Add the name to the site line of `/etc/caddy/Caddyfile`, then reload Caddy.
+  - Set `"operations": {"domain": "ops.kcmeatup.com"}` in host.json, and restart.
+
+  Then sign in with your operator address. Locally it is `http://ops.localhost:8080/`.
+- **Watch for.**
+  - The change log starts when this version is deployed; earlier changes aren't in it.
+  - Traffic history comes from the access logs still on disk (four files of 64 MiB).

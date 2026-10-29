@@ -139,6 +139,9 @@ Read these before doing design work:
   - `design/machine/027.Partials.md`: shared partials: `_partials/$name.html` included by
     `<!--#include name-->` in pages and box HTML, active links by `data-match`, `@auth` variants,
     ETags after expansion, and the `partial_*` tools.
+  - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
+    `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
+    change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

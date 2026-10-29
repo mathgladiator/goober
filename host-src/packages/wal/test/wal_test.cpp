@@ -109,3 +109,20 @@ TEST(Wal, ABundleThatCantApplyIsSetAsideAndNeverLost) {
   EXPECT_TRUE(fs::exists(root / "wal" / "failed"));
   EXPECT_EQ(*base::read_file(root / "c"), "y");
 }
+
+TEST(Wal, TheObserverSeesEachBundleBeforeItsFilesChange) {
+  auto root = fresh("wal_observer");
+  wal::HostWal w(root);
+  std::string err;
+  ASSERT_TRUE(w.commit({{wal::FileChange::Kind::kWrite, "a.txt", "old"}}, &err));
+  std::vector<std::string> seen;
+  w.set_observer([&](const wal::Bundle& b) {
+    seen.push_back(b.at(0).path + "=" + base::read_file(root / b.at(0).path).value_or("(none)"));
+    throw std::runtime_error("ignored");
+  });
+  ASSERT_TRUE(w.commit({{wal::FileChange::Kind::kWrite, "a.txt", "new"}}, &err)) << err;
+  EXPECT_EQ(*base::read_file(root / "a.txt"), "new");
+  // Refused before anything is durable: not observed.
+  EXPECT_FALSE(w.commit({{wal::FileChange::Kind::kWrite, "../x", "y"}}, &err));
+  EXPECT_EQ(seen, std::vector<std::string>{"a.txt=old"});
+}

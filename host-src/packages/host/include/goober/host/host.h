@@ -21,6 +21,8 @@
 #include "goober/host/rate_limit.h"
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
+#include "goober/operations/changes.h"
+#include "goober/operations/traffic.h"
 #include "goober/runtime_wasm/engine.h"
 #include "goober/server_http/server.h"
 #include "goober/site/site.h"
@@ -113,18 +115,43 @@ class Host {
   identity::Identity& identity() { return *identity_; }
   mail::templates::Store& mail_templates() { return *mail_templates_; }
   const std::vector<std::string>& startup_notes() const { return startup_notes_; }
+  // The operator panel's rollups and change log (design/machine/028.Panel.md).
+  operations::Traffic& traffic() { return *traffic_; }
+  operations::ChangeLog& changes() { return *changes_; }
+  // The panel's own listener (operations.listen), or 0 when there is none.
+  uint16_t panel_port() const;
+  // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).
+  static bool is_read_tool(std::string_view tool);
   // One step of every running crawl: at most one page each (design/machine/017.Crawl.md).
   // The crawler thread calls it; tests call it directly. Returns the pages fetched.
   int crawl_step();
 
  private:
-  void handle(server::http::Request req, server::http::Responder respond);
+  void handle(server::http::Request req, server::http::Responder respond, bool panel_listener = false);
+  // The operator panel (panel.cpp): its origin is operations.domain or its own listener.
+  bool is_panel_request(const server::http::Request& req, bool panel_listener) const;
+  void handle_panel(const server::http::Request& req, const Finish& finish, const std::string& path,
+                    const std::string& domain);
+  void register_panel_tools();
+  // An operator's host roles: tokens are host:owner; an OAuth operator's come from the config.
+  std::vector<std::string> operator_roles(const std::string& operator_name) const;
+  static bool may_change(const std::vector<std::string>& roles);
+  // The WAL's observer: one change-log row per change, with this thread's operator.
+  void record_bundle(const wal::Bundle& bundle);
+  void run_traffic();
+  // The request id of the operator call running on this thread, for the change log.
+  static std::string& current_request_id();
+  std::unique_ptr<operations::Traffic> traffic_;
+  std::unique_ptr<operations::ChangeLog> changes_;
+  std::unique_ptr<server::http::Server> panel_server_;
+  std::thread traffic_thread_;
   void handle_operations(const server::http::Request& req, const Finish& finish);
   // The operator a bearer token names ("config" or "token:$name"), or "" when there is none.
   std::string bearer_operator(const server::http::Request& req) const;
   // The host-owned /identity/ endpoints (identity_routes.cpp).
+  // On the panel's origin, host_only: only host identities sign in there.
   void handle_identity(const server::http::Request& req, const Finish& finish, const std::string& path,
-                       const std::string& domain, const std::string& tenant);
+                       const std::string& domain, const std::string& tenant, bool host_only = false);
   // A bearer access token, or else the browser's session cookie.
   std::optional<SignedIn> signed_in(const server::http::Request& req, const std::string& tenant);
   // The session cookie only: what the sign-in, consent, and device screens trust.

@@ -458,6 +458,12 @@ int main(int argc, char** argv) {
               << (local ? " (local mode)" : "") << "\n"
               << "  storage:    " << config->storage.string() << "\n"
               << "  operations: " << base << goober::host::kOperationsMcpPath << " (MCP, bearer token)\n"
+              << (config->panel_domain().empty() ? std::string()
+                                                 : "  panel:      http://" + config->panel_domain() +
+                                                       (local ? ":" + std::to_string(port) : std::string()) +
+                                                       "/ (sign in as a host operator)\n")
+              << (host.panel_port() ? "  panel:      http://localhost:" + std::to_string(host.panel_port()) + "/ (its own listener)\n"
+                                    : std::string())
               << "  sign in:    /identity/sign-in on any domain (operators: /identity/sign-in/as-host); "
                  "account at /identity/account\n";
     for (const auto& [domain, entry] : config->domains) {

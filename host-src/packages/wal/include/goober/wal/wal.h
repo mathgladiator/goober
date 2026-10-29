@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -49,6 +50,13 @@ class HostWal {
 
   const std::filesystem::path& root() const { return root_; }
 
+  // Called with each bundle once its commit record is durable, before it is applied, so the
+  // files it replaces can still be read (the change log, design/machine/028.Panel.md § 5).
+  // Called under the WAL's lock: it must not commit. Set it before any commit; what it
+  // throws is ignored.
+  using Observer = std::function<void(const Bundle&)>;
+  void set_observer(Observer observer) { observer_ = std::move(observer); }
+
   // Test hook: append and fsync the records and the commit, but don't apply the
   // bundle, as if the host died right after the commit record.
   bool commit_without_apply_for_test(const Bundle& bundle);
@@ -67,6 +75,7 @@ class HostWal {
   int fd_ = -1;
   uint64_t next_id_ = 1;
   RecoveryReport recovery_;
+  Observer observer_;
 };
 
 }  // namespace goober::wal

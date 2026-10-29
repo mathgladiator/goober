@@ -1,6 +1,7 @@
 // The operator MCP endpoint (/goober-operations-mcp) and its tools
 // (design/machine/005.FirstVersion.md §9).
 
+#include <iostream>
 #include <algorithm>
 
 #include "goober/base/encoding.h"
@@ -116,8 +117,13 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     return finish(std::move(res), "");
   }
   current_operator() = operator_name;
-  auto reply = mcp_->handle(req.body);
+  current_request_id() = req.header("goober-request-id");
+  // A host:observer only looks (design/machine/028.Panel.md § 2).
+  mcp::McpServer::Allowed allowed;
+  if (!may_change(operator_roles(operator_name))) allowed = [](const std::string& tool) { return is_read_tool(tool); };
+  auto reply = mcp_->handle(req.body, allowed);
   current_operator().clear();
+  current_request_id().clear();
   // Which tool, for which tenant: what an operator (or an agent acting as one) did is in the
   // access log, one line a call.
   bj::object extra{{"operations", "mcp"}, {"operator", operator_name}};
@@ -138,6 +144,19 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   }
   bool failed = reply.body.find("\"isError\":true") != std::string::npos;
   if (failed) extra["tool_error"] = true;
+  // The change log's actions: every tool call, linked to its changes by the request id (§ 5).
+  if (auto* tool = extra.if_contains("tool"); tool && tool->is_string()) {
+    operations::Action action{base::now_unix_ms(), operator_name, std::string(tool->as_string()),
+                              req.header("goober-request-id"), {}, failed || reply.body.find("\"error\":{") != std::string::npos};
+    for (const auto& kv : extra) {
+      if (kv.key().starts_with("arg_")) action.args[kv.key().substr(4)] = kv.value();
+    }
+    try {
+      changes_->record_action(action);
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: change log: " << e.what() << "\n";
+    }
+  }
   finish(json_response(reply.status, std::move(reply.body)), json::dump(extra));
 }
 

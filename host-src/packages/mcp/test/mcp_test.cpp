@@ -65,3 +65,21 @@ TEST(Mcp, Batches) {
   auto v = call(s, R"([{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/x"}])");
   EXPECT_EQ(v.as_array().size(), 1u);
 }
+
+TEST(Mcp, AFilterHidesAndRefusesTools) {
+  auto s = server();
+  s.add_tool({"wipe", "Changes things.", mcp::object_schema({}, {}),
+              [](const bj::object&) { return mcp::ToolResult::ok(bj::object{{"wiped", true}}); }});
+  mcp::McpServer::Allowed reads = [](const std::string& t) { return t == "echo"; };
+  std::string err;
+  auto list = *json::parse(s.handle(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})", reads).body, &err);
+  ASSERT_EQ(list.at("result").at("tools").as_array().size(), 1u);
+  EXPECT_EQ(list.at("result").at("tools").at(0).at("name"), "echo");
+  auto refused = *json::parse(
+      s.handle(R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wipe"}})", reads).body, &err);
+  EXPECT_TRUE(refused.as_object().contains("error"));
+  auto direct = s.call("echo", bj::object{{"text", "hi"}});
+  ASSERT_TRUE(direct);
+  EXPECT_EQ(direct->value.at("echo"), "hi");
+  EXPECT_FALSE(s.call("nope", {}));
+}

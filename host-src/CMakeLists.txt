@@ -11,7 +11,7 @@ include(cmake/Dependencies.cmake)
 include(cmake/GooberPackage.cmake)
 
 # Packages, in dependency order. Each is one directory with its own target and tests.
-foreach(pkg base json aws backup web types timers render mail_templates mail_inbound sqlite config wal content attachments site router manifest runtime_wasm db boxes identity server_http mcp source host fuzz)
+foreach(pkg base json aws backup web types timers render mail_templates mail_inbound sqlite config wal operations content attachments site router manifest runtime_wasm db boxes identity server_http mcp source panel host fuzz)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/packages/${pkg}/CMakeLists.txt")
     add_subdirectory(packages/${pkg})
   endif()
