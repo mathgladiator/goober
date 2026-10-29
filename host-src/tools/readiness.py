@@ -11,7 +11,10 @@ Always checked: /goober/ready (build and every subsystem), /, OAuth and identity
 and that /mcp asks for OAuth the way MCP clients expect. With GOOBER_TOKEN (an operator
 token), also: /goober-operations-mcp initialize and tools/list, and that each --box is
 loaded (--box name@version to require a version). With GOOBER_SITE_TOKEN (a bearer from the
-site's realm), /mcp initialize and tools/list too. Exits 1 if anything fails.
+site's realm), /mcp initialize and tools/list too. With --refresh-file, a file holding
+{"client_id", "refresh_token"} for a client kept for this check, a real refresh on the site's
+token endpoint: the rotated refresh token is written back, and the new access token is used
+for /mcp. Exits 1 if anything fails.
 """
 
 import argparse
@@ -19,6 +22,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -67,6 +71,7 @@ def main():
                     help="a path that must answer 200 with a content type starting with TYPE")
     ap.add_argument("--box", action="append", default=[], help="a box that must be loaded: name or name@version")
     ap.add_argument("--build", help="the build (commit prefix) /goober/ready must report")
+    ap.add_argument("--refresh-file", help="JSON {client_id, refresh_token}: refreshed for real, rewritten")
     args = ap.parse_args()
     base = args.base.rstrip("/")
     failed = []
@@ -90,7 +95,8 @@ def main():
         check(f"build is {args.build}", str(ready.get("build", "")).startswith(args.build), str(ready.get("build")))
 
     for path, kind in [("/", "text/html")] + [tuple(e) for e in args.expect]:
-        status, headers, _ = request(base + path)
+        # Asking for the type the way a browser does: a box route answers JSON to API callers.
+        status, headers, _ = request(base + path, headers={"accept": kind + ",*/*;q=0.1"})
         ctype = headers.get("content-type", "")
         check(f"GET {path} is 200 {kind}", status == 200 and ctype.startswith(kind), f"HTTP {status} {ctype}")
 
@@ -101,8 +107,49 @@ def main():
         check(f"GET {path}", status == 200 and headers.get("content-type", "").startswith("application/json"), f"HTTP {status}")
     status, headers, _ = request(base + "/identity/sign-in")
     check("GET /identity/sign-in", status == 200, f"HTTP {status}")
+    status, _, body = request(base + "/.well-known/openid-configuration")
+    check("GET /.well-known/openid-configuration", status == 200, f"HTTP {status}")
+
+    # The token endpoint answers a refused refresh as OAuth says (a JSON error, not a 5xx):
+    # its realm's database opens and reads. Nothing is written.
+    form = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": "readiness-probe",
+                                   "client_id": "readiness-probe"}).encode()
+    req = urllib.request.Request(base + "/oauth/token", data=form, method="POST",
+                                 headers={"content-type": "application/x-www-form-urlencoded", "user-agent": "goober-readiness/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            status, body = r.status, r.read()
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read()
+    except Exception as e:  # noqa: BLE001
+        status, body = 0, str(e).encode()
+    try:
+        err = json.loads(body).get("error", "")
+    except ValueError:
+        err = ""
+    check("POST /oauth/token refuses a made-up refresh as OAuth does", status in (400, 401) and bool(err), f"HTTP {status} {err}")
 
     site_token = os.environ.get("GOOBER_SITE_TOKEN", "")
+    if args.refresh_file:
+        try:
+            saved = json.load(open(args.refresh_file))
+            form = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": saved["refresh_token"],
+                                           "client_id": saved["client_id"]}).encode()
+            req = urllib.request.Request(base + "/oauth/token", data=form, method="POST",
+                                         headers={"content-type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                tokens = json.loads(r.read())
+            saved["refresh_token"] = tokens["refresh_token"]
+            tmp = args.refresh_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(saved, f)
+            os.replace(tmp, args.refresh_file)
+            site_token = tokens["access_token"]
+            check("a real refresh on /oauth/token", True, f"rotated; expires in {tokens.get('expires_in')}s")
+        except urllib.error.HTTPError as e:
+            check("a real refresh on /oauth/token", False, f"HTTP {e.code} {e.read()[:200]!r}")
+        except Exception as e:  # noqa: BLE001
+            check("a real refresh on /oauth/token", False, str(e))
     if site_token:
         try:
             check("/mcp initialize and tools/list", True, f"{len(mcp(base + '/mcp', site_token))} tools")

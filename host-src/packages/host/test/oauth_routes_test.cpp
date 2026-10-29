@@ -160,6 +160,8 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
   ASSERT_EQ(meta.status, 200);
   EXPECT_NE(meta.body.find(R"("authorization_endpoint":"http://localhost:8080/oauth/authorize")"), std::string::npos);
   EXPECT_NE(meta.body.find(R"("code_challenge_methods_supported":["S256"])"), std::string::npos);
+  // OpenID's name for it, which some MCP clients look for first, says the same.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/.well-known/openid-configuration").body, meta.body);
 
   // Signed out, authorize sends the browser to sign in and back.
   auto out = fetch(port, bhttp::verb::get, "/oauth/authorize?" + authorize_query());

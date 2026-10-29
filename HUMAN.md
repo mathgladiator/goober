@@ -89,6 +89,10 @@ GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://kcmeatup.com \
   $(grep -v '^#' host-src/tools/readiness.d/kcmeatup.com)
 ```
 
+To check signing in and refreshing for real (what Grok's and Cursor's connectors do), keep one
+client for it: a file holding {"client_id", "refresh_token"}, which each run refreshes and
+rewrites. Add `--refresh-file ~/.goober/kcmeatup-refresh.json` to the command above.
+
 If the host is down and you want its reason now:
 
 ```sh

@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <set>
 
 #include "goober/base/encoding.h"
 #include "goober/base/hash.h"
@@ -187,11 +188,22 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
     check("storage", good, why.empty() ? bj::object{} : bj::object{{"why", why}});
   }
   // Identity and OAuth: the host realm answers (its database opens and reads).
-  try {
-    identity_->clients(identity::kHostRealm);
-    check("identity", true);
-  } catch (const std::exception& e) {
-    check("identity", false, bj::object{{"why", e.what()}});
+  // Identity and OAuth: the host realm and every tenant's realm answer (their databases open and
+  // read), since a site's /mcp signs in and refreshes in its own realm.
+  {
+    std::set<std::string> realms{std::string(identity::kHostRealm)};
+    for (const auto& [d, e] : cfg->domains) realms.insert(e.tenant);
+    bj::array failing;
+    for (const auto& realm : realms) {
+      try {
+        identity_->clients(realm);
+      } catch (const std::exception& e) {
+        failing.push_back(bj::value(realm + ": " + e.what()));
+      }
+    }
+    bool good = failing.empty();
+    check("identity", good, bj::object{{"realms", int64_t(realms.size())}});
+    if (!good) checks["identity"].as_object()["why"] = std::move(failing);
   }
   auto active = boxes_->active();
   check("boxes", true, bj::object{{"loaded", active->boxes.size()}});

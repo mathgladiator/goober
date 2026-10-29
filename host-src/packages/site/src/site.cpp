@@ -1,3 +1,4 @@
+#include <cctype>
 #include "goober/site/site.h"
 #include "goober/site/includes.h"
 
@@ -321,6 +322,30 @@ std::optional<std::string> json_ld_script(const bj::value& ld) {
   return "<script type=\"application/ld+json\">" + text + "</script>";
 }
 
+// A template written before the host built the tag wraps {{{json_ld}}} in a script of its own:
+// that outer tag is dropped, so the page has one (Pit Boss, 2026-10-29). Only an ld+json
+// script holding exactly the host's tag, with whitespace around it, is unwrapped.
+static void unwrap_json_ld(std::string& html, const std::string& tag) {
+  if (tag.empty()) return;
+  size_t at = 0;
+  while ((at = html.find(tag, at)) != std::string::npos) {
+    size_t before = at;
+    while (before > 0 && std::isspace(static_cast<unsigned char>(html[before - 1]))) --before;
+    size_t after = at + tag.size();
+    while (after < html.size() && std::isspace(static_cast<unsigned char>(html[after]))) ++after;
+    size_t open = before > 0 && html[before - 1] == '>' ? html.rfind("<script", before - 1) : std::string::npos;
+    bool wrapped = open != std::string::npos && html.find('>', open) == before - 1 &&
+                   html.substr(open, before - open).find("application/ld+json") != std::string::npos &&
+                   html.compare(after, 9, "</script>") == 0;
+    if (!wrapped) {
+      at += tag.size();
+      continue;
+    }
+    html.replace(open, after + 9 - open, tag);
+    at = open + tag.size();
+  }
+}
+
 std::optional<std::string> Site::render_template(std::string_view tenant, std::string_view name, bj::object data,
                                                  const std::map<std::string, std::string>* inline_templates,
                                                  std::string* error, bool json_ld) const {
@@ -382,7 +407,10 @@ std::optional<std::string> Site::render_named(std::string_view tenant, std::stri
     }
   }
   bool has_json_ld = data.contains("json_ld");
-  return render_template(tenant, name, std::move(data), inline_templates, error, has_json_ld);
+  std::string tag = has_json_ld ? std::string(data.at("json_ld").as_string()) : "";
+  auto out = render_template(tenant, name, std::move(data), inline_templates, error, has_json_ld);
+  if (out) unwrap_json_ld(*out, tag);
+  return out;
 }
 
 std::vector<bj::object> Site::entries(const Visit& v, const std::string& dir) const {
@@ -611,8 +639,10 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   data["body"] = std::move(body_html);
   // A page's json_ld field becomes the host-built tag, as a box's does.
   bool has_json_ld = false;
+  std::string ld_tag;
   if (auto* ld = data.if_contains("json_ld")) {
     if (auto tag = json_ld_script(*ld)) {
+      ld_tag = *tag;
       *ld = std::move(*tag);
       has_json_ld = true;
     } else {
@@ -621,6 +651,7 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   }
   std::string err;
   auto html = render_template(v.tenant, template_name, std::move(data), nullptr, &err, has_json_ld);
+  if (html) unwrap_json_ld(*html, ld_tag);
   if (!html) return fail(500, page.path + ": " + err);
   r.status = 200;
   r.content_type = "text/html; charset=utf-8";

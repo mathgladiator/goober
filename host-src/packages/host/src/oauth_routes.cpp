@@ -138,6 +138,8 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     // RFC 8414 puts an issuer's metadata at /.well-known/oauth-authorization-server/$path;
     // some clients look under the issuer instead, or for OpenID's name. All are the same.
     if (op) path = "/.well-known/oauth-authorization-server";
+    // The site's issuer too: clients that look for OpenID's name first (2026-10-29).
+    if (!op && path_in == "/.well-known/openid-configuration") path = "/.well-known/oauth-authorization-server";
   } else {
     path = "/oauth/" + path_in.substr(kOperatorBase.size() + 1);
   }

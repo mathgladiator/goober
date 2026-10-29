@@ -206,6 +206,11 @@ TEST_F(SiteTest, RedirectsStaticFilesAndRenderNamed) {
   // An object works the same; anything that isn't JSON renders nothing.
   auto obj = s->render_named("t", "place", boost::json::object{{"json_ld", boost::json::object{{"a", "<"}}}}, &ld_templates, &err);
   EXPECT_EQ(*obj, "<head><script type=\"application/ld+json\">{\"a\":\"\\u003c\"}</script></head><p></p>");
+  // A template that still wraps it in a script of its own gets one tag, not two.
+  std::map<std::string, std::string> wrapped{{"place", "<head><script type=\"application/ld+json\">\n  {{{json_ld}}}\n</script></head>"}};
+  auto once = s->render_named("t", "place", boost::json::object{{"json_ld", boost::json::object{{"a", 1}}}}, &wrapped, &err);
+  ASSERT_TRUE(once) << err;
+  EXPECT_EQ(*once, "<head><script type=\"application/ld+json\">{\"a\":1}</script></head>");
   auto junk = s->render_named("t", "place", boost::json::object{{"json_ld", "<script>alert(1)</script>"}}, &ld_templates, &err);
   EXPECT_EQ(*junk, "<head></head><p></p>");
 }
