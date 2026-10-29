@@ -7,14 +7,15 @@ over ssh; they need sudo.
 ## 1. Is it up? (from your laptop, 10 seconds)
 
 ```sh
-curl -s https://kcmeatup.com/goober/health        # {"ok":true}
+curl -s https://kcmeatup.com/goober/health        # {"ok":true,"build":"a2906b65012c"}
 ```
 
 Then open the site in a browser. If health fails, go to section 5.
 
-Which code is running: `host_health` (ask Grok) reports `build`, the git commit, and on the
-server `goober-host --version` prints it too. It should match `git log -1 --oneline` on the
-machine you deployed from.
+Which code is running: `build` is the git commit the host was built from (`+dirty` if the
+tree had uncommitted changes). It should match `git log -1 --format=%h --abbrev=12` on the
+machine you deployed from. `host_health` (ask Grok) and `goober-host --version` on the
+server say the same.
 
 ## 2. What has Grok done? (on the server)
 

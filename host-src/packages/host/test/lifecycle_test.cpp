@@ -58,7 +58,7 @@ TEST(Lifecycle, HealthAndGracefulShutdown) {
   uint16_t port = h.start();
   std::string body;
   EXPECT_EQ(get(port, "/goober/health", &body), 200);
-  EXPECT_EQ(body, R"({"ok":true})");
+  EXPECT_TRUE(body.starts_with(R"({"ok":true,"build":")") && body.ends_with("\"}")) << body;  // the commit
   // A proxy's health check names the upstream address, which is no configured domain.
   EXPECT_EQ(get(port, "/goober/health", &body, "10.1.2.3:8080"), 200);
   EXPECT_NE(get(port, "/", &body, "10.1.2.3:8080"), 200);

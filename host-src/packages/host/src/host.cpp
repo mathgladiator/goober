@@ -1,3 +1,4 @@
+#include "build_id.h"
 #include "goober/host/host.h"
 
 #include <arpa/inet.h>
@@ -530,7 +531,8 @@ void Host::handle(Request req, Responder respond) {
     Response res;
     res.headers.emplace_back("content-type", "application/json");
     res.headers.emplace_back("cache-control", "no-store");
-    res.body = R"({"ok":true})";
+    // The build's commit, so a deploy can be confirmed from anywhere with curl.
+    res.body = std::string(R"({"ok":true,"build":")") + kBuildCommit + "\"}";
     res.head_only = req.method == "head";
     return finish(std::move(res), "");
   }
