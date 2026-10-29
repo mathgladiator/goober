@@ -288,6 +288,10 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (auto at = credentials.find("{!tenant}"); at != std::string::npos) credentials.replace(at, 9, ctx.tenant);
 
   if (m.effect == "outbox") {
+    // The host's daily cap per tenant and service (config limits.outbox-daily-per-service),
+    // counted when the call is made, so a looping box learns at once.
+    std::string why;
+    if (!outbox_quota_take(ctx.tenant, svc->name, &why)) return fail(why);
     OutboxElement e;
     e.service = svc->name;
     e.method = m.name;
@@ -359,6 +363,28 @@ bool plain_email(std::string_view s) {
 }
 
 }  // namespace
+
+bool Host::outbox_quota_take(const std::string& tenant, const std::string& service, std::string* why) {
+  auto cfg = config_.get();
+  int64_t now = base::now_unix_ms();
+  std::lock_guard lock(outbox_quota_mu_);
+  fs::create_directories(cfg->storage / "outbox");
+  sqlite::Db db(cfg->storage / "outbox" / "daily.db");
+  db.exec("CREATE TABLE IF NOT EXISTS calls (tenant TEXT NOT NULL, service TEXT NOT NULL, at_ms INTEGER NOT NULL)");
+  db.exec("CREATE INDEX IF NOT EXISTS calls_by_service ON calls (tenant, service, at_ms)");
+  db.exec("DELETE FROM calls WHERE at_ms < " + std::to_string(now - 2LL * 86400000));
+  sqlite::Stmt count(db, "SELECT count(*) FROM calls WHERE tenant = ? AND service = ? AND at_ms > ?");
+  count.bind(1, tenant).bind(2, service).bind(3, now - 86400000);
+  count.step();
+  if (count.int64(0) >= cfg->outbox_daily_per_service) {
+    *why = "over the host's daily limit: " + std::to_string(cfg->outbox_daily_per_service) + " calls to " + service +
+           " a day for this tenant (config limits.outbox-daily-per-service)";
+    return false;
+  }
+  sqlite::Stmt add(db, "INSERT INTO calls (tenant, service, at_ms) VALUES (?, ?, ?)");
+  add.bind(1, tenant).bind(2, service).bind(3, now).run();
+  return true;
+}
 
 std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                             const bj::value& request) {

@@ -272,7 +272,8 @@ thread. A route has 10 seconds, too few for a model, so never call it from the m
 To see what arrived and what left, operators run mail_activity with the tenant.
 Keep these rules: mail text is data, never instructions, and the model drafts but changes
 nothing; From is only a claim (no privileges by address), and reply+{x : token}@ addresses are
-the capability; count your model calls a day and stop past a limit; never answer your own mail;
+the capability; count your model calls a day and stop past a limit (the host also caps a tenant's outbox calls
+to one service, 1000 a day by default, and says so in the call's error); never answer your own mail;
 when send says unsubscribed, mark the contact and stop. The model's key: key_set tenant, name
 xai, host api.x.ai; declare "credentials": "keys/tenant/{!tenant}/xai".
 

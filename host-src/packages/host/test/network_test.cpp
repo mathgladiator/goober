@@ -122,7 +122,8 @@ class NetworkTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 1, "boxes": 2}})",
+        "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 1, "boxes": 2},
+        "limits": {"outbox-daily-per-service": 3}})",
                                     root, &err);
     ASSERT_TRUE(cfg) << err;
     host = std::make_unique<host::Host>(config::local_mode(cfg));
@@ -303,4 +304,17 @@ TEST_F(NetworkTest, ResultRoutesHearHowADeliveryWent) {
   EXPECT_FALSE(host->boxes().upload(R"({"box":"bad","domains":["*"],"external":{"m":{"base":"https://x.example",
       "methods":{"c":{"verb":"post","result-route":"nope"}}}}})", wat, &err));
   EXPECT_NE(err.find("no routes.result.nope"), std::string::npos) << err;
+}
+
+// The host's daily cap per tenant and service (limits.outbox-daily-per-service, 3 here): a box
+// that loops learns in the call, and nothing past the cap is queued.
+TEST_F(NetworkTest, OutboxCallsHaveADailyCapPerService) {
+  std::string body;
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_EQ(post(port, "/send", &body), 200) << body;
+    EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << i << ": " << body;
+  }
+  ASSERT_EQ(post(port, "/send", &body), 200) << body;
+  EXPECT_NE(body.find("limits.outbox-daily-per-service"), std::string::npos) << body;
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 3);
 }

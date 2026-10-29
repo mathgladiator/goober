@@ -263,6 +263,9 @@ class Host {
   void run_crawls();
   std::string web_call(struct CallContext& ctx, const manifest::ExternalService& svc, const boost::json::value& request);
   // A box's mail (design/machine/018.Mail.md): checked now, sent after commit through the outbox.
+  // The daily cap on a tenant's outbox calls to one service (config limits.outbox-daily-per-service).
+  bool outbox_quota_take(const std::string& tenant, const std::string& service, std::string* why);
+  std::mutex outbox_quota_mu_;
   std::string mail_call(struct CallContext& ctx, const manifest::ExternalService& svc,
                         const manifest::ExternalMethod& m, const boost::json::value& request);
   // Mail in (mail_in.cpp; design/machine/024.MailIn.md): Stalwart's MTA hook, mail routes,

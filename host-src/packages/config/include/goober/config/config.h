@@ -90,6 +90,9 @@ struct HostConfig {
   int64_t body_max_bytes = 1 << 20;
   // Requests one client address may make per minute, in a burst of a quarter of that.
   int64_t requests_per_minute = 1200;
+  // Outbox calls a tenant's boxes may queue to one service in a day (a model API, a payment
+  // API): what stops a looping box from spending. Mail has its own limits.
+  int64_t outbox_daily_per_service = 1000;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.
   bool behind_proxy = false;

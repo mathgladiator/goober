@@ -332,7 +332,7 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] M2: SES bounces and complaints through SNS, unsubscribing hard bounces and complaints.
 - [x] M3: `mail_activity`, a tenant's mail in and out for operators and agents.
 - [ ] M4: attachments on `send`.
-- [ ] M5: per-tenant daily caps on outbox calls per service.
+- [x] M5: per-tenant daily caps on outbox calls per service (`limits.outbox-daily-per-service`).
 - [ ] M6: markdown in `send`.
 
 ### Later, not planned yet

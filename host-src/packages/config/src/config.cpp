@@ -310,11 +310,16 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     }
   }
   if (const auto* limits = get_object(root, "limits", &err)) {
-    if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute"}, "limits",
-                    &err)) {
+    if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute",
+                              "outbox-daily-per-service"},
+                    "limits", &err)) {
       return *error = err, nullptr;
     }
     if (auto v = get_int(*limits, "body-max-bytes", &err)) cfg->body_max_bytes = *v;
+    if (auto v = get_int(*limits, "outbox-daily-per-service", &err)) {
+      if (*v < 1 || *v > 10'000'000) return *error = "limits.outbox-daily-per-service must be 1 to 10000000", nullptr;
+      cfg->outbox_daily_per_service = *v;
+    }
     if (auto v = get_int(*limits, "requests-per-minute", &err)) {
       if (*v < 10 || *v > 1'000'000) return *error = "limits.requests-per-minute must be 10 to 1000000", nullptr;
       cfg->requests_per_minute = *v;
