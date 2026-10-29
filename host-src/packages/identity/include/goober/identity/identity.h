@@ -62,6 +62,15 @@ struct Mail {
   std::string references = {};      // "<a@x> <b@y>", or ""
   std::string list_unsubscribe = {};  // "<https://...>", or ""
   std::string tenant = {};            // whose box sent it, for logs/mail.log; "" for host mail
+  // A calendar invite (RFC 5546): its text/calendar body, sent beside the text and HTML and as
+  // invite.ics, with its METHOD (REQUEST or CANCEL).
+  std::string calendar = {};
+  std::string calendar_method = {};
+  // Files attached (a box's attachments, design/machine/783.ThesisCommunity.md § 3).
+  struct File {
+    std::string filename, content_type, bytes;
+  };
+  std::vector<File> attachments = {};
 };
 using Mailer = std::function<void(const Mail&)>;
 

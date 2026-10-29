@@ -20,6 +20,7 @@
 | 7. An agent people reach by email | **Yes, to build tomorrow** | Mail from the site's own address, in the person's thread, with unsubscribe; model calls through the outbox with result routes. `design/machine/026.KcMeatUp.md` § 3 is the plan. |
 | 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
 | 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
+| 10. A community that meets by mail (one digest, one reply a day) | **Yes, to build** | Markdown digests, reply-token replies cut to the person's words, calendar invites with RSVPs, attachments (`design/machine/783.ThesisCommunity.md` § 4 is the recipe). |
 
 ## 1. Static content: yes
 
@@ -218,3 +219,15 @@ each ranch's site weekly.
 - **Watch for.**
   - Push on an iPhone works only after the app is added to the home screen.
   - Nobody has received a real push on a phone yet.
+
+## 10. A community that meets by mail: yes, to build
+
+- **What works.** Each member gets a daily digest at 07:00 in their zone, written in markdown
+  by the agent. Their reply comes back to a reply-token address that names them and the day,
+  cut to their own words (`reply_text`). The box enforces one reply a day. A model clusters
+  the replies through the outbox. Past a threshold, the box sends calendar invites, with RSVPs
+  back as `calendar`; files can be attached.
+- **Watch for.**
+  - Raise `mail.daily-max` past the member count.
+  - A bounced address isn't reported to the box yet (M2).
+  - The community box itself is Grok's to build from the recipe.

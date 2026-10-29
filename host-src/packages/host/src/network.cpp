@@ -5,7 +5,10 @@
 // the same transaction as the box's writes, for delivery after commit with retries and an
 // idempotency key.
 
+#include <set>
 #include "network.h"
+#include "goober/render/markdown.h"
+#include "goober/calendar/calendar.h"
 
 
 #include <iostream>
@@ -390,14 +393,16 @@ bool Host::outbox_quota_take(const std::string& tenant, const std::string& servi
 std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                             const bj::value& request) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
-  const char* kShape = "send takes {to, subject, text, reply_to?} or {to, template, vars?, reply_to?}, and reply? to "
-                       "mint a reply address, and in_reply_to? and references? (Message-IDs) to answer in a thread";
+  const char* kShape = "send takes {to, subject, text | markdown, reply_to?} or {to, template, vars?, reply_to?}, and reply? to "
+                       "mint a reply address, in_reply_to? and references? (Message-IDs) to answer in a thread, invite? (a "
+                       "calendar event: {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}), and "
+                       "attachments? (up to 3 attachment ids, 10 MiB in all)";
   if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
     if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
         kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply" && kv.key() != "in_reply_to" &&
-        kv.key() != "references") {
+        kv.key() != "references" && kv.key() != "markdown" && kv.key() != "invite" && kv.key() != "attachments") {
       return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
@@ -493,6 +498,15 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   } else if (r.contains("vars")) {
     return fail("vars go with a template");
   }
+  // Markdown, as a model writes it (783 § 3): the text part as written, and HTML rendered by the
+  // host's renderer, raw HTML escaped, in the tenant's layout.
+  std::string markdown_html;
+  if (const auto* md = r.if_contains("markdown")) {
+    if (r.contains("text") || r.contains("template")) return fail("give markdown, text, or a template, not two");
+    if (!md->is_string()) return fail("markdown is text");
+    text = std::string(md->as_string());
+    markdown_html = render::markdown_to_html(text);
+  }
   if (subject.empty() || subject.size() > 200) return fail("subject is 1 to 200 characters");
   if (text.empty() || text.size() > 65536) return fail("text is 1 to 65536 bytes");
   for (char c : subject) {
@@ -500,9 +514,51 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   }
   if (html.empty()) {
     vars["unsubscribe"] = unsubscribe;
-    auto wrapped = mail_templates_->wrap_text(ctx.tenant, subject, text, vars);
+    auto wrapped = markdown_html.empty() ? mail_templates_->wrap_text(ctx.tenant, subject, text, vars)
+                                         : mail_templates_->wrap_html(ctx.tenant, subject, text, markdown_html, vars);
     html = wrapped.html;
     text = wrapped.text;
+  }
+  // A calendar invite (RFC 5546), from the sending address, to this one recipient.
+  std::string ics, ics_method;
+  if (const auto* inv = r.if_contains("invite")) {
+    if (!inv->is_object()) return fail("invite is {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}");
+    const auto& io = inv->as_object();
+    for (const auto& kv : io) {
+      static const std::set<std::string, std::less<>> kInvite = {"uid", "start", "end", "summary", "description",
+                                                                 "location", "url", "sequence", "cancel"};
+      if (!kInvite.count(kv.key())) return fail("invite has no field \"" + std::string(kv.key()) + "\"");
+    }
+    auto field = [&](const char* k) {
+      auto* v = io.if_contains(k);
+      return v && v->is_string() ? std::string(v->as_string()) : std::string();
+    };
+    calendar::Invite invite{field("uid"), field("start"), field("end"), field("summary"), field("description"),
+                            field("location"), field("url")};
+    if (auto* q = io.if_contains("sequence"); q && q->is_int64()) invite.sequence = q->as_int64();
+    if (auto* c = io.if_contains("cancel"); c && c->is_bool()) invite.cancel = c->as_bool();
+    std::string organizer = from_address.empty() ? cfg->identity.from_address() : from_address;
+    std::string err;
+    auto built = calendar::invite_ics(invite, site, organizer, svc.mail_from_name, to, base::now_unix_ms(), &err);
+    if (!built) return fail(err);
+    ics = *built;
+    ics_method = invite.cancel ? "CANCEL" : "REQUEST";
+  }
+  // Files the tenant stored as attachments (060), read when the mail goes.
+  bj::array files;
+  if (const auto* a = r.if_contains("attachments")) {
+    if (!a->is_array() || a->as_array().size() > 3) return fail("attachments is a list of up to 3 attachment ids");
+    int64_t total = 0;
+    for (const auto& id : a->as_array()) {
+      int64_t n = id.is_int64() ? id.as_int64() : id.is_string() ? std::atoll(std::string(id.as_string()).c_str()) : 0;
+      auto found = n > 0 ? attachments_->get(ctx.tenant, n) : std::nullopt;
+      if (!found || found->state != "stored") return fail("attachment " + json::dump(id) + " isn't one of this tenant's");
+      total += found->size;
+      files.push_back(bj::object{{"id", n},
+                                 {"name", found->name.empty() ? "attachment-" + std::to_string(n) + "." + found->ext : found->name},
+                                 {"content_type", found->content_type}});
+    }
+    if (total > 10LL << 20) return fail("attachments are at most 10 MiB in all");
   }
   OutboxElement e;
   e.service = svc.name;
@@ -518,7 +574,10 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
                                  {"reply_to", reply_to},
                                  {"in_reply_to", in_reply_to},
                                  {"references", references},
-                                 {"list_unsubscribe", "<" + unsubscribe + ">"}});
+                                 {"list_unsubscribe", "<" + unsubscribe + ">"},
+                                 {"calendar", ics},
+                                 {"calendar_method", ics_method},
+                                 {"attachments", std::move(files)}});
   e.idempotency_key = base::sha256_hex("goober-outbox\n" + ctx.request_id + "\n" + std::to_string(ctx.pending.size()))
                           .substr(0, 32);
   e.attempts = m.attempts;

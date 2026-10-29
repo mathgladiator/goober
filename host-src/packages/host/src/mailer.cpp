@@ -112,17 +112,48 @@ std::string mime_message(const std::string& mailer_from, const identity::Mail& m
                              : "List-Unsubscribe: " + header_value(mail.list_unsubscribe) +
                                    "\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n") +
                         "Auto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\n";
-  if (mail.html.empty()) {
-    return headers + "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding + "\r\n\r\n" + text;
+  std::string text_part = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding + "\r\n\r\n" +
+                          text + (text.ends_with("\r\n") ? "" : "\r\n");
+  bool alternative = !mail.html.empty() || !mail.calendar.empty();
+  if (!alternative && mail.attachments.empty()) return headers + text_part;
+  // Text first, HTML, then the invite: a client shows the last part it can (RFC 2046 § 5.1.4),
+  // and Gmail and Outlook show a text/calendar alternative with RSVP buttons. HTML and the
+  // calendar go as base64, so no line can break SMTP, and the boundaries can't occur in them.
+  std::string body = text_part;
+  std::string body_type = "";
+  if (alternative) {
+    std::string b = "=_goober_alt_" + id;
+    body = "--" + b + "\r\n" + text_part;
+    if (!mail.html.empty()) {
+      body += "--" + b + "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+              base64_lines(base::valid_utf8(mail.html));
+    }
+    if (!mail.calendar.empty()) {
+      body += "--" + b + "\r\nContent-Type: text/calendar; charset=utf-8; method=" + header_value(mail.calendar_method) +
+              "\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64_lines(mail.calendar);
+    }
+    body += "--" + b + "--\r\n";
+    body_type = "multipart/alternative; boundary=\"" + b + "\"";
   }
-  // Text first, HTML last: a client shows the last part it can (RFC 2046 § 5.1.4). The HTML
-  // goes as base64, so no line of it can break SMTP, and the boundary can't occur in either.
-  std::string boundary = "=_goober_" + id;
-  return headers + "Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n" +
-         "--" + boundary + "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding +
-         "\r\n\r\n" + text + (text.ends_with("\r\n") ? "" : "\r\n") + "--" + boundary +
-         "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
-         base64_lines(base::valid_utf8(mail.html)) + "--" + boundary + "--\r\n";
+  std::vector<identity::Mail::File> files = mail.attachments;
+  // The invite as a file too, for clients that don't read the alternative.
+  if (!mail.calendar.empty()) files.insert(files.begin(), {"invite.ics", "application/ics", mail.calendar});
+  if (files.empty()) return headers + "Content-Type: " + body_type + "\r\n\r\n" + body;
+  std::string m = "=_goober_mix_" + id;
+  std::string out = headers + "Content-Type: multipart/mixed; boundary=\"" + m + "\"\r\n\r\n--" + m + "\r\n";
+  out += alternative ? "Content-Type: " + body_type + "\r\n\r\n" + body : body;
+  for (const auto& f : files) {
+    // A file's name, quoted, without what would end the quote or the header.
+    std::string name;
+    for (char c : base::valid_utf8(f.filename)) {
+      if (c != '"' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) name += c;
+    }
+    std::string quoted = encoded_words(name) == name ? "\"" + name + "\"" : "\"" + encoded_words(name) + "\"";
+    out += "--" + m + "\r\nContent-Type: " + header_value(f.content_type) + "; name=" + quoted +
+           "\r\nContent-Disposition: attachment; filename=" + quoted + "\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+           base64_lines(f.bytes);
+  }
+  return out + "--" + m + "--\r\n";
 }
 
 MailQueue::MailQueue(ConfigFn config, CredentialsFn credentials, DevFn dev)

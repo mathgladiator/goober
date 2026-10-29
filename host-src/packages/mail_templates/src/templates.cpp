@@ -233,4 +233,15 @@ Rendered Store::wrap_text(std::string_view tenant, const std::string& subject, c
   return out ? *out : Rendered{subject, text, ""};
 }
 
+Rendered Store::wrap_html(std::string_view tenant, const std::string& subject, const std::string& text,
+                          const std::string& html_body, const bj::object& vars_in) const {
+  bj::object vars = vars_in;
+  for (const char* k : {"site", "email"}) {
+    if (!vars.contains(k)) vars[k] = "";
+  }
+  std::string err;
+  auto out = wrap(*get(tenant, kLayout), subject, text, html_body, vars, &err);
+  return out ? *out : Rendered{subject, text, ""};
+}
+
 }  // namespace goober::mail::templates

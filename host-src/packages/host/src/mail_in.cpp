@@ -20,7 +20,9 @@
 #include "goober/base/hash.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
+#include "goober/calendar/calendar.h"
 #include "goober/host/host.h"
+#include "goober/mail_inbound/reply.h"
 #include "mail_hash.h"
 #include "goober/json/json.h"
 #include "goober/mail_inbound/address.h"
@@ -425,6 +427,7 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
                    {"reply_to", mailboxes(message.reply_to)},
                    {"subject", message.subject},
                    {"text", message.text},
+                   {"reply_text", inbound::reply_text(message.text)},
                    {"html", message.html},
                    {"message_id", message.message_id},
                    {"in_reply_to", message.in_reply_to},
@@ -434,6 +437,15 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
                    {"automatic", automatic},
                    {"truncated", message.truncated},
                    {"bytes", size}};
+  // An answer to a calendar invite (RFC 5546 REPLY), read from its text/calendar part.
+  for (const auto& part : message.attachments) {
+    if (part.content_type != "text/calendar" && part.content_type != "application/ics" && !part.filename.ends_with(".ics")) continue;
+    if (auto r = calendar::parse_reply(part.bytes)) {
+      typed["calendar"] = bj::object{{"method", r->method},     {"uid", r->uid},         {"attendee", r->attendee},
+                                     {"partstat", r->partstat}, {"sequence", r->sequence}, {"comment", r->comment}};
+      break;
+    }
+  }
   if (!match->reply_recipient.empty()) {
     // Whether the reply came from the address the token was sent to: a forwarded token still
     // works, but the box can tell.

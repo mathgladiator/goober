@@ -146,6 +146,9 @@ Read these before doing design work:
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
+  - `design/machine/783.ThesisCommunity.md`: a community that meets by mail (jeffrey.io's agentic
+    social network): the audit, markdown on `send`, `reply_text`, calendar invites and RSVPs,
+    attachments on `send`, and the box recipe (one digest a day, one reply a day).
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

@@ -10,6 +10,7 @@
 #include "../src/keys.h"
 #include "../src/mail_hash.h"
 #include "../src/mailer.h"
+#include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -133,11 +134,13 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
 }
 
 // A box that answers fan@example.org in a thread, from the tenant's own address.
-void upload_outreach(host::Host& host, const std::string& in_reply_to = "abc@mail.example.org") {
-  std::string send = R"({"to":"Fan@Example.org","subject":"Re: Brisket","text":"Thanks for writing.",)"
-                     R"("in_reply_to":")" + in_reply_to + R"(","references":"<root@mail.example.org> abc@mail.example.org"})";
+void upload_outreach(host::Host& host, const std::string& in_reply_to = "abc@mail.example.org", std::string send = "") {
+  if (send.empty()) {
+    send = R"({"to":"Fan@Example.org","subject":"Re: Brisket","text":"Thanks for writing.",)"
+           R"("in_reply_to":")" + in_reply_to + R"(","references":"<root@mail.example.org> abc@mail.example.org"})";
+  }
   std::string escaped;
-  for (char c : send) escaped += c == '"' ? std::string("\\22") : std::string(1, c);
+  for (char c : send) escaped += c == '"' ? std::string("\\22") : c == '\\' ? std::string("\\5c") : std::string(1, c);
   std::string wat = R"((module
   (import "goober" "goober_call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
@@ -333,4 +336,59 @@ TEST_F(MailTest, RepliesInAThreadThePersonStartedGetMoreRoom) {
   ASSERT_EQ(post(port, "/reach", &body), 200) << body;
   host->outbox_tick(base::now_unix_ms());
   EXPECT_EQ(fake.mails().size(), 3u);
+}
+
+// A thesis community's digest (design/machine/783.ThesisCommunity.md): written in markdown by
+// its agent, with a calendar invite once enough people want to meet, and a file attached.
+TEST_F(MailTest, ADigestInMarkdownCarriesAnInviteAndAFile) {
+  start("");
+  std::string err;
+  auto pdf = host->attachments().put("playground", "%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n", "agenda.pdf", "", "public",
+                                     base::now_unix_ms(), &err);
+  ASSERT_TRUE(pdf) << err;
+  std::string send = R"({"to":"ada@example.org","subject":"Today in the KC Thesis","markdown":"**Three proposals.** Q39 leads.\n\n- Thursday\n- Saturday",)"
+                     R"("invite":{"uid":"meetup-7","start":"2026-11-05T18:00:00-06:00","end":"2026-11-05T20:00:00-06:00","summary":"Brisket night","location":"Q39"},)"
+                     R"("attachments":[)" + std::to_string(pdf->id) + R"(]})";
+  upload_outreach(*host, "", send);
+  std::string body;
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  ASSERT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
+  ASSERT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  auto mails = fake.mails();
+  ASSERT_EQ(mails.size(), 1u);
+  const std::string& m = mails[0];
+  EXPECT_NE(m.find("Content-Type: multipart/mixed;"), std::string::npos) << m;
+  EXPECT_NE(m.find("Content-Type: multipart/alternative;"), std::string::npos);
+  EXPECT_NE(m.find("Content-Type: text/calendar; charset=utf-8; method=REQUEST"), std::string::npos);
+  EXPECT_NE(m.find("filename=\"invite.ics\""), std::string::npos);
+  EXPECT_NE(m.find("Content-Type: application/pdf; name=\"agenda.pdf\""), std::string::npos);
+  // The text part is the markdown as written; the HTML is it rendered, in the layout.
+  EXPECT_NE(m.find("**Three proposals.** Q39 leads."), std::string::npos);
+  auto decoded_parts = [&](const std::string& type) {
+    std::string out;
+    for (size_t at = m.find("Content-Type: " + type); at != std::string::npos; at = m.find("Content-Type: " + type, at + 1)) {
+      size_t start = m.find("\r\n\r\n", at) + 4, end = m.find("--=_goober", start);
+      std::string b64;
+      for (char c : m.substr(start, end - start)) if (c != '\r' && c != '\n') b64 += c;
+      out += base::base64_decode(b64).value_or("");
+    }
+    return out;
+  };
+  std::string html = decoded_parts("text/html");
+  EXPECT_NE(html.find("<strong>Three proposals.</strong>"), std::string::npos) << html;
+  EXPECT_NE(html.find("<li>Thursday</li>"), std::string::npos) << html;
+  std::string ics = decoded_parts("text/calendar");
+  for (size_t p; (p = ics.find("\r\n ")) != std::string::npos;) ics.erase(p, 3);  // unfold
+  EXPECT_NE(ics.find("UID:meetup-7@kc.example"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("ORGANIZER;CN=\"KC Meat Up\":mailto:hello@kc.example"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ada@example.org"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("DTSTART:20261106T000000Z"), std::string::npos) << ics;
+
+  // A bad invite, or someone else's attachment, fails in the call.
+  upload_outreach(*host, "", R"({"to":"ada@example.org","subject":"x","text":"x","invite":{"uid":"a b","start":"soon","summary":"x"}})");
+  ASSERT_EQ(post(port, "/reach", &body), 200);
+  EXPECT_NE(body.find("invite.uid"), std::string::npos) << body;
+  upload_outreach(*host, "", R"({"to":"ada@example.org","subject":"x","text":"x","attachments":[999]})");
+  ASSERT_EQ(post(port, "/reach", &body), 200);
+  EXPECT_NE(body.find("isn't one of this tenant's"), std::string::npos) << body;
 }

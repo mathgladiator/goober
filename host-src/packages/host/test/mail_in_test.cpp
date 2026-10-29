@@ -344,3 +344,25 @@ TEST_F(MailInTest, ACatchAllTakesWhatNothingElseClaims) {
   auto typed = json::parse(std::string(got[0].at(1).as_string()), &err)->as_object();
   EXPECT_TRUE(typed.at("automatic").as_bool());
 }
+
+// A member's reply to a digest (design/machine/783.ThesisCommunity.md): the box gets their own
+// words without the quoted digest, and an RSVP's answer from its text/calendar part.
+TEST_F(MailInTest, RepliesComeWithTheirOwnWordsAndRsvps) {
+  std::string mixed = "Subject: Accepted: Brisket night\r\nContent-Type: multipart/mixed; boundary=b";
+  std::string ics = "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:meetup-7@kcmeatup.com\r\n"
+                    "ATTENDEE;PARTSTAT=ACCEPTED;CN=Ann:mailto:ann@example.org\r\nSEQUENCE:0\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  std::string body = "--b\r\nContent-Type: text/plain\r\n\r\nI'll bring the sauce.\r\n\r\nOn Tue, Oct 29, 2026 at 6:00 AM "
+                     "The KC Thesis <thesis@kcmeatup.com> wrote:\r\n> Three proposals today\r\n\r\n--b\r\n"
+                     "Content-Type: text/calendar; method=REPLY; charset=utf-8\r\n\r\n" + ics + "--b--\r\n";
+  EXPECT_EQ(action(call(hook("data", {"support@kcmeatup.com"}, mixed, body))), "discard");
+  auto got = rows();
+  ASSERT_EQ(got.size(), 1u);
+  std::string err;
+  auto typed = json::parse(std::string(got[0].at(1).as_string()), &err)->as_object();
+  EXPECT_EQ(typed.at("reply_text"), "I'll bring the sauce.");
+  ASSERT_TRUE(typed.contains("calendar")) << json::dump(typed);
+  EXPECT_EQ(typed.at("calendar").at("method"), "REPLY");
+  EXPECT_EQ(typed.at("calendar").at("uid"), "meetup-7@kcmeatup.com");
+  EXPECT_EQ(typed.at("calendar").at("partstat"), "ACCEPTED");
+  EXPECT_EQ(typed.at("calendar").at("attendee"), "ann@example.org");
+}

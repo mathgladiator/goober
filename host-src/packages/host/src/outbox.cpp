@@ -232,6 +232,21 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   mail.references = text("references");
   mail.list_unsubscribe = text("list_unsubscribe");
   mail.tenant = tenant;
+  mail.calendar = text("calendar");
+  mail.calendar_method = text("calendar_method");
+  if (auto* files = o.if_contains("attachments"); files && files->is_array()) {
+    for (const auto& f : files->as_array()) {
+      if (!f.is_object() || !f.as_object().contains("id") || !f.as_object().at("id").is_int64()) continue;
+      auto bytes = attachments_->read(tenant, f.as_object().at("id").as_int64());
+      if (!bytes) {
+        out.status = 410;
+        out.error = "an attachment was deleted before the mail went";
+        return out;
+      }
+      const auto& fo = f.as_object();
+      mail.attachments.push_back({std::string(fo.at("name").as_string()), std::string(fo.at("content_type").as_string()), *bytes});
+    }
+  }
   // Unsubscribed since the box sent it: refused for good.
   if (mail_suppressed(tenant, mail.to)) {
     out.status = 403;

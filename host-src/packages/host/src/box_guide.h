@@ -226,6 +226,14 @@ operator saves a template of the site's own (mail_template_put, like "order-read
 sends {"to", "template": "order-ready", "vars": {"name": "Ann"}} instead of subject and text;
 {{site}} and {{email}} (the recipient) are filled in. The host's own mails (sign-in codes and
 the rest) can't be sent by a box.
+"markdown": "..." in place of text sends what a model wrote: the text part as written, the HTML
+rendered (raw HTML escaped) in the layout. "attachments": [12, 13] attaches up to 3 of the
+tenant's attachments (attachment_put), 10 MiB in all. "invite": {"uid": "meetup-7", "start":
+"2026-11-05T18:00:00-06:00", "end": "...", "summary": "Brisket night", "location": "Q39",
+"description": "...", "url": "https://...", "sequence": 0, "cancel": false} makes it a calendar
+invite (RFC 5546) from your address to this recipient: Gmail, Outlook, and Apple Mail show it
+with Yes/Maybe/No. Keep uid per event; raise sequence to change it; cancel: true withdraws it.
+Times carry their zone (Z or an offset), or are dates for all-day events.
 
 ## Receiving mail
 
@@ -241,7 +249,13 @@ support@ is that address on every domain the box serves (support@example.com for
 The request's body is the message as JSON: {to, envelope_from, from: {address, name}, sender
 (a verified address, or null), to_list, cc, reply_to, subject, text, html, message_id,
 in_reply_to, references, date, attachments: [{id, filename, content_type, bytes, inline,
-content_id}], automatic, truncated, bytes}. text is always there (made from the HTML if needed).
+content_id}], automatic, truncated, bytes, reply_text, calendar?}. text is always there (made from
+the HTML if needed). reply_text is the person's own words: the text above what they quote,
+without "On ... wrote:", quoted lines, Outlook's header block, a signature, or "Sent from my
+iPhone" (put "reply above this line" in what you send and that cuts too). An RSVP to your
+invite arrives with calendar: {method: "REPLY", uid: "meetup-7@your.domain", attendee,
+partstat: ACCEPTED | DECLINED | TENTATIVE, sequence, comment}; to get it, send invites from an
+address a mail route takes, and let that route take an attachment (the .ics).
 Answer 2xx (or nothing) to accept: the sender's server hears 250. Answer 4xx with
 {"error": "..."} to refuse: it hears 550 with your words. Answer 503 to defer: it hears 451
 and tries again later; your writes roll back. A failure or timeout defers too.
@@ -276,6 +290,18 @@ the capability; count your model calls a day and stop past a limit (the host als
 to one service, 1000 a day by default, and says so in the call's error); never answer your own mail;
 when send says unsubscribed, mark the contact and stop. The model's key: key_set tenant, name
 xai, host api.x.ai; declare "credentials": "keys/tenant/{!tenant}/xai".
+
+## A community that meets by mail (one digest a day, one reply a day)
+
+The shape of design/machine/783.ThesisCommunity.md: members are rows (email, zone, joined,
+last_reply_day), not accounts. A by_timer source fires each member's digest at 7:00 in their
+zone; the digest is markdown the agent drafted, sent with "reply": {"route": "digest_reply",
+"params": {"member": "<id>", "day": "2026-10-29"}}, so a reply arrives on a token route already
+knowing who and which day. digest_reply keeps reply_text if the member hasn't replied today
+(else answers 4xx: "one reply a day"), and a model call (outbox, result route) clusters the
+day's replies into the shared model: proposals, agreements, conflicts. Past a threshold the box
+sends an invite; RSVPs come back as calendar on the same mail route. Join and leave by mail
+(join@ and the unsubscribe link). Raise config mail.daily-max past the member count.
 
 ## Reading the web
 

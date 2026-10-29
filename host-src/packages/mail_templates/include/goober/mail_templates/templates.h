@@ -79,6 +79,9 @@ class Store {
   // Wraps a mail a box wrote as plain text in the tenant's layout, for its HTML part.
   Rendered wrap_text(std::string_view tenant, const std::string& subject, const std::string& text,
                      const bj::object& vars) const;
+  // The same, for a mail whose HTML body the host already rendered (markdown).
+  Rendered wrap_html(std::string_view tenant, const std::string& subject, const std::string& text,
+                     const std::string& html_body, const bj::object& vars) const;
 
  private:
   std::filesystem::path file(std::string_view tenant, std::string_view name) const;

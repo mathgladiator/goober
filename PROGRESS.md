@@ -384,6 +384,13 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       offline pages and the fallback.
 - [ ] A real push end to end on a phone (the human's step), and a panel view of apps.
 
+### Phase 19: a community that meets by mail (783)
+- [x] `"markdown"` on `send` (M6); `"attachments"` on `send` (M4); `"invite"` on `send`:
+      RFC 5545/5546 invites (the `calendar` package); RSVPs read back as `calendar`.
+- [x] `reply_text` on received mail: the person's own words, without the quoted digest.
+- [x] The recipe in `box_guide` and 783.
+- [ ] Bounces and complaints reaching the box (M2); the community box itself (Grok builds it).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),
