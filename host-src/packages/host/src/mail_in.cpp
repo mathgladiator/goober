@@ -20,7 +20,7 @@
 #include "goober/base/hash.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
-#include "goober/calendar/calendar.h"
+#include "goober/libraries/libraries.h"
 #include "goober/host/host.h"
 #include "goober/mail_inbound/reply.h"
 #include "mail_hash.h"
@@ -437,12 +437,18 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
                    {"automatic", automatic},
                    {"truncated", message.truncated},
                    {"bytes", size}};
-  // An answer to a calendar invite (RFC 5546 REPLY), read from its text/calendar part.
+  // A calendar in the message (an RSVP, a proposal, an invite), as ics@1's interpret reads it
+  // for the address it came to (design/machine/831.Libraries.md § 6).
   for (const auto& part : message.attachments) {
     if (part.content_type != "text/calendar" && part.content_type != "application/ics" && !part.filename.ends_with(".ics")) continue;
-    if (auto r = calendar::parse_reply(part.bytes)) {
-      typed["calendar"] = bj::object{{"method", r->method},     {"uid", r->uid},         {"attendee", r->attendee},
-                                     {"partstat", r->partstat}, {"sequence", r->sequence}, {"comment", r->comment}};
+    libraries::Context lctx{base::now_unix_ms()};
+    std::string out = libraries::call(*libraries::find("ics", 1), "interpret",
+                                      json::dump(bj::object{{"ics", part.bytes}, {"me", match->to}}), lctx);
+    std::string perr;
+    if (auto v = json::parse(out, &perr); v && v->is_object() && !v->as_object().contains("error")) {
+      bj::object meaning = std::move(v->as_object());
+      meaning["ics"] = part.bytes.size() <= 262144 ? bj::value(part.bytes) : bj::value(nullptr);
+      typed["calendar"] = std::move(meaning);
       break;
     }
   }

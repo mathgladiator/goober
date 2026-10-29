@@ -194,6 +194,13 @@ struct Manifest {
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;
   std::vector<ExternalService> external;
+  // Host libraries the box calls through goober_lib (design/machine/831.Libraries.md): the name
+  // it calls one by, and which library and major version ("time@1"). The host checks them.
+  struct LibraryImport {
+    std::string alias, library;
+    int major = 1;
+  };
+  std::vector<LibraryImport> libraries;
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
 
   bool applies_to(std::string_view domain) const;

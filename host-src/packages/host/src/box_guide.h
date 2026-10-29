@@ -291,6 +291,31 @@ to one service, 1000 a day by default, and says so in the call's error); never a
 when send says unsubscribed, mark the contact and stop. The model's key: key_set tenant, name
 xai, host api.x.ai; declare "credentials": "keys/tenant/{!tenant}/xai".
 
+## Host libraries: time and calendars
+
+Heavy, subtle work the host does for every box, behind versioned contracts: import them, then
+call with goober_lib (Rust: goober::lib(name, function, json)). library_list and library_get
+show every function's input, output, and examples.
+"libraries": {"time": "time@1", "ics": "ics@1"}
+time@1: now (the request's clock), parse, format (local, weekday, offset, ISO week), to_utc (gaps
+and overlaps said), add (calendar units in a zone: a day across DST is 23 or 25 hours), diff,
+start_of, zone, zones, and recur (an RRULE's instances on the wall clock: "every Thursday at 7
+in Chicago" stays at 7). Zones are IANA names; answers name the tzdata version.
+ics@1: parse and build (iCalendar as events in JSON), invite (REQUEST or CANCEL for attendees),
+respond (an attendee's ACCEPTED, DECLINED, TENTATIVE, or with propose {start, end}, a COUNTER),
+interpret (one word for what arrived: invite, update, accepted, declined, tentative,
+proposal, counter_declined, cancelled, ...), counter_accept (move the event, raise its
+sequence, ask everyone again), counter_decline, and expand (instances with exceptions and
+moved ones). Times are {local, zone}, {ms}, {utc}, RFC 3339 text, or {date} for all day.
+Invites by mail: send {"to", "subject", "text", "invite": {...}} for the simple case, or build
+any calendar with ics@1 and send it as {"ics": ...}. A received message's calendar is
+ics@1's interpret for the address it came to: {kind, uid, sequence, attendee, partstat,
+proposed?, comment, event, ics}. So a box's mail route handles RSVPs and proposals:
+  accepted / declined / tentative: record partstat for (uid, attendee)
+  proposal: decide (a rule, the agent, or the people), then send counter_accept's ics to every
+            attendee, or counter_decline's ics to the one who proposed
+  cancelled / update: change your copy of the event
+
 ## A community that meets by mail (one digest a day, one reply a day)
 
 The shape of design/machine/783.ThesisCommunity.md: members are rows (email, zone, joined,

@@ -11,6 +11,8 @@
 
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "goober/calendar/zones.h"
+#include "goober/libraries/libraries.h"
 #include "goober/operations/changes.h"
 #include "goober/operations/traffic.h"
 #include "goober/panel/assets.h"
@@ -36,7 +38,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "mail_unsubscribed", "mail_template_list", "mail_template_get", "mail_template_preview", "source_list",
     "source_read",     "source_log",        "source_diff",      "source_job",      "backup_status",
     "key_list",        "crawl_list",        "crawl_pages",      "crawl_records",   "box_guide",
-    "site_guide",      "rust_binding",      "pwa_get",          "pwa_list",        "pwa_subscriptions"};
+    "site_guide",      "rust_binding",      "pwa_get",          "pwa_list",        "pwa_subscriptions",
+    "library_list",    "library_get"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -250,6 +253,34 @@ void Host::run_traffic() {
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return timers_stopping_; });
   }
+}
+
+void Host::register_library_tools() {
+  using mcp::object_schema;
+  using mcp::string_property;
+  mcp_->add_tool({"library_list",
+                  "The host libraries a manifest can import (\"libraries\": {\"time\": \"time@1\"}) and call with goober_lib: "
+                  "each name, major version, what it's for, and its functions (design/machine/831.Libraries.md).",
+                  object_schema({}, {}), [](const bj::object&) {
+                    bj::array out;
+                    for (const auto& l : libraries::all()) {
+                      bj::array fns;
+                      for (const auto& f : l.functions) fns.push_back(bj::value(f.name));
+                      out.push_back(bj::object{{"library", l.name + "@" + std::to_string(l.major)},
+                                               {"description", l.description},
+                                               {"functions", std::move(fns)}});
+                    }
+                    return ToolResult::ok(bj::object{{"libraries", std::move(out)}, {"tzdata", calendar::tzdata_version()}});
+                  }});
+  mcp_->add_tool({"library_get",
+                  "One library's contract: every function with its input and output schema and examples.",
+                  object_schema({{"library", string_property("Like time@1 or ics@1.")}}, {"library"}),
+                  [](const bj::object& args) {
+                    auto ref = libraries::parse_ref(arg_text(args, "library"));
+                    const auto* lib = ref ? libraries::find(ref->first, ref->second) : nullptr;
+                    if (!lib) return ToolResult::fail("no such library; library_list shows them");
+                    return ToolResult::ok(libraries::describe(*lib));
+                  }});
 }
 
 void Host::register_panel_tools() {

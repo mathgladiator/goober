@@ -11,6 +11,7 @@
 #include "rust_binding.h"
 #include "keys.h"
 #include "goober/host/host.h"
+#include "goober/libraries/libraries.h"
 #include "goober/json/json.h"
 
 namespace goober::host {
@@ -29,6 +30,15 @@ std::optional<std::string> arg(const bj::object& args, const char* key) {
 
 // Both sides of every internal call agree, and no chain of calls comes back around (039).
 bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
+  // Libraries the host serves (design/machine/831.Libraries.md § 2).
+  for (const auto& l : m.libraries) {
+    if (!libraries::find(l.library, l.major)) {
+      std::string have;
+      for (const auto& x : libraries::all()) have += (have.empty() ? "" : ", ") + x.name + "@" + std::to_string(x.major);
+      *error = "libraries." + l.alias + ": this host has no " + l.library + "@" + std::to_string(l.major) + " (it has " + have + ")";
+      return false;
+    }
+  }
   auto active = boxes_->active();
   // Every box's manifest as it would be with this version in place.
   std::map<std::string, const manifest::Manifest*> boxes;

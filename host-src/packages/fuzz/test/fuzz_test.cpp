@@ -2,6 +2,9 @@
 // (design/machine/013.SecurityReview.md § Next time). Each target must neither crash nor
 // take more than three seconds on any input.
 
+#include "goober/calendar/ics.h"
+#include "goober/calendar/rrule.h"
+#include "goober/libraries/libraries.h"
 #include <gtest/gtest.h>
 
 #include <boost/asio.hpp>
@@ -330,4 +333,47 @@ TEST(Fuzz, PageDeltasAndSealedFiles) {
       throw std::runtime_error("a changed sealed file was accepted");
     }
   });
+}
+
+// iCalendar and the libraries that read it (design/machine/831.Libraries.md): any bytes parse
+// or are refused, never crash, and recurrences stay inside their limits.
+TEST(Fuzz, IcalendarAndRecurrence) {
+  const std::string invite =
+      "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:X\r\nBEGIN:STANDARD\r\nDTSTART:16010101T020000\r\n"
+      "TZOFFSETFROM:-0500\r\nTZOFFSETTO:-0600\r\nRRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n"
+      "BEGIN:VEVENT\r\nUID:a@b\r\nDTSTART;TZID=X:20261105T180000\r\nDTEND;TZID=America/Chicago:20261105T200000\r\n"
+      "RRULE:FREQ=WEEKLY;BYDAY=TH,FR;COUNT=50\r\nEXDATE:20261112T000000Z\r\nATTENDEE;PARTSTAT=ACCEPTED;CN=\"A, B\":mailto:a@b.c\r\n"
+      " \r\nSUMMARY:x\\, y\\n z\r\nBEGIN:VALARM\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  const std::string counter =
+      "BEGIN:VCALENDAR\nMETHOD:COUNTER\nBEGIN:VEVENT\nUID:a@b\nDTSTART;VALUE=DATE:20261106\nATTENDEE:mailto:z@y.x\nEND:VEVENT\n"
+      "END:VCALENDAR\n";
+  const auto* ics = libraries::find("ics", 1);
+  fuzz::run("icalendar", {invite, counter},
+            {"BEGIN:", "END:", "VCALENDAR", "VEVENT", "VTIMEZONE", "\r\n", "\n ", ";", ":", ",", "\"", "=", "TZID=",
+             "RRULE:", "FREQ=SECONDLY", "BYSETPOS=-1", "BYDAY=-53MO", "BYWEEKNO=53", "COUNT=", "UNTIL=99991231",
+             "INTERVAL=0", "DTSTART:", "Z", "T", "\\", "\\n", "PARTSTAT=", "METHOD:", "DURATION:P", "BYYEARDAY=-366"},
+            fuzz::iterations(3000), [&](const std::string& in) {
+              std::string err;
+              if (auto p = calendar::parse(in, &err)) {
+                for (const auto& c : p->components) (void)calendar::serialize(c);
+              }
+              libraries::Context ctx{1793286000000};
+              bj::object arg{{"ics", in}, {"me", "a@b.c"}};
+              for (const char* fn : {"parse", "interpret"}) (void)libraries::call(*ics, fn, json::dump(arg), ctx);
+              arg["from"] = "2026-01-01T00:00:00Z";
+              arg["to"] = "2028-01-01T00:00:00Z";
+              (void)libraries::call(*ics, "expand", json::dump(arg), ctx);
+            });
+  // Rules alone, expanded far: bounded by the cap, whatever they say.
+  fuzz::run("rrule", {"FREQ=DAILY;COUNT=10", "FREQ=MONTHLY;BYDAY=-1FR;BYSETPOS=1", "FREQ=YEARLY;BYWEEKNO=1,-1;BYDAY=MO"},
+            {";", "=", ",", "BYDAY=", "BYMONTHDAY=", "BYHOUR=", "BYMINUTE=", "BYSECOND=", "FREQ=SECONDLY", "FREQ=YEARLY",
+             "-", "1", "53", "366", "MO", "SU", "WKST=", "INTERVAL=", "BYSETPOS="},
+            fuzz::iterations(2000), [&](const std::string& in) {
+              std::string err;
+              if (auto r = calendar::parse_rule(in, &err)) {
+                auto e = calendar::expand(calendar::Civil{2026, 1, 31, 9, 0, 0}, *r, calendar::Civil{2030, 1, 1}, 2000,
+                                          [](const calendar::Civil& c) { return calendar::civil_seconds(c) * 1000; });
+                EXPECT_LE(e.instances.size(), 2000u);
+              }
+            });
 }

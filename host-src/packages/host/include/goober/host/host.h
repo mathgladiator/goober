@@ -137,6 +137,7 @@ class Host {
   void handle_panel(const server::http::Request& req, const Finish& finish, const std::string& path,
                     const std::string& domain);
   void register_panel_tools();
+  void register_library_tools();
   // An operator's host roles: tokens are host:owner; an OAuth operator's come from the config.
   std::vector<std::string> operator_roles(const std::string& operator_name) const;
   static bool may_change(const std::vector<std::string>& roles);

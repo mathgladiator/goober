@@ -380,7 +380,7 @@ TEST_F(MailTest, ADigestInMarkdownCarriesAnInviteAndAFile) {
   std::string ics = decoded_parts("text/calendar");
   for (size_t p; (p = ics.find("\r\n ")) != std::string::npos;) ics.erase(p, 3);  // unfold
   EXPECT_NE(ics.find("UID:meetup-7@kc.example"), std::string::npos) << ics;
-  EXPECT_NE(ics.find("ORGANIZER;CN=\"KC Meat Up\":mailto:hello@kc.example"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("ORGANIZER;CN=KC Meat Up:mailto:hello@kc.example"), std::string::npos) << ics;
   EXPECT_NE(ics.find("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ada@example.org"), std::string::npos) << ics;
   EXPECT_NE(ics.find("DTSTART:20261106T000000Z"), std::string::npos) << ics;
 

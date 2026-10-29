@@ -1,6 +1,6 @@
 goober_package(
   NAME calendar
-  SOURCES src/calendar.cpp
+  SOURCES src/zones.cpp src/rrule.cpp src/ics.cpp
   DEPS goober_base
-  TESTS test/calendar_test.cpp
+  TESTS test/rrule_test.cpp
 )

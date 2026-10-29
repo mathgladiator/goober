@@ -988,7 +988,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   for (const auto& kv : root) {
     std::string key(kv.key());
     if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
-        key == "templates" || key == "data" || key == "types" || key == "external") {
+        key == "templates" || key == "data" || key == "types" || key == "external" || key == "libraries") {
       continue;
     }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
@@ -1050,6 +1050,26 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   if (!err.empty()) return *error = err, std::nullopt;
   if (const auto* ext = get_object(root, "external", &err)) {
     if (!parse_external(*ext, &m, error)) return std::nullopt;
+  }
+  if (const auto* libs = get_object(root, "libraries", &err)) {
+    for (const auto& kv : *libs) {
+      std::string alias(kv.key());
+      if (!valid_identifier(alias)) return *error = "libraries." + alias + ": the name is an identifier", std::nullopt;
+      std::string ref = kv.value().is_string() ? std::string(kv.value().as_string()) : "";
+      auto at = ref.find('@');
+      int major = 0;
+      bool ok = at != std::string::npos && at > 0 && at + 1 < ref.size();
+      for (size_t i = 0; ok && i < at; ++i) {
+        char c = ref[i];
+        ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+      }
+      for (size_t i = at + 1; ok && i < ref.size(); ++i) {
+        ok = ref[i] >= '0' && ref[i] <= '9' && major < 1000;
+        if (ok) major = major * 10 + (ref[i] - '0');
+      }
+      if (!ok || major < 1) return *error = "libraries." + alias + " is a library and its major version, like \"time@1\"", std::nullopt;
+      m.libraries.push_back({alias, ref.substr(0, at), major});
+    }
   }
   if (!err.empty()) return *error = err, std::nullopt;
   if (const auto* data = get_object(root, "data", &err)) {

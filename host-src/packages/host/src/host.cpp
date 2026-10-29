@@ -1,5 +1,7 @@
 #include "build_id.h"
 #include "goober/host/host.h"
+#include "goober/calendar/zones.h"
+#include "goober/libraries/libraries.h"
 #include "goober/site/includes.h"
 
 #include <arpa/inet.h>
@@ -183,6 +185,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_source_tools();
   register_panel_tools();
   register_pwa_tools();
+  register_library_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -928,6 +931,28 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       return external_call(net, service, method, request);
     };
   }
+  // Host libraries (design/machine/831.Libraries.md): pure, on the request's clock, 10,000 calls
+  // a request at most.
+  int64_t library_calls = 0;
+  bool used_tzdata = false;
+  if (!m.libraries.empty()) {
+    input.lib = [&m, &library_calls, &used_tzdata, now = input.now_ms](std::string_view alias, std::string_view fn,
+                                                                         std::string_view arg) -> std::string {
+      const manifest::Manifest::LibraryImport* import = nullptr;
+      for (const auto& l : m.libraries) {
+        if (l.alias == alias) import = &l;
+      }
+      if (!import) return json::dump(bj::object{{"error", "no library named " + std::string(alias) + " in the manifest"},
+                                                {"code", "unknown_library"}});
+      const auto* lib = libraries::find(import->library, import->major);
+      if (!lib) return R"({"error":"the host no longer has this library","code":"unknown_library"})";
+      if (++library_calls > 10000) return R"({"error":"over 10000 library calls in one request","code":"limit"})";
+      libraries::Context ctx{now};
+      std::string out = libraries::call(*lib, fn, arg, ctx);
+      used_tzdata |= ctx.used_tzdata;
+      return out;
+    };
+  }
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(options.timeout_ms ? options.timeout_ms : m.behavior.timeout_ms),
                                    cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
@@ -960,6 +985,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                    {"seed", std::to_string(input.seed)},
                    {"now_ms", input.now_ms}};
   if (who) extra["user_id"] = std::to_string(who->user.user_id);
+  if (library_calls) extra["libraries"] = library_calls;
+  if (used_tzdata) extra["tzdata"] = calendar::tzdata_version();  // for a replay on newer rules
   // A typed response must match its type: a box can't leak a field the schema doesn't name (037).
   if (std::string type = types::json_type_name(route.response);
       !type.empty() && result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status >= 200 &&

@@ -39,6 +39,9 @@ struct CallInput {
   // Calls a declared external service for goober_call: (service, method, request JSON) to a
   // result JSON (design/machine/015.Network.md). Without it, goober_call answers {"error"}.
   std::function<std::string(std::string_view, std::string_view, std::string_view)> call = {};
+  // Calls a declared host library for goober_lib: (library, function, argument JSON) to a result
+  // JSON (design/machine/831.Libraries.md). Without it, goober_lib answers {"error"}.
+  std::function<std::string(std::string_view, std::string_view, std::string_view)> lib = {};
 };
 
 struct LogLine {

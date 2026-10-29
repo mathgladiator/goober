@@ -425,3 +425,20 @@ TEST(Manifest, PushServices) {
     EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
   }
 }
+
+TEST(Manifest, Libraries) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"cal","domains":["*"],"libraries":{"time":"time@1","cal":"ics@1"}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->libraries.size(), 2u);
+  EXPECT_EQ(m->libraries[1].alias, "cal");  // in the manifest's order
+  EXPECT_EQ(m->libraries[1].library, "ics");
+  EXPECT_EQ(m->libraries[1].major, 1);
+  for (const char* bad : {R"({"box":"b","domains":["*"],"libraries":{"t":"time"}})",
+                          R"({"box":"b","domains":["*"],"libraries":{"t":"time@x"}})",
+                          R"({"box":"b","domains":["*"],"libraries":{"t-x":"time@1"}})",
+                          R"({"box":"b","domains":["*"],"libraries":{"t":"Time@1"}})",
+                          R"({"box":"b","domains":["*"],"libraries":["time@1"]})"}) {
+    EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
+  }
+}

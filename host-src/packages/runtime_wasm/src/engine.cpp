@@ -84,7 +84,7 @@ const std::vector<std::string>& abi_imports() {
   static const std::vector<std::string> kImports = {
       "goober_request_size", "goober_request_read", "goober_respond", "goober_header_set",
       "goober_now_ms",       "goober_random_fill",  "goober_log",        "goober_sql",
-      "goober_result_read",  "goober_call"};
+      "goober_result_read",  "goober_call",          "goober_lib"};
   return kImports;
 }
 
@@ -257,6 +257,28 @@ struct Engine::Impl {
                             return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
                           }),
          "goober_call");
+    must(linker.func_wrap("goober", "goober_lib",
+                          [](wasmtime::Caller caller, int32_t lib_ptr, int32_t lib_len, int32_t fn_ptr, int32_t fn_len,
+                             int32_t in_ptr, int32_t in_len) -> int32_t {
+                            auto& st = state_of(caller);
+                            auto mem = memory_of(caller);
+                            auto lib = view(mem, lib_ptr, lib_len);
+                            auto fn = view(mem, fn_ptr, fn_len);
+                            auto in = view(mem, in_ptr, in_len);
+                            if (!lib || !fn || !in) return -1;
+                            std::string l(*lib), f(*fn), a(*in);
+                            if (st.input->lib) {
+                              try {
+                                st.result = st.input->lib(l, f, a);
+                              } catch (...) {
+                                st.result = R"({"error":"the host's library failed","code":"bad_input"})";
+                              }
+                            } else {
+                              st.result = R"({"error":"this box declares no libraries","code":"unknown_library"})";
+                            }
+                            return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
+                          }),
+         "goober_lib");
     must(linker.func_wrap("goober", "goober_result_read",
                           [](wasmtime::Caller caller, int32_t ptr, int32_t len) -> int32_t {
                             auto& st = state_of(caller);

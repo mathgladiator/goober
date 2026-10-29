@@ -391,6 +391,15 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] The recipe in `box_guide` and 783.
 - [ ] Bounces and complaints reaching the box (M2); the community box itself (Grok builds it).
 
+### Phase 20: host libraries (831)
+- [x] `"libraries"` in manifests, checked at upload; `goober_lib` in the ABI and the Rust binding;
+      `library_list` and `library_get`; calls and tzdata on the access line.
+- [x] `time@1`: now, parse, format, to_utc, add, diff, start_of, zone, zones, recur.
+- [x] `ics@1`: parse, build, invite, respond (REPLY or COUNTER), interpret, counter_accept,
+      counter_decline, expand; the `calendar` package (RFC 5545 model, RRULE, VTIMEZONE, zones).
+- [x] Mail speaks ics@1: invites, `"ics"` on send, `calendar` on received mail.
+- [ ] Writing VTIMEZONEs; VTODO helpers; free/busy; a `locale@1`.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

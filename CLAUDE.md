@@ -149,6 +149,9 @@ Read these before doing design work:
   - `design/machine/783.ThesisCommunity.md`: a community that meets by mail (jeffrey.io's agentic
     social network): the audit, markdown on `send`, `reply_text`, calendar invites and RSVPs,
     attachments on `send`, and the box recipe (one digest a day, one reply a day).
+  - `design/machine/831.Libraries.md`: host libraries: closed, pure, versioned function sets a
+    manifest imports (`"libraries": {"time": "time@1"}`) and calls through `goober_lib`; time@1
+    (zones, calendar arithmetic, recurrence) and ics@1 (iCalendar, invites, replies, proposals).
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

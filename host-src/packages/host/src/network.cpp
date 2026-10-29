@@ -8,7 +8,7 @@
 #include <set>
 #include "network.h"
 #include "goober/render/markdown.h"
-#include "goober/calendar/calendar.h"
+#include "goober/libraries/libraries.h"
 
 
 #include <iostream>
@@ -395,14 +395,15 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   const char* kShape = "send takes {to, subject, text | markdown, reply_to?} or {to, template, vars?, reply_to?}, and reply? to "
                        "mint a reply address, in_reply_to? and references? (Message-IDs) to answer in a thread, invite? (a "
-                       "calendar event: {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}), and "
+                       "calendar event: {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}) or ics? (a "
+                       "calendar built with ics@1: a reply, a proposal, an answer to one), and "
                        "attachments? (up to 3 attachment ids, 10 MiB in all)";
   if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
     if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
         kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply" && kv.key() != "in_reply_to" &&
-        kv.key() != "references" && kv.key() != "markdown" && kv.key() != "invite" && kv.key() != "attachments") {
+        kv.key() != "references" && kv.key() != "markdown" && kv.key() != "invite" && kv.key() != "ics" && kv.key() != "attachments") {
       return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
@@ -519,30 +520,62 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
     html = wrapped.html;
     text = wrapped.text;
   }
-  // A calendar invite (RFC 5546), from the sending address, to this one recipient.
+  // A calendar invite (RFC 5546), from the sending address, to this one recipient, built by
+  // ics@1 (design/machine/831.Libraries.md § 6); or any calendar a box built with ics@1, as is.
   std::string ics, ics_method;
+  if (r.contains("invite") && r.contains("ics")) return fail("give invite or ics, not both");
   if (const auto* inv = r.if_contains("invite")) {
     if (!inv->is_object()) return fail("invite is {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}");
     const auto& io = inv->as_object();
+    static const std::set<std::string, std::less<>> kInvite = {"uid", "start", "end", "summary", "description",
+                                                               "location", "url", "sequence", "cancel"};
     for (const auto& kv : io) {
-      static const std::set<std::string, std::less<>> kInvite = {"uid", "start", "end", "summary", "description",
-                                                                 "location", "url", "sequence", "cancel"};
       if (!kInvite.count(kv.key())) return fail("invite has no field \"" + std::string(kv.key()) + "\"");
     }
-    auto field = [&](const char* k) {
-      auto* v = io.if_contains(k);
-      return v && v->is_string() ? std::string(v->as_string()) : std::string();
-    };
-    calendar::Invite invite{field("uid"), field("start"), field("end"), field("summary"), field("description"),
-                            field("location"), field("url")};
-    if (auto* q = io.if_contains("sequence"); q && q->is_int64()) invite.sequence = q->as_int64();
-    if (auto* c = io.if_contains("cancel"); c && c->is_bool()) invite.cancel = c->as_bool();
+    auto uid = io.if_contains("uid");
+    if (!uid || !uid->is_string() || uid->as_string().empty() || uid->as_string().size() > 128 ||
+        std::string_view(uid->as_string()).find_first_of(" \t\r\n@;,\\:\"") != std::string_view::npos) {
+      return fail("invite.uid is 1 to 128 characters without spaces, @, or punctuation, like meetup-7");
+    }
+    bj::object event;
+    for (const auto& kv : io) {
+      if (kv.key() != "cancel") event[kv.key()] = kv.value();
+    }
+    event["uid"] = std::string(uid->as_string()) + "@" + site;
+    bool cancel = io.contains("cancel") && io.at("cancel").is_bool() && io.at("cancel").as_bool();
     std::string organizer = from_address.empty() ? cfg->identity.from_address() : from_address;
+    bj::object org{{"email", organizer}};
+    if (!svc.mail_from_name.empty()) org["name"] = svc.mail_from_name;
+    libraries::Context lctx{base::now_unix_ms()};
+    std::string out = libraries::call(*libraries::find("ics", 1), "invite",
+                                      json::dump(bj::object{{"event", event}, {"organizer", org},
+                                                            {"attendees", bj::array{bj::object{{"email", to}}}},
+                                                            {"method", cancel ? "CANCEL" : "REQUEST"}}),
+                                      lctx);
     std::string err;
-    auto built = calendar::invite_ics(invite, site, organizer, svc.mail_from_name, to, base::now_unix_ms(), &err);
-    if (!built) return fail(err);
-    ics = *built;
-    ics_method = invite.cancel ? "CANCEL" : "REQUEST";
+    auto built = json::parse(out, &err);
+    if (!built || !built->is_object() || built->as_object().contains("error")) {
+      std::string why = built && built->is_object() && built->as_object().contains("error")
+                            ? std::string(built->as_object().at("error").as_string())
+                            : "the invite couldn't be built";
+      return fail("invite: " + why);
+    }
+    ics = std::string(built->as_object().at("ics").as_string());
+    ics_method = cancel ? "CANCEL" : "REQUEST";
+  } else if (const auto* raw = r.if_contains("ics")) {
+    if (!raw->is_string() || raw->as_string().size() > 262144) return fail("ics is a calendar's text, at most 256 KiB (from ics@1)");
+    libraries::Context lctx{base::now_unix_ms()};
+    std::string out = libraries::call(*libraries::find("ics", 1), "interpret", json::dump(bj::object{{"ics", *raw}}), lctx);
+    std::string err;
+    auto meaning = json::parse(out, &err);
+    std::string method = meaning && meaning->is_object() && meaning->as_object().contains("method")
+                             ? std::string(meaning->as_object().at("method").as_string())
+                             : "";
+    static const std::set<std::string, std::less<>> kMethods = {"PUBLISH", "REQUEST", "REPLY", "ADD", "CANCEL",
+                                                                "REFRESH", "COUNTER", "DECLINECOUNTER"};
+    if (!kMethods.count(method)) return fail("ics isn't a calendar with an iTIP METHOD (build it with ics@1)");
+    ics = std::string(raw->as_string());
+    ics_method = method;
   }
   // Files the tenant stored as attachments (060), read when the mail goes.
   bj::array files;
