@@ -165,6 +165,11 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
       if (auto in = get_string(def, "input", &err)) {
         if (types::json_type_name(*in).empty()) return *error = at + ".input must be json:$Type", false;
         tool.input = *in;
+      } else if (!def.contains("input")) {
+        // Listed with a schema that takes nothing: a tool whose description asks for arguments
+        // can't be given them.
+        m->warnings.push_back(at + " has no input, so it takes no arguments; give it \"input\": \"json:$Type\" if "
+                              "it needs any");
       }
       if (auto r = get_string(def, "response", &err)) {
         if (*r != "json" && *r != "text" && types::json_type_name(*r).empty()) {

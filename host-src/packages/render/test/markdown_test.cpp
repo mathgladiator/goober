@@ -110,3 +110,12 @@ TEST(Markdown, HostileInputIsBoundedInDepthAndTime) {
   // Ordinary documents are untouched by the limits.
   EXPECT_EQ(markdown_to_html("> > *hi*"), "<blockquote>\n<blockquote>\n<p><em>hi</em></p>\n</blockquote>\n</blockquote>\n");
 }
+
+TEST(Markdown, TextLeavesOutWhatReadersNeverSee) {
+  using goober::render::html_to_text;
+  EXPECT_EQ(html_to_text("<style>.x{color:red}</style><p>Salt &amp; pepper</p>"), "Salt & pepper");
+  EXPECT_EQ(html_to_text("<STYLE type=\"text/css\">a{}</Style>Hi<script>var a = '<p>';</script> there"), "Hi there");
+  EXPECT_EQ(html_to_text("<!-- note --><p>Kept</p><template><p>no</p></template>"), "Kept");
+  EXPECT_EQ(html_to_text("<styles>not a style tag</styles>"), "not a style tag");
+  EXPECT_EQ(html_to_text("<p>unclosed<script>x"), "unclosed");
+}

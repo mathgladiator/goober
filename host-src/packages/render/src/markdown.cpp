@@ -1007,8 +1007,49 @@ std::string markdown_to_html(std::string_view markdown, const MarkdownOptions& o
 std::string html_to_text(std::string_view html) {
   std::string text;
   bool tag = false;
-  for (char c : html) {
+  for (size_t i = 0; i < html.size(); ++i) {
+    char c = html[i];
     if (c == '<') {
+      // What a reader never sees: a style sheet, a script, a template, a comment.
+      auto lower_at = [&](std::string_view word) {
+        if (i + 1 + word.size() > html.size()) return false;
+        for (size_t k = 0; k < word.size(); ++k) {
+          char h = html[i + 1 + k];
+          if (h >= 'A' && h <= 'Z') h += 32;
+          if (h != word[k]) return false;
+        }
+        char after = i + 1 + word.size() < html.size() ? html[i + 1 + word.size()] : '>';
+        return after == '>' || after == ' ' || after == '\t' || after == '\n' || after == '\r' || after == '/';
+      };
+      std::string_view skip_to;
+      if (html.substr(i, 4) == "<!--") skip_to = "-->";
+      for (const char* w : {"style", "script", "template", "noscript"}) {
+        if (lower_at(w)) skip_to = w;
+      }
+      if (!skip_to.empty()) {
+        if (skip_to == "-->") {
+          auto end = html.find("-->", i + 4);
+          i = end == std::string_view::npos ? html.size() : end + 2;
+        } else {
+          // To the matching close tag, whatever its case.
+          std::string close = "</" + std::string(skip_to);
+          size_t j = i + 1;
+          for (; j + close.size() <= html.size(); ++j) {
+            bool match = true;
+            for (size_t k = 0; k < close.size() && match; ++k) {
+              char h = html[j + k];
+              if (h >= 'A' && h <= 'Z') h += 32;
+              match = h == close[k];
+            }
+            if (match) break;
+          }
+          // No close tag: everything after it is unseen.
+          auto end = j + close.size() <= html.size() ? html.find('>', j) : std::string_view::npos;
+          i = end == std::string_view::npos ? html.size() : end;
+        }
+        text += ' ';
+        continue;
+      }
       tag = true;
     } else if (c == '>' && tag) {
       tag = false;

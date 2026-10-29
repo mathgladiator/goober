@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
@@ -295,4 +297,57 @@ TEST_F(SourceToolsTest, NothingIsStoredUnlessEverythingChecksOut) {
   ASSERT_EQ(ok.at("state"), "succeeded") << json::dump(ok);
   ASSERT_TRUE(host->schemas().get("locations_v3"));
   EXPECT_TRUE(host->schemas().get("locations_v3")->table("locations")->column("city"));
+}
+
+// GrokBot's report: after source_deploy, a box's new typed MCP tools must be what is listed.
+TEST_F(SourceToolsTest, DeployedToolsAreListedWithTheirTypes) {
+  ASSERT_EQ(tool("source_create", {{"project", "loc"}}).at("head"), 0);
+  auto manifest = [](bool v2) {
+    std::string tools = R"("list_locations":{"tool":{"description":"Lists.","requirements":[["owner"]])" +
+                        std::string(v2 ? R"(,"input":"json:ListInput")" : "") + R"(}},
+      "add_location":{"tool":{"description":"Adds.","requirements":[["owner"]])" +
+                        std::string(v2 ? R"(,"input":"json:Location")" : "") + "}}";
+    if (v2) {
+      tools += R"(,"get_location":{"tool":{"description":"Gets.","requirements":[["owner"]],"input":"json:Slug"}},
+      "import_locations":{"tool":{"description":"Imports.","requirements":[["owner"]],"input":"json:ListInput"}})";
+    }
+    return R"({"box":"kc_locations","domains":["localhost"],)" + std::string(v2 ? R"("types":"types.json",)" : "") +
+           R"("routes":{"mcp":{)" + tools + "}}}";
+  };
+  std::string types = R"({"openapi":"3.1.0","components":{"schemas":{
+    "ListInput":{"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false},
+    "Location":{"type":"object","required":["name","slug"],"properties":{"name":{"type":"string"},"slug":{"type":"string"}},"additionalProperties":false},
+    "Slug":{"type":"object","required":["slug"],"properties":{"slug":{"type":"string"}},"additionalProperties":false}}}})";
+  auto wat = [](bool v2) {
+    std::string w = "(module (memory (export \"memory\") 1)";
+    for (const char* n : {"list_locations", "add_location", "get_location", "import_locations"}) {
+      if (!v2 && (std::string(n) == "get_location" || std::string(n) == "import_locations")) continue;
+      w += std::string(" (func (export \"goober_route_") + n + "\") (result i32) (i32.const 0))";
+    }
+    return w + ")";
+  };
+  auto commit = [&](int base, bool v2) {
+    bj::array changes{bj::object{{"path", "goober.project.json"}, {"text", R"({"boxes":["."]})"}},
+                      bj::object{{"path", "manifest.json"}, {"text", manifest(v2)}},
+                      bj::object{{"path", "box.wat"}, {"text", wat(v2)}}};
+    if (v2) changes.push_back(bj::object{{"path", "types.json"}, {"text", types}});
+    return tool("source_commit", {{"project", "loc"}, {"base_rev", base}, {"message", "rev"}, {"changes", changes}});
+  };
+  ASSERT_EQ(commit(0, false).at("rev"), 1);
+  ASSERT_EQ(tool("source_deploy", {{"project", "loc"}}).at("state"), "succeeded");
+  ASSERT_EQ(commit(1, true).at("rev"), 2);
+  auto deployed = tool("source_deploy", {{"project", "loc"}});
+  ASSERT_EQ(deployed.at("state"), "succeeded") << json::dump(deployed);
+  std::string err;
+  ASSERT_TRUE(host->identity().grant("playground", "owner@example.com", "owner", "test", 1'900'000'000'000, &err)) << err;
+  auto preview = tool("mcp_tools_preview", {{"domain", "localhost"}, {"email", "owner@example.com"}});
+  std::string version(host->boxes().active()->boxes.at("kc_locations")->version);
+  std::set<std::string> listed;
+  for (const auto& t : preview.at("tools").as_array()) {
+    EXPECT_EQ(std::string(t.at("version").as_string()), version);
+    EXPECT_TRUE(t.at("listed").as_bool()) << json::dump(t);
+    EXPECT_FALSE(t.at("input").is_null()) << json::dump(t);
+    listed.insert(std::string(t.at("name").as_string()));
+  }
+  EXPECT_EQ(listed, (std::set<std::string>{"add_location", "get_location", "import_locations", "list_locations"}));
 }

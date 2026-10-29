@@ -85,7 +85,15 @@ To let Grok back in, connect it again; it signs you in by email code.
 
 **Grok doesn't see a tool that exists** (after a deploy added it): Grok keeps the tool list
 it fetched when it connected. Disconnect and reconnect the connector; then ask it to list
-the tools again. For a site's own `/mcp` (box tools), the operator tool `mcp_tools_preview`
+the tools again. Every `tools/list` a site's `/mcp` answers is a line in the access log
+(`"mcp":"tools/list"`) naming the tools it listed and their box versions:
+
+```sh
+sudo grep '"mcp":"tools/list"' /srv/goober/host/storage/logs/access.log | tail -n 5
+```
+
+No line after a reconnect means the client didn't ask; an old list there means the host
+served it. For a site's own `/mcp` (box tools), the operator tool `mcp_tools_preview`
 with the domain and a person's email shows what that person's list is right now, which box
 version each tool comes from, and why any is hidden.
 

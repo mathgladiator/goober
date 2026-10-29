@@ -163,6 +163,18 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
                                             {"result", clip(audit_result)}}));
   }
   if (who->agent) extra["client_id"] = who->client_id;
+  // What a tools/list answered: the tools and the box versions behind them, so the host's own
+  // log shows what a client was served (design/machine/012.Agents.md § 2).
+  if (req.body.find("\"tools/list\"") != std::string::npos) {
+    bj::array listed;
+    for (const auto& [name, ref] : active->tools_for(domain)) {
+      if (manifest::check_access(*ref.route, &*caller, {}, tenant) == manifest::Access::kAllowed) {
+        listed.push_back(bj::value(name + "@" + ref.box->version.substr(0, 12)));
+      }
+    }
+    extra["mcp"] = "tools/list";
+    extra["listed"] = std::move(listed);
+  }
   finish(std::move(res), json::dump(extra));
 }
 

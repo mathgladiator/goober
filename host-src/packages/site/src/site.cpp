@@ -38,7 +38,7 @@ namespace {
 // Keys the host sets in template data, which front matter can't shadow.
 bool reserved_key(std::string_view k) {
   return k == "body" || k == "page" || k == "site" || k == "data" || k == "user" || k == "pages" ||
-         k == "pagination" || k == "request" || k == "now" || k == "tag" || k == "title_in_body";
+         k == "pagination" || k == "request" || k == "now" || k == "tag" || k == "title_in_body" || k == "document";
 }
 
 std::string etag_of(std::string_view body) { return "\"" + base::sha256_hex(body).substr(0, 16) + "\""; }
@@ -239,6 +239,9 @@ std::optional<Page> Site::load(std::string_view tenant, std::string_view path) c
     if (auto* d = p.fields.if_contains("draft"); d && !d->is_bool()) {
       p.broken = "draft must be true or false";
     }
+    // A whole HTML document with front matter (document: true): served as written, without
+    // the front matter, but its draft, requirements, title, and summary still apply.
+    if (auto* d = p.fields.if_contains("document"); d && d->is_bool() && d->as_bool()) p.kind = Kind::kDocument;
   }
   return p;
 }
@@ -414,7 +417,7 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   if (page.kind == Kind::kDocument) {
     r.status = 200;
     r.content_type = "text/html; charset=utf-8";
-    r.body = page.raw;
+    r.body = page.body;
     r.etag = etag_of(r.body);
     r.headers.emplace_back("content-security-policy", "frame-ancestors 'self'");
     return r;
@@ -427,6 +430,11 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
     body_html = page.body;
   }
   bj::object data = base_data(v.tenant);
+  // Without _data/site.json's title, the site is named by its domain, not left blank.
+  if (auto& site = data["site"].as_object(); !site.contains("title") && !v.origin.empty()) {
+    std::string host = v.origin.substr(v.origin.find("://") == std::string::npos ? 0 : v.origin.find("://") + 3);
+    site["title"] = host.substr(0, host.find_first_of(":/"));
+  }
   for (const auto& [k, val] : page.fields) {
     if (!reserved_key(k)) data[k] = val;
   }

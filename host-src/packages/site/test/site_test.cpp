@@ -58,7 +58,7 @@ TEST_F(SiteTest, MarkdownPagesUseTheBuiltInLayout) {
   auto r = get("/about");
   ASSERT_EQ(r.status, 200) << r.error;
   EXPECT_EQ(r.kind, site::Kind::kMarkdown);
-  EXPECT_NE(r.body.find("<title>About us</title>"), std::string::npos);
+  EXPECT_NE(r.body.find("<title>About us · "), std::string::npos);
   EXPECT_NE(r.body.find("<h1>About us</h1>"), std::string::npos);
   EXPECT_NE(r.body.find("<p>We <strong>fix</strong> things.</p>"), std::string::npos);
   EXPECT_NE(r.body.find("2026-10-26"), std::string::npos);
@@ -81,7 +81,7 @@ TEST_F(SiteTest, DocumentsAreServedAsWrittenAndFragmentsAreWrapped) {
   auto frag = get("/frag.html");
   ASSERT_EQ(frag.status, 200) << frag.error;
   EXPECT_NE(frag.body.find("<section>hi {{not a tag}}</section>"), std::string::npos);
-  EXPECT_NE(frag.body.find("<title>Frag</title>"), std::string::npos);
+  EXPECT_NE(frag.body.find("<title>Frag · "), std::string::npos);
 }
 
 TEST_F(SiteTest, TenantTemplatesLayoutsPartialsAndData) {

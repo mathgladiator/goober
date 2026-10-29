@@ -7,6 +7,7 @@
 #include <boost/beast.hpp>
 
 #include "goober/base/encoding.h"
+#include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 
@@ -323,4 +324,46 @@ TEST_F(SiteRoutesTest, UploadsInPiecesForAgentsWithoutCode) {
   // attachment_put says how much base64 arrived, and refuses past its limit by name.
   auto small = tool("attachment_put", {{"tenant", "playground"}, {"base64", base::base64_encode(kPng)}});
   EXPECT_EQ(small.at("base64_chars_received").as_int64(), int64_t(base::base64_encode(kPng).size()));
+}
+
+// Engineer B's report, item by item.
+TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
+  std::string doc = "<!DOCTYPE html><html><head><title>Future</title></head><body><p>Salt &amp; pepper</p></body></html>";
+  // 1. A whole document can be a draft, and need a role.
+  auto put = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-meat"}, {"format", "document"}, {"body", doc},
+                               {"title", "The future of meat"},
+                               {"fields", bj::object{{"draft", true}, {"requirements", bj::array{bj::array{"owner"}}}}}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-meat").status, 404);  // a draft, hidden
+  auto preview = tool("page_render", {{"tenant", "playground"}, {"path", "/future-of-meat"}, {"drafts", true}});
+  EXPECT_EQ(preview.at("kind"), "document");
+  std::string html(preview.at("body").as_string());
+  EXPECT_EQ(html, doc);  // served as written: no front matter, no template
+  auto refused = tool("page_put", {{"tenant", "playground"}, {"path", "/x"}, {"format", "document"}, {"body", doc},
+                                   {"template", "page"}});
+  EXPECT_NE(std::string(refused.at("error").as_string()).find("takes no template"), std::string::npos);
+
+  // 2 and 4. A trailing slash writes the directory's index, and the old file for that URL goes,
+  // so the render is the new body at once.
+  auto index = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-meat/"}, {"format", "document"},
+                                 {"body", "<!DOCTYPE html><p>v2</p>"}});
+  EXPECT_EQ(index.at("file"), "future-of-meat/index.html");
+  EXPECT_EQ(index.at("replaced").at(0), "future-of-meat.html");
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-meat").body, "<!DOCTYPE html><p>v2</p>");
+
+  // 3. page_get finds documents by URL, the root included.
+  tool("page_put", {{"tenant", "playground"}, {"path", "/"}, {"format", "document"}, {"body", "<!DOCTYPE html><p>home</p>"}});
+  EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/"}}).at("file"), "index.html");
+  EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/future-of-meat"}}).at("file"), "future-of-meat/index.html");
+
+  // 5. Bodies are kept byte for byte.
+  tool("page_put", {{"tenant", "playground"}, {"path", "/salt"}, {"format", "fragment"},
+                    {"body", "<style>.x{color:red}</style><p>Salt &amp; &quot;pepper&quot;</p>"}});
+  EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/salt"}}).at("body"),
+            "<style>.x{color:red}</style><p>Salt &amp; &quot;pepper&quot;</p>");
+  // 6. The description skips the style sheet, and the footer names the site by its domain.
+  auto salt = fetch(port, bhttp::verb::get, "/salt").body;
+  EXPECT_NE(salt.find("<meta name=\"description\" content=\"Salt &amp; &quot;pepper&quot;\">"), std::string::npos) << salt;
+  EXPECT_EQ(salt.find("color:red} Salt"), std::string::npos);
+  EXPECT_NE(salt.find("© " + base::format_utc_ms(base::now_unix_ms()).substr(0, 4) + " localhost"), std::string::npos);
 }

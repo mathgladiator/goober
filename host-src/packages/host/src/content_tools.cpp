@@ -132,6 +132,7 @@ std::string file_for(const site::Site& site, const std::string& tenant, std::str
   while (!url.empty() && url.front() == '/') url.erase(url.begin());
   while (!url.empty() && url.back() == '/') url.pop_back();
   if (url.empty()) return "index" + ext;
+  if (index) return url + "/index" + ext;  // asked for a directory's index: there, whatever else exists
   for (const char* stem : {"", "/index"}) {
     for (const char* e : {".md", ".html"}) {
       if (site.load(tenant, url + stem + e)) return url + stem + ext;
@@ -206,7 +207,10 @@ void Host::register_content_tools() {
       {"page_put",
        "Writes a page at a URL. format is markdown, fragment (HTML wrapped in a template), or document (a whole HTML "
        "page, served as written). title, template, and fields become front matter (fields like date, summary, image, "
-       "tags, draft, requirements, list, sort, per-page, feed). Replaces the page at that URL, whatever its format.",
+       "tags, draft, requirements, list, sort, per-page, feed); a document takes title, summary, date, tags, draft, "
+       "and requirements, and is still served as written. A path ending in / writes that directory's index "
+       "(/about/ is about/index.*). Replaces every file that answers the URL, whatever its format. The body is stored "
+       "byte for byte: entities like &amp; are kept as written.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("The page's URL, like /about, /blog/hello, or / for the home page.")},
                       {"format", enum_property("How body is written.", {"markdown", "fragment", "document"})},
@@ -233,18 +237,25 @@ void Host::register_content_tools() {
          }
          if (auto t = arg(args, "title")) fields["title"] = *t;
          if (auto t = arg(args, "template")) fields["template"] = *t;
-         if (*format == "document" && !fields.empty()) {
-           return ToolResult::fail("a document is served as written, with no front matter; use fragment to give a "
-                                   "title, template, or fields");
-         }
-         if (*format == "document" && body->starts_with("---")) {
-           return ToolResult::fail("a document can't start with ---, which would read as front matter");
+         if (*format == "document") {
+           // A document is served as written; front matter (document: true) carries only what
+           // decides who sees it and how it's listed.
+           for (const auto& [k, v] : fields) {
+             if (k == "template" || k == "list" || k == "sort" || k == "per-page" || k == "feed") {
+               return ToolResult::fail("a document is served as written, so it takes no " + std::string(k) +
+                                       "; use fragment to wrap HTML in a template");
+             }
+           }
+           if (body->starts_with("---")) {
+             return ToolResult::fail("a document can't start with ---, which would read as front matter");
+           }
+           if (!fields.empty()) fields["document"] = true;
          }
          std::string ext = *format == "markdown" ? ".md" : ".html";
          std::string file = file_for(*site_, *tenant, *path, ext);
          if (site::is_private_path(file)) return ToolResult::fail("a page's path can't have a segment starting with _");
          std::string text;
-         if (*format != "document") {
+         if (*format != "document" || !fields.empty()) {
            text = "---\n";
            for (const auto& [k, v] : fields) {
              std::string key(k);
@@ -258,10 +269,20 @@ void Host::register_content_tools() {
          text += *body;
          std::string err;
          if (!content_->put(*tenant, file, text, &err)) return ToolResult::fail(err);
-         // One page per URL: drop the same page in the other format.
-         std::string other = file.substr(0, file.rfind('.')) + (ext == ".md" ? ".html" : ".md");
+         // One page per URL: drop every other file that answers it (the other format, and
+         // name.html beside name/index.html), so what was just written is what's served.
          bj::array removed;
-         if (content_->get(*tenant, other) && content_->remove(*tenant, other, &err)) removed.push_back(bj::value(other));
+         if (auto url = site::page_url(file)) {
+           std::string stem = url->substr(1);
+           std::vector<std::string> others = stem.empty() ? std::vector<std::string>{"index.md", "index.html"}
+                                                          : std::vector<std::string>{stem + ".md", stem + ".html",
+                                                                                     stem + "/index.md", stem + "/index.html"};
+           for (const auto& other : others) {
+             if (other != file && content_->get(*tenant, other) && content_->remove(*tenant, other, &err)) {
+               removed.push_back(bj::value(other));
+             }
+           }
+         }
          bj::array warnings;
          std::string tmpl = fields.contains("template") && fields["template"].is_string()
                                 ? std::string(fields["template"].get_string())
@@ -283,10 +304,16 @@ void Host::register_content_tools() {
          auto path = arg(args, "path");
          if (!tenant || !path) return ToolResult::fail("tenant and path are required");
          std::optional<site::Page> p;
-         if (path->ends_with(".md") || path->ends_with(".html")) p = site_->load(*tenant, *path);
-         if (!p) {
-           std::string file = file_for(*site_, *tenant, *path, ".md");
-           p = site_->load(*tenant, file);
+         std::string rel = *path;
+         while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
+         if (rel.ends_with(".md") || rel.ends_with(".html")) p = site_->load(*tenant, rel);
+         // A URL, resolved the way a visit resolves it: name.md, name.html, name/index.md, name/index.html.
+         while (!rel.empty() && rel.back() == '/') rel.pop_back();
+         std::vector<std::string> candidates = rel.empty() ? std::vector<std::string>{"index.md", "index.html"}
+                                                           : std::vector<std::string>{rel + ".md", rel + ".html",
+                                                                                      rel + "/index.md", rel + "/index.html"};
+         for (const auto& c : candidates) {
+           if (!p) p = site_->load(*tenant, c);
          }
          if (!p) return ToolResult::fail("no page at " + *path);
          return ToolResult::ok(bj::object{{"file", p->path}, {"url", p->url}, {"kind", site::kind_name(p->kind)},
@@ -338,6 +365,10 @@ void Host::register_content_tools() {
          }
          v.drafts = bool_arg(args, "drafts");
          v.origin = config_.get()->base_url();
+         // As the tenant's own domain would render it (its name stands in for a missing site title).
+         for (const auto& [d, e] : config_.get()->domains) {
+           if (e.tenant == *tenant && d.find('.') != std::string::npos) v.origin = "https://" + d;
+         }
          v.accept = "text/html";
          v.authorize = [](const bj::value&) { return 200; };
          auto r = site_->visit(v);
