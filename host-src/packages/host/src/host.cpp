@@ -583,6 +583,17 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     res.head_only = req.method == "head";
     return finish(std::move(res), "");
   }
+  // The last deploy's outside check (readiness.py, run by the server after the gate), for bots.
+  if (path && path->path == "/goober/deploy") {
+    Response res;
+    auto text = base::read_file(cfg->storage / "operations" / "deploy-check.json");
+    res.status = text ? 200 : 404;
+    res.body = text ? *text : R"({"error":"no deploy has been checked from outside yet"})";
+    res.headers.emplace_back("content-type", "application/json");
+    res.headers.emplace_back("cache-control", "no-store");
+    res.head_only = req.method == "head";
+    return finish(std::move(res), "");
+  }
   // Readiness, for deploys and bots: every subsystem's status, 503 unless all are fine.
   if (path && path->path == "/goober/ready") {
     pool_->post([this, req, finish] {

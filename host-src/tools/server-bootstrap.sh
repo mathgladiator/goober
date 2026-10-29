@@ -8,8 +8,11 @@
 #   - later times: restarts the host on the new binary.
 set -euo pipefail
 
-#   server-bootstrap.sh [DIR] [--user NAME] [--with-rust]   (deploy.sh passes --with-rust unless --without-rust)
+#   server-bootstrap.sh [DIR] [--user NAME] [--with-rust] [--public DOMAIN] [--build COMMIT]
+#   (deploy.sh passes --with-rust unless --without-rust, and the domain and build it deployed)
 DIR=""
+PUBLIC=""
+BUILD=""
 RUN_AS="goober"
 WITH_RUST=""
 WITHOUT_MAIL=""
@@ -18,6 +21,8 @@ while (($#)); do
     --with-rust) WITH_RUST=--with-rust ;;
     --without-mail) WITHOUT_MAIL=1 ;;
     --user) RUN_AS="${2:-}"; shift ;;
+    --public) PUBLIC="${2:-}"; shift ;;
+    --build) BUILD="${2:-}"; shift ;;
     -*) echo "✗ unknown option $1" >&2; exit 2 ;;
     *) DIR="$1" ;;
   esac
@@ -27,6 +32,8 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 BIN=/usr/local/bin/goober-host
 
 die() { echo "✗ $*" >&2; exit 1; }
+[[ -z "$PUBLIC" || "$PUBLIC" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "--public is a domain, like kcmeatup.com"
+[[ -z "$BUILD" || "$BUILD" =~ ^[0-9a-f]{7,40}$ ]] || die "--build is a commit, like 4f575dadb5d7"
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$RUN_AS" != root ]] ||
   die "--run-as must be a lowercase user name other than root, like goober"
@@ -280,6 +287,52 @@ for d in sorted(c.get("domains", {})):
 ' "$DIR/host.json")"
 fi
 
+# Caddyfiles written before 2026-10-29 answer an empty 503 the moment the host restarts or is
+# down, which some MCP clients cache as "sign-in provider unavailable". Add a retry window and
+# a retryable answer to the Caddyfile goober wrote, if it hasn't them; Caddy checks it first.
+if [[ -f /etc/caddy/Caddyfile ]] && grep -q "health_uri /goober/health" /etc/caddy/Caddyfile && ! grep -q "lb_try_duration" /etc/caddy/Caddyfile; then
+  echo "── Caddy: a retry window for restarts, and a retryable 503"
+  NEW_CADDY="$(mktemp)"
+  python3 - /etc/caddy/Caddyfile "$NEW_CADDY" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+out, i, done = [], 0, False
+while i < len(lines):
+    line = lines[i]
+    out.append(line)
+    if not done and line.strip() == "health_uri /goober/health":
+        pad = line[: len(line) - len(line.lstrip())]
+        out += [pad + "lb_try_duration 15s", pad + "lb_try_interval 250ms"]
+        # The end of the reverse_proxy block, then the site's own handle_errors.
+        i += 1
+        while i < len(lines) and lines[i].strip() != "}":
+            out.append(lines[i]); i += 1
+        out.append(lines[i])
+        site = pad[:-2] if len(pad) >= 2 else ""
+        out += [site + "handle_errors {",
+                site + "  @down expression `{err.status_code} in [502, 503, 504]`",
+                site + "  handle @down {",
+                site + "    header Retry-After 15",
+                site + "    header Cache-Control no-store",
+                site + "    header Content-Type application/json",
+                site + '    respond `{"error":"temporarily_unavailable","error_description":"the host is restarting; retry shortly"}` 503',
+                site + "  }",
+                site + "}"]
+        done = True
+    i += 1
+open(sys.argv[2], "w").write("\n".join(out))
+PY
+  if caddy validate --config "$NEW_CADDY" --adapter caddyfile >/tmp/goober-caddy.$$ 2>&1; then
+    cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-retry"
+    install -m 0644 "$NEW_CADDY" /etc/caddy/Caddyfile
+    systemctl reload caddy || systemctl restart caddy
+    echo "   added (the old one is /etc/caddy/Caddyfile.before-retry)"
+  else
+    echo "   Caddy refused the change, so the Caddyfile is as it was:"; sed 's/^/     /' /tmp/goober-caddy.$$ | tail -n 8
+  fi
+  rm -f "$NEW_CADDY" /tmp/goober-caddy.$$
+fi
+
 echo "── ready"
 # The gate: the new build must say it's ready (/goober/ready: storage, identity, boxes, the
 # queue) within a minute. If it doesn't, its log says why, and the previous build comes back.
@@ -380,6 +433,22 @@ open TCP port 25 inbound in your provider's firewall (many block it until asked)
 $MAIL_DNS
 Then declare routes.mail in a box (box_guide, "Receiving mail").
 EOF
+fi
+
+# The same checks people's browsers and agents depend on, from here through the public name,
+# published for bots at https://$PUBLIC/goober/deploy (and summed up in /goober/ready).
+if [[ -n "$PUBLIC" && -f "$SRC/readiness.py" ]]; then
+  echo "── readiness, as people and agents reach https://$PUBLIC"
+  install -m 0755 "$SRC/readiness.py" "$HOME_DIR/tools/readiness.py"
+  EXTRA=()
+  if [[ -f "$SRC/readiness.args" ]]; then
+    while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || EXTRA+=($line); done <"$SRC/readiness.args"
+  fi
+  install -d -o "$RUN_AS" -g "$RUN_AS" -m 0750 "$DIR/storage/operations"
+  if ! sudo -u "$RUN_AS" python3 -I "$HOME_DIR/tools/readiness.py" "https://$PUBLIC" ${BUILD:+--build "$BUILD"} "${EXTRA[@]}" \
+      --json "$DIR/storage/operations/deploy-check.json"; then
+    FAILED+=("readiness from https://$PUBLIC (see /goober/deploy)")
+  fi
 fi
 
 if ((${#FAILED[@]})); then

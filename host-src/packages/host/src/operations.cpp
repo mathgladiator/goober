@@ -213,8 +213,22 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
   checks["traffic"] = bj::object{{"ok", true}, {"on", traffic_ != nullptr}};
   checks["queue"] = bj::object{{"ok", pool_->queued() < max_queued_}, {"queued", pool_->queued()}};
   ok = ok && pool_->queued() < max_queued_;
+  // The last deploy's outside check, in brief (the whole of it is /goober/deploy).
+  bj::value deploy = nullptr;
+  if (auto text = base::read_file(cfg->storage / "operations" / "deploy-check.json")) {
+    std::string err;
+    if (auto d = json::parse(*text, &err); d && d->is_object()) {
+      const auto& o = d->as_object();
+      bj::object brief;
+      for (const char* k : {"at", "build", "ok", "failed"}) {
+        if (auto* v = o.if_contains(k)) brief[k] = *v;
+      }
+      deploy = std::move(brief);
+    }
+  }
   bj::object body{{"ok", ok},
                   {"build", std::string(kBuildCommit)},
+                  {"deploy", std::move(deploy)},
                   {"version", std::string(kVersion)},
                   {"started_at", base::format_utc_ms(started_ms_)},
                   {"uptime_ms", base::now_unix_ms() - started_ms_},

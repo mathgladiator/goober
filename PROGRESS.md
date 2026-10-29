@@ -353,6 +353,11 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] The server keeps the previous build; a new one not ready within a minute is rolled
       back, with its log printed. `tools/readiness.py` then checks from outside (pages,
       discovery, MCP, boxes), with per-site lists in `tools/readiness.d/`.
+- [x] The server runs readiness.py on itself after each deploy and publishes it at
+      `/goober/deploy` (and `deploy` in `/goober/ready`), for bots' post-deploy checks.
+- [x] Caddy holds requests through a restart (`lb_try_duration 15s`) and answers a retryable
+      JSON 503 with Retry-After when the host is down; the deploy adds both to an existing
+      goober Caddyfile after `caddy validate`.
 - [ ] The root cause of the 2026-10-29 outage, from the server's log (the human's step).
 
 ### Phase 17: the operator panel (028)

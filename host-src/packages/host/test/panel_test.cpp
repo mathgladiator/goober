@@ -257,6 +257,19 @@ TEST_F(PanelTest, ReadySaysWhatEverySubsystemIs) {
   }
   EXPECT_EQ(ready["checks"].as_object()["change_log"].as_object()["on"], true);
   EXPECT_FALSE(ready["build"].as_string().empty());
+  EXPECT_TRUE(ready["deploy"].is_null());
+  EXPECT_EQ(fetch(port, "localhost", bhttp::verb::get, "/goober/deploy").status, 404);
+  // What the server's own check after a deploy wrote: served whole, and summed up in ready.
+  std::string err;
+  fs::create_directories(root / "storage/operations");
+  ASSERT_TRUE(base::write_file_durable(root / "storage/operations/deploy-check.json",
+      R"({"at":"2026-10-29T15:10:00Z","build":"4f575dadb5d7","ok":true,"failed":[],"checks":[{"check":"GET /","ok":true,"detail":""}]})"));
+  auto deploy = fetch(port, "localhost", bhttp::verb::get, "/goober/deploy");
+  EXPECT_EQ(deploy.status, 200);
+  EXPECT_EQ(parse(deploy.body)["checks"].as_array().size(), 1u);
+  auto brief = parse(fetch(port, "localhost", bhttp::verb::get, "/goober/ready").body)["deploy"].as_object();
+  EXPECT_EQ(brief["build"], "4f575dadb5d7");
+  EXPECT_FALSE(brief.contains("checks"));
 }
 
 // The panel's stores are never a reason not to start (the 2026-10-29 outage's lesson).

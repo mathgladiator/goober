@@ -72,6 +72,18 @@ FILES=("$STAGE/goober-host" "$STAGE/setup.sh" "$STAGE/server-bootstrap.sh")
 # The server vendors the crates itself, with its own cargo: no Rust needed here.
 cp "$HERE/vendor.sh" "$HERE/stalwart.sh" "$STAGE/"
 FILES+=("$STAGE/vendor.sh" "$STAGE/stalwart.sh")
+# The readiness check the server runs on itself, and the site's own list of what must answer.
+SERVER="${TARGET#*@}"
+# An ssh alias or an address isn't the site's name: then the server doesn't check itself.
+PUBLIC_ARG=""
+[[ "$SERVER" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z][a-z0-9-]*$ ]] && PUBLIC_ARG="--public $SERVER"
+BUILD="$(cd "$HOST_SRC" && git log -1 --format=%h --abbrev=12)"
+cp "$HERE/readiness.py" "$STAGE/"
+FILES+=("$STAGE/readiness.py")
+if [[ -f "$HERE/readiness.d/$SERVER" ]]; then
+  cp "$HERE/readiness.d/$SERVER" "$STAGE/readiness.args"
+  FILES+=("$STAGE/readiness.args")
+fi
 
 # One ssh connection for every step, its socket in the private staging directory.
 SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$STAGE/ssh-%C" -o ControlPersist=120)
@@ -102,22 +114,10 @@ echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
   "($(numfmt --to=iec-i --suffix=B/s $((TOTAL / (ELAPSED > 0 ? ELAPSED : 1)))))"
 
 echo "── installing on $TARGET"
-ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL; rm -rf $REMOTE"
+# The server checks itself after the gate, through its public name (readiness.py, with the
+# site's list from tools/readiness.d/$server), and publishes the result at /goober/deploy.
+ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL $PUBLIC_ARG --build $BUILD; rm -rf $REMOTE"
 
-# From the outside, the way people and agents reach it: pages, discovery, MCP, and the boxes a
-# site lists in tools/readiness.d/$server (one argument per line). The server's own gate already
-# rolled back a build that wouldn't start; this catches what only the public side shows.
-SERVER="${TARGET#*@}"
-echo "── readiness, from here: https://$SERVER"
-EXTRA=()
-if [[ -f "$HERE/readiness.d/$SERVER" ]]; then
-  while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || EXTRA+=($line); done <"$HERE/readiness.d/$SERVER"
-fi
-BUILD="$(cd "$HOST_SRC" && git log -1 --format=%h --abbrev=12)"
-if ! python3 "$HERE/readiness.py" "https://$SERVER" --build "$BUILD" "${EXTRA[@]}"; then
-  echo "✗ deployed, but not ready from outside: see the checks above (HUMAN.md § 5)"
-  exit 1
-fi
 }
 
 main "$@"

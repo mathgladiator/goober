@@ -72,12 +72,15 @@ def main():
     ap.add_argument("--box", action="append", default=[], help="a box that must be loaded: name or name@version")
     ap.add_argument("--build", help="the build (commit prefix) /goober/ready must report")
     ap.add_argument("--refresh-file", help="JSON {client_id, refresh_token}: refreshed for real, rewritten")
+    ap.add_argument("--json", help="also write the result here as JSON (what /goober/deploy serves)")
     args = ap.parse_args()
     base = args.base.rstrip("/")
     failed = []
+    results = []
 
     def check(what, ok, detail=""):
         print(("  ✓ " if ok else "  ✗ ") + what + (f"  ({detail})" if detail else ""))
+        results.append({"check": what, "ok": bool(ok), "detail": str(detail)})
         if not ok:
             failed.append(what)
 
@@ -184,6 +187,14 @@ def main():
             print("    (set GOOBER_TOKEN to check boxes: " + ", ".join(args.box) + ")")
 
     print(("✓ ready" if not failed else f"✗ {len(failed)} check(s) failed: " + "; ".join(failed)))
+    if args.json:
+        import datetime
+        out = {"at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base,
+               "build": ready.get("build"), "ok": not failed, "failed": failed, "checks": results}
+        tmp = args.json + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(out, f, indent=2)
+        os.replace(tmp, args.json)
     sys.exit(1 if failed else 0)
 
 

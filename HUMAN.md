@@ -80,9 +80,13 @@ It upgrades everything and ends with `── checking everything this host needs
 must be `✓ every check passed`. Any `✗` line says what is wrong.
 
 A new build that isn't ready within a minute is rolled back on its own: the deploy prints the
-host's last 60 log lines (the reason), puts the previous build back, and fails. Then it checks
-from outside what people and agents see (`host-src/tools/readiness.d/kcmeatup.com` lists the
-pages and boxes). The same check by hand, with an operator token for the boxes:
+host's last 60 log lines (the reason), puts the previous build back, and fails. Then the
+server checks itself through its public name, as people and agents reach it
+(`host-src/tools/readiness.d/kcmeatup.com` lists the pages), and publishes the result at
+https://kcmeatup.com/goober/deploy, summed up in `/goober/ready` as `deploy`. While the host
+restarts, Caddy holds requests up to 15 seconds; if it's down, Caddy answers a JSON 503 with
+Retry-After, so clients retry rather than remember a failure. The same check by hand, with an
+operator token for the boxes:
 
 ```sh
 GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://kcmeatup.com \
