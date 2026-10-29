@@ -3,6 +3,7 @@
 
 #include <fcntl.h>
 
+#include <algorithm>
 #include <cctype>
 #include <set>
 
@@ -17,6 +18,7 @@
 #include "goober/render/frontmatter.h"
 #include "goober/render/mustache.h"
 #include "goober/router/path.h"
+#include "goober/site/includes.h"
 
 
 namespace goober::host {
@@ -318,6 +320,131 @@ void Host::register_content_tools() {
          if (!p) return ToolResult::fail("no page at " + *path);
          return ToolResult::ok(bj::object{{"file", p->path}, {"url", p->url}, {"kind", site::kind_name(p->kind)},
                                           {"fields", p->fields}, {"body", p->body}});
+       }});
+
+  // Shared partials (design/machine/027.Partials.md): _partials/$name.html, included by
+  // <!--#include name--> in pages and box HTML; the last ten versions kept for rollback.
+  auto partial_file = [](const std::string& name) { return "_partials/" + name + ".html"; };
+  auto versions_of = [this](const std::string& tenant, const std::string& name) {
+    auto files = content_->list(tenant, "_partials/_versions/" + name + "/");
+    std::sort(files.begin(), files.end());
+    return files;
+  };
+  auto partial_name_prop = string_property(
+      "The partial's name, 1 to 64 of [a-z0-9_-], like nav or footer. A signed-in visitor gets name@auth "
+      "when it exists (write it as \"nav@auth\").");
+  auto check_name = [](const std::string& name) {
+    std::string base = name.ends_with("@auth") ? name.substr(0, name.size() - 5) : name;
+    return site::is_partial_name(base);
+  };
+  mcp_->add_tool(
+      {"partial_put",
+       "Writes a shared partial (a nav, a footer): every page and box page with <!--#include name--> gets it at "
+       "once, with no page re-put, and their ETags change. Links may carry data-match=\"/places\" (that path and "
+       "below), data-match-exact=\"/\", or data-key=\"x\" (a page's <meta name=\"nav-key\" content=\"x\">): the "
+       "best fit for each request gets aria-current=\"page\" and class active. The previous version is kept "
+       "(ten in all).",
+       object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}, {"html", string_property("The HTML, as served.")}},
+                     {"tenant", "name", "html"}),
+       [this, partial_file, versions_of, check_name](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto name = arg(args, "name");
+         auto html = arg(args, "html");
+         if (!tenant || !name || !html) return ToolResult::fail("tenant, name, and html are required");
+         if (!check_name(*name)) return ToolResult::fail("a partial's name is 1 to 64 of [a-z0-9_-], optionally ending @auth");
+         if (html->size() > 256 * 1024) return ToolResult::fail("a partial is at most 256 KiB");
+         std::string err;
+         auto old = content_->get(*tenant, partial_file(*name));
+         if (old) {
+           char stamp[32];
+           std::snprintf(stamp, sizeof stamp, "%015lld", static_cast<long long>(base::now_unix_ms()));
+           if (!content_->put(*tenant, "_partials/_versions/" + *name + "/" + stamp + ".html", old->data, &err)) {
+             return ToolResult::fail(err);
+           }
+           auto kept = versions_of(*tenant, *name);
+           for (size_t i = 0; i + 10 < kept.size(); ++i) content_->remove(*tenant, kept[i], &err);
+         }
+         if (!content_->put(*tenant, partial_file(*name), *html, &err)) return ToolResult::fail(err);
+         auto now = content_->get(*tenant, partial_file(*name));
+         return ToolResult::ok(bj::object{{"file", partial_file(*name)},
+                                          {"etag", now ? now->etag : ""},
+                                          {"previous_etag", old ? bj::value(old->etag) : bj::value(nullptr)}});
+       }});
+  mcp_->add_tool(
+      {"partial_get", "Reads a shared partial, or one of its kept versions (from partial_list).",
+       object_schema({{"tenant", tenant_prop},
+                      {"name", partial_name_prop},
+                      {"version", string_property("A kept version's id, from partial_list; omit for the current one.")}},
+                     {"tenant", "name"}),
+       [this, partial_file, check_name](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto name = arg(args, "name");
+         if (!tenant || !name || !check_name(*name)) return ToolResult::fail("tenant and a partial's name are required");
+         auto version = arg(args, "version");
+         if (version && (version->empty() || version->size() > 20 ||
+                         !std::all_of(version->begin(), version->end(), [](char c) { return c >= '0' && c <= '9'; }))) {
+           return ToolResult::fail("version is an id from partial_list");
+         }
+         std::string file = version ? "_partials/_versions/" + *name + "/" + *version + ".html" : partial_file(*name);
+         auto f = content_->get(*tenant, file);
+         if (!f) return ToolResult::fail("no partial " + *name + (version ? " version " + *version : ""));
+         return ToolResult::ok(bj::object{{"name", *name}, {"etag", f->etag}, {"html", f->data}});
+       }});
+  mcp_->add_tool(
+      {"partial_list",
+       "A tenant's shared partials: name, etag, bytes, the kept versions to roll back to, and the pages whose bodies "
+       "include each (box pages aren't listed: route_check says whether a route takes includes).",
+       object_schema({{"tenant", tenant_prop}}, {"tenant"}),
+       [this, versions_of](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant) return ToolResult::fail("tenant is required");
+         std::map<std::string, bj::array> used_by;
+         for (const auto& p : site_->pages(*tenant, "")) {
+           for (const auto& n : site::include_names(p.body)) used_by[n].push_back(bj::value(p.url));
+         }
+         bj::array out;
+         for (const auto& f : content_->list(*tenant, "_partials/")) {
+           if (f.starts_with("_partials/_versions/") || !f.ends_with(".html")) continue;
+           std::string name = f.substr(10, f.size() - 15);
+           auto file = content_->get(*tenant, f);
+           bj::array versions;
+           for (const auto& v : versions_of(*tenant, name)) {
+             std::string id = v.substr(v.rfind('/') + 1);
+             id.resize(id.size() - 5);
+             versions.push_back(bj::value(id));
+           }
+           std::string base = name.ends_with("@auth") ? name.substr(0, name.size() - 5) : name;
+           out.push_back(bj::object{{"name", name},
+                                    {"etag", file ? file->etag : ""},
+                                    {"bytes", file ? int64_t(file->data.size()) : 0},
+                                    {"versions", std::move(versions)},
+                                    {"included_by", used_by.count(base) ? used_by[base] : bj::array{}}});
+         }
+         // Markers with no partial at all, which serve empty.
+         bj::array missing;
+         for (const auto& [n, pages] : used_by) {
+           if (!content_->get(*tenant, "_partials/" + n + ".html")) missing.push_back(bj::object{{"name", n}, {"included_by", pages}});
+         }
+         return ToolResult::ok(bj::object{{"partials", std::move(out)}, {"missing", std::move(missing)}});
+       }});
+  mcp_->add_tool(
+      {"partial_delete", "Removes a shared partial; its markers then render empty. Its kept versions stay, so partial_get "
+                         "and partial_put can bring it back.",
+       object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}}, {"tenant", "name"}),
+       [this, partial_file, check_name](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto name = arg(args, "name");
+         if (!tenant || !name || !check_name(*name)) return ToolResult::fail("tenant and a partial's name are required");
+         std::string err;
+         auto old = content_->get(*tenant, partial_file(*name));
+         if (!old) return ToolResult::fail("no partial " + *name);
+         char stamp[32];
+         std::snprintf(stamp, sizeof stamp, "%015lld", static_cast<long long>(base::now_unix_ms()));
+         if (!content_->put(*tenant, "_partials/_versions/" + *name + "/" + stamp + ".html", old->data, &err) ||
+             !content_->remove(*tenant, partial_file(*name), &err)) {
+           return ToolResult::fail(err);
+         }
+         return ToolResult::ok(bj::object{{"deleted", partial_file(*name)}, {"kept_as", stamp}});
        }});
 
   mcp_->add_tool({"page_list", "Lists the pages under a directory (all of them by default), with URL, title, and status.",

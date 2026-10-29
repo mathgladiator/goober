@@ -26,6 +26,7 @@ struct HttpRoute {
   // A template that renders the route's JSON for callers that prefer HTML
   // (070.UI.md § One route, many audiences; design/machine/007.Content.md §8).
   std::string template_name;
+  bool includes = false;  // expand <!--#include name--> in the box's own text/html (027)
   // "agents": true lets agent tokens call the route (050.AgentsMCP.md); otherwise only
   // a person, signed in through a browser or a person client, may.
   bool agents = false;

@@ -1,4 +1,5 @@
 #include "goober/site/site.h"
+#include "goober/site/includes.h"
 
 #include <algorithm>
 #include <charconv>
@@ -622,7 +623,26 @@ Result Site::directory(const Visit& v, const std::string& dir) const {
   return r;
 }
 
+// Every page's HTML gets its partials (design/machine/027.Partials.md), and its ETag is taken
+// after, so one partial edit changes every page that includes it.
 Result Site::visit(const Visit& v) const {
+  Result r = visit_unexpanded(v);
+  if (r.status != 200 || r.kind == Kind::kStatic || !r.content_type.starts_with("text/html")) return r;
+  auto e = expand_includes(store_, v.tenant, r.body, v.path, !v.user.is_null());
+  if (e.used.empty() && e.missing.empty() && !e.by_auth) return r;
+  r.body = std::move(e.html);
+  r.etag = etag_of(r.body);
+  // A signed-in variant: the answer depends on the cookie, so no shared cache may keep it.
+  if (e.by_auth) r.restricted = true;
+  if (!e.missing.empty()) {
+    std::string names;
+    for (const auto& n : e.missing) names += (names.empty() ? "" : ", ") + n;
+    r.headers.emplace_back("x-goober-partial-missing", names);
+  }
+  return r;
+}
+
+Result Site::visit_unexpanded(const Visit& v) const {
   std::string rel = v.path;
   while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
   if (!rel.empty() && is_private_path(rel)) return fail(404);

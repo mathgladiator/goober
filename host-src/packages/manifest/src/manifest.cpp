@@ -1073,7 +1073,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             std::string key(f.key());
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
-                key == "response" || key == "cors") {
+                key == "response" || key == "cors" || key == "includes") {
               continue;
             }
             if (kLaterRoute.count(key)) {
@@ -1101,6 +1101,8 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           }
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           route.agents = goober::json::get_bool(def, "agents", &err).value_or(false);
+          // The box's own text/html gets the tenant's partials (design/machine/027.Partials.md).
+          route.includes = goober::json::get_bool(def, "includes", &err).value_or(false);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           if (!parse_request_parts(def, v, where, &route, error)) return std::nullopt;
           auto is_public = goober::json::get_bool(def, "public", &err);

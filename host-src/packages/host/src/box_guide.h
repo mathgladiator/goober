@@ -317,6 +317,21 @@ maxLength, minLength, enum, and format date-time (RFC 3339 UTC) or date; objects
 #/components/schemas/X; no oneOf/anyOf/allOf/null/recursion. Defaults are filled in, and
 int64 values reach the box as strings.
 
+## Shared partials (a nav, a footer)
+
+Write a site's nav once, with partial_put {tenant, name: "nav", html}, and put <!--#include nav-->
+where it goes: in documents and pages, in box templates, and in a box's own text/html when the
+route says "includes": true. One partial_put updates every page; no page is re-put, and every
+page's ETag changes. Links can say where they belong: data-match="/places" (that path and
+below), data-match-exact="/", or data-key="future" with <meta name="nav-key" content="future">
+on the page. The best fit for each request gets aria-current="page" and class "active". Write
+nav@auth too, and signed-in visitors get it instead. The partial is spliced raw, one level deep
+(a partial's own markers stay), and a missing one renders empty with an
+x-goober-partial-missing header. Check with page_render (shows the page expanded) and
+partial_list (which pages include each partial, and kept versions: partial_get with a version,
+then partial_put, rolls back). A box template's values are escaped, so a person's text can
+never pull a partial in.
+
 ## Landing pages and forms
 
 A landing page (an ad's destination, say) is content: a whole .html document with no front

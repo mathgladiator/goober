@@ -335,6 +335,12 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] M5: per-tenant daily caps on outbox calls per service (`limits.outbox-daily-per-service`).
 - [ ] M6: markdown in `send`.
 
+### Phase 16: shared partials (027)
+- [x] `_partials/$name.html` included by `<!--#include name-->` in pages, box templates, and box
+      HTML with `"includes": true`; active links by `data-match`, `data-match-exact`, and
+      `nav-key`; `@auth` variants; ETags after expansion; `partial_put`, `partial_get`,
+      `partial_list`, `partial_delete`, and `route_check`'s `partials`.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

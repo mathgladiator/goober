@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "goober/site/includes.h"
 #include "goober/site/site.h"
 
 using namespace goober;
@@ -210,4 +211,61 @@ TEST_F(SiteTest, BrokenFrontMatterFailsClosed) {
   auto notes = get("/notes");
   EXPECT_EQ(notes.status, 200);
   EXPECT_EQ(notes.body.find("Hidden"), std::string::npos);  // a broken page isn't listed
+}
+
+// Shared partials (design/machine/027.Partials.md): the active link.
+TEST(Partials, TheBestFittingLinkIsMarked) {
+  const std::string nav = R"(<nav><a href="/" data-match-exact="/">Home</a>)"
+                          R"(<a href="/places" class="nav" data-match="/places">Places</a>)"
+                          R"(<a href="/places/kc" data-match="/places/kc">KC</a>)"
+                          R"(<a href=/future data-match=/future class=x data-key="future">Future</a></nav>)";
+  // Home only on "/" itself.
+  auto home = site::mark_active(nav, "/", "");
+  EXPECT_NE(home.find(R"(<a href="/" data-match-exact="/" aria-current="page" class="active">)"), std::string::npos) << home;
+  EXPECT_EQ(home.find("active", home.find("Home")), home.find("active", home.find("Home")));
+  EXPECT_EQ(site::mark_active(nav, "/about", ""), nav);  // nothing fits
+  // A prefix covers what's below it; the longest fit wins; class is appended to, query ignored.
+  auto place = site::mark_active(nav, "/places/joes?x=1", "");
+  EXPECT_NE(place.find(R"(class="nav active" data-match="/places" aria-current="page">)"), std::string::npos) << place;
+  auto kc = site::mark_active(nav, "/places/kc/", "");
+  EXPECT_NE(kc.find(R"(data-match="/places/kc" aria-current="page" class="active">KC)"), std::string::npos) << kc;
+  EXPECT_EQ(kc.find(R"(class="nav active")"), std::string::npos) << kc;
+  // A prefix isn't a string prefix: /placesx isn't under /places.
+  EXPECT_EQ(site::mark_active(nav, "/placesx", ""), nav);
+  // An unquoted class gets quoted; a page's nav-key wins over the path.
+  auto keyed = site::mark_active(nav, "/places", "future");
+  EXPECT_NE(keyed.find(R"(class="x active" data-key="future" aria-current="page">Future)"), std::string::npos) << keyed;
+  EXPECT_EQ(keyed.find(R"(class="nav active")"), std::string::npos) << keyed;
+}
+
+TEST_F(SiteTest, PartialsAreSplicedIntoPagesOnce) {
+  put("_partials/nav.html", R"(<a href="/about" data-match="/about">About</a><!--#include nav-->)");
+  put("about.html", "<!doctype html><html><body><!--#include nav--><main>About</main><!--#include  footer --></body></html>");
+  auto r = get("/about");
+  ASSERT_EQ(r.status, 200) << r.error;
+  // Spliced raw, marked active, one level only (the partial's own marker stays), missing ones empty.
+  EXPECT_EQ(r.body, R"(<!doctype html><html><body><a href="/about" data-match="/about" aria-current="page" class="active">About</a>)"
+                    R"(<!--#include nav--><main>About</main></body></html>)");
+  bool flagged = false;
+  for (const auto& [k, v] : r.headers) flagged |= k == "x-goober-partial-missing" && v == "footer";
+  EXPECT_TRUE(flagged);
+  EXPECT_FALSE(r.restricted);
+  // One partial edit changes the page's ETag, with no page write.
+  std::string before = r.etag;
+  put("_partials/nav.html", R"(<a href="/about" data-match="/about">About us</a>)");
+  EXPECT_NE(get("/about").etag, before);
+  EXPECT_EQ(site::include_names("<!--#include nav--> <!--#include nav --> <!--#include Bad--> <!--#include footer-->"),
+            (std::vector<std::string>{"nav", "footer"}));
+
+  // nav@auth for signed-in visitors; either way the page is private to a cookie.
+  put("_partials/nav@auth.html", "<a href=\"/me\">Me</a>");
+  EXPECT_TRUE(get("/about").restricted);
+  site::Visit v;
+  v.tenant = "t";
+  v.path = "/about";
+  v.user = boost::json::object{{"user_id", "1"}};
+  v.authorize = [](const boost::json::value&) { return 200; };
+  auto signed_in = s->visit(v);
+  EXPECT_NE(signed_in.body.find("<a href=\"/me\">Me</a>"), std::string::npos) << signed_in.body;
+  EXPECT_TRUE(signed_in.restricted);
 }

@@ -379,3 +379,79 @@ TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
   EXPECT_NE(served.find(kEntities), std::string::npos) << served;
   EXPECT_EQ(served.find("<script>alert"), std::string::npos);
 }
+
+// Shared partials (design/machine/027.Partials.md): one write updates a document, a box's
+// template page, and a box's own HTML that opts in, with the right link active on each.
+TEST_F(SiteRoutesTest, OnePartialWriteUpdatesEveryPage) {
+  const std::string nav1 = R"(<nav><a href="/" data-match-exact="/">Home</a> <a href="/jobs" data-match="/jobs">Jobs</a></nav>)";
+  auto put = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", nav1}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  EXPECT_TRUE(put.at("previous_etag").is_null());
+  tool("page_put", {{"tenant", "playground"}, {"path", "/"}, {"format", "document"},
+                    {"body", "<!doctype html><body><!--#include nav--><h1>Home</h1></body>"}});
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"jobs","domains":["*"],
+      "templates": {"job": "<!--#include nav--><article>Job {{id}} {{note}}</article>"},
+      "routes":{"http":{"/jobs/{id : int64}":{"get":{"name":"job","template":"job","public":true}},
+                        "/jobs/{id : int64}/raw":{"get":{"name":"raw","public":true,"includes":true}},
+                        "/jobs/{id : int64}/plain":{"get":{"name":"plain","public":true}}}}})",
+                                   R"((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 16) "text/html; charset=utf-8")
+  (data (i32.const 64) "{\"id\":\"7\",\"note\":\"<!--#include nav-->\"}")
+  (data (i32.const 128) "<!--#include nav--><p>raw</p>")
+  (func (export "goober_route_job") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 64) (i32.const 39))) (i32.const 0))
+  (func (export "goober_route_raw") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 16) (i32.const 24) (i32.const 128) (i32.const 29))) (i32.const 0))
+  (func (export "goober_route_plain") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 16) (i32.const 24) (i32.const 128) (i32.const 29))) (i32.const 0))
+))", &err))
+      << err;
+
+  auto home = fetch(port, bhttp::verb::get, "/");
+  EXPECT_NE(home.body.find(R"(<a href="/" data-match-exact="/" aria-current="page" class="active">Home</a>)"), std::string::npos)
+      << home.body;
+  auto job = fetch(port, bhttp::verb::get, "/jobs/7", {{"accept", "text/html"}});
+  EXPECT_NE(job.body.find(R"(data-match="/jobs" aria-current="page" class="active">Jobs</a>)"), std::string::npos) << job.body;
+  // A value that looks like a marker is escaped, so it never pulls a partial in.
+  EXPECT_NE(job.body.find("&lt;!--#include nav--&gt;"), std::string::npos) << job.body;
+  auto raw = fetch(port, bhttp::verb::get, "/jobs/7/raw");
+  EXPECT_NE(raw.body.find(R"(class="active">Jobs</a></nav><p>raw</p>)"), std::string::npos) << raw.body;
+  // Without "includes", a box's own HTML is served as it wrote it.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/jobs/7/plain").body, "<!--#include nav--><p>raw</p>");
+
+  // One write: every page has the new nav, and new ETags.
+  const std::string nav2 = R"(<nav><a href="/" data-match-exact="/">Home</a> <a href="/jobs" data-match="/jobs">All jobs</a></nav>)";
+  auto second = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", nav2}});
+  EXPECT_EQ(second.at("previous_etag"), put.at("etag"));
+  auto home2 = fetch(port, bhttp::verb::get, "/");
+  EXPECT_NE(home2.body.find("All jobs"), std::string::npos);
+  EXPECT_NE(home2.headers["etag"], home.headers["etag"]);
+  EXPECT_NE(fetch(port, bhttp::verb::get, "/jobs/7", {{"accept", "text/html"}}).body.find("All jobs"), std::string::npos);
+  EXPECT_NE(fetch(port, bhttp::verb::get, "/jobs/7/raw").body.find("All jobs"), std::string::npos);
+
+  // Listed with the pages that include it and a version to roll back to.
+  auto list = tool("partial_list", {{"tenant", "playground"}});
+  ASSERT_EQ(list.at("partials").as_array().size(), 1u) << json::dump(list);
+  const auto& entry = list.at("partials").at(0);
+  EXPECT_EQ(entry.at("name"), "nav");
+  EXPECT_EQ(entry.at("included_by").at(0), "/");
+  ASSERT_EQ(entry.at("versions").as_array().size(), 1u);
+  auto old = tool("partial_get", {{"tenant", "playground"}, {"name", "nav"}, {"version", entry.at("versions").at(0)}});
+  EXPECT_EQ(std::string(old.at("html").as_string()), nav1);
+  // route_check names what each path includes.
+  EXPECT_EQ(tool("route_check", {{"domain", "localhost"}, {"path", "/"}}).at("partials").at(0), "nav");
+  EXPECT_EQ(tool("route_check", {{"domain", "localhost"}, {"path", "/jobs/7/raw"}}).at("route").at("includes"), true);
+
+  // Deleted: markers serve empty with a header saying so; never a 500.
+  EXPECT_EQ(tool("partial_delete", {{"tenant", "playground"}, {"name", "nav"}}).at("deleted"), "_partials/nav.html");
+  auto gone = fetch(port, bhttp::verb::get, "/");
+  EXPECT_EQ(gone.status, 200);
+  EXPECT_EQ(gone.headers["x-goober-partial-missing"], "nav");
+  EXPECT_EQ(gone.body, "<!doctype html><body><h1>Home</h1></body>");
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/jobs/7/raw").headers["x-goober-partial-missing"], "nav");
+  EXPECT_TRUE(tool("partial_put", {{"tenant", "playground"}, {"name", "Bad Name"}, {"html", "x"}}).as_object().contains("error"));
+}

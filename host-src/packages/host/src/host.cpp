@@ -1,5 +1,6 @@
 #include "build_id.h"
 #include "goober/host/host.h"
+#include "goober/site/includes.h"
 
 #include <arpa/inet.h>
 
@@ -769,7 +770,10 @@ void Host::serve_content(const Request& req, const Finish& finish, const std::st
     res.headers.emplace_back("referrer-policy", "same-origin");
     res.headers.emplace_back("vary", "accept, cookie");
   }
-  for (auto& h : r.headers) res.headers.push_back(std::move(h));
+  for (auto& h : r.headers) {
+    if (h.first == "x-goober-partial-missing") extra["partial_missing"] = h.second;
+    res.headers.push_back(std::move(h));
+  }
   if (req.header("if-none-match") == r.etag) {
     res.status = 304;
     return finish(std::move(res), json::dump(extra));
@@ -1090,6 +1094,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     res.body = std::move(result.body);
     res.head_only = req.method == "head";
     // One route, many audiences (007 §8): a browser gets the JSON through the route's template.
+    bool templated = false;
     if (!ref.route->template_name.empty() && result.content_type.starts_with("application/json") &&
         prefers_html(req.header("accept"))) {
       std::string err;
@@ -1118,6 +1123,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         res.headers.emplace_back("vary", "accept, cookie");
         if (who) res.headers.emplace_back("cache-control", "private, no-cache");
         res.body = std::move(*html);
+        templated = true;
       } else {
         base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
                                                          {"request_id", request_id},
@@ -1125,6 +1131,31 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                                                          {"level", "host"},
                                                          {"text", "template " + ref.route->template_name + ": " + err}}));
         res = error_page(tenant, 500, request_id);
+      }
+    }
+    // Shared partials (design/machine/027.Partials.md): always in what the host rendered, and in
+    // the box's own HTML when the route opts in.
+    bool html_out = false;
+    for (const auto& [k, v] : res.headers) {
+      if (k == "content-type" && v.starts_with("text/html")) html_out = true;
+    }
+    if (html_out && res.status < 300 && (templated || ref.route->includes)) {
+      auto e = site::expand_includes(*content_, tenant, res.body, req.path, who.has_value());
+      res.body = std::move(e.html);
+      if (e.by_auth) {
+        std::erase_if(res.headers, [](const auto& h) { return h.first == "cache-control" || h.first == "vary"; });
+        res.headers.emplace_back("cache-control", "private, no-cache");
+        res.headers.emplace_back("vary", "accept, cookie");
+      }
+      if (!e.missing.empty()) {
+        std::string names;
+        for (const auto& n : e.missing) names += (names.empty() ? "" : ", ") + n;
+        res.headers.emplace_back("x-goober-partial-missing", names);
+        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
+                                                         {"request_id", request_id},
+                                                         {"version", ref.box->version},
+                                                         {"level", "host"},
+                                                         {"text", "no partial named " + names + " (_partials/)"}}));
       }
     }
   } else {

@@ -103,6 +103,7 @@ class Site {
   static std::vector<std::string> builtin_names();
 
  private:
+  Result visit_unexpanded(const Visit& visit) const;
   Result render_page(const Visit& v, const Page& page, bool listing_only_for_feed) const;
   Result directory(const Visit& v, const std::string& dir) const;
   std::vector<bj::object> entries(const Visit& v, const std::string& dir) const;

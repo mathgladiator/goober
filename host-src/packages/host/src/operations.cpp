@@ -9,6 +9,7 @@
 #include "goober/base/time.h"
 #include "build_id.h"
 #include "goober/host/host.h"
+#include "goober/site/includes.h"
 #include "goober/host/operator_tokens.h"
 #include "goober/json/json.h"
 
@@ -406,7 +407,10 @@ void Host::register_tools() {
                              {"verb", ref.route->verb},
                              {"pattern", ref.route->pattern.source},
                              {"public", ref.route->is_public},
-                             {"requirements", std::move(reqs)}};
+                             {"requirements", std::move(reqs)},
+                             {"template", ref.route->template_name},
+                             // Shared partials: always in a template's HTML, in the box's own when includes is on.
+                             {"includes", ref.route->includes || !ref.route->template_name.empty()}};
          };
          auto m = table.match(path->segments, verb);
          bj::array also, other_verbs;
@@ -443,6 +447,9 @@ void Host::register_tools() {
            if (auto page = site_->load(tenant, c)) {
              out["file"] = page->path;
              out["kind"] = site::kind_name(page->kind);
+             bj::array partials;
+             for (const auto& n : site::include_names(page->body)) partials.push_back(bj::value(n));
+             out["partials"] = std::move(partials);
              return ToolResult::ok(std::move(out));
            }
          }
