@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <thread>
+
 #include "goober/content/content.h"
 
 using namespace goober;
@@ -59,4 +61,33 @@ TEST(ContentType, ByExtension) {
   EXPECT_EQ(content::content_type_for("a/b.PNG"), "image/png");
   EXPECT_EQ(content::content_type_for("noext"), "application/octet-stream");
   EXPECT_EQ(content::content_type_for("dir.d/noext"), "application/octet-stream");
+}
+
+TEST(ContentType, DataAndFeedFiles) {
+  EXPECT_EQ(content::content_type_for("calculate/meat-macros.csv"), "text/csv; charset=utf-8");
+  EXPECT_EQ(content::content_type_for("updates.atom"), "application/atom+xml; charset=utf-8");
+  EXPECT_EQ(content::content_type_for("site.webmanifest"), "application/manifest+json");
+  EXPECT_EQ(content::content_type_for("x.json"), "application/json");
+}
+
+TEST_F(ContentTest, APreviewIsSeenOnlyByItsOwnThreadAndScope) {
+  std::string err;
+  ASSERT_TRUE(store->put("t", "a.md", "old", &err));
+  ASSERT_TRUE(store->put("t", "gone.md", "x", &err));
+  content::Overlay o{"t", {{"a.md", "new"}, {"b/new.md", "fresh"}, {"gone.md", std::nullopt}}};
+  {
+    content::ContentStore::Preview preview(&o);
+    EXPECT_EQ(store->get("t", "a.md")->data, "new");
+    EXPECT_EQ(store->get("t", "b/new.md")->data, "fresh");
+    EXPECT_FALSE(store->get("t", "gone.md"));
+    EXPECT_EQ(store->list("t", ""), (std::vector<std::string>{"a.md", "b/new.md"}));
+    EXPECT_EQ(store->list("other", ""), std::vector<std::string>{});
+    std::optional<content::File> elsewhere;
+    std::thread([&] { elsewhere = store->get("t", "a.md"); }).join();
+    EXPECT_EQ(elsewhere->data, "old");
+  }
+  EXPECT_EQ(store->get("t", "a.md")->data, "old");
+  EXPECT_FALSE(store->get("t", "b/new.md"));
+  EXPECT_TRUE(store->get("t", "gone.md"));
+  EXPECT_FALSE(fs::exists(root / "content/t/b/new.md"));
 }

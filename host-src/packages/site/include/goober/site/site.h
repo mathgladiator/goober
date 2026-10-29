@@ -38,6 +38,11 @@ struct Page {
 };
 
 // One request for content.
+// A json_ld value (an object or array, or a string holding one) as the host-built
+// <script type="application/ld+json"> tag, escaped so nothing in it can end the script; or
+// nullopt. Boxes' json_ld and pages' json_ld field both go through it.
+std::optional<std::string> json_ld_script(const boost::json::value& ld);
+
 struct Visit {
   std::string tenant;
   std::string path;  // a normalized URL path

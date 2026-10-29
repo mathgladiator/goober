@@ -341,6 +341,11 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       `nav-key`; `@auth` variants; ETags after expansion; `partial_put`, `partial_get`,
       `partial_list`, `partial_delete`, and `route_check`'s `partials`.
 
+### Phase 16b: trying content without writing it (007)
+- [x] `page_render` previews unsaved pages, templates, partials, and files, and a listing's
+      feed; `template_get` reads any template, built-ins too; a page's `json_ld` field; Atom
+      author and categories; `content_put` sha256; csv, atom, webmanifest, and other types.
+
 ### Phase 17: the operator panel (028)
 - [x] The panel on `operations.domain` (never a tenant's) or `operations.listen`, signed in as a
       host identity with `host:owner`, `host:operator`, or `host:observer`; look-only.

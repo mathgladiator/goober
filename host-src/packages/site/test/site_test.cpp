@@ -144,6 +144,25 @@ TEST_F(SiteTest, ListingsSortPageFilterAndSkipDrafts) {
   EXPECT_EQ(feed.kind, site::Kind::kFeed);
   EXPECT_NE(feed.body.find("<link href=\"https://example.com/blog/b\"/>"), std::string::npos);
   EXPECT_NE(feed.body.find("<updated>2026-04-01T00:00:00Z</updated>"), std::string::npos);
+  // Valid Atom needs an author; tags become categories.
+  EXPECT_NE(feed.body.find("<author><name>"), std::string::npos);
+  EXPECT_NE(feed.body.find("<category term=\"news\"/>"), std::string::npos);
+}
+
+TEST_F(SiteTest, APagesJsonLdFieldIsTheHostBuiltTag) {
+  put("_templates/post.html", "<head>{{{json_ld}}}</head><h1>{{title}}</h1>{{{body}}}");
+  put("updates/hi.md",
+      "---\ntitle: I'm back\ntemplate: post\njson_ld: {\"@type\": \"Article\", \"headline\": \"I'm back </script>\"}\n---\nHello.");
+  auto r = get("/updates/hi");
+  ASSERT_EQ(r.status, 200) << r.error;
+  EXPECT_NE(r.body.find("<script type=\"application/ld+json\">{\"@type\":\"Article\",\"headline\":\"I'm back \\u003c/script\\u003e\"}</script>"),
+            std::string::npos)
+      << r.body;
+  EXPECT_NE(r.body.find("<h1>I&#39;m back</h1>"), std::string::npos) << r.body;
+  // Anything but JSON is left out, never placed as markup.
+  put("updates/bad.md", "---\ntemplate: post\njson_ld: <b>x</b>\n---\nx");
+  auto bad = get("/updates/bad");
+  EXPECT_EQ(bad.body.find("<b>x</b>"), std::string::npos) << bad.body;
 }
 
 TEST_F(SiteTest, DirectoriesAreListedOnlyWithADirectoryTemplate) {

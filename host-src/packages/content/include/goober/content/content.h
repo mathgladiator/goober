@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,6 +23,14 @@ struct File {
 // The content type for a path, from its extension.
 std::string content_type_for(std::string_view path);
 
+// Files a preview pretends are written (page_render with pages, templates, partials, or
+// files): a value is the file's would-be text, nullopt a file the write would remove. Seen only
+// by reads on the thread that set it, so nothing else ever sees an unsaved file.
+struct Overlay {
+  std::string tree;
+  std::map<std::string, std::optional<std::string>> files;
+};
+
 // Static content per tenant, stored under storage/content/$tenant/$path and
 // changed only through the host WAL.
 class ContentStore {
@@ -37,6 +46,18 @@ class ContentStore {
   // Resolves a normalized URL path ("/", "/a/b") to a file: "/" serves
   // index.html; "/a" serves a, or else a/index.html.
   std::optional<File> resolve(std::string_view tree, std::string_view url_path) const;
+
+  // Reads on this thread see `overlay` until the scope ends. Writes are unaffected.
+  class Preview {
+   public:
+    explicit Preview(const Overlay* overlay);
+    ~Preview();
+    Preview(const Preview&) = delete;
+    Preview& operator=(const Preview&) = delete;
+
+   private:
+    const Overlay* previous_;
+  };
 
  private:
   bool valid(std::string_view tree, std::string_view path, std::string* error) const;

@@ -1,5 +1,7 @@
 #include "goober/content/content.h"
 
+#include <algorithm>
+
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
@@ -27,12 +29,31 @@ std::string content_type_for(std::string_view path) {
       {"xml", "application/xml"},            {"pdf", "application/pdf"},
       {"mp3", "audio/mpeg"},                 {"mp4", "video/mp4"},
       {"ogg", "audio/ogg"},                  {"wav", "audio/wav"},
+      {"csv", "text/csv; charset=utf-8"},    {"tsv", "text/tab-separated-values; charset=utf-8"},
+      {"atom", "application/atom+xml; charset=utf-8"}, {"rss", "application/rss+xml; charset=utf-8"},
+      {"webmanifest", "application/manifest+json"}, {"ics", "text/calendar; charset=utf-8"},
+      {"avif", "image/avif"},                {"webm", "video/webm"},
+      {"geojson", "application/geo+json"},   {"yaml", "text/yaml; charset=utf-8"},
+      {"yml", "text/yaml; charset=utf-8"},   {"map", "application/json"},
   };
   for (const auto& [e, t] : kTypes) {
     if (ext == e) return t;
   }
   return "application/octet-stream";
 }
+
+namespace {
+thread_local const Overlay* t_overlay = nullptr;
+
+const std::optional<std::string>* overlaid(std::string_view tree, std::string_view path) {
+  if (!t_overlay || t_overlay->tree != tree) return nullptr;
+  auto it = t_overlay->files.find(std::string(path));
+  return it == t_overlay->files.end() ? nullptr : &it->second;
+}
+}  // namespace
+
+ContentStore::Preview::Preview(const Overlay* overlay) : previous_(t_overlay) { t_overlay = overlay; }
+ContentStore::Preview::~Preview() { t_overlay = previous_; }
 
 ContentStore::ContentStore(wal::HostWal& wal) : wal_(wal) {}
 
@@ -66,7 +87,12 @@ bool ContentStore::remove(std::string_view tree, std::string_view path, std::str
 
 std::optional<File> ContentStore::get(std::string_view tree, std::string_view path) const {
   if (!valid(tree, path, nullptr)) return std::nullopt;
-  auto data = base::read_file(wal_.root() / "content" / std::string(tree) / std::string(path));
+  std::optional<std::string> data;
+  if (const auto* o = overlaid(tree, path)) {
+    data = *o;
+  } else {
+    data = base::read_file(wal_.root() / "content" / std::string(tree) / std::string(path));
+  }
   if (!data) return std::nullopt;
   File f;
   f.etag = "\"" + base::sha256_hex(*data).substr(0, 16) + "\"";
@@ -79,7 +105,13 @@ std::vector<std::string> ContentStore::list(std::string_view tree, std::string_v
   std::vector<std::string> out;
   if (tree != kHostTree && !base::is_valid_name(tree)) return out;
   for (auto& f : base::list_files(wal_.root() / "content" / std::string(tree))) {
-    if (f.starts_with(prefix)) out.push_back(std::move(f));
+    if (f.starts_with(prefix) && !overlaid(tree, f)) out.push_back(std::move(f));
+  }
+  if (t_overlay && t_overlay->tree == tree) {
+    for (const auto& [f, data] : t_overlay->files) {
+      if (data && f.starts_with(prefix)) out.push_back(f);
+    }
+    std::sort(out.begin(), out.end());
   }
   return out;
 }

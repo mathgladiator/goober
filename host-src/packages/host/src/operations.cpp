@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "goober/base/encoding.h"
+#include "goober/base/hash.h"
 #include "goober/base/names.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
@@ -205,11 +206,15 @@ void Host::register_tools() {
   mcp_->add_tool(
       {"content_put",
        "Writes one static file for a tenant, persisted to disk through the host WAL. Give text, or base64 for binary. "
-       "The path is relative, like index.html or css/site.css; / serves index.html.",
+       "The path is relative, like index.html or css/site.css; / serves index.html. The type comes from the "
+       "extension (.csv is text/csv, .atom application/atom+xml, .webmanifest, .json, .xml, .svg, ...). Both text and "
+       "base64 are stored byte for byte, but a tool-call layer may change text on its way here (CRLF becoming LF): "
+       "when the exact bytes matter, give sha256 and the write is refused unless what arrived matches.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("A relative path, like index.html.")},
                       {"text", string_property("The file's contents as text.")},
-                      {"base64", string_property("The file's contents as base64, for binary files.")}},
+                      {"base64", string_property("The file's contents as base64, for binary files.")},
+                      {"sha256", string_property("The SHA-256 (hex) the bytes must have, or nothing is written.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -226,12 +231,20 @@ void Host::register_tools() {
            if (!decoded) return ToolResult::fail("base64 is not valid");
            data = std::move(*decoded);
          }
+         std::string sha = base::sha256_hex(data);
+         if (auto want = arg(args, "sha256"); want && base::to_lower(*want) != sha) {
+           size_t crs = std::count(data.begin(), data.end(), '\r');
+           return ToolResult::fail("nothing written: the " + std::to_string(data.size()) + " bytes that arrived have sha256 " +
+                                   sha + ", not " + *want + (text ? " (" + std::to_string(crs) +
+                                   " CR bytes arrived; if CRLF line endings were lost on the way, send base64)" : ""));
+         }
          std::string err;
          if (!content_->put(*tenant, *path, data, &err)) return ToolResult::fail(err);
          auto f = content_->get(*tenant, *path);
          return ToolResult::ok(bj::object{{"tenant", *tenant},
                                           {"path", *path},
                                           {"bytes", data.size()},
+                                          {"sha256", sha},
                                           {"content_type", f ? f->content_type : ""},
                                           {"etag", f ? f->etag : ""}});
        }});

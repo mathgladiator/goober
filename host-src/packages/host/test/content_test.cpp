@@ -8,6 +8,7 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
+#include "goober/base/hash.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 
@@ -454,4 +455,58 @@ TEST_F(SiteRoutesTest, OnePartialWriteUpdatesEveryPage) {
   EXPECT_EQ(gone.body, "<!doctype html><body><h1>Home</h1></body>");
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/jobs/7/raw").headers["x-goober-partial-missing"], "nav");
   EXPECT_TRUE(tool("partial_put", {{"tenant", "playground"}, {"name", "Bad Name"}, {"html", "x"}}).as_object().contains("error"));
+}
+
+// Trying a blog without writing it (Engineer B, 2026-10-28): unsaved pages, a template, and the
+// listing's feed render as if written, and nothing is stored.
+TEST_F(SiteRoutesTest, PageRenderPreviewsUnsavedPagesTemplatesAndFeeds) {
+  bj::array pages{
+      bj::object{{"path", "/updates"}, {"format", "markdown"}, {"body", "News."},
+                 {"fields", bj::object{{"list", "updates"}, {"feed", true}, {"title", "Updates"}}}},
+      bj::object{{"path", "/updates/hello"}, {"format", "markdown"}, {"body", "Hello there."}, {"template", "post"},
+                 {"fields", bj::object{{"title", "I'm back"}, {"date", "2026-10-29"}, {"tags", bj::array{"news"}},
+                                       {"json_ld", bj::object{{"@type", "Article"}, {"headline", "I'm back"}}}}}}};
+  bj::object templates{{"post", "<head>{{{json_ld}}}</head><article><h1>{{title}}</h1>{{{body}}}</article>"}};
+  auto post = tool("page_render", {{"tenant", "playground"}, {"path", "/updates/hello"}, {"pages", pages}, {"templates", templates}});
+  ASSERT_EQ(post.at("status").as_int64(), 200) << json::dump(post);
+  std::string html(post.at("body").as_string());
+  EXPECT_NE(html.find("<h1>I&#39;m back</h1>"), std::string::npos) << html;
+  EXPECT_NE(html.find(R"(<script type="application/ld+json">{"@type":"Article","headline":"I'm back"}</script>)"), std::string::npos)
+      << html;
+  EXPECT_EQ(post.at("stored"), false);
+
+  auto list = tool("page_render", {{"tenant", "playground"}, {"path", "/updates"}, {"pages", pages}, {"feed", true}});
+  ASSERT_EQ(list.at("status").as_int64(), 200) << json::dump(list);
+  EXPECT_NE(std::string(list.at("body").as_string()).find("/updates/hello"), std::string::npos);
+  std::string feed(list.at("feed").at("body").as_string());
+  EXPECT_NE(feed.find("<category term=\"news\"/>"), std::string::npos) << feed;
+  EXPECT_NE(feed.find("<updated>2026-10-29"), std::string::npos) << feed;
+
+  // Nothing was written.
+  EXPECT_FALSE(host->content().get("playground", "updates/hello.md"));
+  EXPECT_FALSE(host->content().get("playground", "_templates/post.html"));
+  EXPECT_EQ(tool("page_render", {{"tenant", "playground"}, {"path", "/updates/hello"}}).at("status").as_int64(), 404);
+  // A template that doesn't parse is refused, as template_put would.
+  EXPECT_TRUE(tool("page_render", {{"tenant", "playground"}, {"path", "/"}, {"templates", bj::object{{"x", "{{#a}}"}}}})
+                  .as_object()
+                  .contains("error"));
+}
+
+TEST_F(SiteRoutesTest, TemplateGetGivesTheBuiltInsAndContentPutChecksBytes) {
+  auto page = tool("template_get", {{"tenant", "playground"}, {"name", "list"}});
+  EXPECT_EQ(page.at("source"), "built-in") << json::dump(page);
+  EXPECT_NE(std::string(page.at("template").as_string()).find("{{#pages}}"), std::string::npos);
+
+  std::string csv = "a,b\r\n1,2\r\n";
+  std::string sha = base::sha256_hex(csv);
+  auto put = tool("content_put", {{"tenant", "playground"}, {"path", "data/x.csv"}, {"text", csv}, {"sha256", sha}});
+  EXPECT_EQ(put.at("bytes").as_int64(), 10) << json::dump(put);
+  EXPECT_EQ(std::string(put.at("sha256").as_string()), sha);
+  EXPECT_EQ(put.at("content_type"), "text/csv; charset=utf-8");
+  // What a layer that drops CR would deliver: refused, saying so.
+  auto bad = tool("content_put", {{"tenant", "playground"}, {"path", "data/y.csv"}, {"text", "a,b\n1,2\n"}, {"sha256", sha}});
+  ASSERT_TRUE(bad.as_object().contains("error")) << json::dump(bad);
+  EXPECT_NE(std::string(bad.at("error").as_string()).find("0 CR bytes"), std::string::npos);
+  EXPECT_FALSE(host->content().get("playground", "data/y.csv"));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/data/x.csv").headers["content-type"], "text/csv; charset=utf-8");
 }

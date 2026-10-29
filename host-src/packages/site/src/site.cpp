@@ -293,6 +293,34 @@ bj::object Site::base_data(std::string_view tenant) const {
   return data;
 }
 
+// Structured data for search engines: JSON (an object or array, or a string holding one) as
+// the whole script tag, with < > & U+2028 U+2029 escaped as \u sequences, so no value can end
+// the script or reach the page as markup (070 § Templates). nullopt for anything else.
+std::optional<std::string> json_ld_script(const bj::value& ld) {
+  std::optional<bj::value> v;
+  if (ld.is_object() || ld.is_array()) {
+    v = ld;
+  } else if (ld.is_string()) {
+    std::string err;
+    v = json::parse(ld.get_string(), &err);
+    if (v && !v->is_object() && !v->is_array()) v.reset();
+  }
+  if (!v) return std::nullopt;
+  std::string text;
+  for (char c : json::dump(*v)) {
+    if (c == '<') text += "\\u003c";
+    else if (c == '>') text += "\\u003e";
+    else if (c == '&') text += "\\u0026";
+    else text += c;
+  }
+  for (std::string_view sep : {std::string_view("\xe2\x80\xa8"), std::string_view("\xe2\x80\xa9")}) {
+    for (size_t i = 0; (i = text.find(sep, i)) != std::string::npos;) {
+      text.replace(i, sep.size(), sep.back() == '\xa8' ? "\\u2028" : "\\u2029");
+    }
+  }
+  return "<script type=\"application/ld+json\">" + text + "</script>";
+}
+
 std::optional<std::string> Site::render_template(std::string_view tenant, std::string_view name, bj::object data,
                                                  const std::map<std::string, std::string>* inline_templates,
                                                  std::string* error, bool json_ld) const {
@@ -347,29 +375,8 @@ std::optional<std::string> Site::render_named(std::string_view tenant, std::stri
   // holding one), and the host writes the whole script tag, with < > & escaped as \u003c and
   // so on, so no value can end the script or reach the page as markup (070 § Templates).
   if (auto* ld = data.if_contains("json_ld")) {
-    std::optional<bj::value> v;
-    if (ld->is_object() || ld->is_array()) {
-      v = *ld;
-    } else if (ld->is_string()) {
-      std::string err;
-      v = json::parse(ld->get_string(), &err);
-      if (v && !v->is_object() && !v->is_array()) v.reset();
-    }
-    if (v) {
-      std::string text;
-      for (char c : json::dump(*v)) {
-        if (c == '<') text += "\\u003c";
-        else if (c == '>') text += "\\u003e";
-        else if (c == '&') text += "\\u0026";
-        else text += c;
-      }
-      // U+2028 and U+2029, which some script parsers end a line at.
-      for (std::string_view sep : {std::string_view("\xe2\x80\xa8"), std::string_view("\xe2\x80\xa9")}) {
-        for (size_t i = 0; (i = text.find(sep, i)) != std::string::npos;) {
-          text.replace(i, sep.size(), sep.back() == '\xa8' ? "\\u2028" : "\\u2029");
-        }
-      }
-      *ld = "<script type=\"application/ld+json\">" + text + "</script>";
+    if (auto tag = json_ld_script(*ld)) {
+      *ld = std::move(*tag);
     } else {
       data.erase("json_ld");
     }
@@ -542,6 +549,10 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
       out += "<title>" + xml_escape(title) + "</title>\n<link href=\"" + xml_escape(base + page.url) + "\"/>\n";
       out += "<link rel=\"self\" href=\"" + xml_escape(self) + "\"/>\n<id>" + xml_escape(base + page.url) + "</id>\n";
       out += "<updated>" + xml_escape(updated) + "</updated>\n";
+      // Atom needs an author: the site, by its title (or its domain).
+      std::string site_title;
+      if (auto* st = data.if_contains("site"); st && st->is_object()) site_title = str(st->as_object(), "title");
+      out += "<author><name>" + xml_escape(site_title.empty() ? title : site_title) + "</name></author>\n";
       for (size_t i = 0; i < all.size() && i < kFeedEntries; ++i) {
         const auto& e = all[i];
         std::string link = base + str(e, "url");
@@ -549,6 +560,9 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
                "\"/>\n<id>" + xml_escape(link) + "</id>\n<updated>" + xml_escape(atom_time(str(e, "date"), updated)) +
                "</updated>\n";
         if (auto s = str(e, "summary"); !s.empty()) out += "<summary>" + xml_escape(s) + "</summary>\n";
+        for (const auto& t : e.at("tags").as_array()) {
+          if (t.is_string()) out += "<category term=\"" + xml_escape(std::string(t.get_string())) + "\"/>\n";
+        }
         out += "</entry>\n";
       }
       out += "</feed>\n";
@@ -595,8 +609,18 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   if (template_name.empty()) template_name = "page";
   data["page"] = std::move(page_obj);
   data["body"] = std::move(body_html);
+  // A page's json_ld field becomes the host-built tag, as a box's does.
+  bool has_json_ld = false;
+  if (auto* ld = data.if_contains("json_ld")) {
+    if (auto tag = json_ld_script(*ld)) {
+      *ld = std::move(*tag);
+      has_json_ld = true;
+    } else {
+      data.erase("json_ld");
+    }
+  }
   std::string err;
-  auto html = render_template(v.tenant, template_name, std::move(data), nullptr, &err);
+  auto html = render_template(v.tenant, template_name, std::move(data), nullptr, &err, has_json_ld);
   if (!html) return fail(500, page.path + ": " + err);
   r.status = 200;
   r.content_type = "text/html; charset=utf-8";

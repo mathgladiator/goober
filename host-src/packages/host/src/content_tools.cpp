@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <cctype>
 #include <set>
+#include <tuple>
 
 #include "backups.h"
 #include "goober/base/encoding.h"
+#include "goober/base/files.h"
 #include "goober/base/hash.h"
 #include "goober/base/process.h"
 #include "goober/base/names.h"
@@ -45,11 +47,21 @@ become front matter. Useful fields:
   draft (true hides the page), requirements ([["owner"]] to restrict it; public otherwise),
   redirect (/new) with redirect-status (301, 302, 307, 308, or 410).
 Preview anything, drafts included, with page_render before telling a person it is done.
+Try before writing: page_render also takes unsaved pages (each shaped like page_put's
+arguments), templates {name: text}, partials {name: html}, and files {path: text}, and renders
+as if they were written; nothing is stored. Add feed: true to get a listing's Atom too:
+  page_render {tenant, path: "/updates", pages: [{path: "/updates/hello", format: "markdown",
+    body: "...", fields: {date: "2026-10-29", tags: ["news"]}}], templates: {post: "..."}, feed: true}
+Structured data: a json_ld field (a JSON object or array) becomes the host-built
+<script type="application/ld+json"> tag, escaped so no value can end it; put {{{json_ld}}}
+in the template's <head>, without a <script> of its own. {{title}} inside a script would be
+HTML-escaped (I&#39;m), so build JSON-LD this way instead.
 
-## Templates [template_put, template_list]
+## Templates [template_put, template_get, template_list]
 Mustache, stored as _templates/$name.html. A page picks one with the template field; the
 default is "page", or "list" for a listing. Built-in base, page, and list templates exist, so
-a site looks clean with no templates at all; write your own to restyle.
+a site looks clean with no templates at all; write your own to restyle. template_get gives any
+template's source, the built-ins too, to copy from.
   {{title}} {{date}} {{summary}} {{any_front_matter_field}}  escaped values
   {{{body}}}                     the page's rendered HTML (the only unescaped value)
   {{site.title}} {{#site.nav}}<a href="{{url}}">{{label}}</a>{{/site.nav}}   from _data/site.json
@@ -67,14 +79,21 @@ A page with the field list: blog lists the pages directly inside blog/ (blog/x.m
 blog/y/index.md as /blog/y). Drafts and pages the visitor can't open are left out.
   sort: -date (default), date, title, -title, order, path      per-page: 20 (at most 200)
   ?page=2 pages through; ?tag=news filters; feed: true also serves /blog/feed.xml (Atom).
+Every format is listed: markdown, fragments, and documents with front matter alike (a
+document's title comes from its title field, else its <title>). The feed holds the newest 20
+by the listing's sort: each entry's title, link, id, updated (its date, else the feed's), summary (the
+summary field, else the start of the text), and a category per tag; the feed's author is the
+site's title. It carries no full content.
 A directory without an index page is listed only if _templates/directory.html exists.
 
 ## Site data [content_put]
 _data/site.json holds the site's title, navigation, and footer:
   {"title": "Bob's Plumbing", "nav": [{"label": "Blog", "url": "/blog"}], "footer": "Since 1987",
    "stylesheet": "/css/site.css"}
-Static files (CSS, JS, fonts, favicons) go anywhere with content_put. Paths with a segment that
-starts with "_" are never served.
+Static files (CSS, JS, fonts, favicons, CSV) go anywhere with content_put; the type comes from
+the extension (.csv, .json, .xml, .atom, .rss, .webmanifest, .ics, .svg, .txt, .md, images, fonts).
+Paths with a segment that starts with "_" are never served. Text is stored byte for byte, but a
+tool-call layer can drop CR bytes on the way: give sha256 to make sure, or send base64.
 
 ## Images and files [attachment_put, attachment_list, attachment_get, attachment_delete]
 attachment_put takes base64 bytes, a file already on the site (file: "/hero.jpg"), or an https
@@ -141,6 +160,73 @@ std::string file_for(const site::Site& site, const std::string& tenant, std::str
     }
   }
   return url + (index ? "/index" : "") + ext;
+}
+
+// What page_put writes for its arguments (path, format, body, title, template, fields): the
+// file, its text with front matter, and the other files answering the same URL, which the
+// write removes. page_render previews the same thing without writing it.
+struct BuiltPage {
+  std::string file, text;
+  std::vector<std::string> others;
+  bj::object fields;
+};
+std::optional<BuiltPage> build_page(const site::Site& site, const std::string& tenant, const bj::object& args,
+                                    std::string* error) {
+  auto text_of = [&](const char* k) -> std::optional<std::string> {
+    auto* v = args.if_contains(k);
+    return v && v->is_string() ? std::optional<std::string>(std::string(v->as_string())) : std::nullopt;
+  };
+  auto path = text_of("path"), format = text_of("format"), body = text_of("body");
+  if (!path || !format || !body) return *error = "path, format, and body are required", std::nullopt;
+  if (*format != "markdown" && *format != "fragment" && *format != "document") {
+    return *error = "format must be markdown, fragment, or document", std::nullopt;
+  }
+  BuiltPage out;
+  bj::object& fields = out.fields;
+  if (auto* f = args.if_contains("fields")) {
+    if (!f->is_object()) return *error = "fields must be an object", std::nullopt;
+    fields = f->as_object();
+  }
+  if (auto t = text_of("title")) fields["title"] = *t;
+  if (auto t = text_of("template")) fields["template"] = *t;
+  if (*format == "document") {
+    // A document is served as written; front matter (document: true) carries only what
+    // decides who sees it and how it's listed.
+    for (const auto& [k, v] : fields) {
+      if (k == "template" || k == "list" || k == "sort" || k == "per-page" || k == "feed") {
+        return *error = "a document is served as written, so it takes no " + std::string(k) +
+                        "; use fragment to wrap HTML in a template",
+               std::nullopt;
+      }
+    }
+    if (body->starts_with("---")) return *error = "a document can't start with ---, which would read as front matter", std::nullopt;
+    if (!fields.empty()) fields["document"] = true;
+  }
+  std::string ext = *format == "markdown" ? ".md" : ".html";
+  out.file = file_for(site, tenant, *path, ext);
+  if (site::is_private_path(out.file)) return *error = "a page's path can't have a segment starting with _", std::nullopt;
+  if (*format != "document" || !fields.empty()) {
+    out.text = "---\n";
+    for (const auto& [k, v] : fields) {
+      std::string key(k);
+      bool ok = !key.empty();
+      for (char c : key) ok = ok && (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-');
+      if (!ok) return *error = "field names are letters, digits, _ and -: " + key, std::nullopt;
+      out.text += front_matter_line(key, v);
+    }
+    out.text += "---\n";
+  }
+  out.text += *body;
+  if (auto url = site::page_url(out.file)) {
+    std::string stem = url->substr(1);
+    std::vector<std::string> others = stem.empty() ? std::vector<std::string>{"index.md", "index.html"}
+                                                   : std::vector<std::string>{stem + ".md", stem + ".html",
+                                                                              stem + "/index.md", stem + "/index.html"};
+    for (auto& o : others) {
+      if (o != out.file) out.others.push_back(std::move(o));
+    }
+  }
+  return out;
 }
 
 // Fetches an https URL with the system curl, for attachment_put (007 §7).
@@ -229,61 +315,17 @@ void Host::register_content_tools() {
          auto body = arg(args, "body");
          if (!tenant || !path || !format || !body) return ToolResult::fail("tenant, path, format, and body are required");
          if (!known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves tenant " + *tenant);
-         if (*format != "markdown" && *format != "fragment" && *format != "document") {
-           return ToolResult::fail("format must be markdown, fragment, or document");
-         }
-         bj::object fields;
-         if (auto it = args.find("fields"); it != args.end()) {
-           if (!it->value().is_object()) return ToolResult::fail("fields must be an object");
-           fields = it->value().get_object();
-         }
-         if (auto t = arg(args, "title")) fields["title"] = *t;
-         if (auto t = arg(args, "template")) fields["template"] = *t;
-         if (*format == "document") {
-           // A document is served as written; front matter (document: true) carries only what
-           // decides who sees it and how it's listed.
-           for (const auto& [k, v] : fields) {
-             if (k == "template" || k == "list" || k == "sort" || k == "per-page" || k == "feed") {
-               return ToolResult::fail("a document is served as written, so it takes no " + std::string(k) +
-                                       "; use fragment to wrap HTML in a template");
-             }
-           }
-           if (body->starts_with("---")) {
-             return ToolResult::fail("a document can't start with ---, which would read as front matter");
-           }
-           if (!fields.empty()) fields["document"] = true;
-         }
-         std::string ext = *format == "markdown" ? ".md" : ".html";
-         std::string file = file_for(*site_, *tenant, *path, ext);
-         if (site::is_private_path(file)) return ToolResult::fail("a page's path can't have a segment starting with _");
-         std::string text;
-         if (*format != "document" || !fields.empty()) {
-           text = "---\n";
-           for (const auto& [k, v] : fields) {
-             std::string key(k);
-             bool ok = !key.empty();
-             for (char c : key) ok = ok && (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-');
-             if (!ok) return ToolResult::fail("field names are letters, digits, _ and -: " + key);
-             text += front_matter_line(key, v);
-           }
-           text += "---\n";
-         }
-         text += *body;
          std::string err;
-         if (!content_->put(*tenant, file, text, &err)) return ToolResult::fail(err);
+         auto built = build_page(*site_, *tenant, args, &err);
+         if (!built) return ToolResult::fail(err);
+         const std::string& file = built->file;
+         bj::object& fields = built->fields;
+         if (!content_->put(*tenant, file, built->text, &err)) return ToolResult::fail(err);
          // One page per URL: drop every other file that answers it (the other format, and
          // name.html beside name/index.html), so what was just written is what's served.
          bj::array removed;
-         if (auto url = site::page_url(file)) {
-           std::string stem = url->substr(1);
-           std::vector<std::string> others = stem.empty() ? std::vector<std::string>{"index.md", "index.html"}
-                                                          : std::vector<std::string>{stem + ".md", stem + ".html",
-                                                                                     stem + "/index.md", stem + "/index.html"};
-           for (const auto& other : others) {
-             if (other != file && content_->get(*tenant, other) && content_->remove(*tenant, other, &err)) {
-               removed.push_back(bj::value(other));
-             }
-           }
+         for (const auto& other : built->others) {
+           if (content_->get(*tenant, other) && content_->remove(*tenant, other, &err)) removed.push_back(bj::value(other));
          }
          bj::array warnings;
          std::string tmpl = fields.contains("template") && fields["template"].is_string()
@@ -470,16 +512,68 @@ void Host::register_content_tools() {
   mcp_->add_tool(
       {"page_render",
        "Renders a URL exactly as a visitor gets it (status, kind, and HTML), as a host operator, so pages with "
-       "requirements render too. With drafts, drafts render; use it to preview before telling someone it's done.",
+       "requirements render too. With drafts, drafts render; use it to preview before telling someone it's done. "
+       "To try something without writing it, pass unsaved pages (each shaped like page_put's arguments), templates, "
+       "partials, or files: the render sees them as if written, and nothing is stored. With feed, a listing's "
+       "/feed.xml is rendered too.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("The URL, like /blog or /blog/hello.")},
                       {"query", object_property("Query parameters, like {\"page\": \"2\"}.")},
-                      {"drafts", boolean_property("Render drafts too.")}},
+                      {"drafts", boolean_property("Render drafts too.")},
+                      {"pages", bj::object{{"type", "array"},
+                                           {"description", "Unsaved pages: [{path, format, body, title?, template?, fields?}], "
+                                                           "as page_put takes them."},
+                                           {"items", bj::object{{"type", "object"}}}}},
+                      {"templates", object_property("Unsaved templates by name, like {\"post\": \"<article>{{{body}}}</article>\"}.")},
+                      {"partials", object_property("Unsaved partials by name, like {\"nav\": \"<nav>...</nav>\"}.")},
+                      {"files", object_property("Other unsaved files by path, like {\"_data/site.json\": \"{...}\"}.")},
+                      {"feed", boolean_property("Also render the listing's feed, path/feed.xml.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
          auto tenant = arg(args, "tenant");
          auto path = arg(args, "path");
          if (!tenant || !path) return ToolResult::fail("tenant and path are required");
+         // The would-be files, seen only by this render (content::ContentStore::Preview).
+         content::Overlay overlay{*tenant, {}};
+         bj::array previewed;
+         auto add = [&](const std::string& file, std::optional<std::string> text) {
+           overlay.files[file] = std::move(text);
+         };
+         if (auto* pages = args.if_contains("pages")) {
+           if (!pages->is_array()) return ToolResult::fail("pages must be an array of page_put arguments");
+           for (const auto& pv : pages->as_array()) {
+             if (!pv.is_object()) return ToolResult::fail("each page is an object of page_put arguments");
+             std::string err;
+             auto built = build_page(*site_, *tenant, pv.as_object(), &err);
+             if (!built) return ToolResult::fail("pages: " + err);
+             for (const auto& o : built->others) add(o, std::nullopt);
+             add(built->file, built->text);
+             previewed.push_back(bj::value(built->file));
+           }
+         }
+         for (auto [key, dir, ext] : {std::tuple{"templates", "_templates/", ".html"}, std::tuple{"partials", "_partials/", ".html"},
+                                      std::tuple{"files", "", ""}}) {
+           auto* m = args.if_contains(key);
+           if (!m) continue;
+           if (!m->is_object()) return ToolResult::fail(std::string(key) + " must be an object of names to text");
+           for (const auto& [name, text] : m->as_object()) {
+             if (!text.is_string()) return ToolResult::fail(std::string(key) + "." + std::string(name) + " must be text");
+             std::string t(text.as_string());
+             if (std::string_view(key) == "templates") {
+               if (!valid_template_name(std::string(name))) return ToolResult::fail("a template name is lowercase letters, digits, _ and -");
+               std::string err;
+               auto doc = render::split_front_matter(t, &err);
+               if (!err.empty() || !render::check_mustache(doc.body, &err)) {
+                 return ToolResult::fail("templates." + std::string(name) + ": " + err);
+               }
+             }
+             std::string file = std::string(dir) + std::string(name) + ext;
+             if (!base::is_safe_relative_path(file)) return ToolResult::fail(std::string(key) + ": not a safe path: " + file);
+             add(file, t);
+             previewed.push_back(bj::value(file));
+           }
+         }
+         content::ContentStore::Preview preview(overlay.files.empty() ? nullptr : &overlay);
          auto normal = router::normalize_path(*path);
          if (!normal) return ToolResult::fail("not a valid URL path");
          site::Visit v;
@@ -501,6 +595,18 @@ void Host::register_content_tools() {
          auto r = site_->visit(v);
          bj::object out{{"status", r.status}, {"kind", site::kind_name(r.kind)}, {"file", r.file},
                         {"content_type", r.content_type}};
+         if (!previewed.empty()) {
+           out["previewed"] = std::move(previewed);
+           out["stored"] = false;
+         }
+         if (bool_arg(args, "feed")) {
+           site::Visit fv = v;
+           fv.path = (v.path == "/" ? "" : v.path) + "/feed.xml";
+           fv.query.clear();
+           auto f = site_->visit(fv);
+           out["feed"] = bj::object{{"status", f.status}, {"content_type", f.content_type},
+                                    {"body", f.status == 200 ? f.body : f.error}};
+         }
          if (!r.location.empty()) out["location"] = r.location;
          if (!r.error.empty()) out["error"] = r.error;
          constexpr size_t kMax = 200 * 1024;
@@ -534,6 +640,21 @@ void Host::register_content_tools() {
          if (!content_->put(*tenant, path, *text, &err)) return ToolResult::fail(err);
          return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", path}});
        }});
+
+  mcp_->add_tool({"template_get",
+                  "Reads a template's Mustache source as this tenant's pages get it: the tenant's own, else _host's, "
+                  "else the built-in one (base, page, list), so a built-in can be copied and changed.",
+                  object_schema({{"tenant", tenant_prop}, {"name", string_property("The template's name, like page or list.")}},
+                                {"tenant", "name"}),
+                  [this](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    auto name = arg(args, "name");
+                    if (!tenant || !name) return ToolResult::fail("tenant and name are required");
+                    std::string source;
+                    auto text = site_->find_template(*tenant, *name, &source);
+                    if (!text) return ToolResult::fail("no template named " + *name + " for " + *tenant);
+                    return ToolResult::ok(bj::object{{"tenant", *tenant}, {"name", *name}, {"source", source}, {"template", *text}});
+                  }});
 
   mcp_->add_tool({"template_list",
                   "Lists a tenant's templates, and where base, page, list, and directory come from: the tenant, "

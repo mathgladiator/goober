@@ -31,7 +31,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "version_list",    "version_get",       "route_check",      "mcp_tools_preview", "timers_list",
     "outbox_dead_letters", "db_list",       "db_describe",      "db_query",        "schema_list",
     "schema_get",      "domain_list",       "realm_get",        "client_list",     "content_list",
-    "content_get",     "page_list",         "page_get",         "page_render",     "template_list",
+    "content_get",     "page_list",         "page_get",         "page_render",     "template_list",   "template_get",
     "partial_list",    "partial_get",       "attachment_list",  "attachment_get",  "mail_activity",
     "mail_unsubscribed", "mail_template_list", "mail_template_get", "mail_template_preview", "source_list",
     "source_read",     "source_log",        "source_diff",      "source_job",      "backup_status",
