@@ -22,6 +22,8 @@ struct OutboxElement {
   std::vector<std::pair<std::string, std::string>> headers;  // pinned headers, no credentials
   std::string idempotency_header, idempotency_key;
   int64_t attempts = 8, backoff_ms = 1000, within_ms = 600000;
+  std::string result_route = {};  // 035: the box's routes.result route for the outcome, or ""
+  int64_t timeout_ms = 10000;     // one delivery's time
 };
 
 // What one box call needs to make external calls.

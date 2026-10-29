@@ -303,6 +303,8 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     // The key comes from the request and the element's place in it: stable across retries (035).
     e.idempotency_key = base::sha256_hex("goober-outbox\n" + ctx.request_id + "\n" + std::to_string(ctx.pending.size()))
                             .substr(0, 32);
+    e.result_route = m.result_route;
+    e.timeout_ms = m.timeout_ms;
     e.attempts = m.attempts;
     e.backoff_ms = m.backoff_ms;
     e.within_ms = m.within_ms;

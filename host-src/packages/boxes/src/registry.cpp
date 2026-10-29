@@ -67,6 +67,7 @@ std::vector<std::string> exports_of(const manifest::Manifest& m) {
   for (const auto& r : m.internal) out.push_back(r.export_name());
   for (const auto& r : m.identity) out.push_back(r.export_name());
   for (const auto& r : m.mail) out.push_back(r.export_name());
+  for (const auto& r : m.results) out.push_back(r.export_name());
   return out;
 }
 

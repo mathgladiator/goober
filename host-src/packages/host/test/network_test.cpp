@@ -249,3 +249,58 @@ TEST(SendHttp, ServicesReachOnlyPublicAddresses) {
   // Nothing about the request is left behind.
   EXPECT_TRUE(base::list_files(scratch).empty());
 }
+
+// 035 § results: an effect whose outcome the box asked to hear. The host delivers it after the
+// commit, as long as the method allows (a model can take a minute), then calls the box's
+// result route with the outcome as a request of its own.
+TEST_F(NetworkTest, ResultRoutesHearHowADeliveryWent) {
+  const char* wat = R"wat((module
+  (import "goober" "goober_call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_request_size" (func $size (result i32)))
+  (import "goober" "goober_request_read" (func $read (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_log" (func $log (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 16) "model")
+  (data (i32.const 24) "chat")
+  (data (i32.const 32) "{\22body\22:{\22prompt\22:\22reply to Ann\22}}")
+  (func (export "goober_route_think") (result i32) (local $n i32)
+    (local.set $n (call $call (i32.const 16) (i32.const 5) (i32.const 24) (i32.const 4) (i32.const 32) (i32.const 34)))
+    (drop (call $result (i32.const 4096) (local.get $n)))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 4096) (local.get $n)))
+    (i32.const 0))
+  (func (export "goober_route_on_chat") (result i32) (local $n i32)
+    (local.set $n (call $read (i32.const 8192) (call $size)))
+    (drop (call $log (i32.const 1) (i32.const 8192) (local.get $n)))
+    (i32.const 0))
+))wat";
+  std::string err;
+  std::string manifest = R"({"box":"thinker","domains":["*"],
+      "external":{"model":{"base":"http://127.0.0.1:)" + std::to_string(stub.port()) + R"(",
+        "methods":{"chat":{"verb":"post","path":"/v1/chat/completions","result-route":"on_chat",
+                           "delivery":{"attempts":2,"backoff-ms":100,"timeout-ms":60000}}}}},
+      "routes":{"http":{"/think":{"post":{"name":"think","public":true}}},
+                "result":{"on_chat":{"timeout-ms":2000}}}})";
+  ASSERT_TRUE(host->boxes().upload(manifest, wat, &err)) << err;
+  std::string body;
+  ASSERT_EQ(post(port, "/think", &body), 200) << body;
+  EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
+  std::string key = std::string(json::parse(body, &err)->at("key").as_string());
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  // The result route heard the outcome: the key the call answered, and the service's reply.
+  auto log = base::read_file(root / "storage/logs/boxes/thinker.log");
+  ASSERT_TRUE(log);
+  // (The log line holds the request as escaped JSON, so look for the parts.)
+  EXPECT_NE(log->find("result:on_chat"), std::string::npos) << *log;
+  EXPECT_NE(log->find(key), std::string::npos) << *log;
+  EXPECT_NE(log->find("outcome"), std::string::npos) << *log;
+  EXPECT_NE(log->find("done"), std::string::npos) << *log;
+  EXPECT_NE(log->find("widget"), std::string::npos) << *log;
+
+  // A method's result-route must name a result route, on an outbox method.
+  EXPECT_FALSE(host->boxes().upload(R"({"box":"bad","domains":["*"],"external":{"m":{"base":"https://x.example",
+      "methods":{"c":{"verb":"post","result-route":"nope"}}}}})", wat, &err));
+  EXPECT_NE(err.find("no routes.result.nope"), std::string::npos) << err;
+}

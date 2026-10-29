@@ -231,6 +231,9 @@ class Host {
   int64_t outbox_scan_ms_ = 0;
   std::set<std::pair<std::string, std::string>> outbox_scanned_;
   std::unique_ptr<sqlite::Db> open_outbox(const std::string& tenant, const std::string& database);
+  // 035 § results: an element's outcome, as a request to the box's routes.result route.
+  void deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
+                      const boost::json::object& outcome);
   bool enqueue_outbox(const manifest::Manifest& m, const std::string& tenant, std::vector<struct OutboxElement>& pending,
                       db::Session* session, std::string* error);
   std::string external_call(struct CallContext& ctx, std::string_view service, std::string_view method,

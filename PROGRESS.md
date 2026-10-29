@@ -232,7 +232,8 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       `goober_call` as the same person, both sides checked and cycles refused at upload
       (`design/machine/016.Internal.md`).
 - [ ] Outbox elements addressed to a box, idempotent internal routes, and timer targets.
-- [ ] Outbox result routes (035), so a box hears how its delivery went.
+- [x] Outbox result routes (035), so a box hears how its delivery went: `result-route` on a
+      method, `routes.result`, and `delivery.timeout-ms` up to two minutes for model APIs.
 - [ ] Push through FCM once decision 7 is made (Q26).
 
 ### Building products

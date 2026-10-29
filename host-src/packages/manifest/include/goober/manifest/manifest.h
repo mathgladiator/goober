@@ -143,6 +143,10 @@ struct ExternalMethod {
   int64_t budget_calls = 10;  // calls per request
   // Fields the host pins, removed from the box's say: "body.to" -> "{!email}", or a literal.
   std::map<std::string, std::string> require;
+  // 035 § results: a routes.result route the host calls once the element is delivered or
+  // given up on, and how long one delivery may take (a model's answer can take a minute).
+  std::string result_route;
+  int64_t timeout_ms = 10000;
 };
 
 struct ExternalService {
@@ -182,6 +186,7 @@ struct Manifest {
   std::vector<HttpRoute> internal;  // routes.internal.$path.$verb, reachable only from callers
   std::vector<HttpRoute> identity;  // routes.identity.$event, with verb "identity"
   std::vector<HttpRoute> mail;      // routes.mail.$address.receive, with verb "receive"
+  std::vector<HttpRoute> results;   // routes.result.$name, with verb "result": outbox outcomes (035)
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

@@ -192,7 +192,13 @@ goober_call("stripe", "price", {"path": {"price_id": "p_1"}, "query": {...}}) an
 {"status", "content_type", "body", "json"} at once. An effectful method (post, put, patch,
 delete; or "effect": "outbox") answers {"accepted": true, "key"} and is delivered only if the
 request commits, retried with the same idempotency key, and dead-lettered if it can't land
-(outbox_dead_letters, outbox_retry). "effect": "immediate" sends an effectful call now, even if
+(outbox_dead_letters, outbox_retry). To hear how it went, name a result route: "result-route":
+"on_reply" on the method and "routes": {"result": {"on_reply": {"timeout-ms": 5000}}}; once the
+element is delivered or given up on, the host calls goober_route_on_reply with a body of
+{"key", "service", "method", "outcome": "done" or "dead", "status", "body", "error", "attempts"}.
+Store the key the call answered beside your row and match on it. "delivery": {"timeout-ms"}
+gives one delivery up to 120000 ms, so a model API (an LLM writing a reply) fits: call it with
+effect outbox, and act on the answer in the result route. "effect": "immediate" sends an effectful call now, even if
 the request later fails. require pins fields to {!email}, {!user_id}, {!tenant}, {!domain}, or a
 literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
 every call without query strings or bodies.

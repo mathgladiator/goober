@@ -11,6 +11,7 @@
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
 #include "goober/base/encoding.h"
+#include "goober/base/random.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -41,6 +42,20 @@ CREATE TABLE IF NOT EXISTS goober_outbox (
   state TEXT NOT NULL DEFAULT 'pending',   -- pending, done, or dead
   last_status INTEGER, last_error TEXT, done_ms INTEGER
 ))sql";
+
+// Beside an element: its result route and delivery time (035 § results). A table of its own,
+// so outboxes made before it need no migration; a row only where either differs from none.
+constexpr const char* kOutboxMore = R"sql(
+CREATE TABLE IF NOT EXISTS goober_outbox_more (
+  id INTEGER PRIMARY KEY,
+  result_route TEXT NOT NULL,
+  timeout_ms INTEGER NOT NULL
+))sql";
+
+constexpr const char* kInsertMore =
+    "INSERT INTO goober_outbox_more (id, result_route, timeout_ms) VALUES (last_insert_rowid(), ?, ?)";
+
+bool has_more(const OutboxElement& e) { return !e.result_route.empty() || e.timeout_ms != 10000; }
 
 constexpr const char* kInsert =
     "INSERT INTO goober_outbox (created_ms, box, service, method, verb, url, headers, body, content_type, "
@@ -73,8 +88,12 @@ bool Host::enqueue_outbox(const manifest::Manifest& m, const std::string& tenant
   if (const auto* st = outbox_strategy(m); st && session) {
     // In the request's own transaction: enqueued if and only if it commits.
     if (!session->host_exec(*st, kOutboxTable, nullptr, error)) return false;
+    if (!session->host_exec(*st, kOutboxMore, nullptr, error)) return false;
     for (const auto& e : pending) {
       if (!session->host_exec(*st, kInsert, insert_params(e, m.box, now), error)) return false;
+      if (has_more(e) && !session->host_exec(*st, kInsertMore, bj::array{bj::value(e.result_route), e.timeout_ms}, error)) {
+        return false;
+      }
     }
     return true;
   }
@@ -84,6 +103,7 @@ bool Host::enqueue_outbox(const manifest::Manifest& m, const std::string& tenant
     fs::create_directories(dir);
     opened = std::make_unique<sqlite::Db>(dir / "outbox.db");
     opened->exec(kOutboxTable);
+    opened->exec(kOutboxMore);
     opened->exec("BEGIN IMMEDIATE");
   } catch (const std::exception& e) {
     *error = e.what();
@@ -99,6 +119,10 @@ bool Host::enqueue_outbox(const manifest::Manifest& m, const std::string& tenant
         else s.bind(int(i) + 1, std::string_view(p[i].as_string()));
       }
       s.run();
+      if (has_more(e)) {
+        sqlite::Stmt more(db, kInsertMore);
+        more.bind(1, e.result_route).bind(2, e.timeout_ms).run();
+      }
     }
     db.exec("COMMIT");
   } catch (const std::exception& e) {
@@ -162,8 +186,11 @@ std::unique_ptr<sqlite::Db> Host::open_outbox(const std::string& tenant, const s
     db = databases_->open(tenant, database, nullptr, &err);
     if (!db) return nullptr;
   }
-  sqlite::Stmt has(*db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'goober_outbox'");
-  if (!has.step()) return nullptr;
+  {
+    sqlite::Stmt has(*db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'goober_outbox'");
+    if (!has.step()) return nullptr;
+  }
+  db->exec(kOutboxMore);
   return db;
 }
 
@@ -264,7 +291,8 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
   struct Row {
     int64_t id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms;
     std::string box, service, method, verb, url, headers, body, content_type, credentials, auth_header, auth_prefix,
-        idem_header, idem_key;
+        idem_header, idem_key, result_route;
+    int64_t timeout_ms;
   };
   std::vector<std::string> services;
   {
@@ -282,14 +310,16 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       std::optional<Row> head;
       {
         sqlite::Stmt s(*db,
-                       "SELECT id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms, box, service, method, verb, "
-                       "url, headers, body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key "
-                       "FROM goober_outbox WHERE state = 'pending' AND service = ? ORDER BY id LIMIT 1");
+                       "SELECT o.id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms, box, service, method, verb, "
+                       "url, headers, body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key, "
+                       "coalesce(m.result_route, ''), coalesce(m.timeout_ms, 10000) "
+                       "FROM goober_outbox o LEFT JOIN goober_outbox_more m ON m.id = o.id "
+                       "WHERE state = 'pending' AND service = ? ORDER BY o.id LIMIT 1");
         s.bind(1, service);
         if (s.step()) {
           head = Row{s.int64(0),  s.int64(1),  s.int64(2),  s.int64(3),  s.int64(4),  s.int64(5),  s.text(6),
                      s.text(7),   s.text(8),   s.text(9),   s.text(10),  s.text(11), s.text(12), s.text(13),
-                     s.text(14),  s.text(15),  s.text(16), s.text(17), s.text(18)};
+                     s.text(14),  s.text(15),  s.text(16), s.text(17), s.text(18), s.text(19), s.int64(20)};
         }
       }
       if (!head || head->next_ms > now_ms) break;
@@ -315,7 +345,7 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       if (r.verb == "MAIL") {
         reply = deliver_outbox_mail(tenant, r.body, now_ms);
       } else if (reply.error.empty()) {
-        reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", 10000);
+        reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", r.timeout_ms);
       }
       // A mail's address stays out of the egress log, like a URL's query.
       egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.url, reply.status, reply.error,
@@ -352,10 +382,69 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
         std::cerr << "goober-host: outbox element " << r.id << " (" << r.service << "." << r.method << ") for " << tenant
                   << " is dead: " << (reply.error.empty() ? "status " + std::to_string(reply.status) : reply.error) << "\n";
       }
+      if (state != "pending" && !r.result_route.empty()) {
+        // 035 § results: the outcome comes back to the box as a request of its own.
+        deliver_result(tenant, r.box, r.result_route,
+                       bj::object{{"key", r.idem_key},
+                                  {"service", r.service},
+                                  {"method", r.method},
+                                  {"outcome", state},
+                                  {"status", reply.status},
+                                  {"body", base::valid_utf8(reply.body)},
+                                  {"error", reply.error.empty() ? bj::value(nullptr) : bj::value(reply.error)},
+                                  {"attempts", attempts}});
+      }
       if (state == "pending") break;
     }
   }
   return delivered;
+}
+
+void Host::deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
+                          const bj::object& outcome) {
+  auto active = boxes_->active();
+  auto it = active->boxes.find(box);
+  const manifest::HttpRoute* target = nullptr;
+  if (it != active->boxes.end()) {
+    for (const auto& r : it->second->manifest.results) {
+      if (r.name == route) target = &r;
+    }
+  }
+  uint8_t rnd[8];
+  base::os_random_fill(rnd);
+  std::string request_id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
+  std::string domain;
+  for (const auto& [name, entry] : config_.get()->domains) {
+    if (entry.tenant == tenant) {
+      domain = name;
+      break;
+    }
+  }
+  server::http::Request pseudo;
+  pseudo.method = "result";
+  pseudo.path = "result:" + route;
+  pseudo.headers.emplace_back("goober-request-id", request_id);
+  int64_t started_us = base::monotonic_us();
+  if (!target) {
+    // The box was removed or changed since: the outcome is in the outbox list, not lost.
+    access_log(pseudo, 404, started_us, domain,
+               json::dump(bj::object{{"result", route}, {"box", box}, {"tenant", tenant}, {"why", "no such result route now"}}));
+    return;
+  }
+  bj::object doc{{"request_id", request_id}, {"method", "result"},       {"path", "result:" + route},
+                 {"params", bj::object{}},   {"query", bj::object{}},     {"headers", bj::object{}},
+                 {"body", json::dump(outcome)}, {"domain", domain},       {"tenant", tenant},
+                 {"user", nullptr}};
+  CallOptions options;
+  options.timeout_ms = target->timeout_ms;
+  options.no_response_ok = true;
+  auto call = call_box(boxes::RouteRef{it->second, target}, doc, tenant, request_id, std::nullopt, options);
+  bool ok = (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk && call.result.status < 500) ||
+            call.result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
+  call.extra["result"] = route;
+  call.extra["tenant"] = tenant;
+  call.extra["key"] = outcome.at("key");
+  access_log(pseudo, ok ? (call.result.status ? call.result.status : 204) : 500, started_us, domain, json::dump(call.extra));
 }
 
 bj::array Host::outbox_list(const std::string& state) {

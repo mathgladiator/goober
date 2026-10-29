@@ -246,6 +246,34 @@ bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifes
   return true;
 }
 
+// routes.result.$name (035 § results): the host calls the route with an outbox element's
+// outcome once it is delivered or given up on. Like timers, only the host calls it.
+bool parse_results(const bj::value& routes, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!routes.is_object()) return *error = "routes.result must be an object", false;
+  std::string err;
+  for (const auto& kv : routes.as_object()) {
+    std::string name(kv.key());
+    std::string where = "routes.result." + name;
+    if (!base::is_valid_name(name)) return *error = where + ": a result route's key is its name, [a-z][a-z0-9_]*", false;
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    for (const auto& f : kv.value().as_object()) {
+      if (f.key() == "requirements" || f.key() == "public") {
+        return *error = where + ": result routes are called only by the host, so they carry no " + std::string(f.key()), false;
+      }
+      if (f.key() != "timeout-ms") return *error = where + ": unknown field \"" + std::string(f.key()) + "\"", false;
+    }
+    if (!names->insert(name).second) return *error = "route name \"" + name + "\" is used twice", false;
+    HttpRoute r;
+    r.verb = "result";
+    r.name = name;
+    r.timeout_ms = get_int(kv.value().as_object(), "timeout-ms", &err);
+    if (!err.empty()) return *error = where + ": " + err, false;
+    if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    m->results.push_back(std::move(r));
+  }
+  return true;
+}
+
 // routes.identity.$event (design/machine/021.IdentityEvents.md): the host calls the route
 // after a sign-in in the realm of a domain the box serves. Like timers, only the host calls it.
 bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manifest* m, std::string* error) {
@@ -556,10 +584,7 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
             k == "require") {
           continue;
         }
-        if (k == "result-route") {
-          m->warnings.push_back(mw + ".result-route is accepted but not implemented in v1");
-          continue;
-        }
+        if (k == "result-route") continue;
         return *error = mw + ": unknown field \"" + k + "\"", false;
       }
       ExternalMethod em;
@@ -588,7 +613,20 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         if (!idem->starts_with("header/") || idem->size() < 8) return *error = mw + ".idempotency is header/$Name", false;
         em.idempotency_header = base::to_lower(idem->substr(7));
       }
+      if (const auto* rr = md.if_contains("result-route")) {
+        if (!rr->is_string() || !base::is_valid_name(rr->as_string())) {
+          return *error = mw + ".result-route names a routes.result route", false;
+        }
+        em.result_route = std::string(rr->as_string());
+      }
       if (const auto* d = get_object(md, "delivery", &err)) {
+        for (const auto& f : *d) {
+          if (f.key() != "attempts" && f.key() != "backoff-ms" && f.key() != "within-ms" && f.key() != "timeout-ms") {
+            return *error = mw + ".delivery: unknown field \"" + std::string(f.key()) + "\"", false;
+          }
+        }
+        em.timeout_ms = get_int(*d, "timeout-ms", &err).value_or(em.timeout_ms);
+        if (em.timeout_ms < 1000 || em.timeout_ms > 120000) return *error = mw + ".delivery.timeout-ms is 1000 to 120000", false;
         em.attempts = get_int(*d, "attempts", &err).value_or(em.attempts);
         em.backoff_ms = get_int(*d, "backoff-ms", &err).value_or(em.backoff_ms);
         em.within_ms = get_int(*d, "within-ms", &err).value_or(em.within_ms);
@@ -1005,6 +1043,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
         if (!parse_identity(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
+      if (protocol == "result") {
+        if (!parse_results(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
       if (protocol == "mail") {
         if (!parse_mail(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
@@ -1085,6 +1127,17 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     }
   }
   if (!err.empty()) return *error = err, std::nullopt;
+  // A method's result-route is one of this box's result routes, on a method that goes through the outbox.
+  for (const auto& svc : m.external) {
+    for (const auto& [name, em] : svc.methods) {
+      if (em.result_route.empty()) continue;
+      std::string mw = "external." + svc.name + ".methods." + name;
+      if (em.effect != "outbox") return *error = mw + ".result-route needs effect outbox", std::nullopt;
+      bool found = false;
+      for (const auto& r : m.results) found |= r.name == em.result_route;
+      if (!found) return *error = mw + ".result-route: no routes.result." + em.result_route, std::nullopt;
+    }
+  }
   for (const auto& t : m.timers) {
     if (t.source.empty()) continue;
     const DataStrategy* st = nullptr;
