@@ -257,15 +257,42 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       return finish(std::move(res), log("authorize_sign_in"));
     }
     if (is_post) {
+      // Back to an app (a private-use scheme or a loopback port), the answer is a page of our
+      // own that opens the app, with a button: a redirect after a form post is checked against
+      // form-action, and a browser may drop an app launch it didn't see a click for, so a bare
+      // 303 can leave the person looking at an Allow button that did nothing.
+      bool web_client = redirect_uri.starts_with("https://");
+      auto handoff = [&](std::vector<std::pair<std::string, std::string>> params, bool allowed) {
+        Response res = to_client(std::move(params));
+        if (web_client) return res;
+        std::string target;
+        for (const auto& [k, v] : res.headers) {
+          if (k == "location") target = v;
+        }
+        std::string name = html_escape(client->name);
+        Response page = identity_page(
+            tenant, 200, allowed ? "Allowed" : "Not allowed",
+            std::string(allowed ? "<h1>Allowed</h1><p>Opening <strong>" + name + "</strong> to finish signing in.</p>"
+                                : "<h1>Not allowed</h1><p>Telling <strong>" + name + "</strong> you said no.</p>") +
+                "<p><a class=\"button\" href=\"" + html_escape(target) + "\">Open " + name + "</a></p>"
+                "<p class=\"muted\">If nothing opens, press the button. Once the app says it's connected, you can "
+                "close this tab.</p>",
+            "", false);
+        page.headers.emplace_back("refresh", "0;url=" + target);
+        return page;
+      };
+      bj::object extra{{"oauth", "authorize_allowed"},
+                       {"client_id", client_id},
+                       {"user_id", std::to_string(who->user.user_id)},
+                       {"to", form_action_for(redirect_uri)},
+                       {"handoff", web_client ? "redirect" : "page"}};
       if (get(p, "decision") != "allow") {
-        return finish(to_client({{"error", "access_denied"}}), log("authorize_denied"));
+        extra["oauth"] = "authorize_denied";
+        return finish(handoff({{"error", "access_denied"}}, false), json::dump(extra));
       }
       std::string code = identity_->issue_code(realm, client_id, who->user.user_id, redirect_uri, challenge, now);
       mail_new_grant(*who, *client, domain, where_from(redirect_uri));
-      return finish(to_client({{"code", code}}),
-                    json::dump(bj::object{{"oauth", "authorize_allowed"},
-                                          {"client_id", client_id},
-                                          {"user_id", std::to_string(who->user.user_id)}}));
+      return finish(handoff({{"code", code}}, true), json::dump(extra));
     }
     std::string hidden;
     for (const char* k : {"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method",
@@ -367,8 +394,10 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
     std::string why;
     auto c = identity_->register_client(realm, name, uris, now, &why);
     if (!c) {
+      bj::array asked;
+      for (const auto& u : uris) asked.push_back(bj::value(u.substr(0, 200)));
       return finish(json_response(400, bj::object{{"error", "invalid_client_metadata"}, {"error_description", why}}),
-                    log("register_refused"));
+                    json::dump(bj::object{{"oauth", "register_refused"}, {"why", why}, {"redirect_uris", std::move(asked)}}));
     }
     bj::array out_uris;
     for (const auto& u : c->redirect_uris) out_uris.push_back(bj::value(u));

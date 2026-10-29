@@ -115,13 +115,25 @@ class OAuthRoutesTest : public ::testing::Test {
     return "response_type=code&client_id=dumb-terminal&redirect_uri=" + q(redirect) + "&code_challenge=" + kChallenge +
            "&code_challenge_method=S256&state=xyz";
   }
+  // Where an Allow sent the browser: a web client by a 303, an app by a page that opens it (a
+  // refresh, and a button for when the browser wants a click).
+  static std::string handed_to(Reply& r) {
+    if (r.status == 303) return r.headers["location"];
+    EXPECT_EQ(r.status, 200) << r.body;
+    std::string refresh = r.headers["refresh"];
+    EXPECT_TRUE(refresh.starts_with("0;url=")) << refresh;
+    std::string target = refresh.substr(6);
+    std::string href = target;
+    for (size_t i = 0; (i = href.find('&', i)) != std::string::npos; i += 5) href.replace(i, 1, "&amp;");
+    EXPECT_NE(r.body.find("class=\"button\" href=\"" + href + "\""), std::string::npos) << r.body;
+    return target;
+  }
   // Consents as the signed-in person and returns the code from the redirect.
   std::string consent(const std::string& redirect = kApp) {
     auto r = fetch(port, bhttp::verb::post, "/oauth/authorize",
                    {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie}, {"origin", "http://localhost:8080"}},
                    authorize_query(redirect) + "&decision=allow");
-    EXPECT_EQ(r.status, 303) << r.body;
-    std::string loc = r.headers["location"];
+    std::string loc = handed_to(r);
     EXPECT_TRUE(loc.starts_with(redirect + "?code=")) << loc;
     EXPECT_NE(loc.find("&state=xyz"), std::string::npos);
     EXPECT_NE(loc.find("&iss=http%3A%2F%2Flocalhost%3A8080"), std::string::npos);
@@ -200,8 +212,7 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
                        {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "navigate"}, {"sec-fetch-dest", "document"},
                        {"sec-fetch-site", "same-origin"}, {"user-agent", kSafari}},
                       authorize_query() + "&decision=allow");
-  EXPECT_EQ(webkit.status, 303);
-  EXPECT_TRUE(webkit.headers["location"].starts_with(std::string(kApp) + "?code=")) << webkit.headers["location"];
+  EXPECT_TRUE(handed_to(webkit).starts_with(std::string(kApp) + "?code="));
   // Even in WebKit, a fetch() is no navigation.
   EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
                   {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},

@@ -47,6 +47,7 @@ label{display:block;margin:16px 0 4px;font-weight:600}
 input[type=email],input[type=text]{width:100%;padding:10px 12px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
 .check{font-weight:400;display:flex;gap:8px;align-items:center}
 button{margin-top:16px;width:100%;padding:10px;font:inherit;font-weight:600;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+a.button{display:block;margin-top:16px;padding:10px;text-align:center;font-weight:600;border-radius:8px;background:var(--accent);color:#fff;text-decoration:none}
 button.secondary{margin-top:8px;background:transparent;color:var(--fg);border:1px solid var(--line)}
 button.small{width:auto;margin:0;padding:4px 10px;font-size:.85rem}
 li form{display:inline}

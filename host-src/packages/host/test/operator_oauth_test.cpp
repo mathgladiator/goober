@@ -137,6 +137,12 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
                    R"({"client_name":"Grok","redirect_uris":["https://grok.example/callback"]})");
   ASSERT_EQ(reg.status, 201) << reg.body;
   std::string client_id(parse(reg.body)["client_id"].as_string());
+  // Cursor registers its app scheme (one word, not reverse-DNS), a web callback, and a loopback port.
+  auto cursor = fetch(port, bhttp::verb::post, "/oauth/operator/register", {{"content-type", "application/json"}},
+                      R"({"client_name":"Cursor","redirect_uris":["cursor://anysphere.cursor-mcp/oauth/callback",)"
+                      R"("https://cursor.com/agents/oauth/callback","http://localhost:8787/callback"]})");
+  ASSERT_EQ(cursor.status, 201) << cursor.body;
+  std::string cursor_id(parse(cursor.body)["client_id"].as_string());
 
   // 4. Signed out, authorize sends the browser to the host operators' sign-in.
   auto out = fetch(port, bhttp::verb::get, "/oauth/operator/authorize?" + authorize_query(client_id));
@@ -163,6 +169,16 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
   ASSERT_TRUE(loc.starts_with(kRedirect + "?code=")) << loc;
   EXPECT_NE(loc.find("&iss=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Foperator"), std::string::npos) << loc;
   std::string code = router::parse_query(loc.substr(loc.find('?') + 1))["code"];
+  // Back to an app, Allow answers with a page that opens it and a button to press, not a bare 303.
+  auto to_app = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
+                      {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
+                      "response_type=code&client_id=" + cursor_id + "&redirect_uri=" +
+                          base::percent_encode("cursor://anysphere.cursor-mcp/oauth/callback") + "&code_challenge=" +
+                          kChallenge + "&code_challenge_method=S256&state=s&decision=allow");
+  ASSERT_EQ(to_app.status, 200) << to_app.body;
+  EXPECT_TRUE(to_app.headers["refresh"].starts_with("0;url=cursor://anysphere.cursor-mcp/oauth/callback?code="))
+      << to_app.headers["refresh"];
+  EXPECT_NE(to_app.body.find("Open Cursor"), std::string::npos);
 
   // 6. The code becomes tokens, and the access token opens the operator tools.
   auto tok = parse(fetch(port, bhttp::verb::post, "/oauth/operator/token", kForm,

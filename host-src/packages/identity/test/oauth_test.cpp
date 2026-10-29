@@ -78,7 +78,10 @@ TEST(OAuthRedirects, LoopbackPortsMayDifferAndNothingElse) {
   EXPECT_TRUE(redirect_allowed(mcp, "http://localhost:33418/callback"));
   EXPECT_FALSE(redirect_allowed(mcp, "http://localhost:33419/callback"));
   EXPECT_FALSE(is_valid_redirect_uri("javascript:alert(1)"));
-  EXPECT_FALSE(is_valid_redirect_uri("myapp:/cb"));  // no dot: not reverse-DNS
+  EXPECT_TRUE(is_valid_redirect_uri("cursor://anysphere.cursor-mcp/oauth/callback"));  // one word, as Cursor sends
+  EXPECT_FALSE(is_valid_redirect_uri("data:text/html,hi"));
+  EXPECT_FALSE(is_valid_redirect_uri("file:///etc/passwd"));
+  EXPECT_FALSE(is_valid_redirect_uri("Cursor://x"));
   EXPECT_FALSE(is_valid_redirect_uri("https://example.com/cb#frag"));
   EXPECT_FALSE(is_valid_redirect_uri("https:///cb"));
 }

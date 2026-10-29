@@ -194,11 +194,18 @@ bool is_valid_redirect_uri(std::string_view uri) {
     auto host = uri.substr(8);
     return !host.empty() && host[0] != '/' && host.find('/') != std::string_view::npos;
   }
-  // A private-use scheme (RFC 8252 §7.1): reverse-DNS, so it holds a dot.
+  // A private-use scheme (RFC 8252 §7.1), which should be reverse-DNS (com.example.app:). Some
+  // clients use one word (Cursor sends cursor://), so any scheme is taken but the web's own and
+  // the ones a browser runs or reads itself.
   auto colon = uri.find(':');
   if (colon == std::string_view::npos || colon == 0) return false;
   auto scheme = uri.substr(0, colon);
-  if (scheme.find('.') == std::string_view::npos) return false;
+  static constexpr std::string_view kRefused[] = {"http",  "https", "javascript", "vbscript", "data",   "file",
+                                                  "about", "blob",  "filesystem", "ftp",      "ws",     "wss",
+                                                  "mailto", "tel",  "sms",        "intent",   "chrome", "view-source"};
+  for (auto r : kRefused) {
+    if (scheme == r) return false;
+  }
   if (!(scheme[0] >= 'a' && scheme[0] <= 'z')) return false;
   for (char c : scheme) {
     bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+';

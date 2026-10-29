@@ -98,6 +98,16 @@ with the domain and a person's email shows what that person's list is right now,
 version each tool comes from, and why any is hidden. `route_check` with a domain and a path
 says which box, page, or host path answers it.
 
+**Allow does nothing when an app (Cursor, Grok's apps) connects:** see what the host did:
+
+```sh
+sudo grep -E '"oauth":"(authorize_[a-z_]*|register_refused|consent)"' /srv/goober/host/storage/logs/access.log | tail -n 5
+```
+
+`authorize_allowed` means the host answered; `"to"` names where it sent the browser. If
+the app didn't open, press "Open …" on that page. `authorize_cross_origin` lists what the
+browser sent; `register_refused` means the app's redirect wasn't accepted.
+
 **Grok's connectors drop and ask to sign in again:** look for refused refreshes:
 
 ```sh
