@@ -9,8 +9,8 @@ decisions behind it are in [`005.FirstVersion.md`](../design/machine/005.FirstVe
 
 ## Build and test
 
-Dependencies live under `~/.local`: Boost 1.83+, GoogleTest, and wasmtime v49.0.4
-(`tools/install-deps.sh` fetches wasmtime). Then:
+Dependencies live under `~/.local`: Boost 1.83+, GoogleTest, wasmtime v49.0.4, and a static
+OpenSSL 3.5.1 for Web Push (`tools/install-deps.sh` fetches wasmtime and builds OpenSSL). Then:
 
 ```sh
 cmake --preset dev          # configure (Ninja, Debug, build/dev)
@@ -241,6 +241,7 @@ binary, and a `QUALITY.md`. The underscore in a name is a namespace (`server_htt
 | router | Path normalization, route patterns, and the route table. |
 | manifest | The v1 manifest subset, its checks, and route requirements. |
 | runtime_wasm | wasmtime with fuel, epoch timeouts, memory caps, and the goober ABI. |
+| webpush | Web Push's cryptography: VAPID (ES256) and aes128gcm, on OpenSSL's libcrypto. |
 | db | Schemas, tenant databases, the SQL authorizer, request transactions, and operator queries. |
 | boxes | Box versions, activation, and per-domain route tables. |
 | identity | Sign-in codes, sessions, roles, and the audit, in one SQLite database per realm. |

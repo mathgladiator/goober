@@ -281,6 +281,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (svc->web) return web_call(ctx, *svc, request);
   if (svc->mail && m.name == "attachment") return mail_attachment_call(ctx, request);
   if (svc->mail) return mail_call(ctx, *svc, m, request);
+  if (svc->push) return push_call(ctx, *svc, m, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
   if (!built) return fail(err);

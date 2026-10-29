@@ -19,6 +19,7 @@
 | 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
 | 7. An agent people reach by email | **Yes, to build tomorrow** | Mail from the site's own address, in the person's thread, with unsubscribe; model calls through the outbox with result routes. `design/machine/026.KcMeatUp.md` § 3 is the plan. |
 | 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
+| 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
 
 ## 1. Static content: yes
 
@@ -203,3 +204,17 @@ each ranch's site weekly.
 - **Watch for.**
   - The change log starts when this version is deployed; earlier changes aren't in it.
   - Traffic history comes from the access logs still on disk (four files of 64 MiB).
+
+## 9. An installable app: yes, untried on a phone
+
+- **What works.**
+  - `pwa_put` makes the whole domain (`scope: "/"`) or a part of it (`"/shop/"`) an app: the
+    manifest, an offline worker, and the head tags. The built-in base template places them;
+    your own layout needs `<!--#include pwa-->`.
+  - Boxes send push notifications through a `push` service, to a person, a topic, or
+    everyone.
+- **Checked.** In headless Chromium the app installs with no errors, and pages in it work
+  offline. Push is checked against the RFC's own example and a stand-in push service.
+- **Watch for.**
+  - Push on an iPhone works only after the app is added to the home screen.
+  - Nobody has received a real push on a phone yet.

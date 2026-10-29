@@ -1,6 +1,6 @@
 goober_package(
   NAME site
-  SOURCES src/site.cpp src/builtin.cpp src/includes.cpp
+  SOURCES src/site.cpp src/builtin.cpp src/includes.cpp src/pwa.cpp
   DEPS goober_content goober_render goober_json goober_base
-  TESTS test/site_test.cpp
+  TESTS test/site_test.cpp test/pwa_test.cpp
 )

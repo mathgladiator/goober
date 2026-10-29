@@ -332,6 +332,29 @@ partial_list (which pages include each partial, and kept versions: partial_get w
 then partial_put, rolls back). A box template's values are escaped, so a person's text can
 never pull a partial in.
 
+## Installable apps (PWA) and push
+
+Make the whole domain, or part of it, an app a phone installs: pwa_put {tenant, name: "shop",
+app: {scope: "/shop/", manifest: {name, short_name, icons: [{src: "/icons/192.png", sizes:
+"192x192", type: "image/png"}, {..."512x512"...}], theme_color, background_color},
+offline: {fallback: "/shop/offline", precache: ["/css/shop.css"]}, push: true}}. scope "/" is
+the whole domain; with several apps, the longest scope a page fits wins. The host serves the
+manifest, a service worker (offline: pages network-first with the fallback, assets
+stale-while-revalidate, never the host's own paths or private pages), and register.js, all
+under /goober/pwa/shop/. <!--#include pwa--> places the tags (manifest link, theme color,
+iOS icon, register.js); the built-in base template has it, so put it in your own layout's
+<head> and in box templates. Want your own worker? worker: {src: "/shop/sw.js"} (in the
+scope's directory or above), and handle push in it yourself.
+Push: a page calls window.goober.push.subscribe(["orders"]) from a tap (it asks permission;
+on iPhone, only once the app is on the home screen). Subscriptions are tied to the signed-in
+person; push: {anonymous: true} takes signed-out visitors too. A box sends with a push service:
+  "external": {"alerts": {"push": {}}}
+  goober_call("alerts", "send", {"to": {"user_id": "12"} | {"topic": "orders"} | {"everyone": true},
+    "title": "Pickup ready", "body": "Order 7", "url": "/shop/orders/7", "tag": "order-7"})
+It goes after the request commits, through the outbox (it needs a database, like mail),
+encrypted for each browser and signed with the host's VAPID key. Browsers that left are dropped.
+Try it with push_send, see who's reachable with pwa_subscriptions, and check apps with pwa_get.
+
 ## Landing pages and forms
 
 A landing page (an ad's destination, say) is content: a whole .html document with no front

@@ -1,5 +1,7 @@
 #include "goober/site/includes.h"
 
+#include "goober/site/pwa.h"
+
 #include <algorithm>
 #include <cctype>
 #include <optional>
@@ -225,6 +227,15 @@ Expanded expand_includes(const content::ContentStore& store, std::string_view te
     if (auth) out.by_auth = true;
     std::optional<content::File> f = signed_in && auth ? auth : store.get(tenant, file);
     if (signed_in && auth) file = "_partials/" + name + "@auth.html";
+    if (!f && name == "pwa") {
+      // The built-in pwa partial: the head tags of the app whose scope fits (782.PWA.md § 3),
+      // or nothing, which is no miss. A tenant's own _partials/pwa.html wins.
+      if (auto app = app_for(apps(store, tenant), path)) {
+        out.html += head_tags(*app);
+        out.used.push_back("_apps/" + app->name + ".json");
+      }
+      continue;
+    }
     if (!f) {
       if (std::find(out.missing.begin(), out.missing.end(), name) == out.missing.end()) out.missing.push_back(name);
       continue;

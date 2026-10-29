@@ -17,7 +17,8 @@ errors, backups and mail, redeploy, stop Grok, undo); keep every command in it w
 ## The host (`host-src/`)
 
 - C++20, CMake with Ninja presets, GoogleTest through CTest; dependencies under `~/.local`
-  (Boost, GoogleTest, wasmtime v49.0.4 in `~/.local/opt/`).
+  (Boost, GoogleTest, wasmtime v49.0.4 and a static OpenSSL 3.5.1 in `~/.local/opt/`, from
+  `host-src/tools/install-deps.sh`).
 - `cmake --preset dev && cmake --build --preset dev && ctest --preset dev` builds and tests
   everything (`just test` does the same). `host-src/README.md` covers running and playing.
 - The `justfile` at the repo root drives play: `just run`, `just setup`, `just mcp`,
@@ -142,6 +143,9 @@ Read these before doing design work:
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
     change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`.
+  - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
+    scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
+    offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.

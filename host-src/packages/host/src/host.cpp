@@ -182,6 +182,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_web_tools();
   register_source_tools();
   register_panel_tools();
+  register_pwa_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -654,6 +655,17 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     return;
   }
 
+  if (path->path.starts_with("/goober/pwa/")) {
+    pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
+      try {
+        handle_pwa(req, finish, p, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: pwa: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"pwa failed"})");
+      }
+    });
+    return;
+  }
   if (path->path.starts_with("/goober/unsubscribe/")) {
     pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
       try {

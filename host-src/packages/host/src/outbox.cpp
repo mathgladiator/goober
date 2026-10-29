@@ -357,6 +357,8 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       int64_t started = base::monotonic_us();
       if (r.verb == "MAIL") {
         reply = deliver_outbox_mail(tenant, r.body, now_ms);
+      } else if (r.verb == "PUSH") {
+        reply = deliver_outbox_push(tenant, r.body, r.idem_key, now_ms);
       } else if (reply.error.empty()) {
         reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", r.timeout_ms);
       }

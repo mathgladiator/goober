@@ -16,3 +16,6 @@ listings, and Atom feeds (`design/machine/007.Content.md`).
 - **Every entry in a listing defines the common keys** (url, title, date, summary, image,
   tags, order), so a Mustache section never falls through to the listing page's own value.
 - No caching yet: every visit reads the files it needs, which keeps the behavior obvious.
+- **Apps (PWA) are checked strictly.** `_apps/$name.json` names only manifest fields we know,
+  paths on the site, and a scope outside the host's own paths; the generated worker never
+  intercepts the host's paths and never stores a private or no-store response.

@@ -167,7 +167,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source"},
+                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -462,6 +462,25 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (auto v = get_int(*backup, "databases-every-ms", &err)) {
       if (*v < 60000 || *v > 86400000) return *error = "backup.databases-every-ms must be 60000 to 86400000", nullptr;
       b.databases_every_ms = *v;
+    }
+  }
+  if (const auto* pwa = get_object(root, "pwa", &err)) {
+    if (!check_keys(*pwa, {"push-hosts", "push-contact"}, "pwa", &err)) return *error = err, nullptr;
+    if (const auto* hosts = get_array(*pwa, "push-hosts", &err)) {
+      for (const auto& h : *hosts) {
+        std::string host = h.is_string() ? base::to_lower(h.as_string()) : "";
+        std::string bare = host.starts_with("*.") ? host.substr(2) : host;
+        if (!is_dns_name(bare) && bare != "127.0.0.1" && bare != "localhost") {
+          return *error = "pwa.push-hosts holds host names, like push.example.com or *.push.example.com", nullptr;
+        }
+        cfg->pwa.push_hosts.push_back(host);
+      }
+    }
+    if (auto v = get_string(*pwa, "push-contact", &err)) {
+      if (!v->starts_with("mailto:") && !v->starts_with("https://")) {
+        return *error = "pwa.push-contact is mailto:you@example.com or an https URL", nullptr;
+      }
+      cfg->pwa.push_contact = *v;
     }
   }
   if (const auto* source = get_object(root, "source", &err)) {

@@ -409,3 +409,19 @@ TEST(Manifest, MailRoutes) {
   refuse(R"({"a@":{"receive":{"name":"a","public":true,"attachments":101}}})", "attachments");
   refuse(R"({"a@":{"receive":{"name":"a","public":true,"color":"red"}}})", "unknown field");
 }
+
+TEST(Manifest, PushServices) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"shop","domains":["*"],"external":{"alerts":{"push":{},
+      "methods":{"send":{"budget":{"calls":20}}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->external.size(), 1u);
+  EXPECT_TRUE(m->external[0].push);
+  EXPECT_EQ(m->external[0].methods.at("send").effect, "outbox");
+  EXPECT_EQ(m->external[0].methods.at("send").budget_calls, 20);
+  for (const char* bad : {R"({"box":"b","domains":["*"],"external":{"a":{"push":{},"base":"https://x.example"}}})",
+                          R"({"box":"b","domains":["*"],"external":{"a":{"push":{"vapid":"x"}}}})",
+                          R"({"box":"b","domains":["*"],"external":{"a":{"push":{},"methods":{"blast":{}}}}})"}) {
+    EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
+  }
+}

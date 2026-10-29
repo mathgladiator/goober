@@ -159,6 +159,8 @@ struct ExternalService {
   std::vector<std::string> web_hosts;
   // Mail through the host's mailer (design/machine/018.Mail.md): its one method is send.
   bool mail = false;
+  // "push": {} sends Web Push to the tenant's subscribers, through the outbox (782.PWA.md § 5).
+  bool push = false;
   std::string mail_from_name;
   std::string mail_from;  // "" means the host mailer's address
   std::string base;         // https://api.example.com[/prefix]

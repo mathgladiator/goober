@@ -368,6 +368,17 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       `operations.domain` in host.json (the human's step).
 - [ ] Approvals (305), tuning, counters, traces, and cost.
 
+### Phase 18: progressive web apps (782)
+- [x] Apps over a scope (the whole domain or a part), the generated manifest, worker
+      (offline, push), and register.js under /goober/pwa/$app/, and `<!--#include pwa-->` in
+      the built-in base template.
+- [x] Web Push: VAPID and aes128gcm (`webpush`, on static OpenSSL 3.5.1), subscriptions with
+      topics, a box `push` service through the outbox, gone subscriptions dropped.
+- [x] Tools `pwa_put`, `pwa_get`, `pwa_list`, `pwa_delete`, `pwa_subscriptions`, `push_send`.
+- [x] Checked in headless Chromium: the worker controls the scope, no installability errors,
+      offline pages and the fallback.
+- [ ] A real push end to end on a phone (the human's step), and a panel view of apps.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

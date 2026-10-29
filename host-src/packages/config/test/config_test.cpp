@@ -205,3 +205,14 @@ TEST(Config, ThePanelHasADomainOfItsOwn) {
   EXPECT_EQ(goober::config::local_mode(none)->panel_domain(), "ops.localhost");
   EXPECT_FALSE(none->operations_listen_port);
 }
+
+TEST(Config, PwaPushHostsAndContact) {
+  std::string err;
+  auto cfg = parse_config(R"({"pwa":{"push-hosts":["push.example.com","*.push.example.net"],"push-contact":"mailto:ops@example.com"}})",
+                          "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_EQ(cfg->pwa.push_hosts.size(), 2u);
+  EXPECT_EQ(cfg->pwa.push_contact, "mailto:ops@example.com");
+  EXPECT_FALSE(parse_config(R"({"pwa":{"push-hosts":["not a host"]}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"pwa":{"push-contact":"ops@example.com"}})", "/", &err));
+}

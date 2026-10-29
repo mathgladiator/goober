@@ -95,6 +95,14 @@ the extension (.csv, .json, .xml, .atom, .rss, .webmanifest, .ics, .svg, .txt, .
 Paths with a segment that starts with "_" are never served. Text is stored byte for byte, but a
 tool-call layer can drop CR bytes on the way: give sha256 to make sure, or send base64.
 
+## Installable apps [pwa_put, pwa_get, pwa_list, pwa_delete]
+pwa_put {tenant, name, app: {scope: "/" or "/shop/", manifest: {name, short_name, icons,
+theme_color, ...}, offline: {fallback, precache}, push}} makes that part of the site an app:
+manifest, offline worker, and push, served by the host. Pages in scope get the tags through
+<!--#include pwa-->, which the built-in base template already has; add it to your own
+layout's <head>. Icons need 192x192 and 512x512 PNGs for browsers to offer install.
+box_guide's "Installable apps" section has push.
+
 ## Images and files [attachment_put, attachment_list, attachment_get, attachment_delete]
 attachment_put takes base64 bytes, a file already on the site (file: "/hero.jpg"), or an https
 url to fetch, plus name, alt, and visibility (public, or members). A URL on this host's own

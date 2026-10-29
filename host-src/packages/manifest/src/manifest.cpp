@@ -388,7 +388,7 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
       }
-      if (k == "box" || k == "web" || k == "mail") continue;
+      if (k == "box" || k == "web" || k == "mail" || k == "push") continue;
       if (k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
     }
@@ -453,6 +453,41 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       attachment.effect = "none";
       attachment.budget_calls = 20;
       svc.methods["attachment"] = std::move(attachment);
+      m->external.push_back(std::move(svc));
+      continue;
+    }
+    if (const auto* push = def.if_contains("push")) {
+      // Web Push to the tenant's subscribers, after commit, through the outbox (782.PWA.md § 5).
+      if (def.contains("base") || def.contains("credentials") || def.contains("auth") || def.contains("box") ||
+          def.contains("web") || def.contains("mail")) {
+        return *error = where + ": a push service has no base, credentials, box, web, or mail; the host sends", false;
+      }
+      if (!push->is_object() || !push->as_object().empty()) return *error = where + ".push is {}", false;
+      svc.push = true;
+      ExternalMethod send;
+      send.name = "send";
+      send.verb = "push";
+      send.effect = "outbox";
+      send.budget_calls = 5;
+      send.attempts = 5;
+      send.backoff_ms = 30000;
+      send.within_ms = 6LL * 3600 * 1000;
+      if (const auto* methods = get_object(def, "methods", &err)) {
+        for (const auto& mk : *methods) {
+          std::string mw = where + ".methods." + std::string(mk.key());
+          if (mk.key() != "send") return *error = mw + ": a push service's one method is send", false;
+          if (!mk.value().is_object()) return *error = mw + " must be an object", false;
+          for (const auto& f : mk.value().as_object()) {
+            if (f.key() != "budget") return *error = mw + ": unknown field \"" + std::string(f.key()) + "\"", false;
+            if (const auto* b = get_object(mk.value().as_object(), "budget", &err)) {
+              send.budget_calls = get_int(*b, "calls", &err).value_or(send.budget_calls);
+            }
+          }
+        }
+      }
+      if (!err.empty()) return *error = where + ": " + err, false;
+      if (send.budget_calls < 1 || send.budget_calls > 50) return *error = where + ".methods.send.budget.calls is 1 to 50", false;
+      svc.methods["send"] = std::move(send);
       m->external.push_back(std::move(svc));
       continue;
     }

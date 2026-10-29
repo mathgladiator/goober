@@ -144,6 +144,13 @@ struct HostConfig {
     bool enabled() const { return !bucket.empty(); }
   } backup;
   // Source projects and their builds (design/human/521.Source.md).
+  // Progressive web apps' push (design/machine/782.PWA.md § 5): the push services subscriptions
+  // may name besides the browsers' own (FCM, Mozilla, Apple, Windows), and the contact VAPID
+  // gives them ("mailto:" or "https:"; default, the mailer's address).
+  struct Pwa {
+    std::vector<std::string> push_hosts;
+    std::string push_contact;
+  } pwa;
   struct Source {
     std::string cargo;         // the cargo to build Rust boxes with; "" looks in PATH and ~/.cargo/bin
     std::string vendor;        // vendored crates (cargo vendor's output); "" means none, so only std

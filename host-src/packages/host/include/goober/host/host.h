@@ -28,6 +28,7 @@
 #include "goober/site/site.h"
 #include "goober/source/source.h"
 #include "goober/wal/wal.h"
+#include "goober/webpush/webpush.h"
 
 namespace goober::host {
 
@@ -359,6 +360,23 @@ class Host {
   void handle_unsubscribe(const server::http::Request& req, const Finish& finish, const std::string& path,
                           const std::string& tenant);
   void register_mail_out_tools();
+  // Progressive web apps (pwa_routes.cpp; design/machine/782.PWA.md): /goober/pwa/$app/,
+  // the pwa_* tools, and Web Push through the outbox.
+  void handle_pwa(const server::http::Request& req, const Finish& finish, const std::string& path,
+                  const std::string& tenant);
+  void register_pwa_tools();
+  std::optional<webpush::Key> vapid_key(std::string* error);
+  std::mutex vapid_mu_;
+  std::unique_ptr<sqlite::Db> open_push_db();
+  bool push_endpoint_allowed(const std::string& endpoint, bool* loopback, std::string* why) const;
+  std::string vapid_contact() const;
+  struct HttpOut deliver_push(const std::string& tenant, const std::string& app, const boost::json::object& to,
+                              const std::string& payload, const boost::json::object& options, const std::string& key,
+                              int64_t now_ms, boost::json::object* report);
+  struct HttpOut deliver_outbox_push(const std::string& tenant, const std::string& body, const std::string& key,
+                                     int64_t now_ms);
+  std::string push_call(struct CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                        const boost::json::value& request);
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();
