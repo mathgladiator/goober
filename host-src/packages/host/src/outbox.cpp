@@ -15,6 +15,7 @@
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "mail_hash.h"
 #include "goober/json/json.h"
 #include "keys.h"
 #include "mailer.h"
@@ -253,14 +254,25 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     out.error = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)";
     return out;
   }
+  // An answer in a thread the person started (they wrote to this tenant, from this address,
+  // the message this one is in reply to, in the last 30 days) is a conversation, not
+  // outreach: it gets mail.reply-per-address-daily instead.
+  bool reply = false;
+  if (!mail.in_reply_to.empty()) {
+    auto inbound = open_mail_db();
+    sqlite::Stmt s(*inbound, "SELECT 1 FROM received WHERE tenant = ? AND sender = ? AND message = ?");
+    s.bind(1, tenant).bind(2, received_hash(mail.to)).bind(3, received_hash(mail.in_reply_to));
+    reply = s.step();
+  }
+  int64_t per_address = reply ? cfg->mail.reply_per_address_daily : cfg->mail.per_address_daily;
   sqlite::Stmt by_address(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND address = ? AND at_ms > ?");
   by_address.bind(1, tenant).bind(2, address).bind(3, day_ago);
   by_address.step();
-  if (by_address.int64(0) >= cfg->mail.per_address_daily) {
+  if (by_address.int64(0) >= per_address) {
     // Asking again today won't change it, and tomorrow the moment has passed: refused for good.
     out.status = 403;
-    out.error = "this address has had " + std::to_string(cfg->mail.per_address_daily) +
-                " mails today (config mail.per-address-daily)";
+    out.error = "this address has had " + std::to_string(per_address) + " mails today (config mail." +
+                (reply ? "reply-per-address-daily" : "per-address-daily") + ")";
     return out;
   }
   auto outcome = mail_->deliver(mail);

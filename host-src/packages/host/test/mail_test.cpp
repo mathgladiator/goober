@@ -8,10 +8,12 @@
 
 #include "../../aws/test/fake_aws.h"
 #include "../src/keys.h"
+#include "../src/mail_hash.h"
 #include "../src/mailer.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "goober/sqlite/sqlite.h"
 
 using namespace goober;
 namespace asio = boost::asio;
@@ -130,13 +132,10 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
   EXPECT_NE(std::string(dead[0].at("last_error").as_string()).find("per-address-daily"), std::string::npos);
 }
 
-// Reaching people who never signed up (018 § 3): mail comes from the tenant's own address,
-// answers in the person's thread, and carries a one-click unsubscribe that ends every box's
-// mail to them.
-TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
-  start("");
+// A box that answers fan@example.org in a thread, from the tenant's own address.
+void upload_outreach(host::Host& host, const std::string& in_reply_to = "abc@mail.example.org") {
   std::string send = R"({"to":"Fan@Example.org","subject":"Re: Brisket","text":"Thanks for writing.",)"
-                     R"("in_reply_to":"abc@mail.example.org","references":"<root@mail.example.org> abc@mail.example.org"})";
+                     R"("in_reply_to":")" + in_reply_to + R"(","references":"<root@mail.example.org> abc@mail.example.org"})";
   std::string escaped;
   for (char c : send) escaped += c == '"' ? std::string("\\22") : std::string(1, c);
   std::string wat = R"((module
@@ -155,12 +154,21 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
     (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 4096) (local.get $n)))
     (i32.const 0)))
 )";
-  std::string err, body;
-  ASSERT_TRUE(host->boxes().upload(
+  std::string err;
+  ASSERT_TRUE(host.boxes().upload(
       R"({"box":"outreach","domains":["*"],"external":{"mail":{"mail":{"from-name":"KC Meat Up","from":"hello@kc.example"}}},)"
       R"("routes":{"http":{"/reach":{"post":{"name":"reach","public":true}}}}})",
       wat, &err))
       << err;
+}
+
+// Reaching people who never signed up (018 § 3): mail comes from the tenant's own address,
+// answers in the person's thread, and carries a one-click unsubscribe that ends every box's
+// mail to them.
+TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
+  start("");
+  upload_outreach(*host);
+  std::string body;
   ASSERT_EQ(post(port, "/reach", &body), 200) << body;
   EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
   ASSERT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
@@ -288,4 +296,36 @@ TEST(MailQueue, SignInMailGoesThroughSes) {
   EXPECT_FALSE(outcome.sent);
   EXPECT_NE(outcome.error.find("no AWS credentials"), std::string::npos);
   EXPECT_EQ(dev_mails, 0);
+}
+
+// A conversation isn't outreach (018 § 3): an answer to a message the person sent this tenant
+// gets mail.reply-per-address-daily, while a made-up In-Reply-To stays under the outreach cap.
+TEST_F(MailTest, RepliesInAThreadThePersonStartedGetMoreRoom) {
+  start("");
+  std::string body;
+  // Outreach: the fixture's mail.per-address-daily is 1, so the second is refused.
+  upload_outreach(*host, "never-sent@elsewhere.example");
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  EXPECT_EQ(fake.mails().size(), 1u);
+
+  // The person wrote to the tenant (mail in noted their address and Message-ID): answers to it
+  // go out past the outreach cap.
+  {
+    sqlite::Db inbound(root / "storage/mail/inbound.db");
+    inbound.exec("CREATE TABLE IF NOT EXISTS received (tenant TEXT NOT NULL, sender TEXT NOT NULL, message TEXT NOT NULL, "
+                 "at_ms INTEGER NOT NULL, PRIMARY KEY (tenant, sender, message))");
+    sqlite::Stmt s(inbound, "INSERT INTO received (tenant, sender, message, at_ms) VALUES (?, ?, ?, ?)");
+    s.bind(1, std::string("playground"))
+        .bind(2, host::received_hash("fan@example.org"))
+        .bind(3, host::received_hash("<abc@mail.example.org>"))
+        .bind(4, base::now_unix_ms())
+        .run();
+  }
+  upload_outreach(*host);
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  host->outbox_tick(base::now_unix_ms());
+  EXPECT_EQ(fake.mails().size(), 3u);
 }

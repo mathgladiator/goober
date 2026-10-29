@@ -7,7 +7,9 @@
 #include <boost/beast.hpp>
 
 #include "goober/base/files.h"
+#include "../src/mail_hash.h"
 #include "goober/host/host.h"
+#include "goober/sqlite/sqlite.h"
 #include "goober/json/json.h"
 
 using namespace goober;
@@ -220,6 +222,16 @@ TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
   EXPECT_EQ(typed.at("message_id"), "m1@example.org");
   EXPECT_TRUE(typed.at("sender").is_null());  // not a verified claim
   EXPECT_FALSE(typed.at("automatic").as_bool());
+  // The host noted who wrote and which message, as hashes, so an answer in this thread counts
+  // as a reply (018 § 3), and kept neither the address nor the Message-ID.
+  {
+    sqlite::Db inbound(root / "storage/mail/inbound.db");
+    sqlite::Stmt s(inbound, "SELECT tenant, sender, message FROM received");
+    ASSERT_TRUE(s.step());
+    EXPECT_EQ(s.text(1), host::received_hash("ann@example.org"));
+    EXPECT_EQ(s.text(2), host::received_hash("m1@example.org"));
+    EXPECT_EQ(s.text(1).find("ann"), std::string::npos);
+  }
 
   auto no = call(hook("data", {"refuse@kcmeatup.com"}, "Subject: hi", "hi"));
   EXPECT_EQ(status(no), 550);

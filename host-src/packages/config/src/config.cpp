@@ -352,7 +352,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (!is_region(cfg->aws.region)) return *error = "aws.region isn't an AWS region", nullptr;
   }
   if (const auto* mail = get_object(root, "mail", &err)) {
-    if (!check_keys(*mail, {"daily-max", "per-address-daily", "inbound"}, "mail", &err)) return *error = err, nullptr;
+    if (!check_keys(*mail, {"daily-max", "per-address-daily", "reply-per-address-daily", "inbound"}, "mail", &err)) return *error = err, nullptr;
     if (const auto* in = get_object(*mail, "inbound", &err)) {
       if (!check_keys(*in, {"token-file", "max-bytes", "attachment-days"}, "mail.inbound", &err)) return *error = err, nullptr;
       auto& inbound = cfg->mail.inbound;
@@ -369,6 +369,10 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     }
     if (auto v = get_int(*mail, "daily-max", &err)) cfg->mail.daily_max = *v;
     if (auto v = get_int(*mail, "per-address-daily", &err)) cfg->mail.per_address_daily = *v;
+    if (auto v = get_int(*mail, "reply-per-address-daily", &err)) cfg->mail.reply_per_address_daily = *v;
+    if (cfg->mail.reply_per_address_daily < 1 || cfg->mail.reply_per_address_daily > 1000) {
+      return *error = "mail.reply-per-address-daily is 1 to 1000", nullptr;
+    }
     if (cfg->mail.daily_max < 0 || cfg->mail.daily_max > 1000000 || cfg->mail.per_address_daily < 1 ||
         cfg->mail.per_address_daily > 1000) {
       return *error = "mail.daily-max is 0 to 1000000 and mail.per-address-daily 1 to 1000", nullptr;

@@ -114,6 +114,8 @@ struct HostConfig {
   struct Mail {
     int64_t daily_max = 200;
     int64_t per_address_daily = 3;
+    // Answers in a thread the person started (their message's Message-ID, from their address).
+    int64_t reply_per_address_daily = 20;
     // Mail in (design/machine/024.MailIn.md): Stalwart calls the host's MTA hook with the
     // bearer token in token_file. Without a token file, the hook answers 404.
     struct Inbound {

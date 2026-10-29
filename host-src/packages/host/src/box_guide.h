@@ -217,7 +217,8 @@ reach you). To answer someone in their thread, pass the Message-IDs from the mai
 "in_reply_to": its message_id, "references": its references plus its message_id. Every mail
 carries a one-click unsubscribe (a header and a footer link); once a person uses it, every box of
 the tenant gets {"error": "unsubscribed: ..."} for that address, for good; keep a row saying so.
-The host caps mail per tenant a day and per address a day
+Answers in a thread the person started (in_reply_to is a message they sent you) get 20 a day
+to that address; new outreach gets 3. The host caps mail per tenant a day and per address a day
 (config mail), so a form can't be turned into a cannon; a refused mail is a dead letter
 (outbox_dead_letters). A sandbox host (a rehydrated devbox) never sends: mail waits.
 Every mail is wrapped in the site's layout, as text and as HTML. To send a designed mail, the

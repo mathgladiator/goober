@@ -21,6 +21,7 @@
 #include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "mail_hash.h"
 #include "goober/json/json.h"
 #include "goober/mail_inbound/address.h"
 #include "goober/mail_inbound/mime.h"
@@ -155,7 +156,11 @@ std::unique_ptr<sqlite::Db> Host::open_mail_db() {
       "box TEXT NOT NULL, route TEXT NOT NULL, received_ms INTEGER NOT NULL, filename TEXT NOT NULL, "
       "content_type TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, content_id TEXT NOT NULL, "
       "inline INTEGER NOT NULL, bytes BLOB NOT NULL);"
-      "CREATE INDEX IF NOT EXISTS attachments_by_age ON attachments (received_ms);");
+      "CREATE INDEX IF NOT EXISTS attachments_by_age ON attachments (received_ms);"
+      // Who wrote to a tenant, and which message, both as hashes: what lets a box's answer in
+      // that thread count as a reply (mail.reply-per-address-daily) and not as outreach.
+      "CREATE TABLE IF NOT EXISTS received (tenant TEXT NOT NULL, sender TEXT NOT NULL, message TEXT NOT NULL, "
+      "at_ms INTEGER NOT NULL, PRIMARY KEY (tenant, sender, message));");
   return db;
 }
 
@@ -465,6 +470,20 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     return std::string(fallback);
   };
   if (r.outcome == Outcome::kNoResponse || (r.outcome == Outcome::kOk && r.status >= 200 && r.status < 300)) {
+    if (message.from && !message.message_id.empty()) {
+      try {
+        auto db = open_mail_db();
+        db->exec("DELETE FROM received WHERE at_ms < " + std::to_string(base::now_unix_ms() - 30LL * 86400000));
+        sqlite::Stmt s(*db, "INSERT OR IGNORE INTO received (tenant, sender, message, at_ms) VALUES (?, ?, ?, ?)");
+        s.bind(1, match->tenant)
+            .bind(2, received_hash(message.from->address))
+            .bind(3, received_hash(message.message_id))
+            .bind(4, base::now_unix_ms())
+            .run();
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: mail in: couldn't note the sender: " << e.what() << "\n";
+      }
+    }
     return answer(hook_discard(), "delivered");
   }
   drop_attachments();
