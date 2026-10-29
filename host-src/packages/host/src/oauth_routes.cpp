@@ -236,7 +236,14 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
                     log("authorize_error"));
     }
     if (is_post && !user_submitted(req, origin)) {
-      return finish(error_page(tenant, 403, request_id), log("authorize_cross_origin"));
+      // What the browser sent, so a refused Allow can be traced to the browser that sent it.
+      return finish(error_page(tenant, 403, request_id),
+                    json::dump(bj::object{{"oauth", "authorize_cross_origin"},
+                                          {"origin", req.header("origin")},
+                                          {"sec_fetch", req.header("sec-fetch-site") + " " + req.header("sec-fetch-mode") +
+                                                            " " + req.header("sec-fetch-dest") + " " +
+                                                            req.header("sec-fetch-user")},
+                                          {"user_agent", req.header("user-agent").substr(0, 200)}}));
     }
     // The operator issuer takes only a host operator's session; a tenant's, only a person's.
     auto who = browser_session(req, tenant);

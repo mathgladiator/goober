@@ -182,6 +182,34 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
                   authorize_query() + "&decision=allow")
                 .status,
             403);
+  // Chromium marks a clicked form with Sec-Fetch-User; without the mark, a script submitted it.
+  const std::string kChrome = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36";
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
+                  {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
+                   {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "navigate"}, {"sec-fetch-dest", "document"},
+                   {"sec-fetch-site", "same-origin"}, {"user-agent", kChrome}},
+                  authorize_query() + "&decision=allow")
+                .status,
+            403);
+  // WebKit (Safari, iOS apps' sign-in sheets, macOS web views) never sends Sec-Fetch-User, so
+  // its clicked Allow lands on the client.
+  const std::string kSafari =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+  auto webkit = fetch(port, bhttp::verb::post, "/oauth/authorize",
+                      {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
+                       {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "navigate"}, {"sec-fetch-dest", "document"},
+                       {"sec-fetch-site", "same-origin"}, {"user-agent", kSafari}},
+                      authorize_query() + "&decision=allow");
+  EXPECT_EQ(webkit.status, 303);
+  EXPECT_TRUE(webkit.headers["location"].starts_with(std::string(kApp) + "?code=")) << webkit.headers["location"];
+  // Even in WebKit, a fetch() is no navigation.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
+                  {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
+                   {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "cors"}, {"sec-fetch-dest", "empty"},
+                   {"user-agent", kSafari}},
+                  authorize_query() + "&decision=allow")
+                .status,
+            403);
   // The consent screen ignores the tenant's sign-in stylesheet.
   host->content().put("playground", "sign-in.css", "button{display:none}", nullptr);
   auto styled = fetch(port, bhttp::verb::get, "/oauth/authorize?" + authorize_query(), {{"cookie", cookie}});

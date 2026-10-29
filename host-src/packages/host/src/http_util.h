@@ -38,11 +38,20 @@ inline bool same_origin(const server::http::Request& req, const std::string& ori
 // coming from this origin, the POST must be a person's own navigation, a form they
 // submitted by clicking, not a script's fetch. Browsers set Sec-Fetch-* themselves, and no
 // script can forge them; a browser too old to send them is held to the origin check alone.
+// WebKit (Safari, every iOS browser and in-app sign-in, macOS apps' web views) sends
+// Sec-Fetch-Mode and -Dest but never Sec-Fetch-User (WebKit bug 247697), so for it a
+// top-level form navigation is the most it can show. Chromium and Firefox always mark a
+// click with "?1", so for them a missing mark still means a script submitted the form.
 inline bool user_submitted(const server::http::Request& req, const std::string& origin) {
   if (!same_origin(req, origin)) return false;
   std::string mode = req.header("sec-fetch-mode");
   if (mode.empty()) return true;
-  return mode == "navigate" && req.header("sec-fetch-dest") == "document" && req.header("sec-fetch-user") == "?1";
+  if (mode != "navigate" || req.header("sec-fetch-dest") != "document") return false;
+  std::string user = req.header("sec-fetch-user");
+  if (user == "?1") return true;
+  if (!user.empty()) return false;
+  std::string agent = req.header("user-agent");
+  return agent.find("Chrome/") == std::string::npos && agent.find("Firefox/") == std::string::npos;
 }
 
 }  // namespace goober::host
