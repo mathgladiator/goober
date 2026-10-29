@@ -312,6 +312,17 @@ class Host {
   // Every mail the host sends is rendered from these (design/machine/022.MailTemplates.md).
   std::unique_ptr<mail::templates::Store> mail_templates_;
   void register_mail_tools();
+  // Unsubscribes (mail_out.cpp; design/machine/018.Mail.md § 3): a tenant's list of addresses
+  // that asked for no more of its boxes' mail, kept by hash, and the one-click link to join it.
+ public:
+  bool mail_suppressed(const std::string& tenant, const std::string& address);
+
+ private:
+  void mail_suppress(const std::string& tenant, const std::string& address_hash, const std::string& how, bool on);
+  std::string unsubscribe_url(const std::string& domain, const std::string& tenant, const std::string& address);
+  void handle_unsubscribe(const server::http::Request& req, const Finish& finish, const std::string& path,
+                          const std::string& tenant);
+  void register_mail_out_tools();
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();

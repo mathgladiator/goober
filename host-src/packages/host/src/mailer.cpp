@@ -89,7 +89,8 @@ std::string base64_lines(std::string_view data) {
   return out;
 }
 
-std::string mime_message(const std::string& from, const identity::Mail& mail, int64_t now_ms, const std::string& id) {
+std::string mime_message(const std::string& mailer_from, const identity::Mail& mail, int64_t now_ms, const std::string& id) {
+  const std::string& from = mail.from_address.empty() ? mailer_from : mail.from_address;
   std::time_t secs = now_ms / 1000;
   std::tm tm{};
   gmtime_r(&secs, &tm);
@@ -103,7 +104,14 @@ std::string mime_message(const std::string& from, const identity::Mail& mail, in
   std::string from_name = encoded_words(name) == name ? "\"" + name + "\"" : encoded_words(name);
   std::string headers = "From: " + from_name + " <" + header_value(from) + ">\r\nTo: " + header_value(mail.to) + "\r\n" +
                         reply_to + "Subject: " + encoded_words(header_value(mail.subject)) + "\r\nDate: " + date +
-                        "\r\nMessage-ID: <" + id + "@" + domain + ">\r\nAuto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\n";
+                        "\r\nMessage-ID: <" + id + "@" + domain + ">\r\n" +
+                        (mail.in_reply_to.empty() ? "" : "In-Reply-To: " + header_value(mail.in_reply_to) + "\r\n") +
+                        (mail.references.empty() ? "" : "References: " + header_value(mail.references) + "\r\n") +
+                        (mail.list_unsubscribe.empty()
+                             ? ""
+                             : "List-Unsubscribe: " + header_value(mail.list_unsubscribe) +
+                                   "\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n") +
+                        "Auto-Submitted: auto-generated\r\nMIME-Version: 1.0\r\n";
   if (mail.html.empty()) {
     return headers + "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: " + encoding + "\r\n\r\n" + text;
   }
@@ -171,7 +179,8 @@ MailOutcome MailQueue::deliver(const identity::Mail& mail) {
       return out;
     }
     const auto& ses = cfg->identity.ses;
-    aws::SesMessage m{ses.from, mail.to, mime_message(ses.from, mail, base::now_unix_ms(), id), ses.configuration_set};
+    aws::SesMessage m{mail.from_address.empty() ? ses.from : mail.from_address, mail.to,
+                      mime_message(ses.from, mail, base::now_unix_ms(), id), ses.configuration_set};
     auto r = aws::ses_send(m, *creds, ses.region.empty() ? cfg->aws.region : ses.region, cfg->storage / "tmp", ses.endpoint);
     out.sent = r.sent;
     out.permanent = r.permanent;

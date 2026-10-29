@@ -205,7 +205,13 @@ A box sends mail through the host's own mailer (SES or SMTP, set by the operator
 goober_call("mail", "send", {"to": "person@example.org", "subject": "Confirm your spot",
   "text": "...", "reply_to": "owner@example.com"}) answers {"accepted": true, "key"}: the mail
 leaves only if the request commits, through the outbox, retried for a day. It comes from the
-host's address with your from-name. The host caps mail per tenant a day and per address a day
+host's address with your from-name, or from your own: "mail": {"from-name": "KC Meat Up",
+"from": "hello@kcmeatup.com"} (a domain of your tenant; declare a mail route for it, so replies
+reach you). To answer someone in their thread, pass the Message-IDs from the mail you got:
+"in_reply_to": its message_id, "references": its references plus its message_id. Every mail
+carries a one-click unsubscribe (a header and a footer link); once a person uses it, every box of
+the tenant gets {"error": "unsubscribed: ..."} for that address, for good; keep a row saying so.
+The host caps mail per tenant a day and per address a day
 (config mail), so a form can't be turned into a cannon; a refused mail is a dead letter
 (outbox_dead_letters). A sandbox host (a rehydrated devbox) never sends: mail waits.
 Every mail is wrapped in the site's layout, as text and as HTML. To send a designed mail, the

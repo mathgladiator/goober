@@ -372,10 +372,25 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       }
       if (!mail->is_object()) return *error = where + ".mail is {\"from-name\": \"Beef Share\"}", false;
       for (const auto& f : mail->as_object()) {
-        if (f.key() != "from-name") return *error = where + ".mail: unknown field \"" + std::string(f.key()) + "\"", false;
+        if (f.key() != "from-name" && f.key() != "from") {
+          return *error = where + ".mail: unknown field \"" + std::string(f.key()) + "\"", false;
+        }
       }
       svc.mail = true;
       svc.mail_from_name = get_string(mail->as_object(), "from-name", &err).value_or("");
+      // The address mail comes from, on one of the tenant's own domains (checked when sending,
+      // against the host config); replies to it reach the box's mail routes.
+      svc.mail_from = base::to_lower(get_string(mail->as_object(), "from", &err).value_or(""));
+      if (!svc.mail_from.empty()) {
+        auto at = svc.mail_from.find('@');
+        bool ok = at != std::string::npos && at > 0 && at <= 64 && svc.mail_from.size() <= 254 &&
+                  svc.mail_from.find('@', at + 1) == std::string::npos &&
+                  svc.mail_from.find('.', at) != std::string::npos;
+        for (char c : svc.mail_from) {
+          if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '@' || c == '.' || c == '-' || c == '_' || c == '+')) ok = false;
+        }
+        if (!ok) return *error = where + ".mail.from is one address, like hello@example.com", false;
+      }
       if (svc.mail_from_name.size() > 64 || svc.mail_from_name.find_first_of("\"\\\r\n<>") != std::string::npos) {
         return *error = where + ".mail.from-name is at most 64 characters, without quotes, backslashes, or <>", false;
       }

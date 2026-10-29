@@ -330,7 +330,13 @@ TEST(Manifest, MailService) {
     EXPECT_NE(e.find(why), std::string::npos) << e;
   };
   refuse(R"({"m":{"mail":{},"base":"https://x.example"}})", "no base");
-  refuse(R"({"m":{"mail":{"from":"x@y.z"}}})", "unknown field");
+  refuse(R"({"m":{"mail":{"reply":"x@y.z"}}})", "unknown field");
+  refuse(R"({"m":{"mail":{"from":"Evil <x@y.z>"}}})", "mail.from is one address");
+  refuse(R"({"m":{"mail":{"from":"nobody"}}})", "mail.from is one address");
+  std::string ok_err;
+  auto with_from = parse_manifest(R"({"box":"n","domains":["*"],"external":{"m":{"mail":{"from":"Hello@KCmeatup.com"}}}})", &ok_err);
+  ASSERT_TRUE(with_from) << ok_err;
+  EXPECT_EQ(with_from->external.at(0).mail_from, "hello@kcmeatup.com");
   refuse(R"({"m":{"mail":{"from-name":"Evil\" <x@y.z>"}}})", "from-name");
   refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "methods are send, and attachment");
   refuse(R"({"m":{"mail":{},"methods":{"send":{"budget":{"calls":50}}}}})", "1 to 10");

@@ -155,6 +155,7 @@ struct ExternalService {
   // Mail through the host's mailer (design/machine/018.Mail.md): its one method is send.
   bool mail = false;
   std::string mail_from_name;
+  std::string mail_from;  // "" means the host mailer's address
   std::string base;         // https://api.example.com[/prefix]
   std::string credentials;  // keys/system/$name or keys/tenant/{!tenant}/$name, or ""
   std::string auth_header = "authorization";

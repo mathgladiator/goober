@@ -362,12 +362,13 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
                             const bj::value& request) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   const char* kShape = "send takes {to, subject, text, reply_to?} or {to, template, vars?, reply_to?}, and reply? to "
-                       "mint a reply address";
+                       "mint a reply address, and in_reply_to? and references? (Message-IDs) to answer in a thread";
   if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
     if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
-        kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply") {
+        kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply" && kv.key() != "in_reply_to" &&
+        kv.key() != "references") {
       return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
@@ -379,6 +380,53 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
               reply_to = base::to_lower(text_field("reply_to"));
   if (!plain_email(to)) return fail("to must be one email address");
   if (!reply_to.empty() && !plain_email(reply_to)) return fail("reply_to must be one email address");
+  // Unsubscribed is final for every box of the tenant (design/machine/018.Mail.md § 3).
+  if (mail_suppressed(ctx.tenant, to)) return fail("unsubscribed: " + to + " asked for no more mail from this site");
+  // From an address of the tenant's own, on a domain the host config gives it.
+  auto cfg = config_.get();
+  std::string from_address = svc.mail_from, site = ctx.domain;
+  if (!from_address.empty()) {
+    std::string from_domain = from_address.substr(from_address.find('@') + 1);
+    auto d = cfg->domains.find(from_domain);
+    if (d == cfg->domains.end() || d->second.tenant != ctx.tenant) {
+      return fail("mail.from " + from_address + " isn't on a domain of tenant " + ctx.tenant);
+    }
+    site = from_domain;
+  }
+  if (site.empty() || site == "*") {
+    for (const auto& [name, entry] : cfg->domains) {
+      if (entry.tenant == ctx.tenant) {
+        site = name;
+        break;
+      }
+    }
+  }
+  // Threading (RFC 5322 § 3.6.4): Message-IDs, given with or without their angle brackets.
+  auto message_ids = [](const std::string& v, size_t most, std::string* out) {
+    std::string ids;
+    size_t n = 0, i = 0;
+    while (i < v.size()) {
+      while (i < v.size() && (v[i] == ' ' || v[i] == ',')) ++i;
+      if (i >= v.size()) break;
+      size_t j = i;
+      while (j < v.size() && v[j] != ' ' && v[j] != ',') ++j;
+      std::string id = v.substr(i, j - i);
+      i = j;
+      if (id.front() == '<' && id.back() == '>') id = id.substr(1, id.size() - 2);
+      if (id.empty() || id.size() > 250 || id.find('@') == std::string::npos) return false;
+      for (unsigned char c : id) {
+        if (c <= 0x20 || c >= 0x7f || c == '<' || c == '>') return false;
+      }
+      if (++n > most) return false;
+      ids += (ids.empty() ? "<" : " <") + id + ">";
+    }
+    *out = ids;
+    return true;
+  };
+  std::string in_reply_to, references;
+  if (!message_ids(text_field("in_reply_to"), 1, &in_reply_to)) return fail("in_reply_to is one Message-ID, like <abc@mail.example.com>");
+  if (!message_ids(text_field("references"), 20, &references)) return fail("references is up to 20 Message-IDs, separated by spaces");
+  if (!in_reply_to.empty() && references.empty()) references = in_reply_to;
   // A reply address that is a capability (038): the host mints reply+<token>@domain on one of
   // the box's token routes, and replies come back to that route with the claims.
   std::string reply_address;
@@ -393,7 +441,8 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   // A template of the tenant's own (design/machine/022.MailTemplates.md), rendered now so a bad
   // one fails the call; never one of the host's, so no box can send what looks like a sign-in code.
   std::string html;
-  bj::object vars{{"site", ctx.domain}, {"email", to}};
+  std::string unsubscribe = unsubscribe_url(site, ctx.tenant, to);
+  bj::object vars{{"site", site}, {"email", to}};
   if (r.contains("template")) {
     if (r.contains("subject") || r.contains("text")) return fail("give a template or a subject and text, not both");
     std::string name = text_field("template");
@@ -405,6 +454,7 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
         if (kv.key() != "email") vars[kv.key()] = kv.value();  // the recipient is always to
       }
     }
+    vars["unsubscribe"] = unsubscribe;  // never the box's to choose
     std::string err;
     auto rendered = mail_templates_->render(ctx.tenant, name, vars, &err);
     if (!rendered) return fail(err);
@@ -419,7 +469,12 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   for (char c : subject) {
     if (c == '\r' || c == '\n') return fail("subject is one line");
   }
-  if (html.empty()) html = mail_templates_->wrap_text(ctx.tenant, subject, text, vars).html;
+  if (html.empty()) {
+    vars["unsubscribe"] = unsubscribe;
+    auto wrapped = mail_templates_->wrap_text(ctx.tenant, subject, text, vars);
+    html = wrapped.html;
+    text = wrapped.text;
+  }
   OutboxElement e;
   e.service = svc.name;
   e.method = m.name;
@@ -430,7 +485,11 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
                                  {"text", base::valid_utf8(text)},
                                  {"html", base::valid_utf8(html)},
                                  {"from_name", svc.mail_from_name},
-                                 {"reply_to", reply_to}});
+                                 {"from_address", from_address},
+                                 {"reply_to", reply_to},
+                                 {"in_reply_to", in_reply_to},
+                                 {"references", references},
+                                 {"list_unsubscribe", "<" + unsubscribe + ">"}});
   e.idempotency_key = base::sha256_hex("goober-outbox\n" + ctx.request_id + "\n" + std::to_string(ctx.pending.size()))
                           .substr(0, 32);
   e.attempts = m.attempts;

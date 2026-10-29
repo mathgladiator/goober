@@ -157,6 +157,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_content_tools();
   register_data_tools();
   register_mail_tools();
+  register_mail_out_tools();
   register_web_tools();
   register_source_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
@@ -577,6 +578,17 @@ void Host::handle(Request req, Responder respond) {
     return;
   }
 
+  if (path->path.starts_with("/goober/unsubscribe/")) {
+    pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
+      try {
+        handle_unsubscribe(req, finish, p, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: unsubscribe: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"unsubscribe failed"})");
+      }
+    });
+    return;
+  }
   if (path->path == "/attachment" || path->path.starts_with("/attachment/")) {
     pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
       try {

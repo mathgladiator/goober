@@ -75,7 +75,8 @@ class MailTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 1, "boxes": 2},
+        "domains": {"localhost": {"tenant": "playground"}, "kc.example": {"tenant": "playground"}},
+        "threads": {"network": 1, "boxes": 2},
         "identity": {"mailer": "ses", "ses": {"from": "no-reply@example.com", "endpoint": ")" + fake.endpoint() + R"("}},
         "mail": {"per-address-daily": 1})" + extra + "}",
                                     root, &err);
@@ -127,6 +128,90 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
   auto dead = host->outbox_list("dead");
   ASSERT_EQ(dead.size(), 1u);
   EXPECT_NE(std::string(dead[0].at("last_error").as_string()).find("per-address-daily"), std::string::npos);
+}
+
+// Reaching people who never signed up (018 § 3): mail comes from the tenant's own address,
+// answers in the person's thread, and carries a one-click unsubscribe that ends every box's
+// mail to them.
+TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
+  start("");
+  std::string send = R"({"to":"Fan@Example.org","subject":"Re: Brisket","text":"Thanks for writing.",)"
+                     R"("in_reply_to":"abc@mail.example.org","references":"<root@mail.example.org> abc@mail.example.org"})";
+  std::string escaped;
+  for (char c : send) escaped += c == '"' ? std::string("\\22") : std::string(1, c);
+  std::string wat = R"((module
+  (import "goober" "goober_call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 16) "mail")
+  (data (i32.const 24) "send")
+  (data (i32.const 64) ")" + escaped + R"(")
+  (func (export "goober_route_reach") (result i32) (local $n i32)
+    (local.set $n (call $call (i32.const 16) (i32.const 4) (i32.const 24) (i32.const 4) (i32.const 64) (i32.const )" +
+                    std::to_string(send.size()) + R"()))
+    (drop (call $result (i32.const 4096) (local.get $n)))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 4096) (local.get $n)))
+    (i32.const 0)))
+)";
+  std::string err, body;
+  ASSERT_TRUE(host->boxes().upload(
+      R"({"box":"outreach","domains":["*"],"external":{"mail":{"mail":{"from-name":"KC Meat Up","from":"hello@kc.example"}}},)"
+      R"("routes":{"http":{"/reach":{"post":{"name":"reach","public":true}}}}})",
+      wat, &err))
+      << err;
+  ASSERT_EQ(post(port, "/reach", &body), 200) << body;
+  EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
+  ASSERT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  auto mails = fake.mails();
+  ASSERT_EQ(mails.size(), 1u);
+  const std::string& m = mails[0];
+  EXPECT_NE(m.find("From: \"KC Meat Up\" <hello@kc.example>\r\n"), std::string::npos) << m;
+  EXPECT_NE(m.find("In-Reply-To: <abc@mail.example.org>\r\n"), std::string::npos) << m;
+  EXPECT_NE(m.find("References: <root@mail.example.org> <abc@mail.example.org>\r\n"), std::string::npos) << m;
+  EXPECT_NE(m.find("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"), std::string::npos) << m;
+  auto at = m.find("List-Unsubscribe: <https://kc.example/goober/unsubscribe/playground/");
+  ASSERT_NE(at, std::string::npos) << m;
+  EXPECT_NE(m.find("Unsubscribe: https://kc.example/goober/unsubscribe/"), std::string::npos) << m;  // the footer
+  std::string url = m.substr(at + 19, m.find('>', at) - at - 19);
+  std::string path = url.substr(std::string("https://kc.example").size());
+
+  auto request = [&](bhttp::verb verb, const std::string& target) {
+    asio::io_context io;
+    beast::tcp_stream stream(io);
+    stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+    bhttp::request<bhttp::string_body> req(verb, target, 11);
+    req.set(bhttp::field::host, "kc.example");
+    if (verb == bhttp::verb::post) {
+      req.set(bhttp::field::content_type, "application/x-www-form-urlencoded");
+      req.body() = "List-Unsubscribe=One-Click";
+    }
+    req.prepare_payload();
+    bhttp::write(stream, req);
+    beast::flat_buffer buf;
+    bhttp::response<bhttp::string_body> res;
+    bhttp::read(stream, buf, res);
+    return std::pair<int, std::string>(int(res.result_int()), res.body());
+  };
+  // Opening the link (as a mail scanner does) asks; it doesn't unsubscribe.
+  auto asked = request(bhttp::verb::get, path);
+  EXPECT_EQ(asked.first, 200);
+  EXPECT_NE(asked.second.find("Stop these emails?"), std::string::npos);
+  EXPECT_FALSE(host->mail_suppressed("playground", "fan@example.org"));
+  // A forged link does nothing.
+  EXPECT_EQ(request(bhttp::verb::post, path.substr(0, path.size() - 1) + (path.back() == '0' ? "1" : "0")).first, 404);
+  EXPECT_FALSE(host->mail_suppressed("playground", "fan@example.org"));
+  // The one-click POST unsubscribes.
+  auto done = request(bhttp::verb::post, path);
+  EXPECT_EQ(done.first, 200);
+  EXPECT_NE(done.second.find("unsubscribed"), std::string::npos);
+  EXPECT_TRUE(host->mail_suppressed("playground", "FAN@example.org"));
+  // Every box of the tenant is refused in the call from then on.
+  ASSERT_EQ(post(port, "/reach", &body), 200);
+  EXPECT_NE(body.find("unsubscribed"), std::string::npos) << body;
+  EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 0);
+  EXPECT_EQ(fake.mails().size(), 1u);
 }
 
 // Mail templates (022): a box sends one of the tenant's own templates by name, wrapped in the

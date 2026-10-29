@@ -55,6 +55,12 @@ struct Mail {
   std::string template_name = {};
   bj::object vars = {};
   std::string html = {};  // an HTML alternative to text, or ""
+  // A box's mail (design/machine/018.Mail.md § 3): its own From on the tenant's domain, the
+  // headers that thread it into a conversation, and the one-click unsubscribe (RFC 8058).
+  std::string from_address = {};    // "" means the mailer's
+  std::string in_reply_to = {};     // "<id@host>", or ""
+  std::string references = {};      // "<a@x> <b@y>", or ""
+  std::string list_unsubscribe = {};  // "<https://...>", or ""
 };
 using Mailer = std::function<void(const Mail&)>;
 

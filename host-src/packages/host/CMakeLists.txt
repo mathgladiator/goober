@@ -1,6 +1,6 @@
 goober_package(
   NAME host
-  SOURCES src/worker_pool.cpp src/rate_limit.cpp src/mailer.cpp src/backup.cpp src/backups.cpp src/rehydrate.cpp src/scheduler.cpp src/identity_events.cpp src/mail_tools.cpp src/mail_in.cpp src/toolchain.cpp src/keys.cpp src/network.cpp src/outbox.cpp src/host.cpp src/operations.cpp src/identity_routes.cpp src/oauth_routes.cpp src/mcp_routes.cpp src/operator_tokens.cpp
+  SOURCES src/worker_pool.cpp src/rate_limit.cpp src/mailer.cpp src/backup.cpp src/backups.cpp src/rehydrate.cpp src/scheduler.cpp src/identity_events.cpp src/mail_tools.cpp src/mail_in.cpp src/mail_out.cpp src/toolchain.cpp src/keys.cpp src/network.cpp src/outbox.cpp src/host.cpp src/operations.cpp src/identity_routes.cpp src/oauth_routes.cpp src/mcp_routes.cpp src/operator_tokens.cpp
           src/attachment_routes.cpp src/content_tools.cpp src/data_tools.cpp src/web_fetch.cpp src/crawler.cpp src/builder.cpp src/source_tools.cpp
   DEPS goober_base goober_aws goober_backup goober_json goober_config goober_wal goober_content goober_site goober_attachments goober_router goober_manifest
        goober_runtime_wasm goober_db goober_boxes goober_identity goober_mail_templates goober_mail_inbound goober_server_http goober_mcp goober_timers goober_web goober_source

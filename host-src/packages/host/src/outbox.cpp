@@ -199,6 +199,16 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   };
   identity::Mail mail{text("to"), text("subject"), text("text"), text("from_name"), text("reply_to")};
   mail.html = text("html");
+  mail.from_address = text("from_address");
+  mail.in_reply_to = text("in_reply_to");
+  mail.references = text("references");
+  mail.list_unsubscribe = text("list_unsubscribe");
+  // Unsubscribed since the box sent it: refused for good.
+  if (mail_suppressed(tenant, mail.to)) {
+    out.status = 403;
+    out.error = "unsubscribed since it was sent";
+    return out;
+  }
   // The limits (config mail): per tenant a day, and per address a day, counted by a hash of
   // the address so the ledger holds no addresses.
   fs::create_directories(cfg->storage / "mail");

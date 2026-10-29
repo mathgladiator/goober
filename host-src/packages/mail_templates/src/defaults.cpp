@@ -36,7 +36,7 @@ const char* kLayoutHtml = R"(<!doctype html>
 {{{content}}}
 </td></tr>
 </table>
-<p style="margin:16px 0 0;font:12px/1.5 )" GOOBER_FONT R"(;color:#a1a1aa;">Sent by {{site}} to {{email}}.</p>
+<p style="margin:16px 0 0;font:12px/1.5 )" GOOBER_FONT R"(;color:#a1a1aa;">Sent by {{site}} to {{email}}.{{#unsubscribe}} <a href="{{unsubscribe}}" style="color:#a1a1aa;">Unsubscribe</a>{{/unsubscribe}}</p>
 </td></tr>
 </table>
 </body>
@@ -46,7 +46,8 @@ const char* kLayoutHtml = R"(<!doctype html>
 const char* kLayoutText = R"({{{content}}}
 
 --
-Sent by {{site}} to {{email}}.
+Sent by {{site}} to {{email}}.{{#unsubscribe}}
+Unsubscribe: {{unsubscribe}}{{/unsubscribe}}
 )";
 
 const char* kSignInNewHtml = R"(<h1 style=")" GOOBER_H1 R"(">Welcome to {{site}}</h1>
@@ -95,7 +96,7 @@ const std::vector<Builtin>& builtins() {
   static const std::vector<Builtin> kBuiltins = {
       {std::string(kLayout),
        "Wraps every mail. {{{content}}} is the rendered mail; also subject, preheader (the text's first line), site, "
-       "and email. Its subject is unused.",
+       "email, and, on boxes' mail only, unsubscribe (the one-click link; keep it). Its subject is unused.",
        bj::object{{"content", "<p>Hello.</p>"}, {"subject", "Hello"}, {"preheader", "Hello."}, {"site", "example.com"},
                   {"email", "ann@example.com"}},
        Template{"{{subject}}", kLayoutText, kLayoutHtml}},
