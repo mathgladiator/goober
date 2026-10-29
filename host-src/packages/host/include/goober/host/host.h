@@ -126,6 +126,28 @@ class Host {
   uint16_t panel_port() const;
   // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).
   static bool is_read_tool(std::string_view tool);
+  // Operator scope (design/machine/030.OperatorScope.md): which tenants an operator acts on.
+  enum class ScopeRule { kTenant, kBox, kManifest, kDomain, kSchema, kProject, kProjectCreate, kTicket, kResult,
+                         kFiltered, kOpen, kHost };
+  struct OperatorScope {
+    bool all = true;
+    std::set<std::string> tenants;  // when not all
+    std::string set_by;
+    int64_t at_ms = 0;
+  };
+  // Every operator tool's rule; nullopt for a tool that has none (refused when focused).
+  static std::optional<ScopeRule> scope_rule(std::string_view tool);
+  // Whose scope an operator name uses: "person:$email" for the panel and OAuth agents alike,
+  // else the name ("config", "token:$name").
+  static std::string scope_key(const std::string& operator_name);
+  std::map<std::string, OperatorScope> operator_scopes() const;
+  OperatorScope operator_scope(const std::string& operator_name) const;
+  // Writes one operator's scope (all removes the entry). Refuses tenants the config doesn't serve.
+  bool set_operator_scope(const std::string& key, const OperatorScope& scope, const std::string& by, std::string* why);
+  // The MCP policy for an operator: read-only for an observer, and their scope's checks and filters.
+  mcp::McpServer::Policy operator_policy(const std::string& operator_name, bool read_only);
+  // The operator tool server, for tests that check every tool has a scope rule.
+  const mcp::McpServer& operator_tools() const { return *mcp_; }
   // One step of every running crawl: at most one page each (design/machine/017.Crawl.md).
   // The crawler thread calls it; tests call it directly. Returns the pages fetched.
   int crawl_step();
@@ -341,6 +363,20 @@ class Host {
   std::string issue_upload_ticket(UploadTicket t);
   // The ticket's terms if it is live and for this tenant; with consume, it can't be used again.
   std::optional<UploadTicket> upload_ticket(const std::string& ticket, const std::string& tenant, bool consume);
+  // The tenant a live ticket is for, without using it.
+  std::optional<std::string> upload_ticket_tenant(const std::string& ticket);
+  std::optional<std::string> scope_refusal(const OperatorScope& scope, const std::string& operator_name,
+                                           const std::string& tool, const boost::json::object& args);
+  std::optional<std::string> scope_filter(const OperatorScope& scope, const std::string& operator_name,
+                                          const std::string& tool, boost::json::value& result);
+  std::mutex scopes_mu_;
+  void register_scope_tools();
+  // The panel's Operators view, and its two writes (030 § 2; 029 § 6).
+  boost::json::object panel_operators(const SignedIn& who);
+  std::pair<int, boost::json::object> panel_set_scope(const SignedIn& who, const boost::json::object& args,
+                                                      const std::string& request_id);
+  std::pair<int, boost::json::object> panel_unblock(const SignedIn& who, const boost::json::object& args,
+                                                    const std::string& request_id);
 
  private:
   std::mutex upload_tickets_mu_;

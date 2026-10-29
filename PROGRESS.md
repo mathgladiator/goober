@@ -400,6 +400,13 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Mail speaks ics@1: invites, `"ics"` on send, `calendar` on received mail.
 - [ ] Writing VTIMEZONEs; VTODO helpers; free/busy; a `locale@1`.
 
+### Phase 21: operator scope (030)
+- [x] Each operator (a person, a token, the config's token) acts on all tenants or a set, kept in
+      `storage/operations/scopes.json`; every operator tool has a scope rule, deny by default.
+- [x] Changed only in the panel's Operators view (an owner sets anyone's; an operator narrows
+      their own); `operator_scope` tells an agent where it stands; `token create --tenants`.
+- [x] The panel narrows itself for a focused person.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

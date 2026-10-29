@@ -57,7 +57,7 @@ namespace {
 constexpr const char* kUsage =
     "usage: goober-host [--config host.json] [--local]\n"
     "       goober-host check [--config host.json]\n"
-    "       goober-host token create [--config host.json] [--name NAME] [--claude] [--local]\n"
+    "       goober-host token create [--config host.json] [--name NAME] [--tenants T,...] [--claude] [--local]\n"
     "       goober-host token list [--config host.json]\n"
     "       goober-host token revoke NAME_OR_ID [--config host.json]\n"
     "       goober-host operator revoke EMAIL [--config host.json]   (ends every operator login and OAuth grant)\n"
@@ -82,7 +82,7 @@ std::string shell_quote(const std::string& s) {
 }
 
 int run_token(const std::vector<std::string>& args, const std::string& config_path, const std::string& name,
-              bool claude, bool local) {
+              bool claude, bool local, const std::string& tenants) {
   std::string err;
   auto config = goober::config::load_config(config_path, &err);
   if (!config) {
@@ -92,8 +92,29 @@ int run_token(const std::vector<std::string>& args, const std::string& config_pa
   if (local) config = goober::config::local_mode(config);
   const std::string& verb = args.size() > 1 ? args[1] : "";
   if (verb == "create") {
+    // --tenants a,b: the token starts focused on those tenants (030); a person widens it in the panel.
+    std::set<std::string> focus;
+    for (size_t i = 0; i < tenants.size();) {
+      size_t j = tenants.find(',', i);
+      if (j == std::string::npos) j = tenants.size();
+      if (j > i) focus.insert(tenants.substr(i, j - i));
+      i = j + 1;
+    }
+    for (const auto& t : focus) {
+      bool known = false;
+      for (const auto& [d, e] : config->domains) known |= e.tenant == t;
+      if (!known) {
+        std::cerr << "goober-host: no domain in the host config serves tenant " << t << "\n";
+        return 1;
+      }
+    }
     auto token = goober::host::create_operator_token(config->storage, name, goober::base::now_unix_ms(), &err);
     if (!token) {
+      std::cerr << "goober-host: " << err << "\n";
+      return 1;
+    }
+    if (!focus.empty() && !goober::host::write_operator_scope(config->storage, "token:" + name, focus, "cli",
+                                                             goober::base::now_unix_ms(), &err)) {
       std::cerr << "goober-host: " << err << "\n";
       return 1;
     }
@@ -348,6 +369,7 @@ int main(int argc, char** argv) {
   umask(0077);
   std::string config_path = "host.json";
   std::string token_name = "operator";
+  std::string token_tenants;
   bool local = false, claude = false;
   Flags flags;
   std::vector<std::string> positional;
@@ -357,6 +379,8 @@ int main(int argc, char** argv) {
       config_path = argv[++i];
     } else if (a == "--name" && i + 1 < argc) {
       token_name = argv[++i];
+    } else if (a == "--tenants" && i + 1 < argc) {
+      token_tenants = argv[++i];
     } else if (a == "--local") {
       local = true;
     } else if (a == "--claude") {
@@ -388,7 +412,7 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (!positional.empty() && positional[0] == "token") return run_token(positional, config_path, token_name, claude, local);
+  if (!positional.empty() && positional[0] == "token") return run_token(positional, config_path, token_name, claude, local, token_tenants);
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);

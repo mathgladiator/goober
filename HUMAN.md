@@ -122,6 +122,12 @@ sudo systemctl stop goober-host
 
 To let Grok back in, connect it again; it signs you in by email code.
 
+**Keep Grok on one site** without stopping it: in the panel, **Operators**, uncheck "all" on
+your row and check the one tenant. Every agent signed in as you is then held to it, and so are
+you in the panel, until you check "all" again. A minted token can start that way:
+`goober-host token create --name grok --tenants kcmeatup`. Grok can ask `operator_scope`
+where it stands, but no tool can change it.
+
 **Grok doesn't see a tool that exists** (after a deploy added it): Grok keeps the tool list
 it fetched when it connected. Disconnect and reconnect the connector; then ask it to list
 the tools again. Every `tools/list` a site's `/mcp` answers is a line in the access log

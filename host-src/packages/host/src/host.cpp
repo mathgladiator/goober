@@ -186,6 +186,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_panel_tools();
   register_pwa_tools();
   register_library_tools();
+  register_scope_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -371,6 +372,13 @@ std::string Host::issue_upload_ticket(UploadTicket t) {
   }
   upload_tickets_[base::sha256_hex(ticket)] = std::move(t);
   return ticket;
+}
+
+std::optional<std::string> Host::upload_ticket_tenant(const std::string& ticket) {
+  std::lock_guard lock(upload_tickets_mu_);
+  auto it = upload_tickets_.find(base::sha256_hex(ticket));
+  if (it == upload_tickets_.end() || it->second.expires_ms <= base::now_unix_ms()) return std::nullopt;
+  return it->second.tenant;
 }
 
 std::optional<Host::UploadTicket> Host::upload_ticket(const std::string& ticket, const std::string& tenant, bool consume) {

@@ -353,8 +353,30 @@ function manifestDiff(beforeText, afterText) {
 
 const state = { window: store.get('window', '12h'), me: null, refresh: null };
 
+// A focused operator (030) sees only their tenants: host-wide views narrow to the first of them.
+function focus() { return state.me && state.me.focus && state.me.focus.length ? state.me.focus : null; }
+function focusNote(what) {
+  return h('div', { class: 'notice' }, 'You are focused on ' + focus().join(', ') + '. ' + what +
+    ' An owner can widen your scope in ', h('a', { href: '#/operators' }, 'Operators'), '.');
+}
+
 const views = {
   async overview() {
+    if (focus()) {
+      const tenant = focus()[0];
+      const [traffic, changes] = await Promise.all([
+        api('traffic', { window: state.window, tenant }), api('changes', { tenant, limit: 8 })]);
+      return [
+        h('div', { class: 'bar' }, h('h1', {}, 'Overview of ' + tenant), h('span', { class: 'muted' }, '·'), windowPicker(render)),
+        focusNote('The host\'s health and heat are left out.'),
+        h('div', { class: 'grid' },
+          wideCard('Requests', requestsChart(traffic.series)),
+          wideCard('Latency', latencyChart(traffic.series))),
+        h('div', { class: 'grid' },
+          wideCard('Newest changes', changes.changes.length ? changesTable(changes.changes) : h('p', { class: 'muted' }, 'No changes recorded yet.'),
+            h('p', {}, h('a', { href: '#/changes' }, 'All changes →')))),
+      ];
+    }
     const [health, traffic, hot, changes] = await Promise.all([
       api('host_health'), api('traffic', { window: state.window }), api('hot_boxes', { window: state.window }),
       api('changes', { limit: 8 })]);
@@ -380,7 +402,7 @@ const views = {
   },
 
   async traffic(params) {
-    const tenant = params.get('tenant') || '', box = params.get('box') || '';
+    const tenant = params.get('tenant') || (focus() ? focus()[0] : ''), box = params.get('box') || '';
     const t = await api('traffic', { window: state.window, tenant, box });
     const tenants = state.me.tenants || [];
     const boxes = [...new Set(t.routes.map((r) => r.box).filter(Boolean))].sort();
@@ -412,6 +434,7 @@ const views = {
   },
 
   async flow() {
+    if (focus()) return [h('h1', {}, 'Data flow'), focusNote('The whole host\'s graph is left out; open a box for its own.'), h('p', {}, h('a', { href: '#/boxes' }, 'Boxes →'))];
     const g = await api('box_graph', { window: state.window });
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Data flow'), windowPicker(render)),
@@ -423,7 +446,7 @@ const views = {
   },
 
   async boxes() {
-    const [list, hot] = await Promise.all([api('box_list'), api('hot_boxes', { window: state.window })]);
+    const [list, hot] = await Promise.all([api('box_list'), api('hot_boxes', { window: state.window }).catch(() => ({ boxes: [] }))]);
     const heat = Object.fromEntries(hot.boxes.map((b) => [b.box, b]));
     const routeCount = (b) => (b.routes || []).length + (b.tools || []).length + (b.timers || []).length +
       (b.mail || []).length + (b.internal || []).length;
@@ -446,7 +469,8 @@ const views = {
   async box(params, name) {
     const [graph, versions, logs, changes] = await Promise.all([
       api('box_graph', { window: state.window, box: name }), api('version_list', { box: name }),
-      api('box_logs', { box: name, limit: 30 }).catch(() => []), api('changes', { kind: 'deploy', limit: 200 })]);
+      api('box_logs', { box: name, limit: 30 }).catch(() => []),
+      api('changes', { kind: 'deploy', limit: 200, tenant: focus() ? focus()[0] : '' }).catch(() => ({ changes: [] }))]);
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
     const deploys = changes.changes.filter((c) => c.target === name);
@@ -487,10 +511,10 @@ const views = {
   },
 
   async changes(params) {
-    const kind = params.get('kind') || '', tenant = params.get('tenant') || '', tab = params.get('tab') || 'changes';
+    const kind = params.get('kind') || '', tenant = params.get('tenant') || (focus() ? focus()[0] : ''), tab = params.get('tab') || 'changes';
     const before = Number(params.get('before') || 0);
     const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); params.delete('before'); location.hash = '#/changes?' + params; };
-    const tabs = segmented(['changes', 'actions'], tab, (t) => go('tab', t === 'changes' ? '' : t));
+    const tabs = focus() ? null : segmented(['changes', 'actions'], tab, (t) => go('tab', t === 'changes' ? '' : t));
     if (tab === 'actions') {
       const changedOnly = params.get('changed') === '1';
       const a = await api('operator_actions', { changed_only: changedOnly, before_id: before, limit: 100 });
@@ -515,7 +539,7 @@ const views = {
         h('label', {}, 'Kind '), h('select', { onchange: (e) => go('kind', e.target.value) }, h('option', { value: '' }, 'all'),
           kinds.map((k) => h('option', { value: k, selected: k === kind }, k))),
         h('label', {}, 'Tenant '), h('select', { onchange: (e) => go('tenant', e.target.value) }, h('option', { value: '' }, 'all'),
-          [...(state.me.tenants || []), '_host'].map((t) => h('option', { value: t, selected: t === tenant }, t)))),
+          [...(state.me.tenants || []), ...(focus() ? [] : ['_host'])].map((t) => h('option', { value: t, selected: t === tenant }, t)))),
       wideCard('', c.changes.length ? changesTable(c.changes) : h('p', { class: 'muted' }, 'No changes recorded yet. The log starts with this version of the host.'),
         pager(c.changes, before, (id) => { params.set('before', id); location.hash = '#/changes?' + params; })),
     ];
@@ -550,6 +574,45 @@ const views = {
       h('div', { class: 'bar' }, h('a', { href: '#/changes' }, '← Change log'), h('h1', {}, 'Change #' + c.id)),
       h('div', { class: 'grid' }, card('', h('dl', { class: 'kv' }, rows.map(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])))),
       wideCard(c.kind === 'deploy' || c.kind === 'upload' ? 'Manifest changes' : 'Diff', body),
+    ];
+  },
+
+  async operators() {
+    const o = await api('operators');
+    const tenants = state.me.all_tenants || state.me.tenants || [];
+    const status = h('p', { class: 'muted small' });
+    const editor = (op) => {
+      const editable = o.may_set_any || op.you;
+      const current = op.scope === 'all' ? null : op.scope.tenants;
+      const all = h('input', { type: 'checkbox', checked: !current, disabled: !o.may_set_any });
+      const boxes = tenants.map((t) => h('input', { type: 'checkbox', value: t, checked: !current || current.includes(t) }));
+      const save = h('button', { class: 'small', onclick: async () => {
+        const picked = boxes.filter((b) => b.checked).map((b) => b.value);
+        const next = all.checked ? 'all' : picked;
+        const words = next === 'all' ? 'every tenant' : picked.join(', ') || 'nothing';
+        if (!confirm('Focus ' + op.name + ' on ' + words + '?')) return;
+        try {
+          await api('write/scope', { operator: op.key, tenants: next, confirm: true });
+          render(false);
+        } catch (e) { status.textContent = e.message; }
+      } }, 'Save');
+      if (!editable) return h('span', { class: 'muted' }, current ? current.join(', ') : 'all tenants');
+      return h('span', { class: 'scope' }, h('label', {}, all, ' all'), ' ',
+        tenants.map((t, i) => h('label', {}, boxes[i], ' ' + t + ' ')), save);
+    };
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Operators')),
+      wideCard('', h('p', { class: 'muted small' },
+        'Each operator acts on all tenants, or only those checked: their agents too. Only a person here changes it; ' +
+        (o.may_set_any ? 'as an owner, you set anyone\'s.' : 'you may narrow your own.')),
+        table([
+          { label: 'Operator', get: (op) => op.name + (op.you ? ' (you)' : ''), cls: () => 'mono' },
+          { label: 'Kind', get: (op) => op.kind },
+          { label: 'Roles', get: (op) => op.roles.join(', '), cls: () => 'muted' },
+          { label: 'Scope', get: (op) => editor(op) },
+          { label: 'Set', get: (op) => op.scope === 'all' ? '' : op.scope.set_by + ' · ' + fmt.time(op.scope.at_ms), cls: () => 'muted small' },
+        ], o.operators), status),
+      wideCard('Lift a mail block', unblockForm(tenants)),
     ];
   },
 
@@ -649,6 +712,25 @@ function pager(rows, before, next) {
     rows.length >= 100 ? h('button', { type: 'button', onclick: () => next(rows[rows.length - 1].id) }, 'Older →') : null);
 }
 
+// Lifting a block takes a person here, with a statement of why (029 § 6): no tool can.
+function unblockForm(tenants) {
+  const tenant = h('select', {}, tenants.map((t) => h('option', { value: t }, t)));
+  const email = h('input', { type: 'email', placeholder: 'person@example.com' });
+  const statement = h('textarea', { rows: 2, placeholder: 'Why: "Asked by phone on 11/2 to rejoin the digest"' });
+  const out = h('p', { class: 'muted small' });
+  const go = h('button', { class: 'small', onclick: async () => {
+    if (!confirm('Allow ' + tenant.value + ' to email ' + email.value + ' again?')) return;
+    try {
+      const r = await api('write/unblock', { tenant: tenant.value, email: email.value, statement: statement.value, confirm: true });
+      out.textContent = r.lifted ? 'Lifted. It was blocked ' + fmt.time(r.blocked_at) + ' (' + r.how + ').' : 'That address wasn\'t blocked.';
+    } catch (e) { out.textContent = e.message; }
+  } }, 'Allow mail again');
+  return h('div', { class: 'unblock' },
+    h('p', { class: 'muted small' }, 'Someone who declined an invite or unsubscribed is blocked. They can lift it themselves, signed in on the site; ' +
+      'or you can, here, saying why. Agents can\'t.'),
+    h('label', {}, 'Tenant '), tenant, ' ', h('label', {}, 'Address '), email, statement, go, out);
+}
+
 // ------------------------------------------------------------------ router
 
 let renderSeq = 0;
@@ -692,7 +774,8 @@ async function start() {
     clear($main); $main.appendChild(errorBox(e)); return;
   }
   const who = document.getElementById('who');
-  append(who, [h('span', { title: state.me.roles.join(', ') }, state.me.email), h('span', {}, 'build ' + state.me.build),
+  append(who, [focus() ? h('span', { class: 'pill focus' }, 'Focused on ' + focus().join(', ')) : null,
+    h('span', { title: state.me.roles.join(', ') }, state.me.email), h('span', {}, 'build ' + state.me.build),
     h('form', { method: 'post', action: '/identity/sign-out' }, h('input', { type: 'hidden', name: 'return', value: '/' }), h('button', {}, 'Sign out'))]);
   window.addEventListener('hashchange', () => render(false));
   // Live views refresh every 15 seconds while visible; the database and change pages don't.

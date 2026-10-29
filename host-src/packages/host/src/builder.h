@@ -24,6 +24,13 @@
 
 namespace goober::host {
 
+// What goober.project.json says a project builds.
+struct ProjectSpec {
+  std::vector<std::string> boxes, schemas;
+  std::vector<std::pair<std::string, std::string>> sites;  // dir, tenant
+};
+std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error);
+
 struct BuiltBox {
   std::string dir;       // in the project, like "." or "boxes/leads"
   std::string box;       // the manifest's box name

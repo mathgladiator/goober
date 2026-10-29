@@ -123,9 +123,8 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   current_operator() = operator_name;
   current_request_id() = req.header("goober-request-id");
   // A host:observer only looks (design/machine/028.Panel.md § 2).
-  mcp::McpServer::Allowed allowed;
-  if (!may_change(operator_roles(operator_name))) allowed = [](const std::string& tool) { return is_read_tool(tool); };
-  auto reply = mcp_->handle(req.body, allowed);
+  // A focused operator only reaches their tenants (design/machine/030.OperatorScope.md).
+  auto reply = mcp_->handle(req.body, operator_policy(operator_name, !may_change(operator_roles(operator_name))));
   current_operator().clear();
   current_request_id().clear();
   // Which tool, for which tenant: what an operator (or an agent acting as one) did is in the

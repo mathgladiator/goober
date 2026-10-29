@@ -90,49 +90,6 @@ std::string crate_name(const std::string& toml) {
   return name;
 }
 
-struct ProjectSpec {
-  std::vector<std::string> boxes, schemas;
-  std::vector<std::pair<std::string, std::string>> sites;  // dir, tenant
-};
-
-std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error) {
-  std::string err;
-  auto v = json::parse(text, &err);
-  if (!v || !v->is_object()) return *error = "goober.project.json isn't a JSON object: " + err, std::nullopt;
-  ProjectSpec spec;
-  auto dir_ok = [](const std::string& d) { return d == "." || source::valid_path(d); };
-  for (const auto& kv : v->as_object()) {
-    std::string k(kv.key());
-    if (k == "boxes" || k == "schemas") {
-      if (!kv.value().is_array()) return *error = "goober.project.json: " + k + " is a list", std::nullopt;
-      for (const auto& e : kv.value().as_array()) {
-        std::string s = e.is_string() ? std::string(e.as_string()) : "";
-        if (k == "boxes" ? !dir_ok(s) : !source::valid_path(s)) {
-          return *error = "goober.project.json: " + k + " holds a bad path: " + s, std::nullopt;
-        }
-        (k == "boxes" ? spec.boxes : spec.schemas).push_back(s);
-      }
-    } else if (k == "sites") {
-      if (!kv.value().is_array()) return *error = "goober.project.json: sites is a list", std::nullopt;
-      for (const auto& e : kv.value().as_array()) {
-        const auto* o = e.if_object();
-        const auto* dir = o ? o->if_contains("dir") : nullptr;
-        const auto* tenant = o ? o->if_contains("tenant") : nullptr;
-        if (!dir || !dir->is_string() || !tenant || !tenant->is_string() || !dir_ok(std::string(dir->as_string()))) {
-          return *error = "goober.project.json: a site is {\"dir\": \"site\", \"tenant\": \"playground\"}", std::nullopt;
-        }
-        spec.sites.emplace_back(std::string(dir->as_string()), std::string(tenant->as_string()));
-      }
-    } else if (k != "description") {
-      return *error = "goober.project.json: unknown field \"" + k + "\" (boxes, schemas, sites)", std::nullopt;
-    }
-  }
-  if (spec.boxes.empty() && spec.schemas.empty() && spec.sites.empty()) {
-    return *error = "goober.project.json names no boxes, schemas, or sites", std::nullopt;
-  }
-  return spec;
-}
-
 std::string joined(const std::string& dir, const std::string& name) { return dir == "." ? name : dir + "/" + name; }
 
 // The build's output, read only if it is a regular file under the target directory reached
@@ -178,6 +135,45 @@ uintmax_t tree_bytes(const fs::path& root) {
 }
 
 }  // namespace
+
+std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error) {
+  std::string err;
+  auto v = json::parse(text, &err);
+  if (!v || !v->is_object()) return *error = "goober.project.json isn't a JSON object: " + err, std::nullopt;
+  ProjectSpec spec;
+  auto dir_ok = [](const std::string& d) { return d == "." || source::valid_path(d); };
+  for (const auto& kv : v->as_object()) {
+    std::string k(kv.key());
+    if (k == "boxes" || k == "schemas") {
+      if (!kv.value().is_array()) return *error = "goober.project.json: " + k + " is a list", std::nullopt;
+      for (const auto& e : kv.value().as_array()) {
+        std::string s = e.is_string() ? std::string(e.as_string()) : "";
+        if (k == "boxes" ? !dir_ok(s) : !source::valid_path(s)) {
+          return *error = "goober.project.json: " + k + " holds a bad path: " + s, std::nullopt;
+        }
+        (k == "boxes" ? spec.boxes : spec.schemas).push_back(s);
+      }
+    } else if (k == "sites") {
+      if (!kv.value().is_array()) return *error = "goober.project.json: sites is a list", std::nullopt;
+      for (const auto& e : kv.value().as_array()) {
+        const auto* o = e.if_object();
+        const auto* dir = o ? o->if_contains("dir") : nullptr;
+        const auto* tenant = o ? o->if_contains("tenant") : nullptr;
+        if (!dir || !dir->is_string() || !tenant || !tenant->is_string() || !dir_ok(std::string(dir->as_string()))) {
+          return *error = "goober.project.json: a site is {\"dir\": \"site\", \"tenant\": \"playground\"}", std::nullopt;
+        }
+        spec.sites.emplace_back(std::string(dir->as_string()), std::string(tenant->as_string()));
+      }
+    } else if (k != "description") {
+      return *error = "goober.project.json: unknown field \"" + k + "\" (boxes, schemas, sites)", std::nullopt;
+    }
+  }
+  if (spec.boxes.empty() && spec.schemas.empty() && spec.sites.empty()) {
+    return *error = "goober.project.json names no boxes, schemas, or sites", std::nullopt;
+  }
+  return spec;
+}
+
 
 std::vector<std::string> sandboxed(const std::vector<std::string>& command, const config::HostConfig& cfg,
                                    const fs::path& src, const fs::path& target, const std::string& cargo,

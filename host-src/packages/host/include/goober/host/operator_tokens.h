@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,5 +36,11 @@ int revoke_operator_tokens(const std::filesystem::path& storage, std::string_vie
 
 // The token for a raw value, or nullopt.
 std::optional<OperatorToken> find_operator_token(const std::filesystem::path& storage, std::string_view raw);
+
+// Writes one operator's scope to storage/operations/scopes.json (design/machine/030.OperatorScope.md):
+// nullopt tenants means all, which removes the entry. The host and `token create --tenants` share it.
+bool write_operator_scope(const std::filesystem::path& storage, const std::string& key,
+                          const std::optional<std::set<std::string>>& tenants, const std::string& by, int64_t now_ms,
+                          std::string* why);
 
 }  // namespace goober::host

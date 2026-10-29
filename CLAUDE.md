@@ -143,6 +143,9 @@ Read these before doing design work:
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
     change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`.
+  - `design/machine/030.OperatorScope.md`: focusing an operator (a person, a token, and every agent
+    signed in as them) on some tenants: a scope rule per tool, deny by default, changed only by a
+    person in the panel.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

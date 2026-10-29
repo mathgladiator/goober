@@ -39,7 +39,9 @@ const std::set<std::string, std::less<>> kReadTools = {
     "source_read",     "source_log",        "source_diff",      "source_job",      "backup_status",
     "key_list",        "crawl_list",        "crawl_pages",      "crawl_records",   "box_guide",
     "site_guide",      "rust_binding",      "pwa_get",          "pwa_list",        "pwa_subscriptions",
-    "library_list",    "library_get"};
+    "library_list",    "library_get",       "operator_scope",   "invite_list",     "invite_get",
+    "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
+    "approval_verify", "approval_list",     "tool_schemas"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -179,8 +181,25 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       for (const auto& [d, e] : cfg->domains) {
         if (seen.insert(e.tenant).second) tenants.push_back(bj::value(e.tenant));
       }
+      auto scope = operator_scope("panel:" + who->user.email);
+      bool owner = std::find(who->roles.begin(), who->roles.end(), "host:owner") != who->roles.end();
+      bj::array all_tenants = tenants;
+      bj::value focus = nullptr;
+      if (!scope.all) {
+        bj::array ts;
+        for (const auto& t : scope.tenants) ts.push_back(bj::value(t));
+        focus = std::move(ts);
+        // The tenant pickers offer only the scope.
+        bj::array kept;
+        for (const auto& t : tenants) {
+          if (scope.tenants.count(std::string(t.as_string()))) kept.push_back(t);
+        }
+        tenants = std::move(kept);
+      }
       return finish(json_reply(200, bj::object{{"email", who->user.email},
                                                {"roles", std::move(roles)},
+                                               {"focus", std::move(focus)},
+                                               {"all_tenants", owner ? std::move(all_tenants) : bj::array(tenants)},
                                                {"build", std::string(kBuildCommit)},
                                                {"tenants", std::move(tenants)},
                                                {"domain", domain}}),
@@ -202,10 +221,6 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     if (!same_origin(req, origin_of(req))) {
       return finish(json_reply(403, bj::object{{"error", "cross-origin"}}), R"({"why":"panel cross-origin"})");
     }
-    if (!is_read_tool(tool)) {
-      return finish(json_reply(403, bj::object{{"error", "the panel only looks: " + tool + " isn't a read tool"}}),
-                    json::dump(bj::object{{"panel", tool}, {"why", "not a read tool"}}));
-    }
     std::string err;
     bj::object args;
     if (!req.body.empty()) {
@@ -215,9 +230,32 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       }
       args = v->as_object();
     }
-    current_operator() = "panel:" + who->user.email;
+    std::string me = "panel:" + who->user.email;
+    // The panel's own writes: the only changes it makes, each a human's (030 § 2, 029 § 6).
+    if (tool == "operators") return finish(json_reply(200, panel_operators(*who)), R"({"panel":"operators"})");
+    if (tool == "write/scope" || tool == "write/unblock") {
+      auto [status, body] = tool == "write/scope" ? panel_set_scope(*who, args, request_id)
+                                                  : panel_unblock(*who, args, request_id);
+      return finish(json_reply(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
+    if (!is_read_tool(tool)) {
+      return finish(json_reply(403, bj::object{{"error", "the panel only looks: " + tool + " isn't a read tool"}}),
+                    json::dump(bj::object{{"panel", tool}, {"why", "not a read tool"}}));
+    }
+    // A focused person sees only their tenants here too (030 § 3).
+    auto policy = operator_policy(me, true);
+    if (policy.check) {
+      if (auto refused = policy.check(tool, args)) {
+        return finish(json_reply(403, bj::object{{"error", *refused}}),
+                      json::dump(bj::object{{"panel", tool}, {"why", "outside the operator's scope"}}));
+      }
+    }
+    current_operator() = me;
     current_request_id() = request_id;
     auto out = mcp_->call(tool, args);
+    if (out && !out->is_error && policy.filter) {
+      if (auto refused = policy.filter(tool, out->value)) out = ToolResult::fail(*refused);
+    }
     current_operator().clear();
     current_request_id().clear();
     bj::object extra{{"panel", tool}, {"operator", "panel:" + who->user.email}};

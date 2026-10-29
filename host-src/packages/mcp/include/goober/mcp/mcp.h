@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "goober/json/json.h"
 
@@ -41,12 +42,23 @@ class McpServer {
   void set_tool_meta(const std::string& name, bj::object meta) { meta_[name] = std::move(meta); }
   // Which tools a caller may see and call; an empty filter allows every tool.
   using Allowed = std::function<bool(const std::string& tool)>;
+  // A caller's whole policy: which tools it sees, a check of each call's arguments (a refusal
+  // is the tool's error), and a filter over each result it gets back.
+  struct Policy {
+    Allowed allowed;
+    std::function<std::optional<std::string>(const std::string& tool, const bj::object& arguments)> check;
+    // A filter may also refuse the result as a whole: the call then answers that refusal.
+    std::function<std::optional<std::string>(const std::string& tool, bj::value& result)> filter;
+  };
   HttpReply handle(std::string_view body, const Allowed& allowed = {}) const;
+  HttpReply handle(std::string_view body, const Policy& policy) const;
+  // Every tool's name, sorted.
+  std::vector<std::string> names() const;
   // Calls one tool directly, as tools/call would; nullopt for a tool that doesn't exist.
   std::optional<ToolResult> call(const std::string& tool, const bj::object& arguments) const;
 
  private:
-  bj::value dispatch(const bj::object& request, bool* is_notification, const Allowed& allowed) const;
+  bj::value dispatch(const bj::object& request, bool* is_notification, const Policy& policy) const;
   std::string name_, version_, instructions_;
   std::map<std::string, Tool> tools_;
   std::map<std::string, bj::object> meta_;
