@@ -182,6 +182,11 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
   auto at = m.find("List-Unsubscribe: <https://kc.example/goober/unsubscribe/playground/");
   ASSERT_NE(at, std::string::npos) << m;
   EXPECT_NE(m.find("Unsubscribe: https://kc.example/goober/unsubscribe/"), std::string::npos) << m;  // the footer
+  // logs/mail.log names the tenant and the From, which mail_activity reads.
+  auto mail_log = base::read_file(root / "storage/logs/mail.log");
+  ASSERT_TRUE(mail_log);
+  EXPECT_NE(mail_log->find(R"("tenant":"playground")"), std::string::npos) << *mail_log;
+  EXPECT_NE(mail_log->find(R"("from":"hello@kc.example")"), std::string::npos) << *mail_log;
   std::string url = m.substr(at + 19, m.find('>', at) - at - 19);
   std::string path = url.substr(std::string("https://kc.example").size());
 

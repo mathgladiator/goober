@@ -231,6 +231,7 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   mail.in_reply_to = text("in_reply_to");
   mail.references = text("references");
   mail.list_unsubscribe = text("list_unsubscribe");
+  mail.tenant = tenant;
   // Unsubscribed since the box sent it: refused for good.
   if (mail_suppressed(tenant, mail.to)) {
     out.status = 403;

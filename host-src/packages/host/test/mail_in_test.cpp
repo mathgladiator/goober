@@ -143,6 +143,7 @@ class MailInTest : public ::testing::Test {
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
         "domains": {"kcmeatup.com": {"tenant": "kc"}, "localhost": {"tenant": "kc"}},
         "mail": {"inbound": {"token-file": "hook.token"}},
+        "operations": {"token": "op-token-for-mail-in-tests-0123456789"},
         "threads": {"network": 1, "boxes": 2}})",
                                     root, &err);
     ASSERT_TRUE(cfg) << err;
@@ -162,6 +163,15 @@ class MailInTest : public ::testing::Test {
     std::string err;
     auto v = json::parse(r.body, &err);
     return v && v->is_object() ? v->as_object() : bj::object{};
+  }
+  bj::value tool(const std::string& name, bj::object args) {
+    bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                   {"params", bj::object{{"name", name}, {"arguments", std::move(args)}}}};
+    auto r = post(port, "/goober-operations-mcp", json::dump(req),
+                  {{"authorization", "Bearer op-token-for-mail-in-tests-0123456789"}, {"content-type", "application/json"}});
+    EXPECT_EQ(r.status, 200) << r.body;
+    std::string err;
+    return json::parse(r.body, &err)->at("result").at("structuredContent");
   }
   std::string action(const bj::object& o) { return o.contains("action") ? std::string(o.at("action").as_string()) : ""; }
   int64_t status(const bj::object& o) { return o.contains("response") ? o.at("response").at("status").as_int64() : 0; }
@@ -239,6 +249,18 @@ TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
   auto later = call(hook("data", {"later@kcmeatup.com"}, "Subject: hi", "hi"));
   EXPECT_EQ(status(later), 451);
   EXPECT_EQ(rows().size(), 1u);
+
+  // An agent can see it all without the server: what came in for the tenant, and the answers.
+  auto seen = tool("mail_activity", {{"tenant", "kc"}});
+  const auto& mail = seen.at("mail").as_array();
+  std::string outcomes;
+  for (const auto& m : mail) {
+    EXPECT_EQ(m.at("direction"), "in");
+    outcomes += std::string(m.at("to").as_string()) + "=" + std::string(m.at("outcome").as_string()) + " ";
+  }
+  EXPECT_NE(outcomes.find("support@kcmeatup.com=delivered"), std::string::npos) << outcomes;
+  EXPECT_NE(outcomes.find("later@kcmeatup.com="), std::string::npos) << outcomes;
+  EXPECT_TRUE(tool("mail_activity", {{"tenant", "other"}}).at("mail").as_array().empty());
 }
 
 TEST_F(MailInTest, LimitsLoopsAndAttachments) {

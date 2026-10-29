@@ -61,6 +61,7 @@ struct Mail {
   std::string in_reply_to = {};     // "<id@host>", or ""
   std::string references = {};      // "<a@x> <b@y>", or ""
   std::string list_unsubscribe = {};  // "<https://...>", or ""
+  std::string tenant = {};            // whose box sent it, for logs/mail.log; "" for host mail
 };
 using Mailer = std::function<void(const Mail&)>;
 

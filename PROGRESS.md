@@ -330,7 +330,7 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Host-built JSON-LD for box templates (007 § 8).
 - [ ] M1: Stalwart's DMARC strict, once real mail arrives (Q39).
 - [ ] M2: SES bounces and complaints through SNS, unsubscribing hard bounces and complaints.
-- [ ] M3: `mail_activity`, a tenant's mail in and out for operators and agents.
+- [x] M3: `mail_activity`, a tenant's mail in and out for operators and agents.
 - [ ] M4: attachments on `send`.
 - [ ] M5: per-tenant daily caps on outbox calls per service.
 - [ ] M6: markdown in `send`.

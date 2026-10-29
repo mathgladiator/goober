@@ -200,6 +200,9 @@ MailOutcome MailQueue::deliver(const identity::Mail& mail) {
                   {"via", out.via},
                   {"status", out.sent ? "sent" : "failed"}};
   if (!out.message_id.empty()) line["message_id"] = out.message_id;
+  if (!mail.tenant.empty()) line["tenant"] = mail.tenant;
+  if (!mail.from_address.empty()) line["from"] = mail.from_address;
+  if (!mail.in_reply_to.empty()) line["in_reply_to"] = mail.in_reply_to;
   if (!out.sent) line["error"] = out.error;
   base::append_line(cfg->storage / "logs" / "mail.log", json::dump(line));
   return out;

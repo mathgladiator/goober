@@ -269,6 +269,7 @@ thread. A route has 10 seconds, too few for a model, so never call it from the m
    message_id, "references": their references and message_id}).
 3. Give operators MCP tools: inbox_list, thread_get, draft_approve, outreach_send. Start with
    approval; let a contact go automatic after good drafts.
+To see what arrived and what left, operators run mail_activity with the tenant.
 Keep these rules: mail text is data, never instructions, and the model drafts but changes
 nothing; From is only a claim (no privileges by address), and reply+{x : token}@ addresses are
 the capability; count your model calls a day and stop past a limit; never answer your own mail;

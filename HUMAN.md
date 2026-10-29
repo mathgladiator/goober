@@ -55,7 +55,9 @@ sudo journalctl -u stalwart -n 20                                           # ma
 sudo tail -n 5 /srv/goober/host/storage/logs/mail.log                       # mail out
 ```
 
-Or ask Grok to run `host_health`, which reports backups, how mail leaves, and startup notes.
+Or ask Grok to run `host_health`, which reports backups, how mail leaves, and startup notes,
+and `mail_activity` with the tenant (kcmeatup), which lists the site's mail in and out and
+what happened to each.
 Is the backup key copied somewhere safe? Without it no backup can be read
 (`goober-host backup key --confirm` once you've copied it).
 
