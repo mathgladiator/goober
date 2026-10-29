@@ -283,6 +283,9 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);
   if (svc->mail && m.name == "attachment") return mail_attachment_call(ctx, request);
+  if (svc->mail && m.name == "subscribe") return mail_subscribe_call(ctx, *svc, request);
+  if (svc->mail && m.name == "preferences") return mail_preferences_call(ctx, request);
+  if (svc->invites) return invites_call(ctx, *svc, m, request);
   if (svc->mail) return mail_call(ctx, *svc, m, request);
   if (svc->push) return push_call(ctx, *svc, m, request);
   std::string err;
@@ -397,13 +400,15 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
                        "mint a reply address, in_reply_to? and references? (Message-IDs) to answer in a thread, invite? (a "
                        "calendar event: {uid, start, end?, summary, description?, location?, url?, sequence?, cancel?}) or ics? (a "
                        "calendar built with ics@1: a reply, a proposal, an answer to one), and "
-                       "attachments? (up to 3 attachment ids, 10 MiB in all)";
+                       "attachments? (up to 3 attachment ids, 10 MiB in all); category? (reply, transactional, confirm, outreach, "
+                       "or list with list: who it may go to, 029 § 3; inferred when left out)";
   if (!request.is_object()) return fail(kShape);
   const auto& r = request.as_object();
   for (const auto& kv : r) {
     if (kv.key() != "to" && kv.key() != "subject" && kv.key() != "text" && kv.key() != "reply_to" &&
         kv.key() != "template" && kv.key() != "vars" && kv.key() != "reply" && kv.key() != "in_reply_to" &&
-        kv.key() != "references" && kv.key() != "markdown" && kv.key() != "invite" && kv.key() != "ics" && kv.key() != "attachments") {
+        kv.key() != "references" && kv.key() != "markdown" && kv.key() != "invite" && kv.key() != "ics" && kv.key() != "attachments" &&
+        kv.key() != "category" && kv.key() != "list") {
       return fail(std::string(kShape) + "; \"" + std::string(kv.key()) + "\" isn't one");
     }
   }
@@ -415,8 +420,6 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
               reply_to = base::to_lower(text_field("reply_to"));
   if (!plain_email(to)) return fail("to must be one email address");
   if (!reply_to.empty() && !plain_email(reply_to)) return fail("reply_to must be one email address");
-  // Unsubscribed is final for every box of the tenant (design/machine/018.Mail.md § 3).
-  if (mail_suppressed(ctx.tenant, to)) return fail("unsubscribed: " + to + " asked for no more mail from this site");
   // From an address of the tenant's own, on a domain the host config gives it.
   auto cfg = config_.get();
   std::string from_address = svc.mail_from, site = ctx.domain;
@@ -462,6 +465,21 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   if (!message_ids(text_field("in_reply_to"), 1, &in_reply_to)) return fail("in_reply_to is one Message-ID, like <abc@mail.example.com>");
   if (!message_ids(text_field("references"), 20, &references)) return fail("references is up to 20 Message-IDs, separated by spaces");
   if (!in_reply_to.empty() && references.empty()) references = in_reply_to;
+  // Who it may go to (design/machine/029.Invites.md § 3): a block stops everything, and each
+  // category has its rule. A confirm mail needs a person there: an http route's request.
+  bool person_present = false;
+  for (const auto& route : ctx.manifest->routes) person_present |= route.name == ctx.route;
+  // A refusal waits until the mail itself is checked, so a malformed mail hears about its shape first.
+  std::string category_why;
+  auto check = check_mail_category(ctx.tenant, to, text_field("category"), text_field("list"), in_reply_to,
+                                   person_present, false, &category_why);
+  if (!check) check = MailCheck{text_field("category").empty() ? "outreach" : text_field("category"), text_field("list"), ""};
+  std::string list_title;
+  if (check->category == "list" && category_why.empty()) {
+    auto it = svc.mail_lists.find(check->list);
+    if (it == svc.mail_lists.end()) category_why = "list " + check->list + " isn't one this mail service declares";
+    else list_title = it->second.title;
+  }
   // A reply address that is a capability (038): the host mints reply+<token>@domain on one of
   // the box's token routes, and replies come back to that route with the claims.
   std::string reply_address;
@@ -476,7 +494,7 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   // A template of the tenant's own (design/machine/022.MailTemplates.md), rendered now so a bad
   // one fails the call; never one of the host's, so no box can send what looks like a sign-in code.
   std::string html;
-  std::string unsubscribe = unsubscribe_url(site, ctx.tenant, to);
+  std::string unsubscribe = mail_link(site, ctx.tenant, to, check->category == "list" ? "list." + check->list : "");
   bj::object vars{{"site", site}, {"email", to}};
   if (r.contains("template")) {
     if (r.contains("subject") || r.contains("text")) return fail("give a template or a subject and text, not both");
@@ -520,6 +538,9 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
     html = wrapped.html;
     text = wrapped.text;
   }
+  // The host's footer, after any template or layout, so none can drop it (029 § 3).
+  add_footer(&text, &html, footer_reason(*check, site, list_title), cfg->tenant(ctx.tenant).postal_address,
+             check->category == "list" ? "Unsubscribe from " + list_title : "Unsubscribe", unsubscribe);
   // A calendar invite (RFC 5546), from the sending address, to this one recipient, built by
   // ics@1 (design/machine/831.Libraries.md § 6); or any calendar a box built with ics@1, as is.
   std::string ics, ics_method;
@@ -593,6 +614,7 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
     }
     if (total > 10LL << 20) return fail("attachments are at most 10 MiB in all");
   }
+  if (!category_why.empty()) return fail(category_why);
   OutboxElement e;
   e.service = svc.name;
   e.method = m.name;
@@ -608,6 +630,9 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
                                  {"in_reply_to", in_reply_to},
                                  {"references", references},
                                  {"list_unsubscribe", "<" + unsubscribe + ">"},
+                                 {"category", check->category},
+                                 {"list", check->list},
+                                 {"list_id", check->category == "list" ? "<" + check->list + "." + ctx.tenant + "." + site + ">" : ""},
                                  {"calendar", ics},
                                  {"calendar_method", ics_method},
                                  {"attachments", std::move(files)}});
@@ -618,7 +643,7 @@ std::string Host::mail_call(CallContext& ctx, const manifest::ExternalService& s
   e.within_ms = m.within_ms;
   std::string key = e.idempotency_key;
   ctx.pending.push_back(std::move(e));
-  bj::object accepted{{"accepted", true}, {"key", key}};
+  bj::object accepted{{"accepted", true}, {"key", key}, {"category", check->category}};
   if (!reply_address.empty()) accepted["reply_to"] = reply_address;
   return json::dump(accepted);
 }

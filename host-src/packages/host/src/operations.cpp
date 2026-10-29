@@ -261,9 +261,19 @@ void Host::register_tools() {
                     for (const auto& [name, b] : boxes_->active()->boxes) {
                       loaded.push_back(bj::object{{"box", name}, {"version", b->version}});
                     }
+                    // Tenants whose outreach, lists, and invites are refused until the config
+                    // names a postal address (029 § 8).
+                    bj::array no_postal;
+                    std::set<std::string> seen;
+                    for (const auto& [d, e] : cfg->domains) {
+                      if (seen.insert(e.tenant).second && cfg->tenant(e.tenant).postal_address.empty()) {
+                        no_postal.push_back(bj::value(e.tenant));
+                      }
+                    }
                     return ToolResult::ok(bj::object{{"version", std::string(kVersion)},
                                                      {"build", kBuildCommit},
                                                      {"ready", readiness(false).second},
+                                                     {"tenants_without_postal_address", std::move(no_postal)},
                                                      {"boxes_loaded", std::move(loaded)},
                                                      {"uptime_ms", base::now_unix_ms() - started_ms_},
                                                      {"requests", requests_.load()},

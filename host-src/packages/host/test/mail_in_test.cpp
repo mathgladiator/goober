@@ -142,6 +142,7 @@ class MailInTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
         "domains": {"kcmeatup.com": {"tenant": "kc"}, "localhost": {"tenant": "kc"}},
+        "tenants": {"kc": {"postal-address": "KC Meat Up, 1 Main St, Kansas City, MO 64105"}},
         "mail": {"inbound": {"token-file": "hook.token"}},
         "operations": {"token": "op-token-for-mail-in-tests-0123456789"},
         "threads": {"network": 1, "boxes": 2}})",

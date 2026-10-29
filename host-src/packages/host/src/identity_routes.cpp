@@ -53,6 +53,7 @@ button.small{width:auto;margin:0;padding:4px 10px;font-size:.85rem}
 li form{display:inline}
 .error{color:#c0392b;font-weight:600}.local{border-left:3px solid var(--accent);padding-left:10px}
 code{font-size:.9em}ul{padding-left:20px}a{color:var(--accent)}
+blockquote{margin:12px 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
 )css";
 
 }  // namespace
@@ -166,7 +167,17 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
            "<p class=\"muted\">We'll email you a six-digit code to type here. Nothing to remember.</p>" +
            local_note();
   };
-  auto code_form = [&](const std::string& email, const std::string& ret, bool as_host, const std::string& error) {
+  // "By continuing, you accept the terms" (029 § 8), when the tenant has terms; never for the host.
+  const auto& tenant_cfg = cfg->tenant(tenant);
+  auto terms_line = [&](bool as_host) -> std::string {
+    if (as_host || host_only || tenant_cfg.terms.empty()) return "";
+    return "<p class=\"muted\">By continuing, you accept " + html_escape(domain) + "'s <a href=\"" +
+           html_escape(tenant_cfg.terms) + "\">terms</a>" +
+           (tenant_cfg.privacy.empty() ? "" : " and <a href=\"" + html_escape(tenant_cfg.privacy) + "\">privacy policy</a>") +
+           ".</p>";
+  };
+  auto code_form = [&](const std::string& email, const std::string& ret, bool as_host, const std::string& error,
+                       const std::string& invite = "") {
     return "<h1>Check your email</h1><p>If <strong>" + html_escape(email) + "</strong> can sign in to <strong>" +
            html_escape(domain) + "</strong>" + (as_host ? " as a host operator" : "") +
            ", a code is on its way. It expires in 10 minutes.</p>" +
@@ -177,6 +188,8 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
            "<input type=\"hidden\" name=\"email\" value=\"" + html_escape(email) + "\">"
            "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">" +
            (as_host ? "<input type=\"hidden\" name=\"as\" value=\"host\">" : "") +
+           (invite.empty() ? "" : "<input type=\"hidden\" name=\"invite\" value=\"" + html_escape(invite) + "\">") +
+           terms_line(as_host) +
            "<button>Sign in</button></form><p class=\"muted\">Only continue if you started this sign-in yourself. "
            "<a href=\"/identity/sign-in" + (as_host ? "/as-host" : "") + "?return=" + base::percent_encode(ret) +
            "\">Use a different address</a>.</p>" +
@@ -194,6 +207,23 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
   }
   int64_t now = base::now_unix_ms();
 
+  // Invites (029 § 2.4): the accept and decline pages.
+  if (path.starts_with("/identity/invite/") && !host_only) return handle_invite(req, finish, path, domain, tenant);
+  // The code form an invite's Continue leads to: the address is the invite's, fixed.
+  if (path == "/identity/sign-in/code" && is_get && !host_only) {
+    std::string email = base::to_lower(get(query, "email"));
+    return finish(page(200, "Check your email", code_form(email, "/", false, "", get(query, "invite"))),
+                  R"({"identity":"code_page"})");
+  }
+  if (path.starts_with("/identity/mail/") && is_post && !host_only) {
+    auto who = browser_session(req, tenant);
+    if (!who || who->host) return finish(redirect("/identity/sign-in?return=%2Fidentity%2Faccount"), "");
+    std::string why;
+    bool ok = account_mail_post(tenant, *who, path, form, request_id, &why);
+    if (!ok) return finish(page(400, "Mail", "<h1>Not changed</h1><p>" + html_escape(why) + "</p><p><a href=\"/identity/account\">Back</a></p>"),
+                           R"({"identity":"mail_refused"})");
+    return finish(redirect("/identity/account"), json::dump(bj::object{{"identity", "mail"}, {"action", path.substr(15)}}));
+  }
   if ((path == "/identity/sign-in" || path == "/identity/sign-in/as-host") && is_get) {
     bool as_host = host_only || path == "/identity/sign-in/as-host";
     return finish(page(200, as_host ? "Host sign-in" : "Sign in",
@@ -224,6 +254,12 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
       in = identity_->verify_email(identity::kHostRealm, email, get(form, "code"), is_operator, now, session_ms, &why);
     } else {
       in = identity_->verify_email(tenant, email, get(form, "code"), true, now, session_ms, &why);
+      // Terms accepted by continuing, recorded with the page's hash (029 § 8).
+      if (in) {
+        if (auto t = terms_now(tenant); t && identity_->terms_accepted(tenant, in->user.user_id, t->first) != t->second) {
+          identity_->accept_terms(tenant, in->user.user_id, t->first, t->second, "sign-in", now);
+        }
+      }
       // The first owner named in the config gets "owner" whenever the realm has none.
       auto entry = cfg->resolve_host(req.header("host"));
       if (in && entry && entry->second.owner == in->user.email && identity_->holders(tenant, "owner") == 0) {
@@ -232,14 +268,40 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
       }
     }
     if (!in) {
-      return finish(page(400, "Check your email", code_form(email, ret, as_host, why)), R"({"identity":"verify_failed"})");
+      return finish(page(400, "Check your email", code_form(email, ret, as_host, why, get(form, "invite"))),
+                    R"({"identity":"verify_failed"})");
+    }
+    // An invite: accepted now if the code form came from its Continue; else an open one is shown
+    // before anything else, since nothing is accepted without its page (029 § 2.4).
+    std::string invite_note;
+    if (!as_host) {
+      std::string token = get(form, "invite");
+      auto dot = token.find('.');
+      std::optional<identity::Invite> inv;
+      if (dot != std::string::npos) {
+        try {
+          inv = identity_->invite(tenant, std::stoll(token.substr(0, dot)));
+        } catch (...) {
+        }
+      }
+      if (inv && inv->email == in->user.email && token.substr(dot + 1) == invite_mac(tenant, inv->id, inv->email) &&
+          inv->state == "open") {
+        std::string err;
+        if (auto next = accept_invite_for(tenant, *inv, in->user, "code", request_id, &err)) {
+          ret = safe_return(*next);
+          invite_note = "accepted";
+        }
+      } else if (auto open = identity_->open_invite_for(tenant, in->user.email); open && open->expires_at > now) {
+        ret = "/identity/invite/" + std::to_string(open->id) + "/" + invite_mac(tenant, open->id, open->email);
+        invite_note = "shown";
+      }
     }
     auto res = redirect(ret);
     res.headers.emplace_back("set-cookie",
                              cookie(std::string(as_host ? "h." : "t.") + in->token, session_ms / 1000));
-    return finish(std::move(res), json::dump(bj::object{{"identity", "sign_in"},
-                                                       {"realm", in->user.realm},
-                                                       {"user_id", std::to_string(in->user.user_id)}}));
+    bj::object extra{{"identity", "sign_in"}, {"realm", in->user.realm}, {"user_id", std::to_string(in->user.user_id)}};
+    if (!invite_note.empty()) extra["invite"] = invite_note;
+    return finish(std::move(res), json::dump(extra));
   }
   if (path == "/identity/sign-out" && is_post) {
     std::string value = read_cookie(req, session_cookie_name());
@@ -353,7 +415,7 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
                            (who->host ? "Host operator, acting on " : "Signed in to ") + "<strong>" +
                            html_escape(domain) + "</strong> &middot; user " + std::to_string(who->user.user_id) +
                            " in realm <code>" + html_escape(who->user.realm) + "</code></p><p><strong>Roles</strong></p><ul>" +
-                           roles + "</ul>" + apps +
+                           roles + "</ul>" + apps + (who->host ? std::string() : account_mail_section(tenant, who->user.email)) +
                            "<form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>"
                            "<p class=\"muted\"><a href=\"/\">Back to the site</a></p>"),
                   "");

@@ -21,6 +21,7 @@
 | 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
 | 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
 | 10. A community that meets by mail (one digest, one reply a day) | **Yes, to build** | Markdown digests, reply-token replies cut to the person's words, calendar invites with RSVPs, attachments (`design/machine/783.ThesisCommunity.md` § 4 is the recipe). |
+| 12. Invites, and mail that follows the law | **Yes, needs the postal address** | The host invites (roles, terms, lists, accept by code, decline for good), every box mail has a category with its rule, lists need a confirmed opt-in, and a person lifts a block (`design/machine/029.Invites.md`). Set `tenants.kcmeatup.postal-address` first. |
 | 11. Boxes that work with time and calendars | **Yes** | `time@1` and `ics@1` host libraries: zones, recurrence, invites, RSVPs, and proposals, tested against RFC 5545 and real clients' messages (`design/machine/831.Libraries.md`). |
 
 ## 1. Static content: yes

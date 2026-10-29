@@ -491,7 +491,9 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     if (message.from && !message.message_id.empty()) {
       try {
         auto db = open_mail_db();
-        db->exec("DELETE FROM received WHERE at_ms < " + std::to_string(base::now_unix_ms() - 30LL * 86400000));
+        // Kept 90 days: who wrote in is a relationship for transactional mail (029 § 3); a reply's
+        // thread is checked against the last 30.
+        db->exec("DELETE FROM received WHERE at_ms < " + std::to_string(base::now_unix_ms() - 90LL * 86400000));
         sqlite::Stmt s(*db, "INSERT OR IGNORE INTO received (tenant, sender, message, at_ms) VALUES (?, ?, ?, ?)");
         s.bind(1, match->tenant)
             .bind(2, received_hash(message.from->address))

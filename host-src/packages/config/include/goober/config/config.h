@@ -68,6 +68,17 @@ struct IdentityConfig {
   std::map<std::string, Client> clients;
 };
 
+// What the host config says about one tenant (design/machine/029.Invites.md § 8).
+struct TenantConfig {
+  std::string postal_address;  // CAN-SPAM's physical address; required for outreach, lists, and invites
+  std::string terms, privacy;  // paths of pages on the tenant's site, or ""
+  struct Invites {
+    std::vector<std::string> roles;  // roles a box's invite may grant
+    int64_t daily_max = 50;
+    int64_t per_inviter_daily = 10;
+  } invites;
+};
+
 // The whole host configuration, from one JSON file (see design/machine/005.FirstVersion.md §6).
 struct HostConfig {
   std::string listen_address = "127.0.0.1";
@@ -75,6 +86,14 @@ struct HostConfig {
   std::filesystem::path storage = "./storage";
   std::string platform_domain = "localhost";
   std::map<std::string, DomainEntry> domains;
+  // Per tenant: its postal address, terms, and what boxes' invites may grant (029 § 8).
+  std::map<std::string, TenantConfig> tenants;
+  // The tenant's entry, or the defaults when it has none.
+  const TenantConfig& tenant(const std::string& name) const {
+    static const TenantConfig kNone;
+    auto it = tenants.find(name);
+    return it == tenants.end() ? kNone : it->second;
+  }
   // Where people and agents reach this host, like https://goober.example.com. Optional;
   // used to print links. Defaults to http://$listen_address:$listen_port.
   std::string public_url;
@@ -126,6 +145,8 @@ struct HostConfig {
     int64_t per_address_daily = 3;
     // Answers in a thread the person started (their message's Message-ID, from their address).
     int64_t reply_per_address_daily = 20;
+    // Cold outreach a tenant may send in a day (029 § 3), each address at most once in 30 days.
+    int64_t outreach_daily_max = 50;
     // Mail in (design/machine/024.MailIn.md): Stalwart calls the host's MTA hook with the
     // bearer token in token_file. Without a token file, the hook answers 404.
     struct Inbound {

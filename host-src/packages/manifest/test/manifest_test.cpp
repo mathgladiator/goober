@@ -362,7 +362,7 @@ TEST(Manifest, IdentityRoutes) {
     EXPECT_FALSE(parse_manifest(text, &e)) << text;
     EXPECT_NE(e.find(why), std::string::npos) << e;
   };
-  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-out":{"name":"x"}}}})", "first-verified and signed-in");
+  refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-out":{"name":"x"}}}})", "first-verified, signed-in");
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","public":true}}}})", "only by the host");
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{}}}})", "name is required");
   refuse(R"({"box":"t","domains":["*"],"routes":{"identity":{"signed-in":{"name":"x","every-ms":5}}}})", "unknown field");
@@ -439,6 +439,34 @@ TEST(Manifest, Libraries) {
                           R"({"box":"b","domains":["*"],"libraries":{"t-x":"time@1"}})",
                           R"({"box":"b","domains":["*"],"libraries":{"t":"Time@1"}})",
                           R"({"box":"b","domains":["*"],"libraries":["time@1"]})"}) {
+    EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
+  }
+}
+
+TEST(Manifest, MailListsAndInvites) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"thesis","domains":["*"],"external":{
+      "mail":{"mail":{"from-name":"KC Meat Up","lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
+      "invites":{"invites":{"roles":["member","editor/blog"],"lists":["digest"]}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->external.size(), 2u);
+  const auto& mail = m->external[0].mail ? m->external[0] : m->external[1];
+  const auto& inv = m->external[0].invites ? m->external[0] : m->external[1];
+  EXPECT_EQ(mail.mail_lists.at("digest").title, "The daily digest");
+  EXPECT_TRUE(mail.methods.count("subscribe"));
+  EXPECT_EQ(mail.methods.at("preferences").effect, "none");
+  EXPECT_TRUE(inv.invites);
+  EXPECT_EQ(inv.invite_roles.size(), 2u);
+  EXPECT_EQ(inv.methods.at("send").effect, "outbox");
+  EXPECT_EQ(inv.methods.at("status").effect, "none");
+  for (const char* bad : {
+           R"({"box":"b","domains":["*"],"external":{"i":{"invites":{"roles":["host:owner"]}}}})",
+           R"({"box":"b","domains":["*"],"external":{"i":{"invites":{"lists":["digest"]}}}})",  // no such list
+           R"({"box":"b","domains":["*"],"external":{"i":{"invites":{},"base":"https://x.example"}}})",
+           R"({"box":"b","domains":["*"],"external":{"i":{"invites":{"grant":["x"]}}}})",
+           R"({"box":"b","domains":["*"],"external":{"m":{"mail":{"lists":{"Digest":{"title":"x"}}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"m":{"mail":{"lists":{"digest":{"title":""}}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"m":{"mail":{"lists":{"digest":{"title":"x","color":"red"}}}}}})"}) {
     EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
   }
 }

@@ -407,6 +407,19 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       their own); `operator_scope` tells an agent where it stands; `token create --tenants`.
 - [x] The panel narrows itself for a focused person.
 
+### Phase 22: invites, consent, and mail preferences (029)
+- [x] Invites in the realm: the record, the host's `invite` template with links no template can
+      drop, accepting by code (roles, terms, lists), declining as a block, one reminder, lapse
+      and cooling; `invite_*` tools; a box's `invites` service with roles the config allows.
+- [x] Mail categories (reply, transactional, confirm, outreach, list) checked at the call and
+      at delivery; the host's footer with the postal address; `List-Id`.
+- [x] Lists with double opt-in (`subscribe`, `/goober/list/`), the preferences page, the
+      account page's Mail section, and `consent.db` with a five-year log.
+- [x] Blocks lifted only by the person (signed in, with a statement) or in the panel.
+- [x] `tenants` in the host config: postal address, terms, privacy, invite roles and limits.
+- [ ] SES bounces and complaints as blocks (026 M2); a host-wide block; data subject requests;
+      `invites.reminder: false` for CASL's one-message referral rule.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

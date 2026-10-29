@@ -90,7 +90,10 @@ cat > "$dir/stdin"
   EXPECT_NE(mail->find("Content-Type: text/html; charset=utf-8"), std::string::npos);
   // No code left on disk, and the private curl config is gone.
   EXPECT_FALSE(fs::exists(root / "storage/mail/outbox"));
-  for (const auto& e : fs::directory_iterator(root / "storage/mail")) ADD_FAILURE() << e.path();
+  // consent.db (who the tenants may mail, by hash) is the only file there: no code, no mail.
+  for (const auto& e : fs::directory_iterator(root / "storage/mail")) {
+    if (e.path().filename() != "consent.db") ADD_FAILURE() << e.path();
+  }
   EXPECT_NE(base::read_file(root / "storage/logs/mail.log")->find(R"("status":"sent")"), std::string::npos);
 }
 

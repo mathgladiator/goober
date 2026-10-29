@@ -36,18 +36,19 @@ const char* kLayoutHtml = R"(<!doctype html>
 {{{content}}}
 </td></tr>
 </table>
-<p style="margin:16px 0 0;font:12px/1.5 )" GOOBER_FONT R"(;color:#a1a1aa;">Sent by {{site}} to {{email}}.{{#unsubscribe}} <a href="{{unsubscribe}}" style="color:#a1a1aa;">Unsubscribe</a>{{/unsubscribe}}</p>
+<p style="margin:16px 0 0;font:12px/1.5 )" GOOBER_FONT R"(;color:#a1a1aa;">Sent by {{site}} to {{email}}.</p>
 </td></tr>
 </table>
 </body>
 </html>
 )";
 
+// The unsubscribe link and the reason a mail came are the host's footer, added after the
+// layout so no override can drop them (design/machine/029.Invites.md § 3).
 const char* kLayoutText = R"({{{content}}}
 
 --
-Sent by {{site}} to {{email}}.{{#unsubscribe}}
-Unsubscribe: {{unsubscribe}}{{/unsubscribe}}
+Sent by {{site}} to {{email}}.
 )";
 
 const char* kSignInNewHtml = R"(<h1 style=")" GOOBER_H1 R"(">Welcome to {{site}}</h1>
@@ -90,13 +91,54 @@ const char* kAgentTokenText = R"(An operator of {{site}} just gave the agent {{c
 
 If you expected that, there is nothing to do. If not, open {{site}} yourself, go to your account page, and remove it.)";
 
+#define GOOBER_BUTTON                                                                                                \
+  "display:inline-block;padding:12px 20px;background:#2457d6;color:#ffffff;border-radius:8px;font-weight:600;" \
+  "text-decoration:none;"
+
+const char* kInviteHtml = R"(<h1 style=")" GOOBER_H1 R"(">{{#reminder}}A reminder: {{/reminder}}{{inviter}} invited you to {{site}}</h1>
+{{#note}}<p style=")" GOOBER_P R"(border-left:3px solid #e4e4e7;padding-left:12px;color:#52525b;">{{note}}</p>{{/note}}
+{{#has_roles}}<p style=")" GOOBER_P R"(">You'd join as: {{#roles}}{{role}} {{/roles}}</p>{{/has_roles}}
+{{#has_lists}}<p style=")" GOOBER_P R"(">You'd get:</p><ul>{{#lists}}<li><strong>{{title}}</strong>: {{about}}</li>{{/lists}}</ul>{{/has_lists}}
+<p style=")" GOOBER_P R"("><a href="{{accept_url}}" style=")" GOOBER_BUTTON R"(">See the invite</a></p>
+{{#terms_url}}<p style=")" GOOBER_SMALL R"(">Joining means accepting {{site}}'s <a href="{{terms_url}}">terms</a>{{#privacy_url}} and <a href="{{privacy_url}}">privacy policy</a>{{/privacy_url}}.</p>{{/terms_url}}
+<p style=")" GOOBER_SMALL R"(">The invite is open until {{expires}}. Not interested? <a href="{{decline_url}}">Don't invite me again</a>: {{site}} won't email you after that.</p>)";
+
+const char* kInviteText = R"({{#reminder}}A reminder: {{/reminder}}{{inviter}} invited you to {{site}}.
+{{#note}}
+"{{note}}"
+{{/note}}{{#has_roles}}
+You'd join as: {{#roles}}{{role}} {{/roles}}
+{{/has_roles}}{{#has_lists}}
+You'd get:{{#lists}}
+- {{title}}: {{about}}{{/lists}}
+{{/has_lists}}
+See the invite: {{accept_url}}
+{{#terms_url}}
+Joining means accepting {{site}}'s terms ({{terms_url}}){{#privacy_url}} and privacy policy ({{privacy_url}}){{/privacy_url}}.
+{{/terms_url}}
+The invite is open until {{expires}}. Not interested? Don't invite me again: {{decline_url}})";
+
+const char* kListConfirmHtml = R"(<h1 style=")" GOOBER_H1 R"(">Subscribe to {{list_title}}?</h1>
+<p style=")" GOOBER_P R"(">{{list_about}}</p>
+<p style=")" GOOBER_P R"("><a href="{{confirm_url}}" style=")" GOOBER_BUTTON R"(">Yes, subscribe me</a></p>
+<p style=")" GOOBER_SMALL R"(">If you didn't ask for this, ignore this email. Nothing more comes unless you confirm.</p>)";
+
+const char* kListConfirmText = R"(Subscribe to {{list_title}} from {{site}}?
+
+{{list_about}}
+
+Yes, subscribe me: {{confirm_url}}
+
+If you didn't ask for this, ignore this email. Nothing more comes unless you confirm.)";
+
 }  // namespace
 
 const std::vector<Builtin>& builtins() {
   static const std::vector<Builtin> kBuiltins = {
       {std::string(kLayout),
        "Wraps every mail. {{{content}}} is the rendered mail; also subject, preheader (the text's first line), site, "
-       "email, and, on boxes' mail only, unsubscribe (the one-click link; keep it). Its subject is unused.",
+       "email, and, on boxes' mail only, unsubscribe (the one-click link). The host adds its own footer after it "
+       "(why the mail came, the postal address, the link to stop it), so a layout needn't. Its subject is unused.",
        bj::object{{"content", "<p>Hello.</p>"}, {"subject", "Hello"}, {"preheader", "Hello."}, {"site", "example.com"},
                   {"email", "ann@example.com"}},
        Template{"{{subject}}", kLayoutText, kLayoutHtml}},
@@ -114,6 +156,27 @@ const std::vector<Builtin>& builtins() {
        bj::object{{"kind", "agent"}, {"acting", "for you"}, {"client", "Grok"}, {"from", "grok.com"},
                   {"unchecked", true}, {"site", "example.com"}, {"email", "ann@example.com"}},
        Template{"A new {{kind}} can act for you on {{site}}", kNewGrantText, kNewGrantHtml}},
+      {"invite",
+       "An invite to join a site (029 § 2.3), and its one reminder (reminder true). The text and HTML must each keep "
+       "accept_url and decline_url, or the host sends its default instead; the host adds its footer after it. "
+       "roles is [{role}], lists [{title, about}]; has_roles and has_lists say whether either is empty.",
+       bj::object{{"inviter", "Ann (ann@example.com)"}, {"inviter_email", "ann@example.com"}, {"note", "Come grill with us"},
+                  {"roles", bj::array{bj::object{{"role", "member"}}}},
+                  {"lists", bj::array{bj::object{{"title", "The daily digest"}, {"about", "One email a day."}}}},
+                  {"terms_url", "https://example.com/terms"}, {"privacy_url", "https://example.com/privacy"},
+                  {"accept_url", "https://example.com/identity/invite/1/abc"},
+                  {"decline_url", "https://example.com/identity/invite/1/abc/decline"},
+                  {"postal_address", "1 Main St, Kansas City, MO"}, {"expires", "2026-11-28"}, {"reminder", false},
+                  {"has_roles", true}, {"has_lists", true},
+                  {"site", "example.com"}, {"email", "bob@example.com"}},
+       Template{"{{#reminder}}Reminder: {{/reminder}}{{inviter}} invited you to {{site}}", kInviteText, kInviteHtml}},
+      {"list-confirm",
+       "Asks someone to confirm a list a box asked to subscribe them to (029 § 4, double opt-in). It must keep "
+       "confirm_url, or the host sends its default instead.",
+       bj::object{{"list_title", "The daily digest"}, {"list_about", "One email a day."},
+                  {"confirm_url", "https://example.com/goober/list/kc/abc/digest/def"}, {"site", "example.com"},
+                  {"email", "bob@example.com"}},
+       Template{"Confirm: {{list_title}} from {{site}}", kListConfirmText, kListConfirmHtml}},
       {"agent-token",
        "Sent when an operator mints an agent token for a person.",
        bj::object{{"client", "Grok"}, {"days", 30}, {"site", "example.com"}, {"email", "ann@example.com"}},

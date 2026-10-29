@@ -16,6 +16,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/mail_consent/consent.h"
 #include "goober/mail_inbound/mime.h"
 #include "goober/mail_templates/templates.h"
 #include "goober/host/rate_limit.h"
@@ -386,17 +387,81 @@ class Host {
   // Every mail the host sends is rendered from these (design/machine/022.MailTemplates.md).
   std::unique_ptr<mail::templates::Store> mail_templates_;
   void register_mail_tools();
-  // Unsubscribes (mail_out.cpp; design/machine/018.Mail.md § 3): a tenant's list of addresses
-  // that asked for no more of its boxes' mail, kept by hash, and the one-click link to join it.
+  // Who a tenant may mail (consent.cpp; design/machine/029.Invites.md §§ 3–6): blocks, lists,
+  // categories, the host's footer, and the preferences page every footer links to.
  public:
+  // Whether the address is blocked for the tenant: it declined an invite, unsubscribed, or an
+  // operator blocked it. Every box mail and invite is refused.
   bool mail_suppressed(const std::string& tenant, const std::string& address);
+  mail::consent::Store& consent() { return *consent_; }
 
  private:
-  void mail_suppress(const std::string& tenant, const std::string& address_hash, const std::string& how, bool on);
-  std::string unsubscribe_url(const std::string& domain, const std::string& tenant, const std::string& address);
+  std::unique_ptr<mail::consent::Store> consent_;
+  std::mutex sent_mu_;  // storage/mail/sent.db, the daily mail ledger
+  // The site a tenant's links name: its first domain that isn't localhost or an address.
+  std::string site_of(const std::string& tenant) const;
+  // The preferences link for an address: /goober/mail/$tenant/$hash/$mac[/$scope], where scope
+  // is "" (everything), or "list.$name" for a list's one-click unsubscribe.
+  std::string mail_link(const std::string& domain, const std::string& tenant, const std::string& address,
+                        const std::string& scope);
+  std::string unsubscribe_url(const std::string& domain, const std::string& tenant, const std::string& address) {
+    return mail_link(domain, tenant, address, "");
+  }
+  // The lists a tenant's boxes declare: name -> {title, about, box}.
+  std::map<std::string, std::pair<manifest::ExternalService::MailList, std::string>> tenant_lists(const std::string& tenant);
+  // A box mail's category (§ 3): `category` as given (or "" to infer), checked for this address.
+  // Returns the category, or nullopt with `why`. At delivery, consent is checked again.
+  struct MailCheck {
+    std::string category, list, relationship;  // relationship: account, wrote_in, or ""
+  };
+  std::optional<MailCheck> check_mail_category(const std::string& tenant, const std::string& to, std::string category,
+                                               const std::string& list, const std::string& in_reply_to, bool person_present,
+                                               bool at_delivery, std::string* why);
+  bool wrote_in(const std::string& tenant, const std::string& address, int64_t within_ms);
+  bool thread_verified(const std::string& tenant, const std::string& address, const std::string& message_id);
+  // The host's footer, added after any template or layout: why the mail came, the postal
+  // address, and the link to stop it.
+  void add_footer(std::string* text, std::string* html, const std::string& why, const std::string& postal,
+                  const std::string& link_label, const std::string& link);
+  std::string footer_reason(const MailCheck& c, const std::string& site, const std::string& list_title) const;
   void handle_unsubscribe(const server::http::Request& req, const Finish& finish, const std::string& path,
                           const std::string& tenant);
+  void handle_list_confirm(const server::http::Request& req, const Finish& finish, const std::string& path,
+                           const std::string& tenant);
   void register_mail_out_tools();
+  void register_consent_tools();
+  // The mail service's subscribe and preferences methods (§ 4).
+  std::string mail_subscribe_call(struct CallContext& ctx, const manifest::ExternalService& svc,
+                                  const boost::json::value& request);
+  std::string mail_preferences_call(struct CallContext& ctx, const boost::json::value& request);
+  struct HttpOut deliver_list_confirm(const std::string& tenant, const std::string& body, int64_t now_ms);
+  // The account page's Mail section, and its posts (lists on and off, lifting a block).
+  std::string account_mail_section(const std::string& tenant, const std::string& email);
+  bool account_mail_post(const std::string& tenant, const SignedIn& who, const std::string& path,
+                         const std::map<std::string, std::string>& form, const std::string& request_id, std::string* why);
+
+  // Invites (invites.cpp; 029 § 2).
+  void register_invite_tools();
+  std::string invites_call(struct CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                           const boost::json::value& request);
+  struct HttpOut deliver_outbox_invite(const std::string& tenant, const std::string& body, const std::string& key,
+                                       int64_t now_ms);
+  // Checks an invite against blocks, the host config, and the limits, then stores and mails it.
+  std::optional<identity::Invite> make_invite(const std::string& tenant, identity::Invite invite, std::string* code,
+                                              std::string* why);
+  bool send_invite_mail(const std::string& tenant, const identity::Invite& invite, bool reminder, std::string* why);
+  std::string invite_mac(const std::string& tenant, int64_t id, const std::string& email);
+  std::string invite_url(const std::string& tenant, const identity::Invite& invite, bool decline);
+  void handle_invite(const server::http::Request& req, const Finish& finish, const std::string& path,
+                     const std::string& domain, const std::string& tenant);
+  // Accepts an invite for a signed-in person: roles, terms, lists. Returns where to go next.
+  std::optional<std::string> accept_invite_for(const std::string& tenant, const identity::Invite& invite,
+                                               const identity::User& user, const std::string& how,
+                                               const std::string& request_id, std::string* why);
+  // Hourly: reminders due (one per invite).
+  void remind_invites(int64_t now_ms);
+  // The tenant's terms page and its hash now, or nullopt when the tenant has none.
+  std::optional<std::pair<std::string, std::string>> terms_now(const std::string& tenant);
   // Progressive web apps (pwa_routes.cpp; design/machine/782.PWA.md): /goober/pwa/$app/,
   // the pwa_* tools, and Web Push through the outbox.
   void handle_pwa(const server::http::Request& req, const Finish& finish, const std::string& path,

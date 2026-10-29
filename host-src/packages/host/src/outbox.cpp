@@ -247,14 +247,26 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
       mail.attachments.push_back({std::string(fo.at("name").as_string()), std::string(fo.at("content_type").as_string()), *bytes});
     }
   }
-  // Unsubscribed since the box sent it: refused for good.
+  // Consent again (029 § 3): blocked, left the list, or used its outreach since the box sent it
+  // are refused for good. Elements queued before categories existed only check the block.
+  std::string category = text("category"), list = text("list");
+  mail.list_id = text("list_id");
   if (mail_suppressed(tenant, mail.to)) {
     out.status = 403;
     out.error = "unsubscribed since it was sent";
     return out;
   }
+  if (!category.empty() && category != "list_confirm") {
+    std::string why;
+    if (!check_mail_category(tenant, mail.to, category, list, mail.in_reply_to, true, true, &why)) {
+      out.status = 403;
+      out.error = "no longer allowed: " + why;
+      return out;
+    }
+  }
   // The limits (config mail): per tenant a day, and per address a day, counted by a hash of
   // the address so the ledger holds no addresses.
+  std::lock_guard lock(sent_mu_);  // the sent ledger, shared with invites
   fs::create_directories(cfg->storage / "mail");
   sqlite::Db ledger(cfg->storage / "mail" / "sent.db");
   ledger.exec("CREATE TABLE IF NOT EXISTS sent (tenant TEXT NOT NULL, address TEXT NOT NULL, at_ms INTEGER NOT NULL)");
@@ -276,9 +288,7 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   bool reply = false;
   if (!mail.in_reply_to.empty()) {
     auto inbound = open_mail_db();
-    sqlite::Stmt s(*inbound, "SELECT 1 FROM received WHERE tenant = ? AND sender = ? AND message = ?");
-    s.bind(1, tenant).bind(2, received_hash(mail.to)).bind(3, received_hash(mail.in_reply_to));
-    reply = s.step();
+    reply = thread_verified(tenant, mail.to, mail.in_reply_to);
   }
   int64_t per_address = reply ? cfg->mail.reply_per_address_daily : cfg->mail.per_address_daily;
   sqlite::Stmt by_address(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND address = ? AND at_ms > ?");
@@ -295,6 +305,9 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   if (outcome.sent) {
     sqlite::Stmt add(ledger, "INSERT INTO sent (tenant, address, at_ms) VALUES (?, ?, ?)");
     add.bind(1, tenant).bind(2, address).bind(3, now_ms).run();
+    std::string hash = mail::consent::address_hash(mail.to);
+    if (category == "outreach") consent_->outreach_sent(tenant, hash, now_ms);
+    if (category == "confirm") consent_->asked(tenant, hash, "confirm", now_ms);
     out.status = 200;
     out.body = outcome.message_id;
     return out;
@@ -372,13 +385,15 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       int64_t started = base::monotonic_us();
       if (r.verb == "MAIL") {
         reply = deliver_outbox_mail(tenant, r.body, now_ms);
+      } else if (r.verb == "INVITE") {
+        reply = deliver_outbox_invite(tenant, r.body, r.idem_key, now_ms);
       } else if (r.verb == "PUSH") {
         reply = deliver_outbox_push(tenant, r.body, r.idem_key, now_ms);
       } else if (reply.error.empty()) {
         reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", r.timeout_ms);
       }
       // A mail's address stays out of the egress log, like a URL's query.
-      egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.url, reply.status, reply.error,
+      egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.verb == "INVITE" ? "invite:" : r.url, reply.status, reply.error,
                  base::monotonic_us() - started, r.body.size(), reply.body.size(), "", r.id);
       int64_t attempts = r.attempts + 1;
       bool ok = reply.error.empty() && reply.status >= 200 && reply.status < 300;

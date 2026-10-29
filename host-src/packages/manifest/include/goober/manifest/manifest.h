@@ -163,6 +163,15 @@ struct ExternalService {
   bool push = false;
   std::string mail_from_name;
   std::string mail_from;  // "" means the host mailer's address
+  // A mail service's lists (design/machine/029.Invites.md § 4): name -> title and about.
+  struct MailList {
+    std::string title, about;
+  };
+  std::map<std::string, MailList> mail_lists;
+  // "invites": {"roles": [...], "lists": [...]} asks the host to invite people (029 § 2.6): the
+  // roles an invite may grant (also allowed by the host config) and lists it may join.
+  bool invites = false;
+  std::vector<std::string> invite_roles, invite_lists;
   std::string base;         // https://api.example.com[/prefix]
   std::string credentials;  // keys/system/$name or keys/tenant/{!tenant}/$name, or ""
   std::string auth_header = "authorization";

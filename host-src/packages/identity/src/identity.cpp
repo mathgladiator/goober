@@ -91,6 +91,35 @@ CREATE TABLE IF NOT EXISTS events (
   email TEXT NOT NULL,
   at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invites (     -- design/machine/029.Invites.md § 2.7
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused
+  email TEXT NOT NULL,
+  state TEXT NOT NULL,                   -- open, accepted, declined, lapsed, revoked
+  roles TEXT NOT NULL,                   -- JSON arrays
+  lists TEXT NOT NULL,
+  note TEXT NOT NULL,
+  inviter_name TEXT NOT NULL,
+  inviter_email TEXT NOT NULL,
+  inviter_kind TEXT NOT NULL,            -- operator, person, site
+  box TEXT,                              -- the box that sent it, or NULL for an operator
+  return_path TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  reminded_at INTEGER,
+  answered_at INTEGER,                   -- accepted, declined, lapsed, or revoked
+  expires_at INTEGER NOT NULL,
+  answer_how TEXT,
+  terms_sha256 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS invites_by_email ON invites(email, id);
+CREATE INDEX IF NOT EXISTS invites_by_state ON invites(state, created_at);
+CREATE TABLE IF NOT EXISTS terms_accepted (
+  user_id INTEGER NOT NULL,
+  path TEXT NOT NULL,                    -- the terms page, like /terms
+  sha256 TEXT NOT NULL,                  -- the page's hash when accepted
+  at INTEGER NOT NULL,
+  how TEXT NOT NULL,                     -- sign-in, invite
+  PRIMARY KEY (user_id, path, sha256)
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -112,6 +141,8 @@ void migrate(sqlite::Db& db) {
   if (!has("clients", "source")) db.exec("ALTER TABLE clients ADD COLUMN source TEXT NOT NULL DEFAULT 'host'");
   if (!has("tokens", "family")) db.exec("ALTER TABLE tokens ADD COLUMN family TEXT");
   if (!has("tokens", "rotated_at")) db.exec("ALTER TABLE tokens ADD COLUMN rotated_at INTEGER");
+  if (!has("events", "invite_id")) db.exec("ALTER TABLE events ADD COLUMN invite_id INTEGER");
+  if (!has("events", "box")) db.exec("ALTER TABLE events ADD COLUMN box TEXT");
   if (!has("users", "verified_at")) {
     db.exec("ALTER TABLE users ADD COLUMN verified_at INTEGER");
     // Before the column, an account that ever signed in had proved its address.

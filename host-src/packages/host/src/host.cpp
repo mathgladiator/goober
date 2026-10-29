@@ -161,6 +161,11 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   mail_templates_ = std::make_unique<mail::templates::Store>(config->storage / "mail" / "templates");
+  // Who each tenant may mail (design/machine/029.Invites.md): the old unsubscribes become blocks once.
+  consent_ = std::make_unique<mail::consent::Store>(config->storage / "mail" / "consent.db");
+  if (int n = consent_->import_unsubscribed(config->storage / "mail" / "unsubscribed.db", base::now_unix_ms())) {
+    std::cerr << "goober-host: mail: " << n << " unsubscribed address(es) became blocks in consent.db\n";
+  }
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
   backups_ = std::make_unique<BackupService>([this] { return config_.get(); }, *keys_, config_file_);
@@ -181,6 +186,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_data_tools();
   register_mail_tools();
   register_mail_out_tools();
+  register_consent_tools();
+  register_invite_tools();
   register_web_tools();
   register_source_tools();
   register_panel_tools();
@@ -688,7 +695,18 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     });
     return;
   }
-  if (path->path.starts_with("/goober/unsubscribe/")) {
+  if (path->path.starts_with("/goober/list/")) {
+    pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
+      try {
+        handle_list_confirm(req, finish, p, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: list confirm: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"list confirm failed"})");
+      }
+    });
+    return;
+  }
+  if (path->path.starts_with("/goober/unsubscribe/") || path->path.starts_with("/goober/mail/")) {
     pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
       try {
         handle_unsubscribe(req, finish, p, tenant);

@@ -54,6 +54,9 @@ void Host::identity_tick(int64_t now_ms) {
     }
     // Received attachments past mail.inbound.attachment-days, and expired reply tokens.
     prune_mail(now_ms);
+    // Invites' one reminder each, and consent's old log rows (029).
+    remind_invites(now_ms);
+    consent_->prune(now_ms);
   }
 
   struct Delivery {
@@ -119,7 +122,9 @@ void Host::identity_tick(int64_t now_ms) {
       for (const auto& e : d.events) {
         // Other kinds move the cursor without a call, as does a person since deleted or disabled.
         auto person = e.kind == route.identity_event ? identity_->user(d.tenant, e.user_id) : std::nullopt;
-        if (!person) {
+        // invite-declined is heard as nobody: the person never signed in (029 § 2.5).
+        bool as_nobody = e.kind == route.identity_event && e.kind == identity::kInviteDeclined;
+        if (!person && !as_nobody) {
           save(e.id, 0, 0);
           d.after_id = e.id;
           d.failures = 0;
@@ -129,13 +134,19 @@ void Host::identity_tick(int64_t now_ms) {
         uint8_t rnd[8];
         base::os_random_fill(rnd);
         std::string request_id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
-        SignedIn who{*person, false, person->roles, false, ""};
+        std::optional<SignedIn> who;
+        if (person) who = SignedIn{*person, false, person->roles, false, ""};
         // The event is the body; the person is the caller, as on their own request.
         bj::object body{{"event", e.kind},
                         {"event_id", d.tenant + ":" + std::to_string(e.id)},  // the same on every retry
                         {"user_id", std::to_string(e.user_id)},
                         {"email", e.email},
                         {"at", base::format_utc_ms(e.at_ms)}};
+        if (e.invite_id) {
+          body["invite_id"] = std::to_string(e.invite_id);
+          body["box"] = e.box.empty() ? bj::value(nullptr) : bj::value(e.box);
+          if (as_nobody) body["user_id"] = nullptr;
+        }
         bj::object doc{{"request_id", request_id}, {"method", "identity"},  {"path", "identity:" + e.kind},
                        {"params", bj::object{}},   {"query", bj::object{}}, {"headers", bj::object{}},
                        {"body", json::dump(body)}, {"domain", d.domain},    {"tenant", d.tenant},

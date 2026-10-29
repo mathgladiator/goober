@@ -42,6 +42,13 @@ inline constexpr int64_t kEventTtlMs = 7LL * 24 * 3600 * 1000;
 // What boxes' identity routes hear (design/machine/021.IdentityEvents.md).
 inline constexpr std::string_view kFirstVerified = "first-verified";  // an address proved for the first time
 inline constexpr std::string_view kSignedIn = "signed-in";            // every sign-in by an emailed code
+inline constexpr std::string_view kInviteAccepted = "invite-accepted";  // design/machine/029.Invites.md § 2.5
+inline constexpr std::string_view kInviteDeclined = "invite-declined";
+
+// Invites (029 § 2): one reminder after 7 days, lapsed at 30, and the address cools 90 days.
+inline constexpr int64_t kInviteTtlMs = 30LL * 24 * 3600 * 1000;
+inline constexpr int64_t kInviteReminderMs = 7LL * 24 * 3600 * 1000;
+inline constexpr int64_t kInviteCoolMs = 90LL * 24 * 3600 * 1000;
 
 struct Mail {
   std::string to;
@@ -61,6 +68,7 @@ struct Mail {
   std::string in_reply_to = {};     // "<id@host>", or ""
   std::string references = {};      // "<a@x> <b@y>", or ""
   std::string list_unsubscribe = {};  // "<https://...>", or ""
+  std::string list_id = {};           // "<digest.kc.example.com>" for a list's mail (RFC 2919), or ""
   std::string tenant = {};            // whose box sent it, for logs/mail.log; "" for host mail
   // A calendar invite (RFC 5546): its text/calendar body, sent beside the text and HTML and as
   // invite.ics, with its METHOD (REQUEST or CANCEL).
@@ -91,10 +99,28 @@ struct SignIn {
 // One identity event, appended in the same transaction as the sign-in that caused it.
 struct Event {
   int64_t id = 0;  // increasing within the realm, never reused
-  std::string kind;  // kFirstVerified or kSignedIn
-  int64_t user_id = 0;
+  std::string kind;  // kFirstVerified, kSignedIn, kInviteAccepted, or kInviteDeclined
+  int64_t user_id = 0;  // 0 for invite-declined: nobody signed in
   std::string email;
   int64_t at_ms = 0;
+  int64_t invite_id = 0;  // for the invite events
+  std::string box;        // the box that sent the invite, or ""
+};
+
+// One invite (029 § 2.7).
+struct Invite {
+  int64_t id = 0;
+  std::string email;
+  std::string state = "open";  // open, accepted, declined, lapsed, revoked
+  std::vector<std::string> roles, lists;
+  std::string note, inviter_name, inviter_email;
+  std::string inviter_kind;  // operator, person, site
+  std::string box;           // "" for an operator
+  std::string return_path = "/";
+  int64_t created_at = 0, reminded_at = 0, answered_at = 0, expires_at = 0;
+  std::string answer_how;
+  std::string terms_sha256;
+  bj::object to_json() const;
 };
 
 // OAuth 2.1 (013 § Sessions, schema, and the login API; design/machine/009.OAuth.md).
@@ -259,6 +285,39 @@ class Identity {
   // A user's live grants (one per signed-in client), for the account page, and revoking one.
   bj::array grants(std::string_view realm, int64_t user_id, int64_t now_ms);
   bool revoke_grant(std::string_view realm, int64_t user_id, std::string_view family, int64_t now_ms);
+
+  // ---- invites (design/machine/029.Invites.md § 2): the record; the host checks blocks, config, and limits.
+  // Stores an open invite. Refuses, with `code` (member, open, cooling) and `why`, an address
+  // that is already a proved account, has an open invite, or lapsed or was revoked within 90 days.
+  std::optional<Invite> create_invite(std::string_view realm, Invite invite, int64_t now_ms, std::string* code,
+                                      std::string* why);
+  std::optional<Invite> invite(std::string_view realm, int64_t id);
+  std::optional<Invite> open_invite_for(std::string_view realm, std::string_view email);
+  // Newest first; empty filters match everything.
+  std::vector<Invite> invites(std::string_view realm, std::string_view state, std::string_view email,
+                              std::string_view box, int limit);
+  // Invites made since `since_ms`, all or by one inviter's address.
+  int64_t invites_since(std::string_view realm, int64_t since_ms, std::string_view inviter_email = {});
+  bool revoke_invite(std::string_view realm, int64_t id, std::string_view by, int64_t now_ms, std::string* why);
+  // Accepts an open invite for the signed-in user whose address it names: grants its roles (each
+  // checked by `allowed`), appends invite-accepted, and returns the user. The user must hold the
+  // invited address and have proved it.
+  std::optional<User> accept_invite(std::string_view realm, int64_t id, int64_t user_id, std::string_view how,
+                                    const std::function<bool(const std::string& role)>& allowed, int64_t now_ms,
+                                    std::string* why);
+  // Declines an open or lapsed invite, appending invite-declined. False when it was already answered.
+  bool decline_invite(std::string_view realm, int64_t id, std::string_view how, int64_t now_ms, std::string* why);
+  // Open invites due their one reminder (7 days old, none sent), and marking one sent.
+  std::vector<Invite> due_reminders(std::string_view realm, int64_t now_ms);
+  void mark_reminded(std::string_view realm, int64_t id, int64_t now_ms);
+
+  // Whether the address is an account of the realm that has proved it (by a code).
+  bool proved(std::string_view realm, std::string_view email);
+
+  // ---- terms (029 § 8): the newest hash of a terms page a user accepted, and recording one.
+  std::optional<std::string> terms_accepted(std::string_view realm, int64_t user_id, std::string_view path);
+  void accept_terms(std::string_view realm, int64_t user_id, std::string_view path, std::string_view sha256,
+                    std::string_view how, int64_t now_ms);
 
   // How many users in the realm hold the role.
   int holders(std::string_view realm, std::string_view role);

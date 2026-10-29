@@ -107,6 +107,7 @@ std::string mime_message(const std::string& mailer_from, const identity::Mail& m
                         "\r\nMessage-ID: <" + id + "@" + domain + ">\r\n" +
                         (mail.in_reply_to.empty() ? "" : "In-Reply-To: " + header_value(mail.in_reply_to) + "\r\n") +
                         (mail.references.empty() ? "" : "References: " + header_value(mail.references) + "\r\n") +
+                        (mail.list_id.empty() ? std::string() : "List-Id: " + header_value(mail.list_id) + "\r\n") +
                         (mail.list_unsubscribe.empty()
                              ? ""
                              : "List-Unsubscribe: " + header_value(mail.list_unsubscribe) +

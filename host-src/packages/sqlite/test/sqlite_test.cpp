@@ -34,3 +34,12 @@ TEST(Sqlite, BlobsHoldAnyBytes) {
   EXPECT_EQ(s.blob(0), bytes);
   EXPECT_EQ(s.text(1), "blob");
 }
+
+TEST(Sqlite, AnEmptyViewIsEmptyTextNotNull) {
+  goober::sqlite::Db db(":memory:");
+  goober::sqlite::Stmt s(db, "SELECT ? IS NULL, ? = ''");
+  s.bind(1, std::string_view{}).bind(2, std::string_view{});
+  ASSERT_TRUE(s.step());
+  EXPECT_EQ(s.int64(0), 0);
+  EXPECT_EQ(s.int64(1), 1);
+}

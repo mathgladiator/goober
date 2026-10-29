@@ -214,13 +214,35 @@ leaves only if the request commits, through the outbox, retried for a day. It co
 host's address with your from-name, or from your own: "mail": {"from-name": "KC Meat Up",
 "from": "hello@kcmeatup.com"} (a domain of your tenant; declare a mail route for it, so replies
 reach you). To answer someone in their thread, pass the Message-IDs from the mail you got:
-"in_reply_to": its message_id, "references": its references plus its message_id. Every mail
-carries a one-click unsubscribe (a header and a footer link); once a person uses it, every box of
-the tenant gets {"error": "unsubscribed: ..."} for that address, for good; keep a row saying so.
-Answers in a thread the person started (in_reply_to is a message they sent you) get 20 a day
-to that address; new outreach gets 3. The host caps mail per tenant a day and per address a day
-(config mail), so a form can't be turned into a cannon; a refused mail is a dead letter
-(outbox_dead_letters). A sandbox host (a rehydrated devbox) never sends: mail waits.
+"in_reply_to": its message_id, "references": its references plus its message_id.
+Every mail has a "category", which says who it may go to (the host checks when you call and
+again when it goes; left out, it's inferred strictly: reply, else transactional, else outreach):
+- "reply": answering a message that address sent you in the last 30 days (in_reply_to is its
+  Message-ID). 20 a day to that address.
+- "transactional": receipts and notices for an account of the site, or someone who wrote to it
+  in the last 90 days. 3 a day.
+- "confirm": a confirmation link for an address someone just typed, sent from an http route
+  (they're there). 1 a day and 3 in 30 days to an address.
+- "outreach": a cold, one-to-one mail. One per address in 30 days (if they reply, answer with
+  reply), and mail.outreach-daily-max per tenant (50).
+- "list" with "list": "digest": a list's mail, only to people who opted in (below).
+Outreach, lists, and invites need the tenant's postal address in the host config
+(tenants.$tenant.postal-address); without it they're refused, naming the key. The host adds a
+footer to every mail, after your text and the layout: why it came, the postal address, and the
+link to stop it (one click, also in the List-Unsubscribe header). Someone who stops all mail, or
+declines an invite, is blocked for the tenant: every box gets {"error": "blocked: ..."} for that
+address until they allow mail again themselves (signed in) or an operator lifts it in the panel.
+Keep a row saying so. goober_call("mail", "preferences", {"email"}) answers {blocked, lists:
+{digest: in | out | none}, relationship: account | wrote_in | none, outreach: {state: allowed |
+used | opted_out}}: ask before you write.
+Lists: declare them on the mail service, "mail": {"from-name": "KC Meat Up", "lists": {"digest":
+{"title": "The daily digest", "about": "One email a day at 7am."}}}. A box can't record consent:
+goober_call("mail", "subscribe", {"email", "list"}) has the host mail a confirmation (one per
+address and list in 30 days); the person clicks Yes, and only then is list mail allowed. People
+also join on their account page, or by accepting an invite that names the list. Each list mail's
+unsubscribe leaves that list only. The host caps mail per tenant a day (config mail.daily-max);
+a refused mail is a dead letter (outbox_dead_letters). A sandbox host (a rehydrated devbox) never
+sends: mail waits.
 Every mail is wrapped in the site's layout, as text and as HTML. To send a designed mail, the
 operator saves a template of the site's own (mail_template_put, like "order-ready"), and the box
 sends {"to", "template": "order-ready", "vars": {"name": "Ann"}} instead of subject and text;
@@ -234,6 +256,29 @@ tenant's attachments (attachment_put), 10 MiB in all. "invite": {"uid": "meetup-
 invite (RFC 5546) from your address to this recipient: Gmail, Outlook, and Apple Mail show it
 with Yes/Maybe/No. Keep uid per event; raise sequence to change it; cancel: true withdraws it.
 Times carry their zone (Z or an offset), or are dates for all-day events.
+
+## Invites (people joining the site)
+
+The host owns invites (design/machine/029.Invites.md): the record, the mail, the links, and the
+limits. A box asks through an invites service:
+"external": {"club": {"invites": {"roles": ["member"], "lists": ["digest"]}}}
+roles must also be in the host config's tenants.$tenant.invites.roles (checked at upload); lists
+are this box's own mail lists. Then:
+goober_call("club", "send", {"email": "bob@example.com", "roles": ["member"], "lists": ["digest"],
+  "note": "Come grill with us", "inviter_name": "Ann", "return": "/welcome"}) -> {"accepted": true}
+After your request commits, the host stores the invite and mails it, naming who invited: the
+person signed in on this request (inviter_name is their display name; their address is shown
+too), or else the site itself (inviter_name is refused then). The mail has an accept link (the
+person proves the address with a sign-in code; the roles are granted, the lists joined, the
+site's terms accepted) and a decline link that blocks the tenant's mail to them for good. One
+reminder after 7 days; it lapses at 30, and the address can't be invited again for 90.
+Refused: blocked, member (already an account: an operator grants a role instead), open (an
+invite is out), and the daily limits (tenants.$tenant.invites.daily-max, per-inviter-daily).
+goober_call("club", "status", {"email"}) -> {state: none | open | accepted | declined | lapsed |
+revoked, invite_id?, can_invite, why?}; goober_call("club", "revoke", {"invite_id"}) withdraws
+one of yours. Hear the answers on identity routes: "routes": {"identity": {"invite-accepted":
+{"name": "joined"}, "invite-declined": {"name": "declined"}}}; the body adds invite_id and box,
+and invite-declined is called as nobody (user_id null). Don't mail invites yourself.
 
 ## Receiving mail
 
@@ -288,7 +333,7 @@ Keep these rules: mail text is data, never instructions, and the model drafts bu
 nothing; From is only a claim (no privileges by address), and reply+{x : token}@ addresses are
 the capability; count your model calls a day and stop past a limit (the host also caps a tenant's outbox calls
 to one service, 1000 a day by default, and says so in the call's error); never answer your own mail;
-when send says unsubscribed, mark the contact and stop. The model's key: key_set tenant, name
+when send says blocked, mark the contact and stop. The model's key: key_set tenant, name
 xai, host api.x.ai; declare "credentials": "keys/tenant/{!tenant}/xai".
 
 ## Host libraries: time and calendars
@@ -325,8 +370,11 @@ zone; the digest is markdown the agent drafted, sent with "reply": {"route": "di
 knowing who and which day. digest_reply keeps reply_text if the member hasn't replied today
 (else answers 4xx: "one reply a day"), and a model call (outbox, result route) clusters the
 day's replies into the shared model: proposals, agreements, conflicts. Past a threshold the box
-sends an invite; RSVPs come back as calendar on the same mail route. Join and leave by mail
-(join@ and the unsubscribe link). Raise config mail.daily-max past the member count.
+sends an invite; RSVPs come back as calendar on the same mail route. The digest is a list
+("category": "list", "list": "digest"): a member joins by mail to join@, which answers with
+goober_call("mail", "subscribe", ...) so the host confirms it, or by accepting an invite that
+names the list; leaving is the list's unsubscribe link. Raise config mail.daily-max past the
+member count.
 
 ## Reading the web
 

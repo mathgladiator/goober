@@ -49,7 +49,10 @@ Stmt& Stmt::bind(int index, int64_t value) {
 }
 
 Stmt& Stmt::bind(int index, std::string_view value) {
-  if (sqlite3_bind_text(stmt_, index, value.data(), int(value.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
+  // A default-constructed view has no data, and SQLite binds a null pointer as NULL: text is
+  // text, so an empty one is bound as ''.
+  const char* data = value.data() ? value.data() : "";
+  if (sqlite3_bind_text(stmt_, index, data, int(value.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
     fail(db_, "bind");
   }
   return *this;

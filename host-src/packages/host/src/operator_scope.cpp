@@ -494,8 +494,3 @@ void Host::register_scope_tools() {
 
 }  // namespace goober::host
 
-namespace goober::host {
-std::pair<int, bj::object> Host::panel_unblock(const SignedIn&, const bj::object&, const std::string&) {
-  return {501, bj::object{{"error", "not yet"}}};
-}
-}  // namespace goober::host

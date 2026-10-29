@@ -167,7 +167,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa"},
+                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -401,7 +401,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (!is_region(cfg->aws.region)) return *error = "aws.region isn't an AWS region", nullptr;
   }
   if (const auto* mail = get_object(root, "mail", &err)) {
-    if (!check_keys(*mail, {"daily-max", "per-address-daily", "reply-per-address-daily", "inbound"}, "mail", &err)) return *error = err, nullptr;
+    if (!check_keys(*mail, {"daily-max", "per-address-daily", "reply-per-address-daily", "outreach-daily-max", "inbound"}, "mail", &err)) return *error = err, nullptr;
     if (const auto* in = get_object(*mail, "inbound", &err)) {
       if (!check_keys(*in, {"token-file", "max-bytes", "attachment-days"}, "mail.inbound", &err)) return *error = err, nullptr;
       auto& inbound = cfg->mail.inbound;
@@ -419,6 +419,10 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (auto v = get_int(*mail, "daily-max", &err)) cfg->mail.daily_max = *v;
     if (auto v = get_int(*mail, "per-address-daily", &err)) cfg->mail.per_address_daily = *v;
     if (auto v = get_int(*mail, "reply-per-address-daily", &err)) cfg->mail.reply_per_address_daily = *v;
+    if (auto v = get_int(*mail, "outreach-daily-max", &err)) cfg->mail.outreach_daily_max = *v;
+    if (cfg->mail.outreach_daily_max < 0 || cfg->mail.outreach_daily_max > 10000) {
+      return *error = "mail.outreach-daily-max is 0 to 10000", nullptr;
+    }
     if (cfg->mail.reply_per_address_daily < 1 || cfg->mail.reply_per_address_daily > 1000) {
       return *error = "mail.reply-per-address-daily is 1 to 1000", nullptr;
     }
@@ -481,6 +485,49 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
         return *error = "pwa.push-contact is mailto:you@example.com or an https URL", nullptr;
       }
       cfg->pwa.push_contact = *v;
+    }
+  }
+  if (const auto* tenants = get_object(root, "tenants", &err)) {
+    for (const auto& kv : *tenants) {
+      std::string name(kv.key()), where = "tenants." + name;
+      bool served = false;
+      for (const auto& [d, e] : cfg->domains) served |= e.tenant == name;
+      if (!served) return *error = where + ": no domain serves tenant " + name, nullptr;
+      if (!kv.value().is_object()) return *error = where + " is an object", nullptr;
+      const auto& t = kv.value().as_object();
+      if (!check_keys(t, {"postal-address", "terms", "privacy", "invites"}, where.c_str(), &err)) return *error = err, nullptr;
+      TenantConfig tc;
+      tc.postal_address = get_string(t, "postal-address", &err).value_or("");
+      if (tc.postal_address.size() > 200 || tc.postal_address.find_first_of("\r\n") != std::string::npos) {
+        return *error = where + ".postal-address is one line of at most 200 characters", nullptr;
+      }
+      for (const char* k : {"terms", "privacy"}) {
+        std::string v = get_string(t, k, &err).value_or("");
+        if (!v.empty() && (v[0] != '/' || v.size() > 200 || v.find_first_of(" ?#\\") != std::string::npos)) {
+          return *error = where + "." + k + " is a path on the site, like /terms", nullptr;
+        }
+        (std::string(k) == "terms" ? tc.terms : tc.privacy) = v;
+      }
+      if (const auto* inv = get_object(t, "invites", &err)) {
+        std::string iw = where + ".invites";
+        if (!check_keys(*inv, {"roles", "daily-max", "per-inviter-daily"}, iw.c_str(), &err)) return *error = err, nullptr;
+        if (const auto* roles = get_array(*inv, "roles", &err)) {
+          for (const auto& r : *roles) {
+            std::string role = r.is_string() ? std::string(r.as_string()) : "";
+            bool ok = !role.empty() && role.find(':') == std::string::npos && role.size() <= 64;
+            for (char ch : role) ok = ok && (std::isalnum((unsigned char)ch) || ch == '_' || ch == '/');
+            if (!ok) return *error = iw + ".roles holds tenant roles, like member or editor/blog", nullptr;
+            tc.invites.roles.push_back(role);
+          }
+        }
+        if (auto v = get_int(*inv, "daily-max", &err)) tc.invites.daily_max = *v;
+        if (auto v = get_int(*inv, "per-inviter-daily", &err)) tc.invites.per_inviter_daily = *v;
+        if (tc.invites.daily_max < 0 || tc.invites.daily_max > 10000 || tc.invites.per_inviter_daily < 1 ||
+            tc.invites.per_inviter_daily > 1000) {
+          return *error = iw + ".daily-max is 0 to 10000 and per-inviter-daily 1 to 1000", nullptr;
+        }
+      }
+      cfg->tenants[name] = std::move(tc);
     }
   }
   if (const auto* source = get_object(root, "source", &err)) {

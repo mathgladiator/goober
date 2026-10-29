@@ -216,3 +216,25 @@ TEST(Config, PwaPushHostsAndContact) {
   EXPECT_FALSE(parse_config(R"({"pwa":{"push-hosts":["not a host"]}})", "/", &err));
   EXPECT_FALSE(parse_config(R"({"pwa":{"push-contact":"ops@example.com"}})", "/", &err));
 }
+
+TEST(Config, TenantsCarryPostalAddressTermsAndInviteRoles) {
+  std::string err;
+  auto cfg = parse_config(R"({"domains":{"kc.example.com":{"tenant":"kc"}},
+      "mail":{"outreach-daily-max":20},
+      "tenants":{"kc":{"postal-address":"KC Meat Up, 1 Main St, Kansas City, MO 64105","terms":"/terms","privacy":"/privacy",
+                       "invites":{"roles":["member","editor/blog"],"daily-max":30,"per-inviter-daily":5}}}})",
+                          "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_EQ(cfg->tenant("kc").postal_address, "KC Meat Up, 1 Main St, Kansas City, MO 64105");
+  EXPECT_EQ(cfg->tenant("kc").terms, "/terms");
+  EXPECT_EQ(cfg->tenant("kc").invites.roles.size(), 2u);
+  EXPECT_EQ(cfg->tenant("kc").invites.daily_max, 30);
+  EXPECT_EQ(cfg->mail.outreach_daily_max, 20);
+  EXPECT_EQ(cfg->tenant("other").invites.daily_max, 50);  // defaults for a tenant without an entry
+  EXPECT_TRUE(cfg->tenant("other").invites.roles.empty());
+  EXPECT_FALSE(parse_config(R"({"tenants":{"kc":{}}})", "/", &err));  // no domain serves it
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"terms":"terms"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"invites":{"roles":["host:owner"]}}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"postal-address":"a\nb"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"colour":"red"}}})", "/", &err));
+}

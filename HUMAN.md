@@ -67,6 +67,22 @@ sudo tail -n 5 /srv/goober/host/storage/logs/mail.log                       # ma
 Or ask Grok to run `host_health`, which reports backups, how mail leaves, and startup notes,
 and `mail_activity` with the tenant (kcmeatup), which lists the site's mail in and out and
 what happened to each.
+**Mail needs your postal address.** Outreach, lists, and invites are refused until the host
+config names it (CAN-SPAM). `host_health` lists `tenants_without_postal_address`. On the server,
+edit `/srv/goober/host/host.json` and add, next to `domains`:
+
+```json
+"tenants": {"kcmeatup": {"postal-address": "KC Meat Up, 123 Main St, Kansas City, MO 64105",
+                         "terms": "/terms", "privacy": "/privacy",
+                         "invites": {"roles": ["member"]}}}
+```
+
+then `sudo systemctl reload goober-host`. `terms` and `privacy` are pages on the site; with
+them, signing in and accepting an invite say "by continuing, you accept" and record it.
+`invites.roles` is what a box's invites may grant. Someone who declined or unsubscribed stays
+blocked until they allow mail on their account page, or you lift it in the panel
+(**Operators**, **Lift a mail block**, saying why). Grok can't lift one.
+
 Is the backup key copied somewhere safe? Without it no backup can be read
 (`goober-host backup key --confirm` once you've copied it).
 

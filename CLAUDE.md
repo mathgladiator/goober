@@ -143,6 +143,9 @@ Read these before doing design work:
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
     change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`.
+  - `design/machine/029.Invites.md`: invites as a host feature (the record, the template, accept by
+    code with roles, terms, and lists; decline as a block only a person lifts), mail categories with
+    their rules, lists with double opt-in, the preferences page, and per-tenant postal addresses.
   - `design/machine/030.OperatorScope.md`: focusing an operator (a person, a token, and every agent
     signed in as them) on some tenants: a scope rule per tool, deny by default, changed only by a
     person in the panel.

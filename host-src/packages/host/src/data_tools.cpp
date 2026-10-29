@@ -11,6 +11,7 @@
 #include "rust_binding.h"
 #include "keys.h"
 #include "goober/host/host.h"
+#include "timer_state.h"
 #include "goober/libraries/libraries.h"
 #include "goober/json/json.h"
 
@@ -40,6 +41,42 @@ bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
     }
   }
   auto active = boxes_->active();
+  // Invites grant only roles the host config allows for every tenant the box serves, and a
+  // list's title is one thing per tenant, whichever box declares it (029 §§ 2.6, 4).
+  {
+    auto cfg = config_.get();
+    auto served = tenants_of(*cfg, m);
+    for (const auto& svc : m.external) {
+      for (const auto& role : svc.invite_roles) {
+        for (const auto& [tenant, domain] : served) {
+          const auto& allowed = cfg->tenant(tenant).invites.roles;
+          if (std::find(allowed.begin(), allowed.end(), role) == allowed.end()) {
+            *error = "external." + svc.name + ".invites.roles: " + role + " isn't in the host config's tenants." + tenant +
+                     ".invites.roles, so this box's invites can't grant it there";
+            return false;
+          }
+        }
+      }
+      for (const auto& [list, l] : svc.mail_lists) {
+        for (const auto& [name, box] : active->boxes) {
+          if (name == m.box) continue;
+          bool shared = false;
+          for (const auto& [t, d] : tenants_of(*cfg, box->manifest)) {
+            for (const auto& [mine, md] : served) shared |= t == mine;
+          }
+          if (!shared) continue;
+          for (const auto& other : box->manifest.external) {
+            auto it = other.mail_lists.find(list);
+            if (it != other.mail_lists.end() && it->second.title != l.title) {
+              *error = "external." + svc.name + ".mail.lists." + list + ": box " + name + " already declares it as \"" +
+                       it->second.title + "\" for a tenant this box serves; one list, one title";
+              return false;
+            }
+          }
+        }
+      }
+    }
+  }
   // Every box's manifest as it would be with this version in place.
   std::map<std::string, const manifest::Manifest*> boxes;
   for (const auto& [name, box] : active->boxes) boxes[name] = &box->manifest;

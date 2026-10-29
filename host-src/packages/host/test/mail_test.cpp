@@ -79,6 +79,7 @@ class MailTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
         "domains": {"localhost": {"tenant": "playground"}, "kc.example": {"tenant": "playground"}},
+        "tenants": {"playground": {"postal-address": "Beef Share, 1 Main St, Kansas City, MO 64105"}},
         "threads": {"network": 1, "boxes": 2},
         "identity": {"mailer": "ses", "ses": {"from": "no-reply@example.com", "endpoint": ")" + fake.endpoint() + R"("}},
         "mail": {"per-address-daily": 1})" + extra + "}",
@@ -124,13 +125,15 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
   EXPECT_NE(log->find(R"("message_id":"fake-1")"), std::string::npos) << *log;
   EXPECT_EQ(fake.refused_signatures(), 0);
 
-  // One mail a day to an address (mail.per-address-daily 1): the second is refused for good.
-  ASSERT_EQ(post(port, "/join"), 200);
+  // Mail to someone with no relationship is outreach (029 § 3): the host's footer says so, with
+  // the postal address and the link to stop it.
+  EXPECT_NE(mails[0].find("Beef Share, 1 Main St, Kansas City, MO 64105"), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("wrote to you once. It won't again unless you reply."), std::string::npos) << mails[0];
+  // One outreach per address in 30 days: the second is refused in the call.
+  ASSERT_EQ(post(port, "/join", &body), 200);
+  EXPECT_NE(body.find("one mail per address in 30 days"), std::string::npos) << body;
   EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 0);
   EXPECT_EQ(fake.mails().size(), 1u);
-  auto dead = host->outbox_list("dead");
-  ASSERT_EQ(dead.size(), 1u);
-  EXPECT_NE(std::string(dead[0].at("last_error").as_string()).find("per-address-daily"), std::string::npos);
 }
 
 // A box that answers fan@example.org in a thread, from the tenant's own address.
@@ -182,9 +185,9 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
   EXPECT_NE(m.find("In-Reply-To: <abc@mail.example.org>\r\n"), std::string::npos) << m;
   EXPECT_NE(m.find("References: <root@mail.example.org> <abc@mail.example.org>\r\n"), std::string::npos) << m;
   EXPECT_NE(m.find("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"), std::string::npos) << m;
-  auto at = m.find("List-Unsubscribe: <https://kc.example/goober/unsubscribe/playground/");
+  auto at = m.find("List-Unsubscribe: <https://kc.example/goober/mail/playground/");
   ASSERT_NE(at, std::string::npos) << m;
-  EXPECT_NE(m.find("Unsubscribe: https://kc.example/goober/unsubscribe/"), std::string::npos) << m;  // the footer
+  EXPECT_NE(m.find("Unsubscribe: https://kc.example/goober/mail/"), std::string::npos) << m;  // the footer
   // logs/mail.log names the tenant and the From, which mail_activity reads.
   auto mail_log = base::read_file(root / "storage/logs/mail.log");
   ASSERT_TRUE(mail_log);
@@ -210,10 +213,14 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
     bhttp::read(stream, buf, res);
     return std::pair<int, std::string>(int(res.result_int()), res.body());
   };
-  // Opening the link (as a mail scanner does) asks; it doesn't unsubscribe.
+  // Opening the link (as a mail scanner does) asks; it doesn't unsubscribe. Links mailed before
+  // 029 (/goober/unsubscribe/...) still work.
   auto asked = request(bhttp::verb::get, path);
   EXPECT_EQ(asked.first, 200);
   EXPECT_NE(asked.second.find("Stop these emails?"), std::string::npos);
+  std::string old_path = path;
+  old_path.replace(old_path.find("/goober/mail/"), 13, "/goober/unsubscribe/");
+  EXPECT_NE(request(bhttp::verb::get, old_path).second.find("Stop these emails?"), std::string::npos);
   EXPECT_FALSE(host->mail_suppressed("playground", "fan@example.org"));
   // A forged link does nothing.
   EXPECT_EQ(request(bhttp::verb::post, path.substr(0, path.size() - 1) + (path.back() == '0' ? "1" : "0")).first, 404);

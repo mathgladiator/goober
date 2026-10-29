@@ -275,6 +275,9 @@ int Identity::prune(std::string_view realm_name, int64_t now_ms) {
   idle.bind(1, now_ms - 7 * kDay).run();
   sqlite::Stmt events(r.db, "DELETE FROM events WHERE at < ?");
   events.bind(1, now_ms - kEventTtlMs).run();
+  // Invites unanswered for 30 days lapse; the address then cools (029 § 2.5).
+  sqlite::Stmt lapse(r.db, "UPDATE invites SET state = 'lapsed', answered_at = ? WHERE state = 'open' AND expires_at <= ?");
+  lapse.bind(1, now_ms).bind(2, now_ms).run();
   // Invites never taken up: the address was never proved, so the account doesn't stay.
   Transaction tx(r.db);
   std::vector<std::pair<int64_t, std::string>> stale;
@@ -298,9 +301,12 @@ std::vector<Event> Identity::events_after(std::string_view realm_name, int64_t a
   auto& r = realm(realm_name);
   std::lock_guard lock(r.mu);
   std::vector<Event> out;
-  sqlite::Stmt s(r.db, "SELECT id, kind, user_id, email, at FROM events WHERE id > ? ORDER BY id LIMIT ?");
+  sqlite::Stmt s(r.db, "SELECT id, kind, user_id, email, at, invite_id, box FROM events WHERE id > ? ORDER BY id LIMIT ?");
   s.bind(1, after_id).bind(2, int64_t(limit));
-  while (s.step()) out.push_back(Event{s.int64(0), s.text(1), s.int64(2), s.text(3), s.int64(4)});
+  while (s.step()) {
+    out.push_back(Event{s.int64(0), s.text(1), s.int64(2), s.text(3), s.int64(4), s.is_null(5) ? 0 : s.int64(5),
+                        s.is_null(6) ? "" : s.text(6)});
+  }
   return out;
 }
 

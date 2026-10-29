@@ -282,8 +282,8 @@ bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manif
   for (const auto& kv : routes.as_object()) {
     std::string event(kv.key());
     std::string where = "routes.identity." + event;
-    if (event != "first-verified" && event != "signed-in") {
-      return *error = where + ": the identity events are first-verified and signed-in", false;
+    if (event != "first-verified" && event != "signed-in" && event != "invite-accepted" && event != "invite-declined") {
+      return *error = where + ": the identity events are first-verified, signed-in, invite-accepted, and invite-declined", false;
     }
     if (!kv.value().is_object()) return *error = where + " must be an object", false;
     const auto& def = kv.value().as_object();
@@ -388,7 +388,7 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
       }
-      if (k == "box" || k == "web" || k == "mail" || k == "push") continue;
+      if (k == "box" || k == "web" || k == "mail" || k == "push" || k == "invites") continue;
       if (k == "capability" || k == "provider") return *error = where + "." + k + " isn't built yet", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
     }
@@ -400,8 +400,29 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       }
       if (!mail->is_object()) return *error = where + ".mail is {\"from-name\": \"Beef Share\"}", false;
       for (const auto& f : mail->as_object()) {
-        if (f.key() != "from-name" && f.key() != "from") {
+        if (f.key() != "from-name" && f.key() != "from" && f.key() != "lists") {
           return *error = where + ".mail: unknown field \"" + std::string(f.key()) + "\"", false;
+        }
+      }
+      // Lists people opt in to (029 § 4): {"digest": {"title": "The daily digest", "about": "..."}}.
+      if (const auto* lists = mail->as_object().if_contains("lists")) {
+        if (!lists->is_object() || lists->as_object().size() > 20) {
+          return *error = where + ".mail.lists is up to 20 lists: {\"digest\": {\"title\": \"...\", \"about\": \"...\"}}", false;
+        }
+        for (const auto& l : lists->as_object()) {
+          std::string lw = where + ".mail.lists." + std::string(l.key());
+          if (!base::is_valid_name(l.key())) return *error = lw + ": a list name matches [a-z][a-z0-9_]*", false;
+          const auto* lo = l.value().if_object();
+          if (!lo) return *error = lw + " is {\"title\", \"about\"}", false;
+          for (const auto& f : *lo) {
+            if (f.key() != "title" && f.key() != "about") return *error = lw + ": unknown field \"" + std::string(f.key()) + "\"", false;
+          }
+          ExternalService::MailList ml{get_string(*lo, "title", &err).value_or(""), get_string(*lo, "about", &err).value_or("")};
+          if (ml.title.empty() || ml.title.size() > 80 || ml.about.size() > 300 ||
+              ml.title.find_first_of("\r\n") != std::string::npos) {
+            return *error = lw + ": title is one line of 1 to 80 characters, and about at most 300", false;
+          }
+          svc.mail_lists[std::string(l.key())] = std::move(ml);
         }
       }
       svc.mail = true;
@@ -433,7 +454,9 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       if (const auto* methods = get_object(def, "methods", &err)) {
         for (const auto& mk : *methods) {
           std::string mw = where + ".methods." + std::string(mk.key());
-          if (mk.key() != "send") return *error = mw + ": a mail service's methods are send, and attachment (always there)", false;
+          if (mk.key() != "send") {
+            return *error = mw + ": a mail service's methods are send, and attachment, subscribe, and preferences (always there)", false;
+          }
           if (!mk.value().is_object()) return *error = mw + " must be an object", false;
           for (const auto& f : mk.value().as_object()) {
             if (f.key() != "budget") return *error = mw + ": unknown field \"" + std::string(f.key()) + "\"", false;
@@ -453,6 +476,69 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       attachment.effect = "none";
       attachment.budget_calls = 20;
       svc.methods["attachment"] = std::move(attachment);
+      // Asking someone to confirm a list (a host mail, after commit), and reading what an address
+      // may get (029 § 4).
+      ExternalMethod subscribe;
+      subscribe.name = "subscribe";
+      subscribe.verb = "mail";
+      subscribe.effect = "outbox";
+      subscribe.budget_calls = 5;
+      subscribe.attempts = 6;
+      subscribe.backoff_ms = 30000;
+      subscribe.within_ms = 24LL * 3600 * 1000;
+      svc.methods["subscribe"] = std::move(subscribe);
+      ExternalMethod preferences;
+      preferences.name = "preferences";
+      preferences.verb = "mail";
+      preferences.effect = "none";
+      preferences.budget_calls = 50;
+      svc.methods["preferences"] = std::move(preferences);
+      m->external.push_back(std::move(svc));
+      continue;
+    }
+    if (const auto* inv = def.if_contains("invites")) {
+      // Invites through the host (design/machine/029.Invites.md § 2.6): the host keeps the record,
+      // the template, and the limits; the box names the person and what accepting grants.
+      if (def.size() != 1) return *error = where + ": an invites service has only \"invites\"; the host sends", false;
+      if (!inv->is_object()) return *error = where + ".invites is {\"roles\": [\"member\"], \"lists\": [\"digest\"]}", false;
+      for (const auto& f : inv->as_object()) {
+        if (f.key() != "roles" && f.key() != "lists") {
+          return *error = where + ".invites: unknown field \"" + std::string(f.key()) + "\"", false;
+        }
+      }
+      svc.invites = true;
+      auto names = [&](const char* key, std::vector<std::string>* out, bool role) {
+        const auto* v = inv->as_object().if_contains(key);
+        if (!v) return true;
+        if (!v->is_array() || v->as_array().size() > 20) return false;
+        for (const auto& e : v->as_array()) {
+          std::string s = e.is_string() ? std::string(e.as_string()) : "";
+          bool ok = role ? !s.empty() && s.size() <= 64 && s.find(':') == std::string::npos : base::is_valid_name(s);
+          if (role) {
+            for (char ch : s) ok = ok && (std::isalnum((unsigned char)ch) || ch == '_' || ch == '/');
+          }
+          if (!ok) return false;
+          out->push_back(s);
+        }
+        return true;
+      };
+      if (!names("roles", &svc.invite_roles, true)) {
+        return *error = where + ".invites.roles holds up to 20 tenant roles, like member or editor/blog", false;
+      }
+      if (!names("lists", &svc.invite_lists, false)) {
+        return *error = where + ".invites.lists holds up to 20 list names of this box's mail service", false;
+      }
+      for (const char* method : {"send", "revoke", "status"}) {
+        ExternalMethod em;
+        em.name = method;
+        em.verb = "invites";
+        em.effect = std::string(method) == "send" ? "outbox" : "none";
+        em.budget_calls = std::string(method) == "status" ? 50 : 10;
+        em.attempts = 6;
+        em.backoff_ms = 30000;
+        em.within_ms = 24LL * 3600 * 1000;
+        svc.methods[method] = std::move(em);
+      }
       m->external.push_back(std::move(svc));
       continue;
     }
@@ -1050,6 +1136,19 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
   if (!err.empty()) return *error = err, std::nullopt;
   if (const auto* ext = get_object(root, "external", &err)) {
     if (!parse_external(*ext, &m, error)) return std::nullopt;
+    // An invite joins only lists this box's own mail service declares (029 § 2.6).
+    std::set<std::string> lists;
+    for (const auto& svc : m.external) {
+      for (const auto& [name, l] : svc.mail_lists) lists.insert(name);
+    }
+    for (const auto& svc : m.external) {
+      for (const auto& l : svc.invite_lists) {
+        if (!lists.count(l)) {
+          *error = "external." + svc.name + ".invites.lists names " + l + ", which no mail service of this box declares";
+          return std::nullopt;
+        }
+      }
+    }
   }
   if (const auto* libs = get_object(root, "libraries", &err)) {
     for (const auto& kv : *libs) {
