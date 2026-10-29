@@ -118,6 +118,9 @@ class Host {
   // The operator panel's rollups and change log (design/machine/028.Panel.md).
   operations::Traffic& traffic() { return *traffic_; }
   operations::ChangeLog& changes() { return *changes_; }
+  // Whether the host is ready (GET /goober/ready):
+  // storage writable (when probed), identity answering, boxes loaded, the queue not full.
+  std::pair<int, boost::json::object> readiness(bool probe_storage);
   // The panel's own listener (operations.listen), or 0 when there is none.
   uint16_t panel_port() const;
   // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).

@@ -246,3 +246,39 @@ TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {
   EXPECT_EQ(fetch(panel, "localhost", bhttp::verb::get, "/panel.css").status, 200);
   EXPECT_EQ(fetch(panel, "localhost", bhttp::verb::get, "/about").status, 404);
 }
+
+TEST_F(PanelTest, ReadySaysWhatEverySubsystemIs) {
+  auto r = fetch(port, "localhost", bhttp::verb::get, "/goober/ready");
+  ASSERT_EQ(r.status, 200) << r.body;
+  auto ready = parse(r.body);
+  EXPECT_EQ(ready["ok"], true);
+  for (const char* k : {"storage", "identity", "boxes", "mcp", "change_log", "traffic", "queue"}) {
+    EXPECT_TRUE(ready["checks"].as_object().contains(k)) << k;
+  }
+  EXPECT_EQ(ready["checks"].as_object()["change_log"].as_object()["on"], true);
+  EXPECT_FALSE(ready["build"].as_string().empty());
+}
+
+// The panel's stores are never a reason not to start (the 2026-10-29 outage's lesson).
+TEST(PanelStartup, AHostWhoseChangeLogCantOpenStillServes) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "panel_degraded";
+  fs::remove_all(root);
+  // A directory where each database file would go: SQLite can't open either.
+  fs::create_directories(root / "storage/operations/changes.db");
+  fs::create_directories(root / "storage/operations/traffic.db");
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 1, "boxes": 1}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto host = std::make_unique<host::Host>(config::local_mode(cfg));
+  uint16_t port = host->start();
+  bool noted = false;
+  for (const auto& n : host->startup_notes()) noted |= n.starts_with("change log off");
+  EXPECT_TRUE(noted);
+  auto r = fetch(port, "localhost", bhttp::verb::get, "/goober/ready");
+  EXPECT_EQ(r.status, 200) << r.body;
+  EXPECT_EQ(parse(r.body)["checks"].as_object()["change_log"].as_object()["on"], false);
+  std::string text;
+  ASSERT_TRUE(host->content().put("playground", "x.md", "# x", &text)) << text;
+  EXPECT_EQ(fetch(port, "localhost", bhttp::verb::get, "/x").status, 200);
+}

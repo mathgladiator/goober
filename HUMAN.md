@@ -8,7 +8,12 @@ over ssh; they need sudo.
 
 ```sh
 curl -s https://kcmeatup.com/goober/health        # {"ok":true,"build":"a2906b65012c"}
+curl -s https://kcmeatup.com/goober/ready         # every subsystem: storage, identity, boxes, mcp, queue
 ```
+
+An empty 503 from Caddy (no body, `server: Caddy`) means the host isn't answering at all: go
+to section 5. `/goober/ready` answers 503 with `"ok":false` and names the failing check when
+the host runs but something is wrong.
 
 Then open the site in a browser. If health fails, go to section 5.
 
@@ -73,6 +78,25 @@ just deploy kcmeatup.com --user customer
 
 It upgrades everything and ends with `── checking everything this host needs`. The last line
 must be `✓ every check passed`. Any `✗` line says what is wrong.
+
+A new build that isn't ready within a minute is rolled back on its own: the deploy prints the
+host's last 60 log lines (the reason), puts the previous build back, and fails. Then it checks
+from outside what people and agents see (`host-src/tools/readiness.d/kcmeatup.com` lists the
+pages and boxes). The same check by hand, with an operator token for the boxes:
+
+```sh
+GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://kcmeatup.com \
+  $(grep -v '^#' host-src/tools/readiness.d/kcmeatup.com)
+```
+
+If the host is down and you want its reason now:
+
+```sh
+ssh customer@kcmeatup.com 'sudo journalctl -u goober-host -n 60 --no-pager'
+ssh customer@kcmeatup.com 'sudo -u goober goober-host check --config /srv/goober/host/host.json'
+# Back to the build before the last deploy:
+ssh customer@kcmeatup.com 'sudo cp -p /usr/local/bin/goober-host.prev /usr/local/bin/goober-host && sudo systemctl restart goober-host'
+```
 
 ## 6. Stop Grok
 

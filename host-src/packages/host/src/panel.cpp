@@ -229,6 +229,7 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
 }
 
 void Host::record_bundle(const wal::Bundle& bundle) {
+  if (!changes_) return;
   try {
     std::string actor = current_operator().empty() ? "host" : current_operator();
     changes_->record(bundle, actor, current_request_id(), base::now_unix_ms());
@@ -274,6 +275,7 @@ void Host::register_panel_tools() {
                       {"box", string_property("Only this box.")}},
                      {}),
        [this, window_of](const bj::object& args) {
+         if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
          int64_t now = base::now_unix_ms();
          traffic_->catch_up(now);
          std::string w = window_of(args), tenant = arg_text(args, "tenant"), box = arg_text(args, "box");
@@ -283,6 +285,7 @@ void Host::register_panel_tools() {
 
   mcp_->add_tool({"hot_boxes", "Boxes by heat (CPU time) over a window, with requests, server errors, fuel, and SQL calls.",
                   object_schema({{"window", window_prop}}, {}), [this, window_of](const bj::object& args) {
+                    if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
                     int64_t now = base::now_unix_ms();
                     traffic_->catch_up(now);
                     auto hot = traffic_->hot_boxes(window_of(args), now);
@@ -305,6 +308,7 @@ void Host::register_panel_tools() {
        "is requests or calls; us is CPU time (heat).",
        object_schema({{"window", window_prop}, {"box", string_property("One box's graph.")}}, {}),
        [this, window_of](const bj::object& args) {
+         if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
          int64_t now = base::now_unix_ms();
          traffic_->catch_up(now);
          std::string w = window_of(args), only = arg_text(args, "box");
@@ -491,6 +495,7 @@ void Host::register_panel_tools() {
                       {"limit", integer_property("At most this many: default 50, at most 500.")}},
                      {}),
        [this](const bj::object& args) {
+         if (!changes_) return ToolResult::fail("the change log is off: see host_health's startup notes");
          int64_t limit = std::clamp<int64_t>(arg_int(args, "limit", 50), 1, 500);
          return ToolResult::ok(bj::object{
              {"changes", changes_->list(arg_text(args, "kind"), arg_text(args, "tenant"), arg_int(args, "before_id", 0), limit)}});
@@ -501,6 +506,7 @@ void Host::register_panel_tools() {
                   "for a deploy, both versions' manifests.",
                   object_schema({{"id", integer_property("The change's id, from changes.")}}, {"id"}),
                   [this](const bj::object& args) {
+                    if (!changes_) return ToolResult::fail("the change log is off: see host_health's startup notes");
                     auto row = changes_->get(arg_int(args, "id", 0));
                     if (!row) return ToolResult::fail("no such change");
                     if (row->at("kind") == "deploy" || row->at("kind") == "upload") {
@@ -523,6 +529,7 @@ void Host::register_panel_tools() {
                                  {"limit", integer_property("At most this many: default 50, at most 500.")}},
                                 {}),
                   [this](const bj::object& args) {
+                    if (!changes_) return ToolResult::fail("the change log is off: see host_health's startup notes");
                     auto* c = args.if_contains("changed_only");
                     bool changed = c && c->is_bool() && c->as_bool();
                     int64_t limit = std::clamp<int64_t>(arg_int(args, "limit", 50), 1, 500);

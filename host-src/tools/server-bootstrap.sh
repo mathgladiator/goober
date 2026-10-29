@@ -83,8 +83,16 @@ id "$RUN_AS" >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --create
 install -d -o "$RUN_AS" -g "$RUN_AS" -m 0750 "$HOME_DIR" "$DIR"
 
 echo "── binary"
+# The build that was serving is kept as $BIN.prev, so a new one that won't start is rolled back.
+if [[ -f "$BIN" ]]; then cp -p "$BIN" "$BIN.prev"; fi
 install -m 0755 "$SRC/goober-host" "$BIN.new"
 mv "$BIN.new" "$BIN"
+rollback() {
+  [[ -f "$BIN.prev" ]] || { echo "   no previous build to roll back to"; return 1; }
+  echo "── rolling back to the previous build: $("$BIN.prev" --version 2>/dev/null)"
+  cp -p "$BIN.prev" "$BIN"
+  systemctl restart goober-host || true
+}
 mkdir -p "$HOME_DIR/tools"
 install -m 0755 "$SRC/setup.sh" "$HOME_DIR/tools/setup.sh"
 
@@ -118,7 +126,11 @@ fi
 
 if [[ -f "$DIR/host.json" ]]; then
   echo "── upgrading: checking the config with the new binary, then restarting"
-  sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json"
+  if ! sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json"; then
+    echo "✗ the new build refuses host.json (above); the running host is untouched"
+    cp -p "$BIN.prev" "$BIN" 2>/dev/null || true
+    exit 1
+  fi
   systemctl restart goober-host
 else
   echo "── first install: setup (answer Production)"
@@ -268,9 +280,25 @@ for d in sorted(c.get("domains", {})):
 ' "$DIR/host.json")"
 fi
 
-echo "── health"
-for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/goober/health" >/dev/null 2>&1 && break; sleep 0.2; done
-curl -fsS "http://127.0.0.1:$PORT/goober/health" && echo
+echo "── ready"
+# The gate: the new build must say it's ready (/goober/ready: storage, identity, boxes, the
+# queue) within a minute. If it doesn't, its log says why, and the previous build comes back.
+ready() { curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/tmp/goober-ready.$$ 2>&1; }
+up=""
+for _ in $(seq 1 120); do if ready; then up=1; break; fi; sleep 0.5; done
+if [[ -z "$up" ]]; then
+  echo "✗ the new build isn't ready after 60 s. Its status and last log lines:"
+  cat /tmp/goober-ready.$$ 2>/dev/null | sed 's/^/   /'; echo
+  systemctl --no-pager --lines=0 status goober-host | sed 's/^/   /' | head -8 || true
+  journalctl -u goober-host -n 60 --no-pager | sed 's/^/   /'
+  rm -f /tmp/goober-ready.$$
+  if rollback; then
+    for _ in $(seq 1 60); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/health" >/dev/null 2>&1 && break; sleep 0.5; done
+    if curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/health"; then echo; echo "   the previous build is serving again"; else echo "   ✗ the previous build isn't answering either"; fi
+  fi
+  exit 1
+fi
+cat /tmp/goober-ready.$$; echo; rm -f /tmp/goober-ready.$$
 systemctl --no-pager --lines=0 status goober-host | head -3 || true
 
 echo "── versions"
@@ -300,6 +328,7 @@ check() {
 }
 check "goober-host is running" systemctl is-active --quiet goober-host
 check "goober-host answers its health check" curl -fsS "http://127.0.0.1:$PORT/goober/health"
+check "goober-host is ready (storage, identity, boxes)" curl -fsS "http://127.0.0.1:$PORT/goober/ready"
 check "Caddy is running" systemctl is-active --quiet caddy
 check "the nightly backup timer is on" systemctl is-active --quiet goober-backup.timer
 if [[ "$WITH_RUST" == --with-rust ]]; then

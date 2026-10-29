@@ -8,6 +8,7 @@
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
 #include "goober/base/files.h"
+#include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "build_id.h"
 #include "goober/host/host.h"
@@ -17,6 +18,7 @@
 
 namespace goober::host {
 namespace bj = boost::json;
+namespace fs = std::filesystem;
 using mcp::ToolResult;
 using server::http::Request;
 using server::http::Response;
@@ -146,7 +148,7 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   bool failed = reply.body.find("\"isError\":true") != std::string::npos;
   if (failed) extra["tool_error"] = true;
   // The change log's actions: every tool call, linked to its changes by the request id (§ 5).
-  if (auto* tool = extra.if_contains("tool"); tool && tool->is_string()) {
+  if (auto* tool = extra.if_contains("tool"); changes_ && tool && tool->is_string()) {
     operations::Action action{base::now_unix_ms(), operator_name, std::string(tool->as_string()),
                               req.header("goober-request-id"), {}, failed || reply.body.find("\"error\":{") != std::string::npos};
     for (const auto& kv : extra) {
@@ -159,6 +161,54 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     }
   }
   finish(json_response(reply.status, std::move(reply.body)), json::dump(extra));
+}
+
+std::pair<int, bj::object> Host::readiness(bool probe_storage) {
+  auto cfg = config_.get();
+  bj::object checks;
+  bool ok = true;
+  auto check = [&](const char* name, bool good, bj::object more = {}) {
+    more["ok"] = good;
+    checks[name] = std::move(more);
+    ok = ok && good;
+  };
+  // Storage: the host can write where it keeps everything (a probe file, made and removed).
+  {
+    bool good = true;
+    std::string why;
+    if (probe_storage) {
+      auto probe = cfg->storage / "tmp" / ("ready-" + std::to_string(base::os_random_u64()));
+      std::error_code ec;
+      fs::create_directories(probe.parent_path(), ec);
+      good = base::write_file_durable(probe, "ready");
+      fs::remove(probe, ec);
+      if (!good) why = "can't write under " + cfg->storage.string();
+    }
+    check("storage", good, why.empty() ? bj::object{} : bj::object{{"why", why}});
+  }
+  // Identity and OAuth: the host realm answers (its database opens and reads).
+  try {
+    identity_->clients(identity::kHostRealm);
+    check("identity", true);
+  } catch (const std::exception& e) {
+    check("identity", false, bj::object{{"why", e.what()}});
+  }
+  auto active = boxes_->active();
+  check("boxes", true, bj::object{{"loaded", active->boxes.size()}});
+  check("mcp", mcp_ != nullptr);
+  // The panel's stores are optional: off is reported, never a failure.
+  checks["change_log"] = bj::object{{"ok", true}, {"on", changes_ != nullptr}};
+  checks["traffic"] = bj::object{{"ok", true}, {"on", traffic_ != nullptr}};
+  checks["queue"] = bj::object{{"ok", pool_->queued() < max_queued_}, {"queued", pool_->queued()}};
+  ok = ok && pool_->queued() < max_queued_;
+  bj::object body{{"ok", ok},
+                  {"build", std::string(kBuildCommit)},
+                  {"version", std::string(kVersion)},
+                  {"started_at", base::format_utc_ms(started_ms_)},
+                  {"uptime_ms", base::now_unix_ms() - started_ms_},
+                  {"checks", std::move(checks)},
+                  {"startup_notes", startup_notes_.size()}};
+  return {ok ? 200 : 503, std::move(body)};
 }
 
 void Host::register_tools() {
@@ -181,8 +231,15 @@ void Host::register_tools() {
                     for (const char* k : {"healthy", "last_nightly_at", "last_increment_at", "last_error", "key_warning"}) {
                       if (auto* v = backup.if_contains(k)) backups[k] = *v;
                     }
+                    // Each box and the version answering, so a deploy can be checked by name.
+                    bj::array loaded;
+                    for (const auto& [name, b] : boxes_->active()->boxes) {
+                      loaded.push_back(bj::object{{"box", name}, {"version", b->version}});
+                    }
                     return ToolResult::ok(bj::object{{"version", std::string(kVersion)},
                                                      {"build", kBuildCommit},
+                                                     {"ready", readiness(false).second},
+                                                     {"boxes_loaded", std::move(loaded)},
                                                      {"uptime_ms", base::now_unix_ms() - started_ms_},
                                                      {"requests", requests_.load()},
                                                      {"queued_jobs", pool_->queued()},

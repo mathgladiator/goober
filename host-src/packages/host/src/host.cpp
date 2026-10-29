@@ -120,15 +120,24 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
     : config_file_(std::move(config_file)), config_(config) {
   started_ms_ = base::now_unix_ms();
   wal_ = std::make_unique<wal::HostWal>(config->storage);
-  // The change log sees every bundle from here on (design/machine/028.Panel.md § 5).
-  changes_ = std::make_unique<operations::ChangeLog>(config->storage / "operations" / "changes.db", config->storage);
-  wal_->set_observer([this](const wal::Bundle& b) { record_bundle(b); });
-  traffic_ = std::make_unique<operations::Traffic>(
-      config->storage / "operations" / "traffic.db", config->storage / "logs",
-      [this](const std::string& domain) -> std::optional<std::string> {
-        if (auto r = config_.get()->resolve_host(domain)) return r->second.tenant;
-        return std::nullopt;
-      });
+  // The change log sees every bundle from here on (design/machine/028.Panel.md § 5). The
+  // panel's stores are never a reason not to start: without them the host serves, and says so.
+  try {
+    changes_ = std::make_unique<operations::ChangeLog>(config->storage / "operations" / "changes.db", config->storage);
+    wal_->set_observer([this](const wal::Bundle& b) { record_bundle(b); });
+  } catch (const std::exception& e) {
+    startup_notes_.push_back(std::string("change log off: ") + e.what());
+  }
+  try {
+    traffic_ = std::make_unique<operations::Traffic>(
+        config->storage / "operations" / "traffic.db", config->storage / "logs",
+        [this](const std::string& domain) -> std::optional<std::string> {
+          if (auto r = config_.get()->resolve_host(domain)) return r->second.tenant;
+          return std::nullopt;
+        });
+  } catch (const std::exception& e) {
+    startup_notes_.push_back(std::string("traffic rollups off: ") + e.what());
+  }
   const auto& rec = wal_->recovery();
   for (const auto& f : rec.failed) startup_notes_.push_back("host WAL: set aside " + f + " (see wal/failed/)");
   if (rec.replayed_bundles || rec.discarded_bundles || rec.torn_tail) {
@@ -272,7 +281,7 @@ uint16_t Host::start() {
     panel_server_->start();
   }
   timer_thread_ = std::thread([this] { run_timers(); });
-  traffic_thread_ = std::thread([this] { run_traffic(); });
+  if (traffic_) traffic_thread_ = std::thread([this] { run_traffic(); });
   outbox_thread_ = std::thread([this] { run_outbox(); });
   crawl_thread_ = std::thread([this] { run_crawls(); });
   if (!backups_manual_) backup_thread_ = std::thread([this] { run_backups(); });
@@ -572,6 +581,25 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     res.body = std::string(R"({"ok":true,"build":")") + kBuildCommit + "\"}";
     res.head_only = req.method == "head";
     return finish(std::move(res), "");
+  }
+  // Readiness, for deploys and bots: every subsystem's status, 503 unless all are fine.
+  if (path && path->path == "/goober/ready") {
+    pool_->post([this, req, finish] {
+      Response res;
+      try {
+        auto [status, body] = readiness(true);
+        res.status = status;
+        res.body = json::dump(body);
+      } catch (const std::exception& e) {
+        res.status = 503;
+        res.body = json::dump(bj::object{{"ok", false}, {"error", e.what()}});
+      }
+      res.headers.emplace_back("content-type", "application/json");
+      res.headers.emplace_back("cache-control", "no-store");
+      res.head_only = req.method == "head";
+      finish(std::move(res), "");
+    });
+    return;
   }
   if (path && path->path == kOperationsMcpPath) {
     pool_->post([this, req, finish] { handle_operations(req, finish); });

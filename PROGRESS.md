@@ -346,6 +346,15 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       feed; `template_get` reads any template, built-ins too; a page's `json_ld` field; Atom
       author and categories; `content_put` sha256; csv, atom, webmanifest, and other types.
 
+### Phase 16c: deploys that can't leave the site down
+- [x] `/goober/ready`: build, uptime, and each subsystem (storage, identity, boxes, mcp,
+      queue, change log, traffic), 503 unless all are fine; `host_health` lists each box's version.
+- [x] The panel's stores never stop the host from starting; it serves without them and says so.
+- [x] The server keeps the previous build; a new one not ready within a minute is rolled
+      back, with its log printed. `tools/readiness.py` then checks from outside (pages,
+      discovery, MCP, boxes), with per-site lists in `tools/readiness.d/`.
+- [ ] The root cause of the 2026-10-29 outage, from the server's log (the human's step).
+
 ### Phase 17: the operator panel (028)
 - [x] The panel on `operations.domain` (never a tenant's) or `operations.listen`, signed in as a
       host identity with `host:owner`, `host:operator`, or `host:observer`; look-only.

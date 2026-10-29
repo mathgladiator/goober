@@ -103,6 +103,21 @@ echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
 
 echo "── installing on $TARGET"
 ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL; rm -rf $REMOTE"
+
+# From the outside, the way people and agents reach it: pages, discovery, MCP, and the boxes a
+# site lists in tools/readiness.d/$server (one argument per line). The server's own gate already
+# rolled back a build that wouldn't start; this catches what only the public side shows.
+SERVER="${TARGET#*@}"
+echo "── readiness, from here: https://$SERVER"
+EXTRA=()
+if [[ -f "$HERE/readiness.d/$SERVER" ]]; then
+  while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || EXTRA+=($line); done <"$HERE/readiness.d/$SERVER"
+fi
+BUILD="$(cd "$HOST_SRC" && git log -1 --format=%h --abbrev=12)"
+if ! python3 "$HERE/readiness.py" "https://$SERVER" --build "$BUILD" "${EXTRA[@]}"; then
+  echo "✗ deployed, but not ready from outside: see the checks above (HUMAN.md § 5)"
+  exit 1
+fi
 }
 
 main "$@"
