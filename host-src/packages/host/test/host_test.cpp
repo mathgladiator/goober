@@ -309,6 +309,11 @@ TEST_F(HostTest, RouteCheckSaysWhoAnswersAPath) {
   EXPECT_EQ(lit.at("route").at("route"), "new_place");
   ASSERT_EQ(lit.at("also_fits").as_array().size(), 1u);
   EXPECT_EQ(lit.at("also_fits").at(0).at("box"), "places");
+  // The query doesn't choose the route; it comes back parsed.
+  auto with_query = check("/places/joes?tag=dirty-carnivore#top");
+  EXPECT_EQ(with_query.at("route").at("box"), "places");
+  EXPECT_EQ(with_query.at("path"), "/places/joes");
+  EXPECT_EQ(with_query.at("query").at("tag"), "dirty-carnivore");
   auto param = check("/places/joes");
   EXPECT_EQ(param.at("route").at("box"), "places");
   EXPECT_EQ(param.at("route").at("params").at("slug"), "joes");

@@ -348,7 +348,7 @@ void Host::register_tools() {
        "parameter as {}) in two boxes is refused at upload, and otherwise a literal segment beats a parameter at the "
        "first place two patterns differ, across boxes.",
        object_schema({{"domain", string_property("A domain from the host config, like kcmeatup.com.")},
-                      {"path", string_property("The request path, like /places/joes.")},
+                      {"path", string_property("The request path, like /places/joes; a ?query is set aside and reported.")},
                       {"verb", string_property("get (the default), post, put, patch, or delete.")}},
                      {"domain", "path"}),
        [this](const bj::object& args) {
@@ -359,10 +359,23 @@ void Host::register_tools() {
          const std::string& tenant = entry->second.tenant;
          std::string verb = base::to_lower(arg(args, "verb").value_or("get"));
          if (verb == "head") verb = "get";
-         auto path = router::normalize_path(arg(args, "path").value_or(""));
+         // A URL's query and fragment don't choose the route; the query is reported as parsed.
+         std::string given = arg(args, "path").value_or("");
+         given = given.substr(0, given.find('#'));
+         std::string query;
+         if (auto q = given.find('?'); q != std::string::npos) {
+           query = given.substr(q + 1);
+           given.resize(q);
+         }
+         auto path = router::normalize_path(given);
          if (!path) return ToolResult::fail("not a path the host would accept");
          const std::string& p = path->path;
          bj::object out{{"domain", domain}, {"tenant", tenant}, {"verb", verb}, {"path", p}};
+         if (!query.empty()) {
+           bj::object q;
+           for (const auto& [k, v] : router::parse_query(query)) q[k] = v;
+           out["query"] = std::move(q);
+         }
          // In the order the host checks them (Host::handle).
          std::string host_part;
          if (p == kMailHookPath) host_part = "the mail hook (Stalwart only)";
