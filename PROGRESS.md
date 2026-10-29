@@ -314,6 +314,13 @@ Decision 7 (push credentials) waits for the human; the terminal works by hourly 
       DKIM, or DMARC result, so `sender` is null (Q39).
 - [ ] Mail reaching the real server: port 25 open, MX records, a first message. This needs the human.
 
+### Phase 14: telephony (designed, waiting on the human)
+Proposed in `design/machine/025.Telephony.md`: a number per tenant from a rented provider,
+`routes.phone` for texts and calls in, a `phone` service for texts out, host-config grants
+that upload checks, `host:owner`-only spending, STOP/HELP and opt-outs in the host, and a
+spend cap. Nothing is built until Q42 to Q49 are answered.
+- [ ] The human ratifies 025 and picks a provider (Q42) and a first path (Q43).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

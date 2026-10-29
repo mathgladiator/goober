@@ -130,6 +130,9 @@ Read these before doing design work:
     realm, so agents that only speak OAuth (Grok) sign an operator in and reach the operator tools.
   - `design/machine/024.MailIn.md`: mail in: Stalwart on port 25 calling the host's MTA hook,
     `routes.mail` addresses, the box's answer as the SMTP answer, reply tokens, and deploys.
+  - `design/machine/025.Telephony.md`: a proposal: a phone number per tenant from a rented
+    provider, `routes.phone` for texts and calls, a `phone` service for texts out, host-config
+    grants checked at upload, spending as `host:owner`, STOP/HELP in the host; Q42 to Q49 open.
   - `design/machine/PHILOSOPHY.md`: engineering philosophy carried over from an earlier
     project. It references C++, CMake, Boost, and `goo::system::System`, none of which
     has been decided for goober. Treat it as a candidate, not a rule.
