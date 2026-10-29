@@ -107,9 +107,11 @@ class Site {
   Result directory(const Visit& v, const std::string& dir) const;
   std::vector<bj::object> entries(const Visit& v, const std::string& dir) const;
   bj::object base_data(std::string_view tenant) const;
+  // json_ld: the data's "json_ld" is a script tag the host built from a box's value
+  // (render_named), so {{{json_ld}}} may emit it unescaped.
   std::optional<std::string> render_template(std::string_view tenant, std::string_view name, bj::object data,
                                              const std::map<std::string, std::string>* inline_templates,
-                                             std::string* error) const;
+                                             std::string* error, bool json_ld = false) const;
 
   const content::ContentStore& store_;
 };

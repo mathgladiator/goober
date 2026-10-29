@@ -95,6 +95,10 @@ pages answer only GETs no box route takes. route_check(domain, path, verb) names
   "template": "order",                      browsers asking for HTML get the JSON rendered
   "cors": ["https://app.example.com"]       browser pages there may call it with a bearer token
 }}}}
+Templates escape every value, {{x}} and {{{x}}} alike, except two the host makes: {{{body}}}
+and {{{json_ld}}}. Put structured data in the JSON as "json_ld" (an object, or a string of
+JSON), and write {{{json_ld}}} in <head>, with no <script> tag of your own: the host writes the
+whole <script type="application/ld+json"> tag, escaped so no value can break out of it.
 Query parameters are OpenAPI schemas (036), one value each: {"type": "string"} (maxLength,
 minLength, enum, format date or date-time), {"type": "integer", "format": "int32"|"int64"}
 (minimum, maximum; int64 reaches the box as a string), {"type": "number", "format":

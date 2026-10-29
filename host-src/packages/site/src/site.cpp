@@ -294,9 +294,10 @@ bj::object Site::base_data(std::string_view tenant) const {
 
 std::optional<std::string> Site::render_template(std::string_view tenant, std::string_view name, bj::object data,
                                                  const std::map<std::string, std::string>* inline_templates,
-                                                 std::string* error) const {
+                                                 std::string* error, bool json_ld) const {
   render::TemplateOptions options;
   options.trusted_html = {"body"};
+  if (json_ld) options.trusted_html.insert("json_ld");
   options.partial = [&](std::string_view partial) -> std::optional<std::string> {
     if (inline_templates) {
       if (auto it = inline_templates->find(std::string(partial)); it != inline_templates->end()) return it->second;
@@ -341,7 +342,39 @@ std::optional<std::string> Site::render_named(std::string_view tenant, std::stri
   }
   // A box's JSON is data, never markup: only the host's own rendering may be "body".
   data.erase("body");
-  return render_template(tenant, name, std::move(data), inline_templates, error);
+  // Structured data for search engines: the box gives JSON (an object or array, or a string
+  // holding one), and the host writes the whole script tag, with < > & escaped as \u003c and
+  // so on, so no value can end the script or reach the page as markup (070 § Templates).
+  if (auto* ld = data.if_contains("json_ld")) {
+    std::optional<bj::value> v;
+    if (ld->is_object() || ld->is_array()) {
+      v = *ld;
+    } else if (ld->is_string()) {
+      std::string err;
+      v = json::parse(ld->get_string(), &err);
+      if (v && !v->is_object() && !v->is_array()) v.reset();
+    }
+    if (v) {
+      std::string text;
+      for (char c : json::dump(*v)) {
+        if (c == '<') text += "\\u003c";
+        else if (c == '>') text += "\\u003e";
+        else if (c == '&') text += "\\u0026";
+        else text += c;
+      }
+      // U+2028 and U+2029, which some script parsers end a line at.
+      for (std::string_view sep : {std::string_view("\xe2\x80\xa8"), std::string_view("\xe2\x80\xa9")}) {
+        for (size_t i = 0; (i = text.find(sep, i)) != std::string::npos;) {
+          text.replace(i, sep.size(), sep.back() == '\xa8' ? "\\u2028" : "\\u2029");
+        }
+      }
+      *ld = "<script type=\"application/ld+json\">" + text + "</script>";
+    } else {
+      data.erase("json_ld");
+    }
+  }
+  bool has_json_ld = data.contains("json_ld");
+  return render_template(tenant, name, std::move(data), inline_templates, error, has_json_ld);
 }
 
 std::vector<bj::object> Site::entries(const Visit& v, const std::string& dir) const {

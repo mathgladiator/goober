@@ -174,6 +174,20 @@ TEST_F(SiteTest, RedirectsStaticFilesAndRenderNamed) {
   auto html = s->render_named("t", "job", boost::json::object{{"id", "<7>"}, {"body", "<script>"}}, &inline_templates, &err);
   ASSERT_TRUE(html) << err;
   EXPECT_EQ(*html, "<b>&lt;7&gt;</b>");
+
+  // json_ld: the host writes the script tag from the box's JSON, and no value can end it.
+  std::map<std::string, std::string> ld_templates{{"place", "<head>{{{json_ld}}}</head><p>{{{name}}}</p>"}};
+  std::string ld_text = R"({"@context":"https://schema.org","name":"Rye </script><script>alert(1)</script> & Co"})";
+  auto ld = s->render_named("t", "place", boost::json::object{{"json_ld", ld_text}, {"name", "<i>Rye</i>"}}, &ld_templates, &err);
+  ASSERT_TRUE(ld) << err;
+  EXPECT_EQ(*ld, "<head><script type=\"application/ld+json\">{\"@context\":\"https://schema.org\",\"name\":\"Rye "
+                 "\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e \\u0026 Co\"}</script></head>"
+                 "<p>&lt;i&gt;Rye&lt;/i&gt;</p>");
+  // An object works the same; anything that isn't JSON renders nothing.
+  auto obj = s->render_named("t", "place", boost::json::object{{"json_ld", boost::json::object{{"a", "<"}}}}, &ld_templates, &err);
+  EXPECT_EQ(*obj, "<head><script type=\"application/ld+json\">{\"a\":\"\\u003c\"}</script></head><p></p>");
+  auto junk = s->render_named("t", "place", boost::json::object{{"json_ld", "<script>alert(1)</script>"}}, &ld_templates, &err);
+  EXPECT_EQ(*junk, "<head></head><p></p>");
 }
 
 TEST_F(SiteTest, BrokenFrontMatterFailsClosed) {
