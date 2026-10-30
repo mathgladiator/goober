@@ -118,6 +118,8 @@ trap 'rm -rf "$ROOT_TMP"' EXIT
 # restarted, says it's ready. (errtrace: the trap fires inside functions too.)
 RESTARTED="" STALWART_STOPPED=""
 on_error() {
+  # errtrace carries the trap into $(...) subshells too: only the script itself acts on it.
+  [[ "$BASHPID" == "$$" ]] || exit 1
   trap - ERR
   echo "✗ the deploy stopped at server-bootstrap.sh line $1 (the output above says why)"
   [[ -n "$STALWART_STOPPED" ]] && { systemctl start stalwart || true; }
@@ -249,6 +251,8 @@ fi
 if [[ -f /etc/caddy/Caddyfile ]] && grep -q "health_uri /goober/health" /etc/caddy/Caddyfile && ! grep -q "respond /internal/\* 404" /etc/caddy/Caddyfile; then
   cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-internal
   sed -i 's|^  encode zstd gzip$|  encode zstd gzip\n  respond /internal/* 404|' /etc/caddy/Caddyfile
+  grep -q 'respond /internal/\*' /etc/caddy/Caddyfile ||
+    echo "!! /etc/caddy/Caddyfile has no '  encode zstd gzip' line to add 'respond /internal/* 404' after; add it by hand"
   if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
     systemctl reload caddy
   else
