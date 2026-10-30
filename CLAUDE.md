@@ -155,6 +155,12 @@ Read these before doing design work:
   - `design/machine/032.Logs.md`: logs with an envelope and a hash chain, daily rotation, sealed
     archives kept 400 days, addresses as keyed hashes, an audit log, the log dive, live per-URI
     p99 and flow in memory, agent auditing, the panel's new views, and a SOC2 mapping.
+  - `design/machine/033.HttpFormats.md`: research: the ways HTTP APIs are described (OpenAPI 2.0
+    to 3.2, Overlays, Arazzo, Discovery, Smithy, and more), an audit of popular APIs (Amazon
+    aside), and the patterns that break "just OpenAPI".
+  - `design/machine/034.SpeakingHttp.md`: a small language for any API: pinned OpenAPI specs,
+    auth appliers, sealed per-user secrets, host-run OAuth 2 and paste connections, form,
+    multipart, and raw bodies, chunked uploads, polling, limits; Hevy, Strava, X, and POSSE.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
