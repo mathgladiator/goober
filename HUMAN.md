@@ -126,6 +126,13 @@ just deploy kcmeatup.com --user customer
 It upgrades everything and ends with `── checking everything this host needs`. The last line
 must be `✓ every check passed`. Any `✗` line says what is wrong.
 
+Before that last line, `── operations audit` says how the host is run: `✓` fine, `!` worth
+fixing, `?` a suggestion with its steps, `·` one you silenced. It never fails the deploy. It
+offers to set up the panel at ops.kcmeatup.com (answer `y`), or `v` to never ask again. To
+silence any check, add its id to host.json: `"audit": {"quiet": ["backup"]}`. The same
+audit any time: `sudo -u goober goober-host audit --config /srv/goober/host/host.json
+--caddyfile /etc/caddy/Caddyfile`.
+
 A new build that isn't ready within a minute is rolled back on its own: the deploy prints the
 host's last 60 log lines (the reason), puts the previous build back, and fails. Then the
 server checks itself through its public name, as people and agents reach it

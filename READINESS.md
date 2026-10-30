@@ -202,7 +202,8 @@ each ranch's site weekly.
   - a database explorer with a read-only SQL box.
 
   It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`).
-- **To turn it on at kcmeatup.com.**
+- **To turn it on at kcmeatup.com.** Deploy: the operations audit offers to set it up once
+  `ops.kcmeatup.com` resolves to the server (it does today). By hand:
   - Add an `A` record for `ops.kcmeatup.com`.
   - Add the name to the site line of `/etc/caddy/Caddyfile`, then reload Caddy.
   - Set `"operations": {"domain": "ops.kcmeatup.com"}` in host.json, and restart.

@@ -107,6 +107,9 @@ struct HostConfig {
   std::optional<uint16_t> operations_listen_port;
   // The panel's domain: operations.domain, or ops.localhost in local mode, or "" (off).
   std::string panel_domain() const { return !operations_domain.empty() ? operations_domain : local ? "ops.localhost" : ""; }
+  // The operations audit's checks the human asked not to be suggested again (audit.quiet),
+  // like "panel": `goober-host audit` notes them as quiet instead.
+  std::vector<std::string> audit_quiet;
   IdentityConfig identity;
   // Set by --local, never by the file: see local_mode().
   bool local = false;

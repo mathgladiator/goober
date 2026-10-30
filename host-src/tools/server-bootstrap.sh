@@ -482,6 +482,102 @@ if [[ -n "$PUBLIC" && -f "$SRC/readiness.py" ]]; then
   fi
 fi
 
+# The operations audit (028.Panel.md § 8): not whether the host is up, but how it is run: the
+# panel, mail, backups, operators, Caddy. It advises and never fails a deploy. A check named in
+# host.json's "audit": {"quiet": [...]} is noted as quiet instead. The panel it can set up here.
+echo "── operations audit"
+AUDIT_ARGS=(--config "$DIR/host.json")
+[[ -r /etc/caddy/Caddyfile ]] && AUDIT_ARGS+=(--caddyfile /etc/caddy/Caddyfile)
+sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" || true
+PANEL="$(sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" --json 2>/dev/null | python3 -I -c '
+import json, sys
+for f in json.load(sys.stdin)["findings"]:
+    if f["id"] == "panel" and f["level"] == "suggest":
+        print(f["data"]["domain"], f["data"]["dns"])
+' 2>/dev/null || true)"
+
+# Edits host.json as the host's user: "operations.domain" set, or "panel" added to audit.quiet.
+edit_config() {
+  sudo -u "$RUN_AS" python3 -I - "$DIR/host.json" "$1" "$2" <<'PY'
+import json, os, sys
+path, what, value = sys.argv[1:4]
+cfg = json.load(open(path))
+if what == "panel":
+    cfg.setdefault("operations", {})["domain"] = value
+else:
+    quiet = cfg.setdefault("audit", {}).setdefault("quiet", [])
+    if value not in quiet:
+        quiet.append(value)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode & 0o777)
+os.replace(tmp, path)
+PY
+}
+
+# The panel on its own domain: host.json, then the Caddyfile's site line, each checked, and
+# both put back if either is refused.
+panel_setup() {
+  local d="$1"
+  cp -p "$DIR/host.json" "$DIR/host.json.before-panel"
+  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel
+  undo() {
+    cp -p "$DIR/host.json.before-panel" "$DIR/host.json"
+    cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile
+    echo "   $1; host.json and the Caddyfile are as they were"
+  }
+  edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
+  sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" >/dev/null || { undo "the host refused the new host.json"; return 1; }
+  python3 -I - /etc/caddy/Caddyfile "$d" <<'PY' || { undo "couldn't find the Caddyfile's site line"; return 1; }
+import sys
+path, d = sys.argv[1:3]
+lines = open(path).read().split("\n")
+for i, line in enumerate(lines):
+    s = line.rstrip()
+    if s.endswith("{") and len(s) > 1 and s[0] not in " \t#{(":
+        lines[i] = s[:-1].rstrip() + ", " + d + " {"
+        break
+else:
+    sys.exit(1)
+open(path, "w").write("\n".join(lines))
+PY
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || { undo "Caddy refused the new site line"; return 1; }
+  systemctl restart goober-host
+  for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && break; sleep 0.5; done
+  systemctl reload caddy
+  # Caddy gets the certificate on the first request; a minute is plenty.
+  local code=""
+  for _ in $(seq 1 30); do
+    code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$d/" || true)"
+    [[ "$code" =~ ^(200|302|303)$ ]] && break
+    sleep 2
+  done
+  if [[ "$code" =~ ^(200|302|303)$ ]]; then
+    echo "   ✓ the panel answers at https://$d/ (sign in with an operator address)"
+  else
+    echo "   ! set up, but https://$d/ answered HTTP ${code:-nothing} so far; Caddy may still be getting its certificate"
+  fi
+}
+
+if [[ -n "$PANEL" ]]; then
+  read -r PANEL_DOMAIN PANEL_DNS <<<"$PANEL"
+  if [[ ! -t 0 ]]; then
+    echo "   (deploy from a terminal to be offered the panel at https://$PANEL_DOMAIN/)"
+  elif [[ "$PANEL_DNS" == ready ]]; then
+    read -r -p "   Set up the panel at https://$PANEL_DOMAIN/ now? [y]es, [n]ot now, ne[v]er: " answer </dev/tty || answer=n
+    case "$answer" in
+      y|Y|yes) panel_setup "$PANEL_DOMAIN" || true ;;
+      v|V|never) edit_config quiet panel && echo "   won't suggest it again (audit.quiet in host.json)" ;;
+      *) echo "   not now; the next deploy asks again" ;;
+    esac
+  else
+    read -r -p "   Add that DNS record and deploy again to set it up. Never suggest the panel? [v]/Enter: " answer </dev/tty || answer=""
+    [[ "$answer" =~ ^(v|V|never)$ ]] && edit_config quiet panel && echo "   won't suggest it again (audit.quiet in host.json)"
+  fi
+fi
+
 if ((${#FAILED[@]})); then
   echo
   echo "✗ ${#FAILED[@]} check(s) failed: ${FAILED[*]}"

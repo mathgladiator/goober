@@ -141,7 +141,8 @@ Read these before doing design work:
     ETags after expansion, and the `partial_*` tools.
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
-    change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`.
+    change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`;
+    the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel.
   - `design/machine/029.Invites.md`: invites as a host feature (the record, the template, accept by
     code with roles, terms, and lists; decline as a block only a person lifts), mail categories with
     their rules, lists with double opt-in, the preferences page, and per-tenant postal addresses.

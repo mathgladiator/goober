@@ -167,7 +167,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants"},
+                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants", "audit"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -485,6 +485,19 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
         return *error = "pwa.push-contact is mailto:you@example.com or an https URL", nullptr;
       }
       cfg->pwa.push_contact = *v;
+    }
+  }
+  // What `goober-host audit` (a deploy's operations audit) stops suggesting: one id per check.
+  if (const auto* audit = get_object(root, "audit", &err)) {
+    if (!check_keys(*audit, {"quiet"}, "audit", &err)) return *error = err, nullptr;
+    if (const auto* quiet = get_array(*audit, "quiet", &err)) {
+      for (const auto& q : *quiet) {
+        std::string id = q.is_string() ? std::string(q.as_string()) : "";
+        bool ok = !id.empty() && id.size() <= 40;
+        for (char ch : id) ok = ok && ((ch >= 'a' && ch <= 'z') || ch == '-');
+        if (!ok) return *error = "audit.quiet holds check ids, like \"panel\"", nullptr;
+        cfg->audit_quiet.push_back(id);
+      }
     }
   }
   if (const auto* tenants = get_object(root, "tenants", &err)) {

@@ -467,9 +467,17 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       keepalive; `bus_status`; tests end to end.
 - [ ] NATS for a cluster; a JavaScript helper in the asset kit.
 
+### Phase 28: the deploy as an operations audit (028 § 8)
+- [x] `goober-host audit`: the panel, Caddy's sites, the mailer, backups, operators;
+      `audit.quiet` in host.json; tests.
+- [x] Every deploy runs it and offers to set up the panel at `ops.` once its DNS is ready
+      (or never to ask again), checked and put back if refused.
+- [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
+      vault key copied off the machine.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
-access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),
+access patterns and generators (020, 028, 110, 120), sourcing (023),
 mail routes (038), the upload verb (060), the key vault (064), approvals, deployments,
 bundles, working sets (300 to 320), stability (330), quotas (390), the cluster (400),
 and contraction (420). Each waits for the human to pull it forward.

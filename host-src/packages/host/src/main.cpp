@@ -40,6 +40,7 @@
 #include "goober/json/json.h"
 
 #include "goober/base/time.h"
+#include "goober/host/audit.h"
 #include "goober/host/backup.h"
 #include "build_id.h"
 #include "goober/host/host.h"
@@ -73,6 +74,7 @@ constexpr const char* kUsage =
     "       goober-host vault key [--config host.json]   (prints the key that seals people's secrets)\n"
     "       goober-host backup list [--config host.json]\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
+    "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
     "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n";
 
@@ -387,7 +389,8 @@ int main(int argc, char** argv) {
   std::string config_path = "host.json";
   std::string token_name = "operator";
   std::string token_tenants;
-  bool local = false, claude = false;
+  bool local = false, claude = false, json_out = false;
+  std::string caddyfile;
   Flags flags;
   std::vector<std::string> positional;
   for (int i = 1; i < argc; ++i) {
@@ -398,6 +401,10 @@ int main(int argc, char** argv) {
       token_name = argv[++i];
     } else if (a == "--tenants" && i + 1 < argc) {
       token_tenants = argv[++i];
+    } else if (a == "--caddyfile" && i + 1 < argc) {
+      caddyfile = argv[++i];
+    } else if (a == "--json") {
+      json_out = true;
     } else if (a == "--local") {
       local = true;
     } else if (a == "--claude") {
@@ -433,6 +440,7 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
+  if (positional.size() == 1 && positional[0] == "audit") return goober::host::run_audit(config_path, caddyfile, json_out);
   if (positional.size() == 1 && positional[0] == "toolchain") return goober::host::run_toolchain_check(config_path);
   if (positional.size() == 3 && positional[0] == "operator" && positional[1] == "revoke") {
     // Every login and token a host operator holds, ended: browser sessions and the OAuth grants
