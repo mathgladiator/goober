@@ -20,6 +20,8 @@ function(goober_package)
     target_compile_options(${target}_test PRIVATE -Wall -Wextra)
     target_compile_definitions(${target}_test PRIVATE GOOBER_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp")
     include(GoogleTest)
-    gtest_discover_tests(${target}_test DISCOVERY_MODE PRE_TEST)
+    # Each case runs as its own process, but a fixture's cases share one directory under
+    # test-tmp: cases of one binary take turns, while packages still run side by side (-j).
+    gtest_discover_tests(${target}_test DISCOVERY_MODE PRE_TEST PROPERTIES RESOURCE_LOCK ${target}_tmp)
   endif()
 endfunction()
