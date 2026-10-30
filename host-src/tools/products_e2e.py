@@ -116,12 +116,25 @@ def main():
         st, h, _ = web.call("POST", f"/leads/{campaign}/signup", form=form, headers={"Origin": "https://evil.example"})
         check(st == 403, "a form posted from another site is refused")
 
+        # The mailed link: opening it changes nothing (a GET only reads); its button confirms.
+        ok, rows = op("db_query", {"tenant": tenant, "database": "leads", "sql": "SELECT token FROM leads WHERE email = ?",
+                                   "params": [visitor]})
+        token = (rows.get("rows") or [[""]])[0][0] if ok else ""
+        st, _, page = web.call("GET", f"/leads/confirm/{token}")
+        check(st == 200 and 'method=post' in page, "the confirmation link shows a button")
+        st, ok, out = tool("leads_list", {"campaign": campaign})
+        check(ok and not next((l for l in out.get("leads", []) if l["email"] == visitor), {}).get("confirmed"),
+              "opening the link confirms nothing")
+        st, h, _ = web.call("POST", f"/leads/confirm/{token}", form={}, headers=same_site)
+        check(st == 303 and h.get("location") == "/confirmed", "the button confirms")
+
         st, ok, out = tool("leads_list", {"campaign": campaign})
         leads = out.get("leads", [])
         mine = next((l for l in leads if l["email"] == visitor), {})
         check(ok and len(leads) == 2, "two leads: the honeypot bot isn't one")
         check(mine.get("answers") == {"share": "quarter", "zip": "93701", "when": "now"} and mine.get("utm_content") == "ad-b",
               "answers merged, the ad remembered")
+        check(bool(mine.get("confirmed")), "and confirmed")
         st, ok, out = tool("survey_summary", {"campaign": campaign, "question": "share"})
         tally = {x["answer"]: x["count"] for x in out.get("answers", [])}
         check(ok and tally == {"quarter": 1, "whole": 1}, "the survey tallies")

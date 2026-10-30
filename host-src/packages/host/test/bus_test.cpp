@@ -10,6 +10,8 @@
 #include <regex>
 #include <thread>
 
+#include <sqlite3.h>
+
 #include "goober/base/files.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
@@ -57,6 +59,12 @@ const char* kWat = R"wat((module
     (drop (call $header (i32.const 256) (i32.const 8) (i32.const 272) (i32.const 21)))
     (drop (call $respond (i32.const 302) (i32.const 192) (i32.const 16) (i32.const 0) (i32.const 0)))
     (i32.const 0))
+  (func (export "goober_route_sneaky_get") (result i32)
+    (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 37) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+  (func (export "goober_route_count") (result i32)
+    (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 128) (i32.const 31) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
   (func (export "goober_route_sneaky") (result i32)
     (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 37) (i32.const 0) (i32.const 0)))
     (i32.const 0))
@@ -68,7 +76,9 @@ const char* kManifest = R"({"box":"shop","domains":["*"],
   "data":{"sqlite3":{"w":{"schema":"items1","database":"items","pattern":"sql",
                           "tables":{"items":{"read":true,"insert":true}},"publish":"items"}}},
   "routes":{
-    "http":{"/items":{"post":{"name":"add","public":true}},"/fail":{"post":{"name":"add_fail","public":true}}},
+    "http":{"/items":{"post":{"name":"add","public":true}},"/fail":{"post":{"name":"add_fail","public":true}},
+              "/items/sneaky":{"get":{"name":"sneaky_get","public":true}},
+              "/items/count":{"get":{"name":"count","public":true,"response":"json"}}},
     "sse":{"/items/live":{"subscribe":{"name":"live","public":true,"response":"json","wake":["items"],
                                        "coalesce-ms":50,"refresh-ms":60000}},
            "/sneaky":{"subscribe":{"name":"sneaky","public":true,"wake":["items"]}},
@@ -207,7 +217,7 @@ TEST_F(BusTest, AWriteThatCommitsWakesSubscribersAndOneThatFailsDoesnt) {
 TEST_F(BusTest, AnEvaluationChangesNothingAndAPlainGetAnswersOnce) {
   Subscriber s(port, "/sneaky");
   ASSERT_TRUE(s.wait_for("event: update", 1, 3000)) << s.text();
-  EXPECT_NE(s.text().find("a subscription changes nothing"), std::string::npos) << s.text();
+  EXPECT_NE(s.text().find("a read changes nothing"), std::string::npos) << s.text();
   // Nothing was inserted: a plain GET of the live route says 0.
   asio::io_context io;
   beast::tcp_stream stream(io);
@@ -220,6 +230,49 @@ TEST_F(BusTest, AnEvaluationChangesNothingAndAPlainGetAnswersOnce) {
   bhttp::read(stream, buf, res);
   EXPECT_EQ(res.result_int(), 200u);
   EXPECT_NE(res.body().find("rows\":[[0]]"), std::string::npos) << res.body();
+}
+
+namespace {
+std::pair<int, std::string> get(uint16_t port, const std::string& target) {
+  asio::io_context io;
+  beast::tcp_stream stream(io);
+  stream.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+  bhttp::request<bhttp::string_body> req(bhttp::verb::get, target, 11);
+  req.set(bhttp::field::host, "localhost");
+  bhttp::write(stream, req);
+  beast::flat_buffer buf;
+  bhttp::response<bhttp::string_body> res;
+  bhttp::read(stream, buf, res);
+  return {int(res.result_int()), res.body()};
+}
+}  // namespace
+
+// A GET changes nothing (037.Caching.md § 2): a statement that writes is refused, and reads
+// begin deferred, so they answer while another connection holds the write lock.
+TEST_F(BusTest, AGetChangesNothingAndReadsBesideAWriter) {
+  auto [status, body] = get(port, "/items/sneaky");
+  EXPECT_EQ(status, 200);
+  EXPECT_NE(body.find("a read changes nothing"), std::string::npos) << body;
+  EXPECT_NE(get(port, "/items/count").second.find("rows\":[[0]]"), std::string::npos);
+  EXPECT_EQ(post(port, "/items"), 201);  // a POST still writes
+  EXPECT_NE(get(port, "/items/count").second.find("rows\":[[1]]"), std::string::npos);
+
+  fs::path file;
+  for (const auto& e : fs::recursive_directory_iterator(root)) {
+    if (e.path().filename() == "items.db") file = e.path();
+  }
+  ASSERT_FALSE(file.empty());
+  sqlite3* writer = nullptr;
+  ASSERT_EQ(sqlite3_open(file.c_str(), &writer), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(writer, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+  auto started = std::chrono::steady_clock::now();
+  auto [s2, b2] = get(port, "/items/count");
+  auto took = std::chrono::steady_clock::now() - started;
+  EXPECT_EQ(s2, 200) << b2;
+  EXPECT_NE(b2.find("rows\":[[1]]"), std::string::npos) << b2;
+  EXPECT_LT(took, std::chrono::milliseconds(1000));  // never waited for the lock
+  sqlite3_exec(writer, "ROLLBACK", nullptr, nullptr, nullptr);
+  sqlite3_close(writer);
 }
 
 TEST(Manifest, SubscriptionsAndPublishAreChecked) {

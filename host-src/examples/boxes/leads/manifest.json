@@ -61,6 +61,11 @@
         "get": {
           "name": "lead_confirm",
           "public": true
+        },
+        "post": {
+          "name": "lead_confirm_post",
+          "public": true,
+          "max-body-bytes": 1024
         }
       },
       "/leads/v1/export/{campaign : string}": {

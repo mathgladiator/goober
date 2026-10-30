@@ -23,7 +23,8 @@ owner's agent tools to count, tally, and export them. See `READINESS.md` at the 
 
 Each new signup gets a confirmation link through the host's `mail` service (declared in the
 manifest): it leaves only once the signup is stored, through the outbox, at most once a day
-to an address. With the dev mailer (the default) the mail is written to
+to an address. Opening the link changes nothing: it shows a button, and the button confirms,
+so a mail scanner that opens links can't confirm anyone. With the dev mailer (the default) the mail is written to
 `storage/mail/outbox/` and nobody receives it. To really send it, set the host's mailer to
 Amazon SES (`identity.mailer: "ses"` with `identity.ses.from` a verified address, and the
 AWS keys set with `goober-host key set aws_access_key_id` and `aws_secret_access_key`) or to

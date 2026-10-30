@@ -86,8 +86,8 @@ class Session {
   void rollback();
   // How many statements ran, for the access log.
   int statements() const { return statements_; }
-  // A subscription's evaluation (design/machine/036.Bus.md § 5): any statement that writes is
-  // refused before it runs.
+  // A GET, a HEAD, or a subscription's evaluation (design/machine/037.Caching.md § 2): any
+  // statement that writes is refused before it runs, and reads begin deferred.
   void set_read_only(bool on) { read_only_ = on; }
   // The strategies a statement that writes ran through, for the topics they publish.
   const std::set<std::string>& wrote() const { return wrote_; }

@@ -352,8 +352,8 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     request = std::move(*parsed);
   }
   if (ctx.read_only) {
-    // An evaluation may serve many subscribers at once, so it changes nothing (040): reads of
-    // the web, a person's mail preferences, and service methods whose effect is none.
+    // A GET or HEAD changes nothing, and an evaluation may serve many subscribers at once
+    // (040): reads of the web, a person's mail preferences, and service methods whose effect is none.
     bool safe = svc->web || (svc->mail && m.name == "preferences");
     if (!safe && svc->box.empty() && !svc->mail && !svc->invites && !svc->push) {
       std::string effect = m.effect;
@@ -365,7 +365,7 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
       }
       safe = effect == "none";
     }
-    if (!safe) return fail("a subscription changes nothing: " + svc->name + "." + m.name + " isn't a read");
+    if (!safe) return fail("a read changes nothing (a GET, a HEAD, or a subscription): " + svc->name + "." + m.name + " isn't a read");
   }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);

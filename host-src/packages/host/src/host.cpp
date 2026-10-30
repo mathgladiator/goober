@@ -1399,7 +1399,11 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // so a box can spot repeats without ever holding an IP address.
   doc["client_key"] = base::sha256_hex("goober-client\n" + tenant + "\n" + client_key).substr(0, 16);
 
-  auto call = call_box(ref, doc, tenant, request_id, who);
+  // A GET or HEAD changes nothing (037.Caching.md § 2): its statements may only read, so they
+  // begin deferred and never wait on the write lock, and its calls out must be reads.
+  CallOptions options;
+  options.read_only = req.method == "get" || req.method == "head";
+  auto call = call_box(ref, doc, tenant, request_id, who, options);
   auto& result = call.result;
   auto& extra = call.extra;
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");

@@ -158,11 +158,35 @@ pub extern "C" fn goober_route_lead_signup() -> i32 {
     finish(is_form, &next)
 }
 
+fn valid_token(t: &str) -> bool {
+    t.len() == 32 && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Opening the mailed link changes nothing (a GET only reads, and mail scanners open links
+/// nobody clicked): it shows a button, and the button's POST confirms.
 #[unsafe(no_mangle)]
 pub extern "C" fn goober_route_lead_confirm() -> i32 {
     let req = Request::read();
     let token = req.param("token").unwrap_or("");
-    if token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !valid_token(token) {
+        goober::redirect("/confirmed?ok=0");
+        return 0;
+    }
+    let page = format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
+         <title>Confirm your email</title><form method=post action=\"/leads/confirm/{token}\" \
+         style=\"font:18px system-ui;margin:2em\"><p>One click and you're confirmed.</p>\
+         <button type=submit style=\"font:inherit;padding:.5em 1.5em\">Confirm my email</button></form>"
+    );
+    respond(200, "text/html; charset=utf-8", page.as_bytes());
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn goober_route_lead_confirm_post() -> i32 {
+    let req = Request::read();
+    let token = req.param("token").unwrap_or("");
+    if !valid_token(token) {
         goober::redirect("/confirmed?ok=0");
         return 0;
     }

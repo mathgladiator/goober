@@ -226,7 +226,7 @@ class Host {
     std::optional<int64_t> timeout_ms;
     std::function<bool(db::Session&, std::string*)> before_commit;
     bool no_response_ok = false;  // a timer fire may just return: there is nobody to answer
-    bool read_only = false;       // a subscription's evaluation (036 § 5): no writes, no effects
+    bool read_only = false;       // a GET, a HEAD, or a subscription (036 § 5): no writes, no effects
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
