@@ -334,8 +334,10 @@ void Host::run_crawls() {
         web_->prune(pruned_ms);
       }
       fetched = crawl_step();
+      loop_beat("crawler");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: crawler: " << e.what() << "\n";
+      loop_beat("crawler", e.what());
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::milliseconds(fetched ? 50 : 500), [this] { return timers_stopping_; });

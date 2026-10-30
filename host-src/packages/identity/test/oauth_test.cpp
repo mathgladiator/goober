@@ -231,6 +231,11 @@ TEST_F(OAuthTest, ClientsAreChecked) {
   EXPECT_FALSE(id->put_client("playground", Client{"x", "x", {}, true, "", 0}, kNow, &why));
   EXPECT_FALSE(id->put_client("playground", Client{"x", "x", {"http://evil.test/cb"}, false, "", 0}, kNow, &why));
   EXPECT_FALSE(id->register_client("playground", "a\nb", {kAppRedirect}, kNow, &why));
+  // Nothing invisible or direction-changing: "Grok" must read as what it is.
+  for (const char* sneaky : {"Grok\u202e (verified)", "Gr\u200bok", "Grok\u2066x\u2069", "\ufeffGrok", "Gr\u00adok"}) {
+    EXPECT_FALSE(id->register_client("playground", sneaky, {kAppRedirect}, kNow, &why)) << sneaky;
+  }
+  EXPECT_TRUE(id->register_client("unicode", "Grök Café — 東京", {kAppRedirect}, kNow, &why)) << why;
   auto list = id->clients("playground");
   ASSERT_EQ(list.size(), 1u);
   EXPECT_TRUE(list[0].person);

@@ -38,9 +38,11 @@ sqlite::Db& Host::timer_progress(const std::string& tenant) {
   if (!db) {
     auto dir = config_.get()->storage / "sqlite3" / tenant;
     std::filesystem::create_directories(dir);
-    db = std::make_unique<sqlite::Db>(dir / "timers.db");
-    db->exec("CREATE TABLE IF NOT EXISTS goober_timer_fires (timer TEXT NOT NULL, row_key TEXT NOT NULL, "
-             "last_due INTEGER NOT NULL, PRIMARY KEY (timer, row_key))");
+    // Kept only once its table is there: a failure is tried again next time, not left half made.
+    auto opened = std::make_unique<sqlite::Db>(dir / "timers.db");
+    opened->exec("CREATE TABLE IF NOT EXISTS goober_timer_fires (timer TEXT NOT NULL, row_key TEXT NOT NULL, "
+                 "last_due INTEGER NOT NULL, PRIMARY KEY (timer, row_key))");
+    db = std::move(opened);
   }
   return *db;
 }
@@ -144,115 +146,122 @@ void Host::timer_tick(int64_t now_ms) {
           if (!all_fixed) fixed.clear();
         }
         for (const auto& [own_tenant, domain] : tenants_of(*cfg, box->manifest)) {
-          const std::string tenant = fixed.empty() ? own_tenant : fixed;
-          // A cron fire: due at `next`, computed once and kept until it fires.
-          auto plan_cron = [&](const std::string& key, const std::string& row_key, const std::chrono::time_zone* zone,
-                               bj::value row) {
-            seen.insert(key);
-            // A new box version's schedule, or a row's new zone, plans the key again.
-            std::string plan = t.cron + "|" + std::string(zone ? zone->name() : "");
-            auto it = st.next_due.find(key);
-            if (it != st.next_due.end() && st.plan[key] != plan) {
-              st.next_due.erase(it);
-              it = st.next_due.end();
-            }
-            st.plan[key] = plan;
-            if (it == st.next_due.end()) {
-              int64_t next = cron->next(now_ms, zone).value_or(INT64_MAX);
-              // Catch up once on what was missed while the host was down (045 "missed").
-              if (t.missed == "once") {
-                auto last = last_due(tenant, t.name, row_key);
-                auto prev = cron->previous(now_ms, zone);
-                if (last && prev && *prev > *last) next = *prev;
-              }
-              it = st.next_due.emplace(key, next).first;
-            }
-            if (it->second <= now_ms && !st.running.count(key)) {
-              due.push_back(Due{ref, tenant, domain, key, row_key, it->second, std::move(row), source});
-              int64_t after = std::max(it->second, now_ms);
-              it->second = cron->next(after, zone).value_or(INT64_MAX);
-            }
-          };
-          if (t.source.empty()) {
-            std::string key = tenant + "|" + t.name + "|";
-            if (t.every_ms) {
+          // One tenant's trouble (its timers.db or its rows unreadable) is its own: logged,
+          // and every other tenant's timers fire.
+          try {
+            const std::string tenant = fixed.empty() ? own_tenant : fixed;
+            // A cron fire: due at `next`, computed once and kept until it fires.
+            auto plan_cron = [&](const std::string& key, const std::string& row_key, const std::chrono::time_zone* zone,
+                                 bj::value row) {
               seen.insert(key);
-              std::string plan = "every|" + std::to_string(*t.every_ms);
+              // A new box version's schedule, or a row's new zone, plans the key again.
+              std::string plan = t.cron + "|" + std::string(zone ? zone->name() : "");
               auto it = st.next_due.find(key);
               if (it != st.next_due.end() && st.plan[key] != plan) {
                 st.next_due.erase(it);
                 it = st.next_due.end();
               }
               st.plan[key] = plan;
-              if (it == st.next_due.end()) it = st.next_due.emplace(key, now_ms + *t.every_ms).first;
-              if (it->second <= now_ms && !st.running.count(key)) {
-                due.push_back(Due{ref, tenant, domain, key, "", it->second, nullptr, nullptr});
-                it->second = now_ms + *t.every_ms;
+              if (it == st.next_due.end()) {
+                int64_t next = cron->next(now_ms, zone).value_or(INT64_MAX);
+                // Catch up once on what was missed while the host was down (045 "missed").
+                if (t.missed == "once") {
+                  auto last = last_due(tenant, t.name, row_key);
+                  auto prev = cron->previous(now_ms, zone);
+                  if (last && prev && *prev > *last) next = *prev;
+                }
+                it = st.next_due.emplace(key, next).first;
               }
-            } else if (cron) {
-              plan_cron(key, "", timers::host_zone(), nullptr);
+              if (it->second <= now_ms && !st.running.count(key)) {
+                due.push_back(Due{ref, tenant, domain, key, row_key, it->second, std::move(row), source});
+                int64_t after = std::max(it->second, now_ms);
+                it->second = cron->next(after, zone).value_or(INT64_MAX);
+              }
+            };
+            if (t.source.empty()) {
+              std::string key = tenant + "|" + t.name + "|";
+              if (t.every_ms) {
+                seen.insert(key);
+                std::string plan = "every|" + std::to_string(*t.every_ms);
+                auto it = st.next_due.find(key);
+                if (it != st.next_due.end() && st.plan[key] != plan) {
+                  st.next_due.erase(it);
+                  it = st.next_due.end();
+                }
+                st.plan[key] = plan;
+                if (it == st.next_due.end()) it = st.next_due.emplace(key, now_ms + *t.every_ms).first;
+                if (it->second <= now_ms && !st.running.count(key)) {
+                  due.push_back(Due{ref, tenant, domain, key, "", it->second, nullptr, nullptr});
+                  it->second = now_ms + *t.every_ms;
+                }
+              } else if (cron) {
+                plan_cron(key, "", timers::host_zone(), nullptr);
+              }
+              continue;
             }
-            continue;
-          }
-          if (!source) continue;
-          // The source's rows, read again every few seconds.
-          // Per box: strategy names are only unique within one manifest.
-          std::string rows_key = rows_cache_key(tenant, box->manifest.box, source->name);
-          auto& cache = st.rows[rows_key];
-          if (cache.read_at == 0 || now_ms - cache.read_at >= kRowsRefreshMs) {
-            cache.read_at = now_ms;
-            cache.rows.clear();
-            std::string database = source->database_for(tenant);
-            if (databases_->exists(tenant, database)) {
-              std::string sql = "SELECT * FROM " + sql_name(source->table) +
-                                (source->active_field.empty() ? "" : " WHERE " + sql_name(source->active_field) + " = 1") +
-                                " LIMIT " + std::to_string(kMaxRows + 1);
-              std::string err;
-              auto r = databases_->operate(tenant, database, sql, nullptr, kMaxRows + 1, false, &err);
-              if (!r) {
-                std::cerr << "goober-host: timer source " << source->name << " for " << tenant << ": " << err << "\n";
-              } else {
-                const auto& cols = r->at("columns").as_array();
-                for (const auto& row : r->at("rows").as_array()) {
-                  if (cache.rows.size() >= size_t(kMaxRows)) break;
-                  bj::object o;
-                  for (size_t i = 0; i < cols.size(); ++i) o[cols[i].as_string()] = row.as_array()[i];
-                  cache.rows.push_back(std::move(o));
+            if (!source) continue;
+            // The source's rows, read again every few seconds.
+            // Per box: strategy names are only unique within one manifest.
+            std::string rows_key = rows_cache_key(tenant, box->manifest.box, source->name);
+            auto& cache = st.rows[rows_key];
+            if (cache.read_at == 0 || now_ms - cache.read_at >= kRowsRefreshMs) {
+              cache.read_at = now_ms;
+              cache.rows.clear();
+              std::string database = source->database_for(tenant);
+              if (databases_->exists(tenant, database)) {
+                std::string sql = "SELECT * FROM " + sql_name(source->table) +
+                                  (source->active_field.empty() ? "" : " WHERE " + sql_name(source->active_field) + " = 1") +
+                                  " LIMIT " + std::to_string(kMaxRows + 1);
+                std::string err;
+                auto r = databases_->operate(tenant, database, sql, nullptr, kMaxRows + 1, false, &err);
+                if (!r) {
+                  std::cerr << "goober-host: timer source " << source->name << " for " << tenant << ": " << err << "\n";
+                } else {
+                  const auto& cols = r->at("columns").as_array();
+                  for (const auto& row : r->at("rows").as_array()) {
+                    if (cache.rows.size() >= size_t(kMaxRows)) break;
+                    bj::object o;
+                    for (size_t i = 0; i < cols.size(); ++i) o[cols[i].as_string()] = row.as_array()[i];
+                    cache.rows.push_back(std::move(o));
+                  }
                 }
               }
             }
-          }
-          auto schema = schemas_->get(source->schema);
-          const db::Table* table = schema ? schema->table(source->table) : nullptr;
-          std::string pk = "id";
-          if (table) {
-            for (const auto& c : table->columns) {
-              if (c.primary_key) pk = c.name;
+            auto schema = schemas_->get(source->schema);
+            const db::Table* table = schema ? schema->table(source->table) : nullptr;
+            std::string pk = "id";
+            if (table) {
+              for (const auto& c : table->columns) {
+                if (c.primary_key) pk = c.name;
+              }
             }
-          }
-          for (const auto& row : cache.rows) {
-            const bj::value* key_value = row.if_contains(pk);
-            if (!key_value) continue;
-            std::string row_key = key_value->is_string() ? std::string(key_value->as_string()) : json::dump(*key_value);
-            std::string key = tenant + "|" + t.name + "|" + row_key;
-            seen.insert(key);
-            if (!t.at_field.empty()) {
-              const bj::value* at = row.if_contains(t.at_field);
-              std::optional<int64_t> when;
-              if (at && at->is_int64()) when = at->as_int64();
-              if (at && at->is_string()) when = timers::parse_instant_ms(at->as_string());
-              if (!when || *when > now_ms || st.running.count(key)) continue;
-              if (auto r = st.retry_after.find(key); r != st.retry_after.end() && r->second > now_ms) continue;
-              due.push_back(Due{ref, tenant, domain, key, row_key, *when, row, source});
-              continue;
+            for (const auto& row : cache.rows) {
+              const bj::value* key_value = row.if_contains(pk);
+              if (!key_value) continue;
+              std::string row_key = key_value->is_string() ? std::string(key_value->as_string()) : json::dump(*key_value);
+              std::string key = tenant + "|" + t.name + "|" + row_key;
+              seen.insert(key);
+              if (!t.at_field.empty()) {
+                const bj::value* at = row.if_contains(t.at_field);
+                std::optional<int64_t> when;
+                if (at && at->is_int64()) when = at->as_int64();
+                if (at && at->is_string()) when = timers::parse_instant_ms(at->as_string());
+                if (!when || *when > now_ms || st.running.count(key)) continue;
+                if (auto r = st.retry_after.find(key); r != st.retry_after.end() && r->second > now_ms) continue;
+                due.push_back(Due{ref, tenant, domain, key, row_key, *when, row, source});
+                continue;
+              }
+              const std::chrono::time_zone* zone = timers::host_zone();
+              if (!source->timezone_field.empty()) {
+                const bj::value* tz = row.if_contains(source->timezone_field);
+                zone = tz && tz->is_string() ? timers::find_zone(tz->as_string()) : nullptr;
+                if (!zone) continue;  // a row without a real zone never fires
+              }
+              plan_cron(key, row_key, zone, row);
             }
-            const std::chrono::time_zone* zone = timers::host_zone();
-            if (!source->timezone_field.empty()) {
-              const bj::value* tz = row.if_contains(source->timezone_field);
-              zone = tz && tz->is_string() ? timers::find_zone(tz->as_string()) : nullptr;
-              if (!zone) continue;  // a row without a real zone never fires
-            }
-            plan_cron(key, row_key, zone, row);
+          } catch (const std::exception& e) {
+            std::cerr << "goober-host: timers: " << box_name << "." << t.name << " for " << own_tenant << ": " << e.what() << "\n";
+            loop_trouble("timers", own_tenant + ": " + e.what());
           }
         }
       }
@@ -476,13 +485,17 @@ void Host::run_timers() {
     lock.unlock();
     try {
       timer_tick(base::now_unix_ms());
+      loop_beat("timers");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: timers: " << e.what() << "\n";
+      loop_beat("timers", e.what());
     }
     try {
       identity_tick(base::now_unix_ms());
+      loop_beat("identity");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: identity events: " << e.what() << "\n";
+      loop_beat("identity", e.what());
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return timers_stopping_; });

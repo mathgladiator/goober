@@ -4,6 +4,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
+#include <fstream>
 #include <thread>
 
 #include "goober/host/host.h"
@@ -80,4 +81,39 @@ TEST(Lifecycle, HealthAndGracefulShutdown) {
   EXPECT_EQ(status, 200) << slow_body;
   EXPECT_GT(stopped_after, std::chrono::milliseconds(50));  // stop() waited for the request
   EXPECT_EQ(get(port, "/goober/health"), -1);  // and then nothing is listening
+}
+
+// A corrupt shared store is never a crash (systemd would restart the host forever): the host
+// serves, /goober/ready names what's off, and with consent unreadable no mail goes out.
+TEST(Lifecycle, CorruptStoresAreSetAsideOrHeldNotFatal) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "lifecycle_corrupt";
+  fs::remove_all(root);
+  std::string junk(8192, 'x');
+  for (const char* f : {"storage/mail/consent.db", "storage/web/web.db", "storage/source/source.db"}) {
+    fs::create_directories((root / f).parent_path());
+    std::ofstream(root / f) << junk;
+  }
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 1, "boxes": 1}})",
+                                  root, &err);
+  ASSERT_TRUE(cfg) << err;
+  host::Host h(config::local_mode(cfg));
+  uint16_t port = h.start();
+  std::string body;
+  EXPECT_EQ(get(port, "/goober/health", &body), 200);
+  auto [status, ready] = h.readiness(false);
+  EXPECT_EQ(status, 503);
+  auto off = boost::json::serialize(ready.at("checks").at("stores"));
+  for (const char* s : {"consent", "web", "source"}) EXPECT_NE(off.find(s), std::string::npos) << off;
+  // Set aside, not deleted: the bytes are kept for recovery; consent.db is left where it is.
+  bool web_kept = false, source_kept = false;
+  for (const auto& e : fs::directory_iterator(root / "storage/web")) web_kept |= e.path().filename().string().starts_with("web.db.unreadable-");
+  for (const auto& e : fs::directory_iterator(root / "storage/source")) source_kept |= e.path().filename().string().starts_with("source.db.unreadable-");
+  EXPECT_TRUE(web_kept);
+  EXPECT_TRUE(source_kept);
+  EXPECT_EQ(fs::file_size(root / "storage/mail/consent.db"), junk.size());
+  // The preferences page refuses rather than lose a choice.
+  EXPECT_EQ(get(port, "/goober/mail/playground/abc/def"), 503);
+  h.stop();
 }

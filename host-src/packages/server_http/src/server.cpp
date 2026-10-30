@@ -78,8 +78,20 @@ class Session : public std::enable_shared_from_this<Session> {
         return self->on_read(bhttp::error::body_limit);
       }
       self->parser_->body_limit(limit);
-      bhttp::async_read(self->stream_, self->buffer_, *self->parser_,
-                        [self](beast::error_code ec2, size_t) { self->on_read(ec2); });
+      auto read_body = [self] {
+        bhttp::async_read(self->stream_, self->buffer_, *self->parser_,
+                          [self](beast::error_code ec2, size_t) { self->on_read(ec2); });
+      };
+      // A client that asked first (curl does above 1 MiB, and so do agents built on it) is told
+      // to go on now, rather than waiting a second before sending anyway.
+      if (!self->parser_->is_done() && beast::iequals(h[bhttp::field::expect], "100-continue")) {
+        static const std::string kContinue = "HTTP/1.1 100 Continue\r\n\r\n";
+        return asio::async_write(self->stream_, asio::buffer(kContinue), [self, read_body](beast::error_code ec2, size_t) {
+          if (ec2) return self->on_read(ec2);
+          read_body();
+        });
+      }
+      read_body();
     });
   }
 
@@ -335,6 +347,10 @@ struct Server::Impl {
         } else {
           // Never inherited by a child process (asio's accept doesn't set it).
           ::fcntl(socket.native_handle(), F_SETFD, FD_CLOEXEC);
+          // No Nagle: a response written in two pieces (headers past Beast's buffer count, then
+          // the body) would otherwise wait out the client's delayed ACK, about 40 ms.
+          beast::error_code nd;
+          socket.set_option(tcp::no_delay(true), nd);
           std::make_shared<Session>(std::move(socket), options, handler, open)->run();
         }
       }

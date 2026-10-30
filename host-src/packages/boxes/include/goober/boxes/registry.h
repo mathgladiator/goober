@@ -73,6 +73,8 @@ class BoxRegistry {
 
   // Loads every box's active version. Problems are returned as warnings.
   std::vector<std::string> load_all();
+  // Boxes with a version set active that aren't being served (a load failure, a conflict).
+  std::vector<std::string> unloaded() const;
 
   // Checks, stores, and activates a version. `module` is binary WASM or WAT text, and
   // `types_text` is the types document the manifest's "types" names, or empty.

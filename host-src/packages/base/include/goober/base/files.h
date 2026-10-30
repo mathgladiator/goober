@@ -29,7 +29,8 @@ std::optional<std::filesystem::path> write_private_file(const std::filesystem::p
 bool remove_file_durable(const std::filesystem::path& path);
 
 // Every regular file under root, as "/"-separated paths relative to root, sorted.
-std::vector<std::string> list_files(const std::filesystem::path& root);
+// Only files whose relative path starts with `under` (a prefix like "posts/"), walking just its directory.
+std::vector<std::string> list_files(const std::filesystem::path& root, std::string_view under = "");
 
 // Appends one line to the file, creating it and its parents. Not fsynced.
 // Appends one line. A file past kLogRotateBytes becomes path.1 (and older ones move up,

@@ -8,12 +8,19 @@ over ssh; they need sudo.
 
 ```sh
 curl -s https://kcmeatup.com/goober/health        # {"ok":true,"build":"a2906b65012c"}
-curl -s https://kcmeatup.com/goober/ready         # every subsystem: storage, identity, boxes, mcp, queue
+curl -s https://kcmeatup.com/goober/ready         # storage, identity, boxes, stores, loops, mcp, queue
 ```
 
 An empty 503 from Caddy (no body, `server: Caddy`) means the host isn't answering at all: go
 to section 5. `/goober/ready` answers 503 with `"ok":false` and names the failing check when
-the host runs but something is wrong.
+the host runs but something is wrong:
+- `boxes` lists any box with an active version that isn't served (`not_loaded`).
+- `stores` lists any shared file that wouldn't open at start (`consent`, `web`, `source`). A
+  broken web or source store was moved aside (`*.unreadable-<time>`, kept) and a fresh one
+  started. A broken `consent` holds all mail until it's repaired and the host restarts, since
+  nothing knows who opted out.
+- `loops` names a background loop (timers, outbox, backups, ...) that stopped coming round
+  or keeps failing; `journalctl -u goober-host` says why.
 
 Then open the site in a browser. If health fails, go to section 5.
 

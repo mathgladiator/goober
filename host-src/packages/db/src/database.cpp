@@ -521,6 +521,17 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
   return db;
 }
 
+bool Databases::ensure_schema(std::string_view tenant, std::string_view database, const Schema& schema,
+                              std::string* error) {
+  if (!base::is_valid_name(tenant)) return *error = "bad tenant", false;
+  if (!is_valid_sql_name(database)) return *error = "bad database name: " + std::string(database), false;
+  {
+    std::lock_guard lock(mu_);
+    if (applied_.count(file(tenant, database).string() + "|" + schema.name)) return true;
+  }
+  return open(tenant, database, &schema, error) != nullptr;
+}
+
 bool Databases::check(std::string_view tenant, std::string_view database, const Schema& schema,
                       std::string* error) const {
   if (!exists(tenant, database)) return true;
@@ -656,7 +667,8 @@ Session::Open* Session::open_database(const std::string& tenant, const std::stri
         err = "schema " + other.schema + " isn't stored on this host";
         break;
       }
-      if (!dbs_.open(tenant, database, &*schema, &err)) break;
+      // Applied once per process: a request after the first opens nothing for it.
+      if (!dbs_.ensure_schema(tenant, database, *schema, &err)) break;
     }
     if (err.empty()) open.db = dbs_.open(tenant, database, nullptr, &err);
   } catch (const std::exception& e) {

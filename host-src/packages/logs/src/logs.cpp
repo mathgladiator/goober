@@ -221,8 +221,6 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
   r.log = name_;
   r.queued = pending / (base_name + ".log");
   r.manifest = pending / (base_name + ".manifest.json");
-  fs::create_hard_link(rotated, r.queued, ec);
-  if (ec) fs::copy_file(rotated, r.queued, fs::copy_options::overwrite_existing, ec);
   // The chain before this file: the line before its first, which is the previous file's last.
   // It's kept beside the log at each rotation (name.log.chain), since the numbered files that
   // held it are deleted after 7 days; a log's first line ever chains from genesis.
@@ -244,12 +242,18 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
                                {"rotated_at", base::format_utc_ms(now_ms)},
                                {"chain_before", prev},
                                {"chain_after", last_chain}};
+  // The stub before the link: finish_pending takes a .log only once its stub is there.
   base::write_file_durable(r.manifest, json::pretty(r.manifest_json));
+  fs::create_hard_link(rotated, r.queued, ec);
+  if (ec) fs::copy_file(rotated, r.queued, fs::copy_options::overwrite_existing, ec);
   if (!last_chain.empty()) base::write_file_durable(sidecar, last_chain);
   return r;
 }
 
 std::vector<Rotated> finish_pending(const fs::path& archive) {
+  // Housekeeping and the uploader both call this, on their own threads: one at a time.
+  static std::mutex finishing;
+  std::lock_guard lock(finishing);
   std::vector<Rotated> out;
   std::error_code ec;
   fs::path pending = archive / "pending";
@@ -258,16 +262,28 @@ std::vector<Rotated> finish_pending(const fs::path& archive) {
     if (it->path().extension() == ".log") logs.push_back(it->path());
   }
   std::sort(logs.begin(), logs.end());
+  // A stub whose log never came (a crash between the two) is dropped after a day; that file's
+  // lines stay in the numbered local files, unarchived.
+  for (auto it = fs::directory_iterator(pending, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    const auto& p = it->path();
+    if (!p.string().ends_with(".manifest.json")) continue;
+    fs::path log = p.parent_path() / (p.filename().string().substr(0, p.filename().string().size() - 14) + ".log");
+    std::error_code e2;
+    auto age = fs::file_time_type::clock::now() - fs::last_write_time(p, e2);
+    if (!e2 && !fs::exists(log, e2) && age > std::chrono::hours(24)) fs::remove(p, e2);
+  }
+  ec.clear();
   for (const auto& f : logs) {
     fs::path stub = f;
     stub.replace_extension(".manifest.json");
     bj::object m;
-    if (auto text = base::read_file(stub)) {
-      std::string err;
-      if (auto v = json::parse(*text, &err); v && v->is_object()) m = v->as_object();
-    }
+    auto text = base::read_file(stub);
+    if (!text) continue;  // a rotation still writing it: next time
+    std::string err;
+    if (auto v = json::parse(*text, &err); v && v->is_object()) m = v->as_object();
     // What the file holds, so its archive can be checked on its own.
     std::ifstream in(f, std::ios::binary);
+    if (!in) continue;
     base::Sha256 sha;
     std::string pending_text;
     int64_t lines = 0, first_seq = 0, last_seq = 0;

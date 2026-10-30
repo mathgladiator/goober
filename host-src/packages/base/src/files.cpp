@@ -113,15 +113,23 @@ bool remove_file_durable(const fs::path& path) {
   return fsync_dir(path.parent_path());
 }
 
-std::vector<std::string> list_files(const fs::path& root) {
+std::vector<std::string> list_files(const fs::path& root, std::string_view under) {
   std::vector<std::string> out;
   std::error_code ec;
-  if (!fs::is_directory(root, ec)) return out;
-  for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+  // Only the directory the prefix names is walked, not the whole tree.
+  std::string sub(under.substr(0, under.rfind('/') == std::string_view::npos ? 0 : under.rfind('/') + 1));
+  fs::path start = sub.empty() ? root : root / sub;
+  if (!fs::is_directory(start, ec)) return out;
+  // The path below root, by slicing: fs::relative canonicalizes, a few syscalls a file.
+  std::string base = root.generic_string();
+  if (!base.empty() && base.back() != '/') base += '/';
+  for (auto it = fs::recursive_directory_iterator(start, ec); !ec && it != fs::recursive_directory_iterator();
        it.increment(ec)) {
     if (it->is_regular_file(ec)) {
-      std::string rel = fs::relative(it->path(), root, ec).generic_string();
-      if (rel.find(".tmp-") == std::string::npos) out.push_back(rel);
+      std::string full = it->path().generic_string();
+      if (!full.starts_with(base)) continue;
+      std::string rel = full.substr(base.size());
+      if (rel.find(".tmp-") == std::string::npos && rel.starts_with(under)) out.push_back(std::move(rel));
     }
   }
   std::sort(out.begin(), out.end());

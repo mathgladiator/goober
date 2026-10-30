@@ -172,9 +172,24 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   mail_->set_log([this](const std::string& log, bj::object line) { log_line(log, std::move(line)); });
   mail_templates_ = std::make_unique<mail::templates::Store>(config->storage / "mail" / "templates");
   // Who each tenant may mail (design/machine/029.Invites.md): the old unsubscribes become blocks once.
-  consent_ = std::make_unique<mail::consent::Store>(config->storage / "mail" / "consent.db");
-  if (int n = consent_->import_unsubscribed(config->storage / "mail" / "unsubscribed.db", base::now_unix_ms())) {
-    std::cerr << "goober-host: mail: " << n << " unsubscribed address(es) became blocks in consent.db\n";
+  // The shared stores open here, and one that won't is never a crash (systemd would restart
+  // the host forever, and every tenant would be down over one file): see set_aside.
+  try {
+    consent_ = std::make_unique<mail::consent::Store>(config->storage / "mail" / "consent.db");
+    if (int n = consent_->import_unsubscribed(config->storage / "mail" / "unsubscribed.db", base::now_unix_ms())) {
+      std::cerr << "goober-host: mail: " << n << " unsubscribed address(es) became blocks in consent.db\n";
+    }
+  } catch (const std::exception& e) {
+    // Not set aside: the opt-outs in it matter. A stand-in keeps the code paths whole, and
+    // consent_off_ holds every mail.
+    consent_off_ = true;
+    stores_off_.push_back("consent");
+    startup_notes_.push_back(std::string("mail held: storage/mail/consent.db won't open (") + e.what() +
+                             "); no mail goes out until it is repaired and the host restarts");
+    auto standin = config->storage / "mail" / "consent.standin.db";
+    std::error_code ec;
+    std::filesystem::remove(standin, ec);
+    consent_ = std::make_unique<mail::consent::Store>(standin);
   }
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
@@ -190,7 +205,13 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status). "
       "See traffic, heat, and data flow (traffic, hot_boxes, box_graph), and what changed and who changed it "
       "(changes, change_get, operator_actions).");
-  init_web();
+  try {
+    init_web();
+  } catch (const std::exception& e) {
+    stores_off_.push_back("web");
+    set_aside(config->storage / "web" / "web.db", e.what());
+    init_web();
+  }
   register_tools();
   register_content_tools();
   register_data_tools();
@@ -257,8 +278,10 @@ void Host::run_backups() {
     lock.unlock();
     try {
       backups_->tick(base::now_unix_ms());
+      loop_beat("backups");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: backups: " << e.what() << "\n";
+      loop_beat("backups", e.what());
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return timers_stopping_; });
@@ -336,6 +359,24 @@ uint16_t Host::start() {
   }
   sse_thread_ = std::thread([this] { sse_loop(); });
   return server_->port();
+}
+
+std::string Host::set_aside(const std::filesystem::path& file, const std::string& why) {
+  std::string stamp = base::format_utc_ms(base::now_unix_ms());
+  for (char& c : stamp) {
+    if (c == ':') c = '-';
+  }
+  std::filesystem::path aside = file.string() + ".unreadable-" + stamp;
+  std::error_code ec;
+  std::filesystem::rename(file, aside, ec);
+  for (const char* extra : {"-wal", "-shm"}) {
+    std::error_code e2;
+    std::filesystem::rename(file.string() + extra, aside.string() + extra, e2);
+  }
+  startup_notes_.push_back(file.filename().string() + " wouldn't open (" + why + "); moved to " + aside.string() +
+                           (ec ? " (the move failed: " + ec.message() + ")" : "") + " and a fresh one started");
+  std::cerr << "goober-host: " << startup_notes_.back() << "\n";
+  return ec ? "" : aside.string();
 }
 
 void Host::stop() {

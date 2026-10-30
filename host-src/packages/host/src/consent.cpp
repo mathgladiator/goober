@@ -250,6 +250,12 @@ void Host::add_footer(std::string* text, std::string* html, const std::string& w
 void Host::handle_unsubscribe(const Request& req, const Finish& finish, const std::string& path,
                               const std::string& tenant) {
   std::string request_id = req.header("goober-request-id");
+  if (consent_off_) {
+    // A choice made now would be lost: say so rather than pretend.
+    auto res = error_page(tenant, 503, request_id);
+    res.headers.emplace_back("retry-after", "3600");
+    return finish(std::move(res), R"({"unsubscribe":"consent store unreadable"})");
+  }
   bool old = path.starts_with("/goober/unsubscribe/");
   std::string rest = path.substr(old ? std::string("/goober/unsubscribe/").size() : std::string("/goober/mail/").size());
   std::vector<std::string> parts;

@@ -104,8 +104,8 @@ std::optional<File> ContentStore::get(std::string_view tree, std::string_view pa
 std::vector<std::string> ContentStore::list(std::string_view tree, std::string_view prefix) const {
   std::vector<std::string> out;
   if (tree != kHostTree && !base::is_valid_name(tree)) return out;
-  for (auto& f : base::list_files(wal_.root() / "content" / std::string(tree))) {
-    if (f.starts_with(prefix) && !overlaid(tree, f)) out.push_back(std::move(f));
+  for (auto& f : base::list_files(wal_.root() / "content" / std::string(tree), prefix)) {
+    if (!overlaid(tree, f)) out.push_back(std::move(f));
   }
   if (t_overlay && t_overlay->tree == tree) {
     for (const auto& [f, data] : t_overlay->files) {

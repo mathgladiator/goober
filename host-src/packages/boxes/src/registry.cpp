@@ -134,13 +134,38 @@ std::vector<std::string> BoxRegistry::load_all() {
   }
   std::string err;
   if (!next->build(&err)) {
-    warnings.push_back("route conflict on load, no boxes served: " + err);
+    // A conflict between stored versions: every box that fits is served, in name order, and
+    // only those that conflict with what's already in are left out (by name, in the warnings).
+    auto all = next->boxes;
     next = std::make_shared<ActiveSet>();
+    for (const auto& [name, box] : all) {
+      auto trial = std::make_shared<ActiveSet>(*next);
+      trial->boxes[name] = box;
+      std::string why;
+      if (trial->build(&why)) {
+        next = trial;
+      } else {
+        warnings.push_back("box " + name + " not loaded: a route conflict: " + why);
+      }
+    }
     next->build(&err);
   }
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
   return warnings;
+}
+
+std::vector<std::string> BoxRegistry::unloaded() const {
+  std::vector<std::string> out;
+  auto current = active();
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes", ec)) {
+    std::string box = entry.path().filename().string();
+    if (!base::is_valid_name(box) || current->boxes.count(box)) continue;
+    if (fs::exists(entry.path() / "active", ec)) out.push_back(box);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
 }
 
 bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,

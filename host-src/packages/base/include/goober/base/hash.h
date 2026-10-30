@@ -19,10 +19,7 @@ class Sha256 {
 
  private:
   void reset();
-  uint32_t state_[8];
-  uint8_t buffer_[64];
-  size_t buffered_ = 0;
-  uint64_t total_ = 0;
+  alignas(8) unsigned char ctx_[128];  // OpenSSL's SHA256_CTX
 };
 
 // SHA-256 of the bytes, as 32 raw bytes.

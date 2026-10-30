@@ -131,3 +131,31 @@ TEST(Server, AStreamTooFarBehindIsLetGo) {
   EXPECT_TRUE(held->closed());
   server.stop();
 }
+
+// A client that sends Expect: 100-continue is told to go on at once.
+TEST(Server, AnswersExpectContinue) {
+  ServerOptions o{"127.0.0.1", 0, 1, 1024};
+  o.body_limit_for = [](std::string_view, std::string_view) -> uint64_t { return 1024; };
+  Server server(o, [](Request req, Responder respond) {
+    Response r;
+    r.body = "got " + std::to_string(req.body.size());
+    respond(std::move(r));
+  });
+  server.start();
+  asio::io_context io;
+  tcp::socket sock(io);
+  sock.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), server.port()));
+  std::string head = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n";
+  asio::write(sock, asio::buffer(head));
+  // Before any body is sent, the 100 arrives.
+  asio::streambuf buf;
+  asio::read_until(sock, buf, "\r\n\r\n");
+  std::string got((std::istreambuf_iterator<char>(&buf)), {});
+  EXPECT_TRUE(got.starts_with("HTTP/1.1 100 Continue")) << got;
+  asio::write(sock, asio::buffer(std::string("hello")));
+  beast::flat_buffer fb;
+  bhttp::response<bhttp::string_body> res;
+  bhttp::read(sock, fb, res);
+  EXPECT_EQ(res.result_int(), 200u);
+  EXPECT_EQ(res.body(), "got 5");
+}

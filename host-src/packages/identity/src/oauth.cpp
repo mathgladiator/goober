@@ -36,10 +36,22 @@ bool is_client_id(std::string_view id) {
   return true;
 }
 
+// A name an operator reads on a consent screen and in the panel: no controls, and none of the
+// invisible or direction-changing characters (zero-width, bidi overrides and isolates, the soft
+// hyphen, the BOM) that would make "Grok" display as something it isn't.
 bool is_client_name(std::string_view name) {
   if (name.empty() || name.size() > 80) return false;
-  for (unsigned char c : name) {
+  for (size_t i = 0; i < name.size(); ++i) {
+    unsigned char c = static_cast<unsigned char>(name[i]);
     if (c < 0x20 || c == 0x7f) return false;
+    auto at = [&](size_t k) { return i + k < name.size() ? static_cast<unsigned char>(name[i + k]) : 0; };
+    if (c == 0xc2 && at(1) == 0xad) return false;                                  // U+00AD
+    if (c == 0xe2 && at(1) == 0x80 && ((at(2) >= 0x8b && at(2) <= 0x8f) ||        // U+200B..200F
+                                      (at(2) >= 0xaa && at(2) <= 0xae))) {        // U+202A..202E
+      return false;
+    }
+    if (c == 0xe2 && at(1) == 0x81 && at(2) >= 0xa0 && at(2) <= 0xaf) return false;  // U+2060..206F
+    if (c == 0xef && at(1) == 0xbb && at(2) == 0xbf) return false;                   // U+FEFF
   }
   return true;
 }

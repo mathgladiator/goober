@@ -25,6 +25,8 @@ class Databases {
   bool exists(std::string_view tenant, std::string_view database) const;
 
   // Opens a database, creating it if needed, and applies `schema` (when given) once.
+  // The schema applied to the database, opening it only the first time in this process.
+  bool ensure_schema(std::string_view tenant, std::string_view database, const Schema& schema, std::string* error);
   std::unique_ptr<sqlite::Db> open(std::string_view tenant, std::string_view database, const Schema* schema,
                                    std::string* error);
 

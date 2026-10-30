@@ -5,6 +5,7 @@
 // who signed in. Delivery is at least once, in order, per route: the cursor moves past an event
 // only when the call succeeded or gave up. Sign-in never waits on a box.
 
+#include <functional>
 #include <iostream>
 
 #include "goober/base/encoding.h"
@@ -48,17 +49,29 @@ void Host::identity_tick(int64_t now_ms) {
   if (prune) {
     std::set<std::string> realms{std::string(identity::kHostRealm)};
     for (const auto& [domain, entry] : cfg->domains) realms.insert(entry.tenant);
+    // Each step, and each realm, on its own: one unreadable database never stops the rest
+    // (log rotation above all, or the disk fills).
+    auto step = [&](const std::string& what, const std::function<void()>& f) {
+      try {
+        f();
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: housekeeping: " << what << ": " << e.what() << "\n";
+        loop_trouble("identity", what + ": " + e.what());
+      }
+    };
     for (const auto& realm : realms) {
-      int gone = identity_->prune(realm, now_ms);
-      if (gone > 0) std::cerr << "goober-host: identity: deleted " << gone << " never-verified account(s) in " << realm << "\n";
+      step("pruning realm " + realm, [&] {
+        int gone = identity_->prune(realm, now_ms);
+        if (gone > 0) std::cerr << "goober-host: identity: deleted " << gone << " never-verified account(s) in " << realm << "\n";
+      });
     }
     // Received attachments past mail.inbound.attachment-days, and expired reply tokens.
-    prune_mail(now_ms);
+    step("mail", [&] { prune_mail(now_ms); });
     // Invites' one reminder each, and consent's old log rows (029).
-    remind_invites(now_ms);
-    consent_->prune(now_ms);
+    step("invites", [&] { remind_invites(now_ms); });
+    step("consent", [&] { consent_->prune(now_ms); });
     // Quiet logs rotate, and rotated files past 7 days leave the machine (032 § 2).
-    logs_housekeeping(now_ms);
+    step("logs", [&] { logs_housekeeping(now_ms); });
   }
 
   struct Delivery {
@@ -72,33 +85,39 @@ void Host::identity_tick(int64_t now_ms) {
   for (const auto& [box_name, box] : active->boxes) {
     for (const auto& r : box->manifest.identity) {
       for (const auto& [tenant, domain] : tenants_of(*cfg, box->manifest)) {
-        std::string key = tenant + "|" + box_name + "|" + r.name;
-        int64_t after_id = 0;
-        int failures = 0;
-        {
-          std::lock_guard lock(timers_->mu);
-          if (timers_->identity_running.count(key)) continue;
-          auto& db = timer_progress(tenant);
-          ensure_cursors(db);
-          sqlite::Stmt s(db, "SELECT after_id, failures, retry_at FROM goober_identity_cursors WHERE box = ? AND route = ?");
-          s.bind(1, box_name).bind(2, r.name);
-          if (!s.step()) {
-            // A new route hears what happens from now on, not the realm's history.
-            sqlite::Stmt put(db, "INSERT INTO goober_identity_cursors (box, route, after_id) VALUES (?, ?, ?)");
-            put.bind(1, box_name).bind(2, r.name).bind(3, identity_->last_event_id(tenant)).run();
-            continue;
+        // One tenant's unreadable cursors or realm never hold up another tenant's events.
+        try {
+          std::string key = tenant + "|" + box_name + "|" + r.name;
+          int64_t after_id = 0;
+          int failures = 0;
+          {
+            std::lock_guard lock(timers_->mu);
+            if (timers_->identity_running.count(key)) continue;
+            auto& db = timer_progress(tenant);
+            ensure_cursors(db);
+            sqlite::Stmt s(db, "SELECT after_id, failures, retry_at FROM goober_identity_cursors WHERE box = ? AND route = ?");
+            s.bind(1, box_name).bind(2, r.name);
+            if (!s.step()) {
+              // A new route hears what happens from now on, not the realm's history.
+              sqlite::Stmt put(db, "INSERT INTO goober_identity_cursors (box, route, after_id) VALUES (?, ?, ?)");
+              put.bind(1, box_name).bind(2, r.name).bind(3, identity_->last_event_id(tenant)).run();
+              continue;
+            }
+            if (s.int64(2) > now_ms) continue;
+            after_id = s.int64(0);
+            failures = int(s.int64(1));
           }
-          if (s.int64(2) > now_ms) continue;
-          after_id = s.int64(0);
-          failures = int(s.int64(1));
+          auto events = identity_->events_after(tenant, after_id, kBatch);
+          if (events.empty()) continue;
+          {
+            std::lock_guard lock(timers_->mu);
+            timers_->identity_running.insert(key);
+          }
+          work.push_back(Delivery{boxes::RouteRef{box, &r}, tenant, domain, key, after_id, failures, std::move(events)});
+        } catch (const std::exception& e) {
+          std::cerr << "goober-host: identity events: " << tenant << ": " << e.what() << "\n";
+          loop_trouble("identity", tenant + ": " + e.what());
         }
-        auto events = identity_->events_after(tenant, after_id, kBatch);
-        if (events.empty()) continue;
-        {
-          std::lock_guard lock(timers_->mu);
-          timers_->identity_running.insert(key);
-        }
-        work.push_back(Delivery{boxes::RouteRef{box, &r}, tenant, domain, key, after_id, failures, std::move(events)});
       }
     }
   }

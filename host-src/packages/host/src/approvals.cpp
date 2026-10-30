@@ -37,8 +37,8 @@ bj::object redacted(const std::string& tool, bj::object args) {
 }
 
 // Moves the requests `select_ids` finds to a final state, keeping their arguments only as shown
-// (035: once decided or expired, secrets are gone). Callers hold approvals_mu_.
-void finish_requests(sqlite::Db& db, const std::string& select_ids, const std::vector<int64_t>& binds,
+// (035: once decided or expired, secrets are gone), and answers how many. Callers hold approvals_mu_.
+int finish_requests(sqlite::Db& db, const std::string& select_ids, const std::vector<int64_t>& binds,
                      const std::string& state, const std::string& decided_by, int64_t now) {
   std::vector<std::tuple<int64_t, std::string, std::string>> rows;
   {
@@ -58,6 +58,7 @@ void finish_requests(sqlite::Db& db, const std::string& select_ids, const std::v
     }
     u.bind(3, now).bind(4, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{}))).bind(5, id).run();
   }
+  return int(rows.size());
 }
 
 bool has_role(const SignedIn& who, const char* role) {
@@ -344,21 +345,22 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
                       "host: the agent can no longer sign in", base::now_unix_ms());
       return {409, bj::object{{"error", agent + " can no longer sign in, so its request was denied"}}};
     }
-    // Claimed before it runs, so two people clicking at once can't run it twice.
-    sqlite::Stmt u(db, "UPDATE requests SET state = ?, decided_by = ?, decided_ms = ? WHERE id = ? AND state = 'pending'");
-    u.bind(1, decision == "approve" ? "running" : "denied").bind(2, by).bind(3, base::now_unix_ms()).bind(4, id).run();
-    if (db.changes() != 1) return {409, bj::object{{"error", "someone else decided it first"}}};
+    // Claimed before it runs, so two people clicking at once can't run it twice. A denial is
+    // final at once: its arguments are kept only as shown, in the same statement.
+    int moved = 0;
+    if (decision == "deny") {
+      moved = finish_requests(db, "SELECT id FROM requests WHERE id = ? AND state = 'pending'", {id}, "denied", by,
+                              base::now_unix_ms());
+    } else {
+      sqlite::Stmt u(db, "UPDATE requests SET state = 'running', decided_by = ?, decided_ms = ? WHERE id = ? AND state = 'pending'");
+      u.bind(1, by).bind(2, base::now_unix_ms()).bind(3, id).run();
+      moved = db.changes();
+    }
+    if (moved != 1) return {409, bj::object{{"error", "someone else decided it first"}}};
   }
   audit(decision == "approve" ? "approval.approved" : "approval.denied", by, tool, "ok",
         bj::object{{"request", id}, {"agent", agent}, {"request_id", request_id}});
-  if (decision == "deny") {
-    std::lock_guard lock(approvals_mu_);
-    std::string err;
-    auto parsed = json::parse(args_text, &err);
-    sqlite::Stmt u(approvals_db(), "UPDATE requests SET args = ? WHERE id = ?");
-    u.bind(1, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{}))).bind(2, id).run();
-    return {200, bj::object{{"id", id}, {"state", "denied"}}};
-  }
+  if (decision == "deny") return {200, bj::object{{"id", id}, {"state", "denied"}}};
   // Run as the agent, under the agent's scope and roles as they are now, without holding again.
   std::string err;
   auto parsed = json::parse(args_text, &err);

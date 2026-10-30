@@ -167,6 +167,24 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   finish(json_response(reply.status, std::move(reply.body)), json::dump(extra));
 }
 
+void Host::loop_beat(const std::string& loop, const std::string& error) {
+  std::lock_guard lock(loops_mu_);
+  auto& st = loops_[loop];
+  st.last_ms = base::now_unix_ms();
+  if (error.empty()) {
+    st.last_ok_ms = st.last_ms;
+  } else {
+    st.last_error = error.substr(0, 300);
+  }
+}
+
+void Host::loop_trouble(const std::string& loop, const std::string& what) {
+  std::lock_guard lock(loops_mu_);
+  auto& st = loops_[loop];
+  st.trouble_ms = base::now_unix_ms();
+  st.trouble = what.substr(0, 300);
+}
+
 std::pair<int, bj::object> Host::readiness(bool probe_storage) {
   auto cfg = config_.get();
   bj::object checks;
@@ -208,8 +226,44 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
     check("identity", good, bj::object{{"realms", int64_t(realms.size())}});
     if (!good) checks["identity"].as_object()["why"] = std::move(failing);
   }
+  // Every box with a version set active is served: one that isn't (a load failure, a route
+  // conflict at startup) fails the check by name.
   auto active = boxes_->active();
-  check("boxes", true, bj::object{{"loaded", active->boxes.size()}});
+  auto unloaded = boxes_->unloaded();
+  {
+    bj::array names;
+    for (const auto& b : unloaded) names.push_back(bj::value(b));
+    bj::object detail{{"loaded", active->boxes.size()}};
+    if (!names.empty()) detail["not_loaded"] = std::move(names);
+    check("boxes", unloaded.empty(), std::move(detail));
+  }
+  // Stores that wouldn't open at startup (their features are off until fixed and restarted).
+  {
+    bj::array off;
+    for (const auto& s : stores_off_) off.push_back(bj::value(s));
+    bool good = off.empty();
+    check("stores", good, good ? bj::object{} : bj::object{{"off", std::move(off)}});
+  }
+  // The background loops: each must have come round lately, and not be failing whole rounds.
+  {
+    int64_t now = base::now_unix_ms();
+    bj::object loops;
+    bool good = true;
+    std::lock_guard lock(loops_mu_);
+    for (const auto& [name, st] : loops_) {
+      // The nightly upload can hold its loop for a long while.
+      int64_t stale = name == "backups" ? 6 * 3600 * 1000 : 10 * 60 * 1000;
+      bool fresh = now - st.last_ms < stale;
+      bool failing = st.last_ok_ms < st.last_ms && now - st.last_ok_ms >= 10 * 60 * 1000;
+      good = good && fresh && !failing;
+      bj::object o{{"ok", fresh && !failing}, {"ago_ms", now - st.last_ms}};
+      if (failing) o["failing_since_ms"] = now - st.last_ok_ms;
+      if (st.trouble_ms && now - st.trouble_ms < 3600 * 1000) o["trouble_ago_ms"] = now - st.trouble_ms;
+      loops[name] = std::move(o);
+    }
+    checks["loops"] = bj::object{{"ok", good}, {"loops", std::move(loops)}};
+    ok = ok && good;
+  }
   check("mcp", mcp_ != nullptr);
   // The panel's stores are optional: off is reported, never a failure.
   checks["change_log"] = bj::object{{"ok", true}, {"on", changes_ != nullptr}};

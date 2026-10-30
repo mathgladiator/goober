@@ -560,10 +560,42 @@ class Host {
 
  private:
   std::unique_ptr<mail::consent::Store> consent_;
+  // Background loops' heartbeats (/goober/ready): each loop beats once a round, with the
+  // error if the round threw; trouble is a part of a round that failed (one tenant's).
+  struct LoopState {
+    int64_t last_ms = 0, last_ok_ms = 0, trouble_ms = 0;
+    std::string last_error, trouble;
+  };
+  void loop_beat(const std::string& loop, const std::string& error = "");
+  void loop_trouble(const std::string& loop, const std::string& what);
+  std::mutex loops_mu_;
+  std::map<std::string, LoopState> loops_;
+  // Stores that wouldn't open at startup: their feature is off, and /goober/ready says so.
+  std::vector<std::string> stores_off_;
+  // consent.db wouldn't open: nothing knows who opted out, so no mail goes out at all (it
+  // waits, retried) and the preferences page refuses, until it is fixed and the host restarts.
+  bool consent_off_ = false;
+  // A store that wouldn't open (corrupt, unreadable) is moved aside, kept for recovery, and a
+  // fresh one opened: answers the path it was moved to, or "".
+  std::string set_aside(const std::filesystem::path& file, const std::string& why);
   std::mutex sent_mu_;  // storage/mail/sent.db, the daily mail ledger
   // The ledger, open for the host's life (callers hold sent_mu_); pruned at most hourly.
   sqlite::Db& sent_ledger();
   std::unique_ptr<sqlite::Db> sent_db_;
+  // A send counted in the ledger before it goes, given back when destroyed unless kept.
+  class SentReservation {
+   public:
+    SentReservation(Host& host, int64_t rowid) : host_(host), rowid_(rowid) {}
+    ~SentReservation();
+    SentReservation(const SentReservation&) = delete;
+    SentReservation& operator=(const SentReservation&) = delete;
+    void keep() { kept_ = true; }
+
+   private:
+    Host& host_;
+    int64_t rowid_;
+    bool kept_ = false;
+  };
   int64_t sent_pruned_ms_ = 0;
   // The site a tenant's links name: its first domain that isn't localhost or an address.
   std::string site_of(const std::string& tenant) const;

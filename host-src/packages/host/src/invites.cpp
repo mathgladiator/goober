@@ -103,6 +103,7 @@ std::optional<std::pair<std::string, std::string>> Host::terms_now(const std::st
 
 bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& inv, bool reminder, std::string* why) {
   auto cfg = config_.get();
+  if (consent_off_) return *why = "mail is held: consent.db won't open", false;
   if (consent_->block_of(tenant, inv.email)) return *why = "blocked", false;
   // Invites count against the tenant's mail for the day, in the same ledger as box mail:
   // counted under the lock, which is let go before rendering and sending.
@@ -122,11 +123,7 @@ bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& i
     add.bind(1, tenant).bind(2, address_hash(inv.email)).bind(3, now).run();
     reserved = ledger.last_insert_rowid();
   }
-  auto give_back = [&] {
-    std::lock_guard lock(sent_mu_);
-    sqlite::Stmt undo(sent_ledger(), "DELETE FROM sent WHERE rowid = ?");
-    undo.bind(1, reserved).run();
-  };
+  SentReservation hold(*this, reserved);  // given back unless the invite goes
   const auto& tc = cfg->tenant(tenant);
   std::string site = site_of(tenant);
   std::string accept = invite_url(tenant, inv, false), decline = invite_url(tenant, inv, true);
@@ -169,10 +166,7 @@ bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& i
     if (rendered) std::cerr << "goober-host: " << tenant << "'s invite template drops a link; the default went instead\n";
     auto layout = mail_templates_->get(tenant, "layout");
     rendered = mail::templates::render_with(mail::templates::builtin("invite")->defaults, *layout, vars, &err);
-    if (!rendered) {
-      give_back();
-      return *why = "the invite template: " + err, false;
-    }
+    if (!rendered) return *why = "the invite template: " + err, false;
   }
   std::string text = rendered->text, html = rendered->html;
   add_footer(&text, &html,
@@ -185,6 +179,7 @@ bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& i
   m.list_unsubscribe = "<" + decline + ">";
   m.tenant = tenant;
   mail_->send(std::move(m));
+  hold.keep();
   return true;
 }
 

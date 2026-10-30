@@ -251,6 +251,10 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
   // are refused for good. Elements queued before categories existed only check the block.
   std::string category = text("category"), list = text("list");
   mail.list_id = text("list_id");
+  if (consent_off_) {
+    out.error = "mail is held: consent.db won't open (see host_health)";  // retried, not refused
+    return out;
+  }
   if (mail_suppressed(tenant, mail.to)) {
     out.status = 403;
     out.error = "unsubscribed since it was sent";
@@ -301,13 +305,11 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     add.bind(1, tenant).bind(2, address).bind(3, now_ms).run();
     reserved = ledger.last_insert_rowid();
   }
+  // Given back unless the mail went: a failure, or anything thrown on the way.
+  SentReservation hold(*this, reserved);
   auto outcome = mail_->deliver(mail);
-  if (!outcome.sent) {
-    std::lock_guard lock(sent_mu_);
-    sqlite::Stmt undo(sent_ledger(), "DELETE FROM sent WHERE rowid = ?");
-    undo.bind(1, reserved).run();
-  }
   if (outcome.sent) {
+    hold.keep();
     std::string hash = mail::consent::address_hash(mail.to);
     if (category == "outreach") consent_->outreach_sent(tenant, hash, now_ms);
     if (category == "confirm") consent_->asked(tenant, hash, "confirm", now_ms);
@@ -322,6 +324,17 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     out.error = outcome.error;
   }
   return out;
+}
+
+Host::SentReservation::~SentReservation() {
+  if (kept_ || !rowid_) return;
+  try {
+    std::lock_guard lock(host_.sent_mu_);
+    sqlite::Stmt undo(host_.sent_ledger(), "DELETE FROM sent WHERE rowid = ?");
+    undo.bind(1, rowid_).run();
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: mail: couldn't give back a counted send: " << e.what() << "\n";
+  }
 }
 
 sqlite::Db& Host::sent_ledger() {
@@ -589,8 +602,10 @@ void Host::run_outbox() {
     lock.unlock();
     try {
       outbox_tick(base::now_unix_ms());
+      loop_beat("outbox");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: outbox: " << e.what() << "\n";
+      loop_beat("outbox", e.what());
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(2), [this] { return timers_stopping_; });

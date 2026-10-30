@@ -972,7 +972,9 @@ async function approvalsCard() {
       { label: 'Tool', get: (r) => r.tool, cls: () => 'mono' },
       { label: 'Arguments', get: (r) => {
         // Never cut silently: what's past the first 20,000 characters is named, so nothing hides there.
-        const s = JSON.stringify(r.args, null, 2);
+        // Invisible and direction-changing characters shown as \uXXXX: what's approved reads as what runs.
+        const s = JSON.stringify(r.args, null, 2).replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g,
+          (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
         return h('pre', { class: 'small' }, s.length > 20000 ? s.slice(0, 20000) + '\n… and ' + (s.length - 20000) +
           ' more characters not shown: deny it, or ask the agent to split it' : s);
       } },
@@ -1016,7 +1018,7 @@ async function render(quiet) {
   const params = new URLSearchParams(query || '');
   const [view, arg] = route.split('/').map(decodeURIComponent);
   const name = view || 'overview';
-  const fn = views[name] && (name !== 'box' && name !== 'change' || arg) ? views[name] : null;
+  const fn = Object.hasOwn(views, name) && (name !== 'box' && name !== 'change' || arg) ? views[name] : null;
   for (const a of document.querySelectorAll('#nav a')) {
     const v = a.getAttribute('data-view');
     a.classList.toggle('active', v === name || (v === 'boxes' && name === 'box') || (v === 'changes' && name === 'change'));

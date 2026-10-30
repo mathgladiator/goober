@@ -87,7 +87,17 @@ done
 
 echo "── user and directory"
 id "$RUN_AS" >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --create-home --shell /usr/sbin/nologin "$RUN_AS"
-install -d -o "$RUN_AS" -g "$RUN_AS" -m 0750 "$HOME_DIR" "$DIR"
+install -d -o "$RUN_AS" -g "$RUN_AS" -m 0750 "$HOME_DIR"
+# Inside the home, the host's user owns everything, so root never makes, writes, chowns, or
+# reads a path there itself: a symlink planted by that user would aim root anywhere. The user
+# does it (as_user), and root takes what it needs from the user's output.
+as_user() { sudo -u "$RUN_AS" -H "$@"; }
+# Installs a file root holds into the home, written by the host's user: as_user_install MODE SRC DEST.
+as_user_install() { as_user sh -c 'cat > "$2.new" && chmod "$1" "$2.new" && mv -f "$2.new" "$2"' sh "$1" "$3" < "$2"; }
+# host.json as the host's user reads it.
+host_json() { as_user cat "$DIR/host.json"; }
+[[ -L "$DIR" ]] && die "$DIR is a symlink; the host directory must be a real directory"
+as_user mkdir -p -m 0750 "$DIR"
 
 echo "── binary"
 # The build that was serving is kept as $BIN.prev, so a new one that won't start is rolled back.
@@ -100,8 +110,8 @@ rollback() {
   cp -p "$BIN.prev" "$BIN"
   systemctl restart goober-host || true
 }
-mkdir -p "$HOME_DIR/tools"
-install -m 0755 "$SRC/setup.sh" "$HOME_DIR/tools/setup.sh"
+as_user mkdir -p "$HOME_DIR/tools"
+as_user_install 0755 "$SRC/setup.sh" "$HOME_DIR/tools/setup.sh"
 
 if [[ "$WITH_RUST" == --with-rust ]]; then
   echo "── Rust for building boxes from source"
@@ -116,12 +126,12 @@ if [[ "$WITH_RUST" == --with-rust ]]; then
   # The crates boxes may use, vendored fresh by the host's user (it has cargo and the network),
   # then copied by root into a root-owned directory the builds read but can't change. A failure
   # (no network) keeps the crates from the last deploy.
-  install -m 0755 "$SRC/vendor.sh" "$HOME_DIR/tools/vendor.sh"
+  as_user_install 0755 "$SRC/vendor.sh" "$HOME_DIR/tools/vendor.sh"
   USER_STAGE="$(sudo -u "$RUN_AS" mktemp -d -p "$HOME_DIR" vendor-stage.XXXXXXXX)"
   if sudo -u "$RUN_AS" -H env PATH="$CARGO_BIN:$PATH" bash "$HOME_DIR/tools/vendor.sh" "$USER_STAGE/vendor"; then
     STAGE_VENDOR="$(mktemp -d)"
     cp -R --no-dereference --preserve=mode,timestamps "$USER_STAGE/vendor/." "$STAGE_VENDOR/"
-    chown -R root:root "$STAGE_VENDOR"
+    chown -hR root:root "$STAGE_VENDOR"  # -h: a symlink in the crates is changed, never followed
     chmod -R a+rX,go-w "$STAGE_VENDOR"
     rm -rf "$HOME_DIR/vendor"
     mv -T "$STAGE_VENDOR" "$HOME_DIR/vendor"
@@ -144,10 +154,41 @@ else
   # setup.sh runs from a directory the user can read, writing into DIR as that user.
   (cd "$HOME_DIR" && sudo -u "$RUN_AS" GOOBER_HOST_BIN="$BIN" GOOBER_USER="$RUN_AS" bash "$HOME_DIR/tools/setup.sh" "$DIR")
   [[ -f "$DIR/deploy/goober-host.service" ]] || die "setup didn't write production files; run it again and answer Production"
-  install -m 0644 "$DIR/deploy/goober-host.service" "$DIR/deploy/goober-backup.service" "$DIR/deploy/goober-backup.timer" \
+  # The units run as root's systemd, so what setup (the host's user) wrote is read as that user
+  # and must be only what setup writes: these keys, run as the host's user, no Exec prefixes
+  # (a "+" runs a command as root).
+  UNIT_TMP="$(mktemp -d)"
+  for unit in goober-host.service goober-backup.service goober-backup.timer; do
+    as_user cat "$DIR/deploy/$unit" > "$UNIT_TMP/$unit"
+    python3 -I - "$UNIT_TMP/$unit" "$RUN_AS" <<'PY' || die "$DIR/deploy/$unit isn't the unit setup writes; run setup again"
+import re, sys
+path, user = sys.argv[1:3]
+allowed = {"Description", "After", "Wants", "User", "WorkingDirectory", "ExecStart", "ExecReload", "Restart",
+           "RestartSec", "NoNewPrivileges", "PrivateTmp", "ProtectSystem", "ReadWritePaths", "LimitNOFILE",
+           "WantedBy", "Type", "OnCalendar", "Persistent"}
+users = 0
+for line in open(path):
+    line = line.strip()
+    if not line or line.startswith("#") or re.fullmatch(r"\[(Unit|Service|Install|Timer)\]", line):
+        continue
+    key, _, value = line.partition("=")
+    if key not in allowed:
+        sys.exit("key " + key)
+    if key == "User":
+        users += 1
+        if value != user:
+            sys.exit("User=" + value)
+    if key.startswith("Exec") and value[:1] in "+!@-:":
+        sys.exit("prefixed " + key)
+sys.exit(0 if users == 1 or path.endswith(".timer") else "User")
+PY
+  done
+  install -m 0644 "$UNIT_TMP/goober-host.service" "$UNIT_TMP/goober-backup.service" "$UNIT_TMP/goober-backup.timer" \
     /etc/systemd/system/
   [[ -f /etc/caddy/Caddyfile && ! -f /etc/caddy/Caddyfile.before-goober ]] && cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-goober
-  install -m 0644 "$DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
+  as_user cat "$DIR/deploy/Caddyfile" > "$UNIT_TMP/Caddyfile"
+  install -m 0644 "$UNIT_TMP/Caddyfile" /etc/caddy/Caddyfile
+  rm -rf "$UNIT_TMP"
   systemctl daemon-reload
   systemctl enable --now goober-host goober-backup.timer
   systemctl reload caddy || systemctl restart caddy
@@ -203,7 +244,7 @@ open(p, "w").write(json.dumps(c, indent=2) + "\n")
   fi
 fi
 
-PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["listen"].get("port", 8080))' "$DIR/host.json")"
+PORT="$(host_json | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["listen"].get("port", 8080)))')"
 MAIL_DNS=""
 if [[ -z "$WITHOUT_MAIL" && -f "$DIR/host.json" ]]; then
   echo "── mail in: Stalwart on port 25, handing every message to goober (024.MailIn.md)"
@@ -234,7 +275,9 @@ if [[ -z "$WITHOUT_MAIL" && -f "$DIR/host.json" ]]; then
   rm -f "$TOKEN_TMP"
   # STARTTLS with Caddy's certificate for the platform domain, once Caddy has one; until then
   # a short-lived self-signed one. The daily timer below copies renewals and reloads.
-  PLATFORM="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("platform-domain", ""))' "$DIR/host.json")"
+  PLATFORM="$(host_json | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("platform-domain", ""))')"
+  # A name root's certificate copy builds paths from: a DNS name, nothing else.
+  [[ "$PLATFORM" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)*$ ]] || PLATFORM=""
   install -d -o stalwart -g stalwart -m 0700 "$MAIL_HOME/tls"
   cat > /usr/local/lib/goober/stalwart-tls.sh <<'TLS'
 #!/usr/bin/env bash
@@ -263,11 +306,11 @@ TLS
   chmod 0755 /usr/local/lib/goober/stalwart-tls.sh
   /usr/local/lib/goober/stalwart-tls.sh "${PLATFORM:-localhost}"
   # Relaying only for the host's domains, read from the config on every deploy.
-  RELAY="$(python3 -c '
+  RELAY="$(host_json | python3 -I -c '
 import json, re, sys
-c = json.load(open(sys.argv[1]))
+c = json.load(sys.stdin)
 print(",".join(d for d in sorted(c.get("domains", {})) if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d)))
-' "$DIR/host.json")"
+')"
   # configure runs with Stalwart stopped, in a private network namespace root makes: its
   # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
   systemctl stop stalwart 2>/dev/null || true
@@ -312,14 +355,14 @@ open(p, "w").write(json.dumps(c, indent=2) + "\n")
     systemctl restart goober-host
   fi
   systemctl --no-pager --lines=0 status stalwart | head -3 || true
-  MAIL_DNS="$(python3 -c '
+  MAIL_DNS="$(host_json | python3 -I -c '
 import json, re, sys
-c = json.load(open(sys.argv[1]))
+c = json.load(sys.stdin)
 mx = c.get("platform-domain", "")
 for d in sorted(c.get("domains", {})):
     if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d):
         print(f"  {d}.  MX  10 {mx}.")
-' "$DIR/host.json")"
+')"
 fi
 
 # Caddyfiles written before 2026-10-29 answer an empty 503 the moment the host restarts or is
@@ -474,12 +517,12 @@ fi
 # published for bots at https://$PUBLIC/goober/deploy (and summed up in /goober/ready).
 if [[ -n "$PUBLIC" && -f "$SRC/readiness.py" ]]; then
   echo "── readiness, as people and agents reach https://$PUBLIC"
-  install -m 0755 "$SRC/readiness.py" "$HOME_DIR/tools/readiness.py"
+  as_user_install 0755 "$SRC/readiness.py" "$HOME_DIR/tools/readiness.py"
   EXTRA=()
   if [[ -f "$SRC/readiness.args" ]]; then
     while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || EXTRA+=($line); done <"$SRC/readiness.args"
   fi
-  install -d -o "$RUN_AS" -g "$RUN_AS" -m 0750 "$DIR/storage/operations"
+  as_user mkdir -p -m 0750 "$DIR/storage/operations"
   if ! sudo -u "$RUN_AS" python3 -I "$HOME_DIR/tools/readiness.py" "https://$PUBLIC" ${BUILD:+--build "$BUILD"} "${EXTRA[@]}" \
       --json "$DIR/storage/operations/deploy-check.json"; then
     FAILED+=("readiness from https://$PUBLIC (see /goober/deploy)")
@@ -526,8 +569,9 @@ PY
 panel_setup() {
   local d="$1"
   # host.json's copy is made and put back by the host's user: DIR is theirs (no root writes in it).
-  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-panel"
-  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel
+  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-panel" ||
+    { echo "   couldn't copy host.json aside; nothing changed"; return 1; }
+  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel || { echo "   couldn't copy the Caddyfile aside; nothing changed"; return 1; }
   undo() {
     sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-panel" "$DIR/host.json"
     cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile

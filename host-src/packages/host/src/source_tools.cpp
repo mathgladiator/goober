@@ -68,7 +68,14 @@ bj::object job_json(const BuildJob& j, bool verbose = true) {
 
 void Host::register_source_tools() {
   auto cfg = config_.get();
-  source_ = std::make_unique<source::Store>(cfg->storage / "source" / "source.db");
+  try {
+    source_ = std::make_unique<source::Store>(cfg->storage / "source" / "source.db");
+  } catch (const std::exception& e) {
+    // Moved aside, kept whole for recovery: the projects in it are out of sight until it's back.
+    stores_off_.push_back("source");
+    set_aside(cfg->storage / "source" / "source.db", e.what());
+    source_ = std::make_unique<source::Store>(cfg->storage / "source" / "source.db");
+  }
   jobs_ = std::make_unique<BuildJobs>();
   auto project_prop = mcp::string_property("The project's name, like ranches.");
   auto rev_prop = mcp::integer_property("A revision number; omit (or 0) for the newest.");

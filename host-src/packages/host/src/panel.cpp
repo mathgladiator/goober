@@ -314,8 +314,10 @@ void Host::run_traffic() {
     lock.unlock();
     try {
       traffic_->catch_up(base::now_unix_ms());
+      loop_beat("traffic");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: traffic rollups: " << e.what() << "\n";
+      loop_beat("traffic", e.what());
     }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return timers_stopping_; });
