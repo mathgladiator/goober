@@ -322,3 +322,65 @@ TEST_F(HostTest, RouteCheckSaysWhoAnswersAPath) {
   EXPECT_EQ(check("/nothing-here").at("status"), 404);
   EXPECT_TRUE(tool("route_check", {{"domain", "nope.example"}, {"path", "/"}}).at("result").at("isError").as_bool());
 }
+
+// A redirect domain (015.Domains.md) answers everything itself: the primary domain, path and
+// query kept, 301 for reads and 308 for the rest; never a page, a box, or a sign-in.
+TEST(HostRedirects, ARedirectDomainSendsEverythingToItsPrimary) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "host_redirects";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(
+      R"({"listen":{"port":0},"storage":"storage","threads":{"network":1,"boxes":1},
+          "operations":{"token":")" + std::string(kToken) + R"("},
+          "domains":{"example.com":{"tenant":"shop"},"www.example.com":{"redirect-to":"example.com"}}})",
+      root, &err);
+  ASSERT_TRUE(cfg) << err;
+  host::Host h(cfg);
+  auto port = h.start();
+  auto send = [&](bhttp::verb verb, const std::string& target, const std::string& host_header) {
+    asio::io_context io;
+    beast::tcp_stream stream(io);
+    stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+    bhttp::request<bhttp::string_body> req(verb, target, 11);
+    req.set(bhttp::field::host, host_header);
+    req.prepare_payload();
+    bhttp::write(stream, req);
+    beast::flat_buffer buf;
+    bhttp::response<bhttp::string_body> res;
+    bhttp::read(stream, buf, res);
+    return std::pair{int(res.result_int()), std::string(res[bhttp::field::location])};
+  };
+  EXPECT_EQ(send(bhttp::verb::get, "/menu/today?x=1&y=2", "WWW.example.com"),
+            (std::pair{301, std::string("https://example.com/menu/today?x=1&y=2")}));
+  EXPECT_EQ(send(bhttp::verb::get, "/", "www.example.com:443"), (std::pair{301, std::string("https://example.com/")}));
+  EXPECT_EQ(send(bhttp::verb::post, "/identity/sign-in", "www.example.com"),
+            (std::pair{308, std::string("https://example.com/identity/sign-in")}));
+  // The path is only ever a path on the primary: an absolute target can't send people elsewhere.
+  EXPECT_EQ(send(bhttp::verb::get, "http://evil.example/x", "www.example.com").second,
+            "https://example.com/http://evil.example/x");
+  // The primary is served as before, and the proxy's health check answers whatever the Host.
+  EXPECT_NE(send(bhttp::verb::get, "/", "example.com").first, 301);
+  EXPECT_EQ(send(bhttp::verb::get, "/goober/health", "www.example.com").first, 200);
+
+  // Operators see it: route_check says the host answers, domain_list names where it goes.
+  auto tool = [&](const std::string& name, bj::object args) {
+    bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                   {"params", bj::object{{"name", name}, {"arguments", std::move(args)}}}};
+    auto r = fetch(port, bhttp::verb::post, "/goober-operations-mcp", "example.com", json::dump(req),
+                   std::string("Bearer ") + kToken);
+    std::string e;
+    auto v = json::parse(r.body, &e);
+    EXPECT_TRUE(v && v->as_object().contains("result")) << r.status << " " << r.body;
+    // An object comes back structured; a list only as the content's text.
+    const auto& result = v->at("result").as_object();
+    if (const auto* sc = result.if_contains("structuredContent")) return *sc;
+    return *json::parse(std::string(result.at("content").at(0).at("text").as_string()), &e);
+  };
+  auto check = tool("route_check", {{"domain", "www.example.com"}, {"path", "/menu"}});
+  EXPECT_EQ(check.at("served_by"), "host");
+  EXPECT_EQ(check.at("redirect_to"), "example.com");
+  EXPECT_EQ(check.at("tenant"), "shop");
+  auto list = tool("domain_list", {}).as_array();
+  ASSERT_EQ(list.size(), 2u);
+  EXPECT_EQ(list.at(1).at("redirect_to"), "example.com");
+}

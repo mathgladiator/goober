@@ -367,7 +367,7 @@ TLS
   RELAY="$(host_json | python3 -I -c '
 import json, re, sys
 c = json.load(sys.stdin)
-print(",".join(d for d in sorted(c.get("domains", {})) if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d)))
+print(",".join(d for d, e in sorted(c.get("domains", {}).items()) if "redirect-to" not in e and re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d)))
 ')"
   # configure runs with Stalwart stopped, in a private network namespace root makes: its
   # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
@@ -423,8 +423,8 @@ os.replace(p + ".tmp", p)
 import json, re, sys
 c = json.load(sys.stdin)
 mx = c.get("platform-domain", "")
-for d in sorted(c.get("domains", {})):
-    if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d):
+for d, e in sorted(c.get("domains", {}).items()):
+    if "redirect-to" not in e and re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d):
         print(f"  {d}.  MX  10 {mx}.")
 ')"
 fi
@@ -611,7 +611,15 @@ for f in json.load(sys.stdin)["findings"]:
         print(f["data"]["domain"], f["data"]["dns"])
 ' 2>/dev/null || true)"
 
-# Edits host.json as the host's user: "operations.domain" set, or "panel" added to audit.quiet.
+REDIRECTS="$(sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" --json 2>/dev/null | python3 -I -c '
+import json, sys
+for f in json.load(sys.stdin)["findings"]:
+    if f["id"] == "redirect" and f["level"] == "suggest":
+        print(f["data"]["domain"], f["data"]["to"], f["data"]["dns"])
+' 2>/dev/null || true)"
+
+# Edits host.json as the host's user: "operations.domain" set, a redirect domain added
+# ("www.example.com=example.com"), or a check added to audit.quiet.
 edit_config() {
   sudo -u "$RUN_AS" python3 -I - "$DIR/host.json" "$1" "$2" <<'PY'
 import json, os, sys
@@ -619,6 +627,9 @@ path, what, value = sys.argv[1:4]
 cfg = json.load(open(path))
 if what == "panel":
     cfg.setdefault("operations", {})["domain"] = value
+elif what == "redirect":
+    name, to = value.split("=", 1)
+    cfg.setdefault("domains", {})[name] = {"redirect-to": to}
 else:
     quiet = cfg.setdefault("audit", {}).setdefault("quiet", [])
     if value not in quiet:
@@ -632,29 +643,36 @@ os.replace(tmp, path)
 PY
 }
 
-# The panel on its own domain: host.json, then the Caddyfile's site line, each checked, and
-# both put back if either is refused.
-panel_setup() {
-  local d="$1"
+# A new name for this server, the panel's or a redirect's: host.json, then the name on the
+# Caddyfile's site line for SITE (so Caddy gets its certificate and proxies it to the host),
+# each checked, the host proved by a restart, and both files put back if anything is refused.
+#   add_site panel ops.example.com example.com
+#   add_site redirect www.example.com example.com
+add_site() {
+  local kind="$1" d="$2" site="$3"
   # host.json's copy is made and put back by the host's user: DIR is theirs (no root writes in it).
-  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-panel" ||
+  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-$kind" ||
     { echo "   couldn't copy host.json aside; nothing changed"; return 1; }
-  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel || { echo "   couldn't copy the Caddyfile aside; nothing changed"; return 1; }
+  cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-$kind" || { echo "   couldn't copy the Caddyfile aside; nothing changed"; return 1; }
   undo() {
-    if sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-panel" "$DIR/host.json" &&
-       cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile; then
+    if sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-$kind" "$DIR/host.json" &&
+       cp -p "/etc/caddy/Caddyfile.before-$kind" /etc/caddy/Caddyfile; then
       echo "   $1; host.json and the Caddyfile are as they were"
     else
-      echo "   $1, and putting the files back failed: restore $DIR/host.json.before-panel and"
-      echo "   /etc/caddy/Caddyfile.before-panel by hand"
-      FAILED+=("putting host.json and the Caddyfile back after the panel's setup")
+      echo "   $1, and putting the files back failed: restore $DIR/host.json.before-$kind and"
+      echo "   /etc/caddy/Caddyfile.before-$kind by hand"
+      FAILED+=("putting host.json and the Caddyfile back after adding $d")
     fi
   }
-  edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
+  if [[ "$kind" == panel ]]; then
+    edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
+  else
+    edit_config redirect "$d=$site" || { undo "couldn't edit host.json"; return 1; }
+  fi
   sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" >/dev/null || { undo "the host refused the new host.json"; return 1; }
-  # The site block that serves the site itself (ops.example.com joins example.com's), read the
-  # way goober-host audit reads site lines: addresses without scheme or port.
-  python3 -I - /etc/caddy/Caddyfile "$d" "${d#ops.}" <<'PY' || { undo "no site block in the Caddyfile serves ${d#ops.}"; return 1; }
+  # The site block that serves the site itself (ops.example.com and www.example.com join
+  # example.com's), read the way goober-host audit reads site lines: addresses without scheme or port.
+  python3 -I - /etc/caddy/Caddyfile "$d" "$site" <<'PY' || { undo "no site block in the Caddyfile serves $site"; return 1; }
 import sys
 path, d, site = sys.argv[1:4]
 lines = open(path).read().split("\n")
@@ -667,7 +685,8 @@ for i, line in enumerate(lines):
         a = a.split("://", 1)[-1]
         names.append(a.split(":", 1)[0].split("/", 1)[0].lower())
     if site in names:
-        lines[i] = s[:-1].rstrip() + ", " + d + " {"
+        if d not in names:
+            lines[i] = s[:-1].rstrip() + ", " + d + " {"
         break
 else:
     sys.exit(1)
@@ -680,51 +699,75 @@ PY
   local up=""
   for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
   if [[ -z "$up" ]]; then
-    undo "the host wasn't ready with the panel set"
+    undo "the host wasn't ready with $d set"
     systemctl restart goober-host || true
-    FAILED+=("the panel's setup (host.json and the Caddyfile were put back)")
+    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
     return 1
   fi
   if ! systemctl reload caddy; then
-    undo "Caddy wouldn't reload with the panel's site"
+    undo "Caddy wouldn't reload with $d on the site line"
     systemctl restart goober-host || true
     systemctl reload caddy || true
-    FAILED+=("the panel's setup (host.json and the Caddyfile were put back)")
+    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
     return 1
   fi
   # Caddy gets the certificate on the first request; a minute is plenty.
-  local code=""
+  local got="" code=""
   for _ in $(seq 1 30); do
-    code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$d/" || true)"
-    [[ "$code" =~ ^(200|302|303)$ ]] && break
+    got="$(curl -s -o /dev/null -m 10 -w '%{http_code} %{redirect_url}' "https://$d/" || true)"
+    code="${got%% *}"
+    if [[ "$kind" == panel ]]; then
+      [[ "$code" =~ ^(200|302|303)$ ]] && break
+    else
+      [[ "$got" == "301 https://$site/" ]] && break
+    fi
     sleep 2
   done
-  if [[ "$code" =~ ^(200|302|303)$ ]]; then
+  if [[ "$kind" == panel && "$code" =~ ^(200|302|303)$ ]]; then
     echo "   ✓ the panel answers at https://$d/ (sign in with an operator address)"
+  elif [[ "$kind" == redirect && "$got" == "301 https://$site/" ]]; then
+    echo "   ✓ https://$d/ redirects to https://$site/"
   else
     echo "   ! set up, but https://$d/ answered HTTP ${code:-nothing} so far; Caddy may still be getting its certificate"
   fi
 }
 
-if [[ -n "$PANEL" ]]; then
-  read -r PANEL_DOMAIN PANEL_DNS <<<"$PANEL"
-  [[ "$PANEL_DOMAIN" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || PANEL=""
-fi
-if [[ -n "$PANEL" ]]; then
-  if [[ ! -t 0 ]]; then
-    echo "   (deploy from a terminal to be offered the panel at https://$PANEL_DOMAIN/)"
-  elif [[ "$PANEL_DNS" == ready ]]; then
-    read -r -p "   Set up the panel at https://$PANEL_DOMAIN/ now? [y]es, [n]ot now, ne[v]er: " answer </dev/tty || answer=n
+# Asks about one name the audit suggested: set it up now when its DNS is ready, or never ask.
+#   offer KIND NAME SITE DNS QUIET-ID WHAT
+# (Whether the deploy has a terminal is read once, here: the loop below feeds offer its own input.)
+[[ -t 0 ]] && TERMINAL=1 || TERMINAL=""
+offer() {
+  local kind="$1" d="$2" site="$3" dns="$4" quiet="$5" what="$6" answer
+  if [[ -z "$TERMINAL" ]]; then
+    echo "   (deploy from a terminal to be offered $what)"
+  elif [[ "$dns" == ready ]]; then
+    read -r -p "   $what now? [y]es, [n]ot now, ne[v]er: " answer </dev/tty || answer=n
     case "$answer" in
-      y|Y|yes) panel_setup "$PANEL_DOMAIN" || true ;;
-      v|V|never) edit_config quiet panel && echo "   won't suggest it again (audit.quiet in host.json)" ;;
+      y|Y|yes) add_site "$kind" "$d" "$site" || true ;;
+      v|V|never) edit_config quiet "$quiet" && echo "   won't suggest it again (audit.quiet in host.json)" ;;
       *) echo "   not now; the next deploy asks again" ;;
     esac
   else
-    read -r -p "   Add that DNS record and deploy again to set it up. Never suggest the panel? [v]/Enter: " answer </dev/tty || answer=""
-    [[ "$answer" =~ ^(v|V|never)$ ]] && edit_config quiet panel && echo "   won't suggest it again (audit.quiet in host.json)"
+    read -r -p "   $what: add the DNS record above and deploy again. Never suggest it? [v]/Enter: " answer </dev/tty || answer=""
+    if [[ "$answer" =~ ^(v|V|never)$ ]]; then
+      edit_config quiet "$quiet" && echo "   won't suggest it again (audit.quiet in host.json)"
+    fi
   fi
+  return 0
+}
+
+if [[ -n "$PANEL" ]]; then
+  read -r PANEL_DOMAIN PANEL_DNS <<<"$PANEL"
+  [[ "$PANEL_DOMAIN" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] && [[ "$PANEL_DOMAIN" == ops.* ]] &&
+    { offer panel "$PANEL_DOMAIN" "${PANEL_DOMAIN#ops.}" "$PANEL_DNS" panel "Set up the panel at https://$PANEL_DOMAIN/" || true; }
 fi
+# Redirect domains (015.Domains.md), like www.example.com: the host answers each with a 301 to
+# its site, and Caddy serves it with a certificate of its own.
+while read -r R_NAME R_TO R_DNS <&3; do
+  [[ -n "$R_NAME" ]] || continue
+  [[ "$R_NAME" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ && "$R_TO" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || continue
+  offer redirect "$R_NAME" "$R_TO" "$R_DNS" "redirect:$R_NAME" "Redirect https://$R_NAME/ to https://$R_TO/" || true
+done 3<<<"$REDIRECTS"
 
 # Missing settings (028.Panel.md § 8.2): each finding about one (a tenant's postal address, the
 # mailer, backups, operators, the AWS keys) says what to ask for. From a terminal, the deploy

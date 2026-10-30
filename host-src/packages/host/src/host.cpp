@@ -733,6 +733,25 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     res.head_only = req.method == "head";
     return finish(std::move(res), "");
   }
+  // A redirect domain (015.Domains.md) answers everything with its primary domain, path and
+  // query kept: no tenant, no route, no box. Permanent: 301 for reads, 308 so a POST stays one.
+  if (auto to = panel ? std::nullopt : cfg->redirect_for(host_header)) {
+    std::string location = secure_transport ? "https://" + *to : "http://" + *to;
+    if (!secure_transport) {
+      // Plain-http local play keeps the port it was reached on.
+      auto colon = host_header.rfind(':');
+      if (colon != std::string::npos && host_header.find(']', colon) == std::string::npos) location += host_header.substr(colon);
+    }
+    location += req.path.starts_with("/") ? req.path : "/" + req.path;
+    if (!req.query.empty()) location += "?" + req.query;
+    Response res;
+    res.status = req.method == "get" || req.method == "head" ? 301 : 308;
+    res.headers.emplace_back("location", location);
+    res.headers.emplace_back("content-type", "text/plain; charset=utf-8");
+    res.body = "Moved to " + location + "\n";
+    res.head_only = req.method == "head";
+    return finish(std::move(res), json::dump(bj::object{{"redirect", *to}}));
+  }
   // The last deploy's outside check (readiness.py, run by the server after the gate), for bots.
   if (path && path->path == "/goober/deploy") {
     Response res;

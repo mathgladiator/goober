@@ -22,7 +22,10 @@ int64_t Limit::resolve(std::optional<int64_t> requested) const {
   return *requested > max_value ? max_value : *requested;
 }
 
-std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std::string_view host) const {
+namespace {
+
+// A Host header value without its port or trailing dot, lowercased.
+std::string host_name(std::string_view host) {
   std::string h = base::to_lower(host);
   if (!h.empty() && h.front() == '[') {
     auto close = h.find(']');
@@ -31,6 +34,13 @@ std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std:
     h = h.substr(0, colon);
   }
   if (!h.empty() && h.back() == '.') h.pop_back();
+  return h;
+}
+
+}  // namespace
+
+std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std::string_view host) const {
+  std::string h = host_name(host);
   if (auto it = domains.find(h); it != domains.end()) return *it;
   if (!local || domains.empty()) return std::nullopt;
   constexpr std::string_view kSuffix = ".localhost";
@@ -41,6 +51,18 @@ std::optional<std::pair<std::string, DomainEntry>> HostConfig::resolve_host(std:
   if (h == "localhost" || h == "127.0.0.1" || h == "[::1]" || h == "10.0.2.2") {  // 10.0.2.2: the Android emulator's name for this machine
     if (auto it = domains.find(platform_domain); it != domains.end()) return *it;
     return *domains.begin();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> HostConfig::redirect_for(std::string_view host) const {
+  std::string h = host_name(host);
+  if (auto it = redirects.find(h); it != redirects.end()) return it->second;
+  constexpr std::string_view kSuffix = ".localhost";
+  if (local && h.size() > kSuffix.size() && h.ends_with(kSuffix)) {
+    if (auto it = redirects.find(h.substr(0, h.size() - kSuffix.size())); it != redirects.end()) {
+      return it->second + std::string(kSuffix);
+    }
   }
   return std::nullopt;
 }
@@ -192,7 +214,15 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       std::string domain = base::to_lower(kv.key());
       if (!kv.value().is_object()) return *error = "domains." + domain + " must be an object", nullptr;
       const auto& entry = kv.value().get_object();
-      if (!check_keys(entry, {"tenant", "owner"}, "domains." + domain, &err)) return *error = err, nullptr;
+      if (!check_keys(entry, {"tenant", "owner", "redirect-to"}, "domains." + domain, &err)) return *error = err, nullptr;
+      if (entry.contains("redirect-to")) {
+        // A redirect is only that: no tenant, no owner (015.Domains.md).
+        if (entry.size() != 1) return *error = "domains." + domain + " has \"redirect-to\", so it takes nothing else", nullptr;
+        auto to = get_string(entry, "redirect-to", &err);
+        if (!to) return *error = "domains." + domain + ".redirect-to must be a domain, like example.com", nullptr;
+        cfg->redirects[domain] = base::to_lower(*to);
+        continue;
+      }
       auto tenant = get_string(entry, "tenant", &err);
       if (!tenant || !base::is_valid_name(*tenant)) {
         return *error = "domains." + domain + ".tenant must match [a-z][a-z0-9_]*", nullptr;
@@ -226,6 +256,17 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       cfg->operations_listen_address = address;
       cfg->operations_listen_port = uint16_t(port);
     }
+  }
+  for (const auto& [from, to] : cfg->redirects) {
+    if (!is_dns_name(from)) return *error = "domains." + from + ": a redirect domain must be a DNS name, like www.example.com", nullptr;
+    if (cfg->domains.count(from)) return *error = "domains." + from + " is listed twice, once as a redirect", nullptr;
+    if (!cfg->domains.count(to)) {
+      return *error = "domains." + from + ".redirect-to is " + to + ", which isn't a tenant's domain in \"domains\"", nullptr;
+    }
+  }
+  if (cfg->redirects.count(cfg->operations_domain)) {
+    *error = "operations.domain " + cfg->operations_domain + " is also a redirect domain: the panel needs a domain of its own";
+    return nullptr;
   }
   if (cfg->domains.count(cfg->operations_domain)) {
     *error = "operations.domain " + cfg->operations_domain +
@@ -487,15 +528,19 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       cfg->pwa.push_contact = *v;
     }
   }
-  // What `goober-host audit` (a deploy's operations audit) stops suggesting: one id per check.
+  // What `goober-host audit` (a deploy's operations audit) stops suggesting: a check's id, or
+  // a check's id and the one name it stops suggesting, like "redirect:www.example.com".
   if (const auto* audit = get_object(root, "audit", &err)) {
     if (!check_keys(*audit, {"quiet"}, "audit", &err)) return *error = err, nullptr;
     if (const auto* quiet = get_array(*audit, "quiet", &err)) {
       for (const auto& q : *quiet) {
         std::string id = q.is_string() ? std::string(q.as_string()) : "";
-        bool ok = !id.empty() && id.size() <= 40;
-        for (char ch : id) ok = ok && ((ch >= 'a' && ch <= 'z') || ch == '-');
-        if (!ok) return *error = "audit.quiet holds check ids, like \"panel\"", nullptr;
+        auto colon = id.find(':');
+        std::string check = id.substr(0, colon);
+        bool ok = !check.empty() && check.size() <= 40;
+        for (char ch : check) ok = ok && ((ch >= 'a' && ch <= 'z') || ch == '-');
+        if (colon != std::string::npos) ok = ok && is_dns_name(id.substr(colon + 1));
+        if (!ok) return *error = "audit.quiet holds check ids, like \"panel\" or \"redirect:www.example.com\"", nullptr;
         cfg->audit_quiet.push_back(id);
       }
     }

@@ -238,3 +238,36 @@ TEST(Config, TenantsCarryPostalAddressTermsAndInviteRoles) {
   EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"postal-address":"a\nb"}}})", "/", &err));
   EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"colour":"red"}}})", "/", &err));
 }
+
+TEST(Config, RedirectDomainsSendEverythingToTheirPrimary) {
+  std::string err;
+  auto cfg = parse_config(
+      R"({"domains":{"example.com":{"tenant":"shop"},"WWW.Example.com":{"redirect-to":"Example.com"}}})", "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_EQ(cfg->domains.size(), 1u);  // a redirect is no tenant's domain
+  EXPECT_EQ(*cfg->redirect_for("www.example.com:443"), "example.com");
+  EXPECT_EQ(*cfg->redirect_for("WWW.example.com."), "example.com");
+  EXPECT_FALSE(cfg->redirect_for("example.com"));
+  EXPECT_FALSE(cfg->tenant_for_host("www.example.com"));
+  EXPECT_FALSE(cfg->redirect_for("www.example.com.localhost"));
+  auto local = local_mode(cfg);
+  EXPECT_EQ(*local->redirect_for("www.example.com.localhost:8080"), "example.com.localhost");
+
+  auto refused = [&](const char* text, const char* says) {
+    err.clear();
+    EXPECT_FALSE(parse_config(text, "/", &err)) << text;
+    EXPECT_NE(err.find(says), std::string::npos) << err;
+  };
+  // Only to a tenant's domain: not to nothing, not to another redirect.
+  refused(R"({"domains":{"www.example.com":{"redirect-to":"example.com"}}})", "isn't a tenant's domain");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"a.example.com":{"redirect-to":"example.com"},
+              "b.example.com":{"redirect-to":"a.example.com"}}})", "isn't a tenant's domain");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"www.example.com":{"redirect-to":"example.com","tenant":"shop"}}})",
+          "takes nothing else");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"www.example.com":{"redirect-to":5}}})", "redirect-to");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"www":{"redirect-to":"example.com"}}})", "DNS name");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"www.example.com":{"tenant":"shop"},
+              "WWW.example.com":{"redirect-to":"example.com"}}})", "listed twice");
+  refused(R"({"domains":{"example.com":{"tenant":"shop"},"ops.example.com":{"redirect-to":"example.com"}},
+              "operations":{"domain":"ops.example.com"}})", "redirect domain");
+}

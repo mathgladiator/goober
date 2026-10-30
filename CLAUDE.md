@@ -143,7 +143,8 @@ Read these before doing design work:
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
     change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
-    and asks for missing settings (postal address, mailer, backups, AWS keys, operators).
+    and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal
+    address, mailer, backups, AWS keys, operators).
   - `design/machine/029.Invites.md`: invites as a host feature (the record, the template, accept by
     code with roles, terms, and lists; decline as a block only a person lifts), mail categories with
     their rules, lists with double opt-in, the preferences page, and per-tenant postal addresses.

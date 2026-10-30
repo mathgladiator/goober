@@ -12,7 +12,7 @@ HOST_SRC="$(dirname "$HERE")"
 BIN="${GOOBER_HOST_BIN:-$HOST_SRC/build/dev/packages/host/goober-host}"
 CONFIG="${1:?usage: examples.sh CONFIG [TENANT]}"
 export GOOBER_CONFIG="$CONFIG"
-TENANT="${2:-$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.argv[1]))["domains"].values()))["tenant"])' "$CONFIG")}"
+TENANT="${2:-$(python3 -c 'import json,sys; print(next(e["tenant"] for e in json.load(open(sys.argv[1]))["domains"].values() if "tenant" in e))' "$CONFIG")}"
 
 if [[ -z "${GOOBER_TOKEN:-}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("operations",{}).get("token") else 1)' "$CONFIG"; then
   GOOBER_TOKEN="$("$BIN" token create --config "$CONFIG" --name examples)"

@@ -181,7 +181,9 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
   std::string widen = "; an owner can widen it in the panel's Operators view";
   auto in = [&](const std::string& tenant) { return scope.tenants.count(tenant) > 0; };
   auto tenant_of_domain = [&](const std::string& domain) -> std::optional<std::string> {
-    auto it = cfg->domains.find(base::to_lower(domain));
+    std::string name = base::to_lower(domain);
+    if (auto r = cfg->redirects.find(name); r != cfg->redirects.end()) name = r->second;  // its primary's tenant
+    auto it = cfg->domains.find(name);
     if (it == cfg->domains.end()) return std::nullopt;
     return it->second.tenant;
   };

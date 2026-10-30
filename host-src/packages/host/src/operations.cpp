@@ -345,11 +345,18 @@ void Host::register_tools() {
                                                      {"startup_notes", std::move(notes)}});
                   }});
 
-  mcp_->add_tool({"domain_list", "The domains this host answers, and the tenant each one serves.",
+  mcp_->add_tool({"domain_list",
+                  "The domains this host answers, and the tenant each one serves; a redirect domain also names the "
+                  "domain it redirects to (redirect_to).",
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array out;
-                    for (const auto& [domain, entry] : config_.get()->domains) {
+                    auto cfg = config_.get();
+                    for (const auto& [domain, entry] : cfg->domains) {
                       out.push_back(bj::object{{"domain", domain}, {"tenant", entry.tenant}, {"owner", entry.owner}});
+                    }
+                    // Redirect domains (015): the host answers each with a 301 to its primary.
+                    for (const auto& [domain, to] : cfg->redirects) {
+                      out.push_back(bj::object{{"domain", domain}, {"tenant", cfg->domains.at(to).tenant}, {"redirect_to", to}});
                     }
                     return ToolResult::ok(std::move(out));
                   }});
@@ -544,6 +551,15 @@ void Host::register_tools() {
        [this](const bj::object& args) {
          auto domain = base::to_lower(arg(args, "domain").value_or(""));
          auto cfg = config_.get();
+         if (auto to = cfg->redirects.find(domain); to != cfg->redirects.end()) {
+           return ToolResult::ok(bj::object{{"domain", domain},
+                                            {"tenant", cfg->domains.at(to->second).tenant},
+                                            {"served_by", "host"},
+                                            {"handler", "a redirect domain"},
+                                            {"redirect_to", to->second},
+                                            {"note", "every path gets a 301 (308 for a write) to the same path on " +
+                                                         to->second + "; ask route_check about that domain"}});
+         }
          auto entry = cfg->domains.find(domain);
          if (entry == cfg->domains.end()) return ToolResult::fail(domain + " isn't a domain in the host config");
          const std::string& tenant = entry->second.tenant;

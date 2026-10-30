@@ -41,7 +41,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 010 Manifest | partial | `box`, `mission`, `domains`, `behavior` (timeout-ms, fuel, memory-max-bytes), `routes.http`, `routes.mcp`, `routes.timer`, `routes.internal`, `routes.identity` (021), `templates`, `types`, `data`, `external`. Per-route exports (005 §3 supersedes signals). 5xx is the host's (011). | `signal`, mode/boundary/lifecycle beyond solo, budgets, shared isolates, `static`, `headers`, `rewrites`, 4xx clamping. |
 | 012 Configs | none | | Box-less config manifests, header priority, rewrites. |
 | 013 Identity | partial | Realms (per tenant, not per domain), emailed codes, cookie sessions, host operators from config, first owner, requirements in DNF with substitution, operator grant/revoke, audit. OAuth 2.1 (009): PKCE codes with consent, rotating refresh tokens with reuse detection, revocation, dynamic registration, the device flow, bearer tokens, person and agent clients, signed-in apps on the account page. Addresses proved before an account stays (invites expire in 30 days), and sign-in events boxes hear (021). | Passwords, passkeys, box `grantable`/`revocable`, realms per primary domain, the operator dive handshake, a separate origin for the screens (Q24). Rate limits, new-grant email, and browser sessions on the account page are built (013 review). |
-| 015 Domains | none | Domains live in the host config (005 §6). | The registry table, primaries and redirects, verification, TLS ask hook. |
+| 015 Domains | partial | Domains live in the host config (005 §6): a tenant's, or a redirect the host answers with a 301 to its primary, keeping the path. | The registry table, one primary per tenant enforced, verification, TLS ask hook. |
 | 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `{!email}`, `{!user_id}`, `{!tenant}`, `{!domain}` in `require`; `client_id` for agents and a `caller` block for internal calls in the request document; `!` names refused. | Substituting `!client_id` and the rest in requirements; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload; across boxes a literal beats a parameter; `route_check` names what answers a path and what it shadows. | Traffic decisions, given-up routes, static and rewrite conflicts. |
 | 020 DataFlow | partial | `data.sqlite3.$strategy` with `pattern: "sql"`, `{!tenant}` database names, a fixed `tenant` per strategy so one database spans domains, and boxes sharing databases with their own grants, their schemas checked to fit (008 §4). | `by_id`, `by_index`, named writes, generated row structs, data signatures. |
@@ -476,6 +476,9 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       (or never to ask again), checked and put back if refused.
 - [x] Missing settings asked for at deploy: the postal address per tenant, the SES from
       address, the backup bucket, the AWS keys, an operator; applied, checked, put back.
+- [x] Redirect domains (`{"redirect-to": ...}` in `domains`, a 301 or 308 from the host); the
+      audit suggests `www.` for a site, and the deploy offers it (yes, not now, never) and adds
+      it to Caddy's site line, checked and put back if refused; tests.
 - [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
       vault key copied off the machine.
 

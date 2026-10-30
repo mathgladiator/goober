@@ -8,7 +8,7 @@
 
 | question | ready? | in one line |
 | --- | --- | --- |
-| 1. Host my static content | **Yes** | Markdown, HTML, templates, images. One-command deploy with TLS. |
+| 1. Host my static content | **Yes** | Markdown, HTML, templates, images. One-command deploy with TLS; the deploy offers to redirect `www.` to the site once its DNS points here. |
 | 2. Dynamic content deployed from Grok | **Yes, untried with Grok** | Grok keeps a project's source in the host, then commits, builds, and deploys it there. |
 | 3. GrokBot doing outreach and tracking | **Yes, untried with Grok** | `leads` and `ranches` boxes, with MCP tools an agent drives through a minted token. |
 | 3a. Facebook ads to collect emails and surveys | **Yes** | A landing page, consent, UTM tags per ad, confirmation mail through SES, counts and CSV. |

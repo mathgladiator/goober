@@ -167,3 +167,47 @@ TEST(Audit, MissingSettingsSayWhatToAskFor) {
   EXPECT_EQ(find(all, "postal").level, "quiet");
   EXPECT_TRUE(find(all, "postal").asks.empty());
 }
+
+// www. for a site's name: suggested with its DNS, checked once set, and quiet per name.
+TEST(Audit, SuggestsRedirectingWwwAndChecksRedirects) {
+  auto here = std::vector<std::string>{"203.0.113.7"};
+  auto cfg = parse(R"({"platform-domain": "shop.example",
+    "domains": {"shop.example": {"tenant": "shop"}, "blog.shop.example": {"tenant": "blog"}, "localhost": {"tenant": "dev"}}})");
+  auto all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}}));
+  std::vector<const host::AuditFinding*> redirects;
+  for (const auto& f : all) {
+    if (f.id == "redirect") redirects.push_back(&f);
+  }
+  // Only www.shop.example: blog.shop.example's www. resolves nowhere, and localhost isn't public.
+  ASSERT_EQ(redirects.size(), 1u);
+  EXPECT_EQ(redirects[0]->level, "suggest");
+  EXPECT_EQ(redirects[0]->data.at("domain"), "www.shop.example");
+  EXPECT_EQ(redirects[0]->data.at("to"), "shop.example");
+  EXPECT_EQ(redirects[0]->data.at("dns"), "missing");
+  EXPECT_NE(redirects[0]->steps[0].find("A www.shop.example -> 203.0.113.7"), std::string::npos);
+  all = host::audit_operations(*cfg, kCaddy,
+                               dns({{"shop.example", here}, {"www.shop.example", here}, {"www.blog.shop.example", here}}));
+  EXPECT_EQ(find(all, "redirect").data.at("dns"), "ready");
+  int suggested = 0;
+  for (const auto& f : all) suggested += f.id == "redirect";
+  EXPECT_EQ(suggested, 2);  // pointed here, so the longer name's www. is suggested too
+
+  // Quiet for one name, or for all.
+  cfg = parse(R"({"platform-domain": "shop.example", "domains": {"shop.example": {"tenant": "shop"}},
+    "audit": {"quiet": ["redirect:www.shop.example"]}})");
+  all = host::audit_operations(*cfg, kCaddy, dns({}));
+  EXPECT_EQ(find(all, "redirect").level, "quiet");
+  for (const auto& f : all) EXPECT_NE(f.id, "audit");  // a named quiet is a known check
+  std::string err;
+  EXPECT_FALSE(config::parse_config(R"({"audit": {"quiet": ["redirect:not a name"]}})", "/tmp", &err));
+
+  // Set: checked for DNS, and for Caddy serving it.
+  cfg = parse(R"({"platform-domain": "shop.example",
+    "domains": {"shop.example": {"tenant": "shop"}, "www.shop.example": {"redirect-to": "shop.example"}}})");
+  all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}, {"www.shop.example", here}}));
+  EXPECT_EQ(find(all, "redirect").level, "ok");
+  EXPECT_EQ(find(all, "caddy").level, "warn");
+  EXPECT_NE(find(all, "caddy").title.find("www.shop.example"), std::string::npos);
+  all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}}));
+  EXPECT_EQ(find(all, "redirect").level, "warn");
+}

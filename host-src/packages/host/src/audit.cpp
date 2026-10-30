@@ -176,7 +176,9 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     return std::find(config.audit_quiet.begin(), config.audit_quiet.end(), id) != config.audit_quiet.end();
   };
   auto add = [&](AuditFinding f) {
-    if (quiet(f.id) && f.level != "ok") {
+    const auto* name = f.data.if_contains("domain");
+    bool named_quiet = name && name->is_string() && quiet(f.id + ":" + std::string(name->as_string()));
+    if ((quiet(f.id) || named_quiet) && f.level != "ok") {
       f.level = "quiet";
       f.title = "not suggested (audit.quiet in host.json): " + f.title;
       f.steps.clear();
@@ -185,7 +187,7 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     out.push_back(std::move(f));
   };
   for (const auto& id : config.audit_quiet) {
-    if (std::find(kAuditChecks.begin(), kAuditChecks.end(), id) == kAuditChecks.end()) {
+    if (std::find(kAuditChecks.begin(), kAuditChecks.end(), id.substr(0, id.find(':'))) == kAuditChecks.end()) {
       out.push_back({"audit", "warn", "audit.quiet names \"" + id + "\", which no check has", {}, {}, {}});
     }
   }
@@ -204,6 +206,9 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     for (const auto& [name, entry] : config.domains) {
       if (is_public_name(name) && !served(sites, name)) missing.push_back(name);
     }
+    for (const auto& [name, to] : config.redirects) {
+      if (!served(sites, name)) missing.push_back(name);
+    }
     if (!config.operations_domain.empty() && !served(sites, config.operations_domain)) {
       missing.push_back(config.operations_domain);
     }
@@ -215,6 +220,39 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
       f.title += ": no certificate, so browsers and agents can't reach it";
       f.steps.push_back("Add it to the site line of /etc/caddy/Caddyfile, then: sudo systemctl reload caddy");
     }
+    add(std::move(f));
+  }
+
+  // Redirect domains (015.Domains.md): each one's DNS, and www. for a site that lacks it.
+  auto ours = site.empty() ? std::vector<std::string>{} : resolve(site);
+  for (const auto& [name, to] : config.redirects) {
+    auto theirs = resolve(name);
+    std::string dns = dns_state(theirs, ours);
+    AuditFinding f{"redirect", "ok", name + " redirects to " + to, {}, {{"domain", name}, {"to", to}, {"dns", dns}}, {}};
+    if (dns == "missing" || dns == "elsewhere") {
+      f.level = "warn";
+      f.title = "the redirect " + name + " -> " + to + (dns == "missing" ? " doesn't resolve" : " resolves somewhere else");
+      f.steps.push_back((dns == "missing" ? "Add DNS: " : "Point it here: ") + records_for(name, ours));
+    }
+    add(std::move(f));
+  }
+  for (const auto& [name, entry] : config.domains) {
+    if (!is_public_name(name) || name.starts_with("www.")) continue;
+    std::string www = "www." + name;
+    if (config.domains.count(www) || config.redirects.count(www) || www == config.operations_domain) continue;
+    auto theirs = resolve(www);
+    // www. is what people type for a name like example.com; under a longer name, like
+    // shop.example.com, only once someone has pointed it somewhere.
+    if (std::count(name.begin(), name.end(), '.') != 1 && theirs.empty()) continue;
+    std::string dns = dns_state(theirs, ours);
+    AuditFinding f{"redirect", "suggest", www + " isn't served: suggest redirecting it to " + name, {},
+                   {{"domain", www}, {"to", name}, {"dns", dns}, {"addresses", strings(ours)}}, {}};
+    if (dns != "ready") {
+      f.steps.push_back("Add DNS: " + records_for(www, ours) + (dns == "elsewhere" ? " (it resolves elsewhere now)" : ""));
+    }
+    f.steps.push_back("Add \"" + www + "\": {\"redirect-to\": \"" + name + "\"} to host.json's domains, add " + www +
+                      " to the Caddyfile's site line, and restart both; a deploy offers to do this once DNS is ready");
+    f.steps.push_back("Not wanted: add \"redirect:" + www + "\" to audit.quiet in host.json, or answer \"never\" at the deploy prompt");
     add(std::move(f));
   }
 

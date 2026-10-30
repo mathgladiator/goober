@@ -86,6 +86,10 @@ struct HostConfig {
   std::filesystem::path storage = "./storage";
   std::string platform_domain = "localhost";
   std::map<std::string, DomainEntry> domains;
+  // Redirect domains (015.Domains.md): each answers every request with a permanent redirect to
+  // its primary domain, keeping the path and query; never a tenant, a route, or a box. In
+  // host.json they sit in "domains" as {"redirect-to": "example.com"}.
+  std::map<std::string, std::string> redirects;
   // Per tenant: its postal address, terms, and what boxes' invites may grant (029 § 8).
   std::map<std::string, TenantConfig> tenants;
   // The tenant's entry, or the defaults when it has none.
@@ -192,6 +196,9 @@ struct HostConfig {
   // platform domain (or else the first domain).
   std::optional<std::pair<std::string, DomainEntry>> resolve_host(std::string_view host) const;
   std::optional<std::string> tenant_for_host(std::string_view host) const;
+  // The primary domain a redirect domain sends a Host header value to, normalized as
+  // resolve_host normalizes. In local mode, "$redirect.localhost" goes to "$primary.localhost".
+  std::optional<std::string> redirect_for(std::string_view host) const;
 
   // The base URL for links: public_url, or the listen address and port.
   std::string base_url() const;
