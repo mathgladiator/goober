@@ -84,6 +84,11 @@ class Session {
   void rollback();
   // How many statements ran, for the access log.
   int statements() const { return statements_; }
+  // A subscription's evaluation (design/machine/036.Bus.md § 5): any statement that writes is
+  // refused before it runs.
+  void set_read_only(bool on) { read_only_ = on; }
+  // The strategies a statement that writes ran through, for the topics they publish.
+  const std::set<std::string>& wrote() const { return wrote_; }
 
  private:
   struct Open {
@@ -93,6 +98,8 @@ class Session {
   Databases& dbs_;
   std::string tenant_;
   std::set<std::string> expect_writes_;  // strategy names
+  std::set<std::string> wrote_;          // strategy names
+  bool read_only_ = false;
   std::string commit_last_;              // an open_ key, "tenant/database"
   const std::vector<manifest::DataStrategy>& strategies_;
   const SchemaStore& schemas_;

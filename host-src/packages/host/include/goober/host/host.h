@@ -11,6 +11,7 @@
 #include <string>
 
 #include "goober/attachments/attachments.h"
+#include "goober/bus/bus.h"
 #include "goober/boxes/registry.h"
 #include "goober/config/config.h"
 #include "goober/content/content.h"
@@ -225,6 +226,7 @@ class Host {
     std::optional<int64_t> timeout_ms;
     std::function<bool(db::Session&, std::string*)> before_commit;
     bool no_response_ok = false;  // a timer fire may just return: there is nobody to answer
+    bool read_only = false;       // a subscription's evaluation (036 § 5): no writes, no effects
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -458,6 +460,41 @@ class Host {
   std::pair<int, boost::json::object> panel_decide(const SignedIn& who, const boost::json::object& args,
                                                    const std::string& request_id);
   void register_approval_tools();
+  // The bus and subscriptions (040; design/machine/036.Bus.md; sse.cpp).
+  struct SseSub {
+    std::shared_ptr<server::http::Stream> stream;
+    std::string client;
+    int64_t opened_ms = 0, last_sent = -1;
+    bool has_answer = false;
+  };
+  struct SseGroup {
+    std::string key, tenant, domain, path, box, route;
+    std::optional<SignedIn> who;
+    boost::json::object doc;
+    std::vector<std::string> topics;
+    int64_t coalesce_ms = 250, refresh_ms = 30000;
+    std::vector<std::shared_ptr<SseSub>> subs;
+    uint64_t watch_id = 0;
+    int64_t last_eval_ms = 0, due_ms = 0, last_id = -1, evaluations = 0;
+    std::string last_body;
+    bool running = false;
+  };
+  static std::optional<std::string> resolve_topic(const std::string& tmpl, const std::string& tenant,
+                                                  const boost::json::object& doc, const std::optional<SignedIn>& who);
+  void serve_subscription(const server::http::Request& req, const Finish& finish, boxes::RouteRef ref,
+                          std::map<std::string, std::string> params, const std::string& domain, const std::string& tenant,
+                          bool stream);
+  void sse_evaluate(std::shared_ptr<SseGroup> g);
+  void sse_loop();
+  void sse_stop();
+  boost::json::object bus_status(const std::string& tenant);
+  bus::Bus bus_{base_seed()};
+  static int64_t base_seed();
+  std::mutex sse_mu_;
+  std::condition_variable sse_cv_;
+  std::map<std::string, std::shared_ptr<SseGroup>> sse_groups_;
+  std::thread sse_thread_;
+  bool sse_stopping_ = false;
   std::mutex approvals_mu_;
   std::unique_ptr<sqlite::Db> approvals_db_;
   std::map<std::string, int64_t> agents_seen_;

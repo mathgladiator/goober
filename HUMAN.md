@@ -64,6 +64,13 @@ Every log line is chained to the one before; to check nothing was edited or dele
 for `log_verify`, or see `log_status` for what's waiting to be archived. Rotated logs go to the
 backup bucket under `logs/`, sealed, for 400 days.
 
+**Do live updates reach browsers?** Once a box has a `routes.sse` subscription (036), this should
+print an `event: update` at once and a `: ping` every 15 seconds, not hang silent:
+
+```sh
+curl -sN -H 'Accept: text/event-stream' https://kcmeatup.com/<the subscription's path> | head -n 8
+```
+
 **Is the kernel patched, and is multipath TCP off?** Deploys turn MPTCP off (the kernel's MPTCP
 code has had remotely reachable flaws), but only a newer kernel fixes the kernel:
 

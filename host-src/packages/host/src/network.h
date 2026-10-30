@@ -44,6 +44,8 @@ struct CallContext {
   int64_t deadline_us = 0;  // monotonic: no internal call outlives the request (039)
   std::map<std::string, int64_t> calls;  // per service.method, against its budget
   std::vector<OutboxElement> pending;
+  // A subscription's evaluation (036 § 5): only calls that change nothing.
+  bool read_only = false;
 };
 
 // A request ready to send: the URL, headers, and body after require is applied.

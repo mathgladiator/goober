@@ -216,6 +216,15 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_log_tools();
   register_spec_tools();
   register_approval_tools();
+  mcp_->add_tool({"bus_status",
+                  "The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last publish, and "
+                  "watchers, and each open subscription's route, subscribers, evaluations, and last answer's size.",
+                  mcp::object_schema({{"tenant", mcp::string_property("The tenant.")}}, {"tenant"}),
+                  [this](const bj::object& args) {
+                    auto* t = args.if_contains("tenant");
+                    if (!t || !t->is_string()) return mcp::ToolResult::fail("tenant is required");
+                    return mcp::ToolResult::ok(bus_status(std::string(t->as_string())));
+                  }});
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -333,10 +342,14 @@ uint16_t Host::start() {
     auto status = backups_->status(false, base::now_unix_ms());
     if (status.contains("key_warning")) startup_notes_.push_back(std::string(status.at("key_warning").as_string()));
   }
+  sse_thread_ = std::thread([this] { sse_loop(); });
   return server_->port();
 }
 
 void Host::stop() {
+  // Open subscriptions first: they hold connections, not workers, and would keep a graceful
+  // stop waiting for nothing.
+  sse_stop();
   if (timer_thread_.joinable()) {
     {
       std::lock_guard lock(timer_thread_mu_);
@@ -848,6 +861,27 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     res.headers.emplace_back("vary", "origin");
     return finish(std::move(res), R"({"cors":"preflight"})");
   }
+  // A subscription (036 § 4): a GET asking for an event stream, or a plain GET where no GET
+  // route answers, which evaluates the subscription once.
+  if (req.method == "get" || req.method == "head") {
+    bool wants_stream = req.method == "get" && req.header("accept").find("text/event-stream") != std::string::npos;
+    auto sub = table.match(path->segments, "subscribe");
+    if (sub.value && (wants_stream || !table.match(path->segments, "get").value)) {
+      auto ref = *sub.value;
+      bool queued = pool_->post(
+          [this, req, finish, ref, params = std::move(sub.params), domain, tenant = *tenant, wants_stream, active]() mutable {
+            try {
+              serve_subscription(req, finish, ref, std::move(params), domain, tenant, wants_stream);
+            } catch (const std::exception& e) {
+              std::cerr << "goober-host: subscription " << ref.box->manifest.box << ": " << e.what() << "\n";
+              finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"subscription failed"})");
+            }
+          },
+          max_queued_);
+      if (!queued) return finish(error_page(*tenant, 503, request_id), R"({"why":"queue full"})");
+      return;
+    }
+  }
   std::string verb = req.method == "head" ? "get" : req.method;
   auto match = table.match(path->segments, verb);
   if (match.value) {
@@ -1034,6 +1068,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
         outbox = false;
       }
     }
+    session->set_read_only(options.read_only);
     input.sql = [&session](std::string_view strategy, std::string_view sql, std::string_view params) {
       return session->run(strategy, sql, params);
     };
@@ -1049,6 +1084,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     net.user = user_json(who);
     net.who = who;
     net.route = ref.route->name;
+    net.read_only = options.read_only;
     input.call = [this, &net](std::string_view service, std::string_view method, std::string_view request) {
       return external_call(net, service, method, request);
     };
@@ -1158,12 +1194,15 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       extra["outcome"] = "host_write_failed";
     }
   }
+  bool committed = false;
   if (session && session->statements() > 0) {
     extra["sql"] = session->statements();
     std::string err;
     if (!ok) {
       session->rollback();
-    } else if (!session->commit(&err)) {
+    } else if (session->commit(&err)) {
+      committed = true;
+    } else {
       result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
       result.error = err;
       extra["outcome"] = "commit_failed";
@@ -1172,6 +1211,18 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
                                                        {"text", "commit failed: " + err}}));
+    }
+  }
+  // The bus (040, design/machine/036.Bus.md): a strategy's topic moves when, and only when, its
+  // writes committed. Topics are the request's tenant's.
+  if (committed) {
+    for (const auto& d : m.data) {
+      if (d.publish.empty() || !session->wrote().count(d.name)) continue;
+      if (auto topic = resolve_topic(d.publish, tenant, doc, who)) {
+        int64_t seq = bus_.publish(tenant + "/" + *topic, base::now_unix_ms());
+        extra["published"] = *topic;
+        (void)seq;
+      }
     }
   }
   if (ok && !net.pending.empty() && !session) {

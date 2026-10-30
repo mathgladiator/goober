@@ -255,6 +255,27 @@ results); "sealed" can't use base "*". "base": "*" with "any-public": true on a 
 takes the whole https URL from the call's url (Webmention, Micropub, a person's Mastodon).
 Effects: an op that is a GET is sent now; others go through the outbox unless "effect" says.
 
+## Real time: publish and subscribe
+
+design/machine/036.Bus.md. The bus carries signals, never data: the database is the truth.
+1. Publish from data: a strategy's "publish": "orders" moves topic "orders" whenever a request's
+   writes through it commit (never on a rollback). Topics are per tenant automatically; segments
+   may be {!tenant}, {!user_id} (the writer's), or {!domain}.
+2. Subscribe with a route: "routes": {"sse": {"/orders/live": {"subscribe": {"name":
+   "live_orders", "public": true (or requirements), "response": "json", "wake": ["orders"],
+   "coalesce-ms": 250, "refresh-ms": 30000}}}}. Export goober_route_live_orders: it answers like a
+   GET (method "subscribe"), read-only: any SQL that writes and any effectful call is refused.
+3. The host evaluates it when a wake topic moves (at most once per coalesce-ms), every refresh-ms
+   anyway, and sends the answer as an SSE event (id = the bus sequence, event "update", the body
+   as data) only when it changed. Viewers with the same signature (same route, params, query,
+   person) share one evaluation.
+In the page: const es = new EventSource("/orders/live"); es.addEventListener("update", e =>
+render(JSON.parse(e.data))); the browser reconnects by itself (streams end every 15 minutes, and
+the request is checked again). A plain GET of the same path answers once, for the first paint.
+"event: error" carries {"status"}; a 401 or 403 ends the stream. bus_status {tenant} shows topics
+and subscriptions. For a chat or feed, keep the messages in a table and subscribe to its newest
+page; the bus only says when to look.
+
 ## Sending mail
 
 A box sends mail through the host's own mailer (SES or SMTP, set by the operator):

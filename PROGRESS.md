@@ -55,7 +55,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 037 Http | partial | Typed path params, verbs, cross-site POST refusal, ETags on content and box GETs; declared `body`, `max-body-bytes`, `query`, `request-headers`, and typed `response`; the status vocabulary; CORS per route (011). | ETags that skip the box, compression, ranges, declared redirect targets; undeclared routes still see every header and parameter. |
 | 038 Mail | partial | Mail in through Stalwart and `routes.mail`, with reply tokens and the box's answer as the SMTP answer (024). Mail out through SMTP or Amazon SES; boxes send through a host `mail` service, via the outbox, within per-tenant and per-address daily limits; a sandbox sends nothing (018). | Verified senders (Q39), verified senders per domain for mail out, `send-email@1`, bounce handling. |
 | 039 Internal | partial | Internal routes with callers, synchronous calls carrying the person and tenant, both sides checked, cycles refused, depth capped, deadlines shrink (016). | Outbox to boxes, idempotent routes, typed generated calls, tenant binding by path, worst-case sums. |
-| 040 Bus | none | | Signals, `publish`, SSE subscriptions. |
+| 040 Bus | partial | In-process (036): `publish` on strategies, moved on commit; `routes.sse` subscriptions evaluated read-only, coalesced, shared per signature, refreshed, over SSE with keepalive and a 15-minute life; `bus_status`. | A cluster (NATS), publishing from operator SQL, topics from route parameters. |
 | 041 Reserved routes | built | The reserved prefixes are refused, plus `/error-message/` and `/attachment/`. | `/internal/` hooks have nothing behind them yet; reserved mail addresses. |
 | 045 Time | partial | Timer routes (every-ms, cron), `by_timer` sources with per-row zones and one-shot at-fields, 045's DST rules, catch-up, operator tools (014). | Spreading fires, `target` to internal routes, `tenant-field`, typed row structs, pause and resume. |
 | 050 Agents/MCP | partial | The operator MCP endpoint. Agent tokens (009), refused on HTTP routes unless `"agents": true`. `/mcp` on every domain with box tools, typed inputs, filtered discovery, an audit log, and RFC 9728 metadata (012). | Resources, subscriptions, sessions and cancellation, per-agent quotas, a run with a real MCP client. |
@@ -460,6 +460,12 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Changing calls held as requests; read tools and `approval_status` never wait; approve
       runs the call as the agent, deny never runs it; requests expire in a day; audited.
 - [ ] Standing rules per tool or tenant, 305's version registry and modes, notifications.
+
+### Phase 27: the bus (040, 036)
+- [x] `bus` package; open HTTP streams; `publish` and `routes.sse` in manifests.
+- [x] Publish on commit; read-only, coalesced, shared evaluations; Last-Event-ID; limits;
+      keepalive; `bus_status`; tests end to end.
+- [ ] NATS for a cluster; a JavaScript helper in the asset kit.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

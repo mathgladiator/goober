@@ -163,6 +163,8 @@ Read these before doing design work:
   - `design/machine/035.Approvals.md`: approvals per connected agent: a switch in the panel, off
     by default; when on, the agent's changing tool calls wait as requests a person approves (run
     as the agent) or denies; read tools never wait.
+  - `design/machine/036.Bus.md`: the bus in-process: `publish` on strategies moved on commit,
+    `routes.sse` subscriptions evaluated read-only, coalesced, and shared, over SSE.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

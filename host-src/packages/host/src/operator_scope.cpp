@@ -39,7 +39,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
           "template_put", "template_delete", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
           "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
-          "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow"}) {
+          "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow", "bus_status"}) {
       m[t] = Rule::kTenant;
     }
     for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote"}) m[t] = Rule::kBox;

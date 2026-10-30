@@ -351,6 +351,22 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     if (!parsed) return fail("the call isn't JSON: " + err);
     request = std::move(*parsed);
   }
+  if (ctx.read_only) {
+    // An evaluation may serve many subscribers at once, so it changes nothing (040): reads of
+    // the web, a person's mail preferences, and service methods whose effect is none.
+    bool safe = svc->web || (svc->mail && m.name == "preferences");
+    if (!safe && svc->box.empty() && !svc->mail && !svc->invites && !svc->push) {
+      std::string effect = m.effect;
+      if (!m.op.empty() && !m.effect_given) {
+        std::string err;
+        if (auto spec = specs_->get(svc->spec, &err)) {
+          if (const auto* op = spec->find(m.op)) effect = op->verb == "get" || op->verb == "head" ? "none" : "outbox";
+        }
+      }
+      safe = effect == "none";
+    }
+    if (!safe) return fail("a subscription changes nothing: " + svc->name + "." + m.name + " isn't a read");
+  }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);
   if (svc->mail && m.name == "attachment") return mail_attachment_call(ctx, request);
