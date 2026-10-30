@@ -153,6 +153,24 @@ else
   systemctl reload caddy || systemctl restart caddy
 fi
 
+# No multipath TCP (2026-10-30). The host listens on plain TCP, but Caddy is built with Go 1.24+,
+# whose listeners take MPTCP whenever the kernel offers it, and the kernel's MPTCP code has had
+# remotely reachable flaws (CVE-2026-98432, CVE-2026-80587). Off in the kernel, and off in Caddy
+# should the kernel setting ever be undone. On every deploy, so existing servers get it too.
+echo "── multipath TCP off"
+if [[ -e /proc/sys/net/mptcp/enabled ]]; then
+  echo "net.mptcp.enabled = 0" > /etc/sysctl.d/90-goober-no-mptcp.conf
+  sysctl -q -w net.mptcp.enabled=0
+fi
+mkdir -p /etc/systemd/system/caddy.service.d
+DROPIN=/etc/systemd/system/caddy.service.d/goober-no-mptcp.conf
+WANT=$'[Service]\nEnvironment=GODEBUG=multipathtcp=0\n'
+if [[ "$(cat "$DROPIN" 2>/dev/null)"$'\n' != "$WANT" ]]; then
+  printf '%s' "$WANT" > "$DROPIN"
+  systemctl daemon-reload
+  systemctl restart caddy
+fi
+
 if [[ -d "$HOME_DIR/vendor" && -f "$DIR/host.json" ]]; then
   # Builds read the vendored crates, and find cargo in the user's home.
   if sudo -u "$RUN_AS" python3 -c '
