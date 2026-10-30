@@ -85,9 +85,14 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     if (policy.check) {
       if (auto refused = policy.check(name, args)) called = ToolResult::fail(*refused);
     }
+    bool held = false;
+    if (!called && policy.hold) {
+      called = policy.hold(name, args);
+      held = called.has_value();
+    }
     if (!called) called = call(name, args);
     ToolResult out = std::move(*called);
-    if (!out.is_error && policy.filter) {
+    if (!out.is_error && policy.filter && !held) {
       if (auto refused = policy.filter(name, out.value)) out = ToolResult::fail(*refused);
     }
     std::string text = out.value.is_string() ? std::string(out.value.get_string()) : goober::json::pretty(out.value);

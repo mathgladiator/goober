@@ -309,7 +309,7 @@ TEST_F(InvitesHostTest, AnOperatorLiftsABlockOnlyInThePanelSayingWhy) {
   EXPECT_EQ(api(R"({"tenant":"kc","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin"})").status, 400);
   auto ok = api(R"({"tenant":"kc","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin","confirm":true})");
   EXPECT_EQ(ok.status, 200) << ok.body;
-  EXPECT_EQ(parse(ok.body).at("lifted"), true);
+  EXPECT_EQ(parse(ok.body).at("result").at("lifted"), true);
   EXPECT_FALSE(host->mail_suppressed("kc", "dee@example.com"));
 }
 

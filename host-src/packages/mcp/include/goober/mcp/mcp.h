@@ -54,6 +54,9 @@ class McpServer {
     std::function<std::optional<std::string>(const std::string& tool, const bj::object& arguments)> check;
     // A filter may also refuse the result as a whole: the call then answers that refusal.
     std::function<std::optional<std::string>(const std::string& tool, bj::value& result)> filter;
+    // After the checks pass, may answer in the tool's place (an approval holding the call): the
+    // tool isn't run, and the answer isn't filtered.
+    std::function<std::optional<ToolResult>(const std::string& tool, const bj::object& arguments)> hold = {};
   };
   HttpReply handle(std::string_view body, const Allowed& allowed = {}) const;
   HttpReply handle(std::string_view body, const Policy& policy) const;

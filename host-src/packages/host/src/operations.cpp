@@ -126,6 +126,7 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   }
   current_operator() = operator_name;
   current_request_id() = req.header("goober-request-id");
+  saw_agent(operator_name);  // the panel lists connected agents, to turn approvals on for one
   // A host:observer only looks (design/machine/028.Panel.md § 2).
   // A focused operator only reaches their tenants (design/machine/030.OperatorScope.md).
   auto reply = mcp_->handle(req.body, operator_policy(operator_name, !may_change(operator_roles(operator_name))));
@@ -157,8 +158,9 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     for (const auto& kv : extra) {
       if (kv.key().starts_with("arg_")) args[kv.key().substr(4)] = kv.value();
     }
+    bool held = !failed && reply.body.find("\"pending_approval\"") != std::string::npos;
     audit("operator.tool", operator_name, std::string(tool->as_string()),
-          failed || reply.body.find("\"error\":{") != std::string::npos ? "failed" : "ok",
+          held ? "held" : failed || reply.body.find("\"error\":{") != std::string::npos ? "failed" : "ok",
           bj::object{{"ip", client_address(req)}, {"request_id", req.header("goober-request-id")}, {"via", "mcp"},
                      {"args", std::move(args)}});
   }

@@ -221,7 +221,7 @@ TEST_F(ScopeTest, OnlyHumansInThePanelChangeIt) {
   EXPECT_EQ(api(boss, "write/scope", R"({"operator":"person:helper@example.com","tenants":"all","confirm":true})").status, 200);
   EXPECT_EQ(api(helper, "host_health").status, 200);
   EXPECT_EQ(api(boss, "write/scope", R"({"operator":"token:grok","tenants":["nope"],"confirm":true})").status, 400);
-  auto ops = parse(api(boss, "operators").body).as_object();
+  auto ops = parse(api(boss, "operators").body).as_object().at("result").as_object();
   EXPECT_TRUE(ops.at("may_set_any").as_bool());
   EXPECT_GE(ops.at("operators").as_array().size(), 4u);
   auto actions = parse(api(boss, "operator_actions").body).as_object().at("result");
@@ -240,4 +240,59 @@ TEST_F(ScopeTest, AnAgentSignedInAsAFocusedPersonIsFocused) {
   ASSERT_TRUE(policy.check);
   EXPECT_TRUE(policy.check("content_put", bj::object{{"tenant", "other"}}));
   EXPECT_FALSE(policy.check("content_put", bj::object{{"tenant", "kc"}}));
+}
+
+// Approvals per connected agent (035): off by default; on, a changing call waits for a person.
+TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
+  // Off: the call runs.
+  EXPECT_FALSE(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"one"})").at("isError").as_bool());
+  auto boss = sign_in("boss@example.com");
+  auto helper = sign_in("helper@example.com");
+  auto watcher = sign_in("watcher@example.com");
+  // The agent is listed once it has called; only an owner turns approvals on for a token.
+  auto listed = api(boss, "approvals");
+  EXPECT_NE(listed.body.find("\"agent\":\"token:grok\""), std::string::npos) << listed.body;
+  EXPECT_EQ(api(helper, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 403);
+  EXPECT_EQ(api(watcher, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 403);
+  EXPECT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true})").status, 400);  // unconfirmed
+  ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 200);
+  // On: looking still runs; changing waits, and nothing changed.
+  EXPECT_FALSE(call("content_list", R"({"tenant":"kc"})").at("isError").as_bool());
+  auto held = call("content_put", R"({"tenant":"kc","path":"a.txt","text":"two"})");
+  EXPECT_FALSE(held.at("isError").as_bool());
+  auto text = std::string(held.at("text").as_string());
+  std::smatch m;
+  ASSERT_TRUE(std::regex_search(text, m, std::regex(R"re("pending_approval": ([0-9]+))re"))) << text;
+  std::string id = m[1];
+  EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "one");
+  // A scope refusal is still a refusal, not a request.
+  focus_grok(R"(["kc"])");
+  EXPECT_TRUE(call("content_put", R"({"tenant":"other","path":"a.txt","text":"x"})").at("isError").as_bool());
+  // The agent sees its request; a helper can't decide for a token; the owner approves, once.
+  EXPECT_NE(std::string(call("approval_status", "{\"id\":" + id + "}").at("text").as_string()).find("\"pending\""),
+            std::string::npos);
+  auto pending = api(boss, "approvals");
+  EXPECT_NE(pending.body.find("\"tool\":\"content_put\""), std::string::npos) << pending.body;
+  EXPECT_EQ(api(helper, "write/decide", "{\"id\":" + id + ",\"decision\":\"approve\",\"confirm\":true}").status, 403);
+  auto ok = api(boss, "write/decide", "{\"id\":" + id + ",\"decision\":\"approve\",\"confirm\":true}");
+  ASSERT_EQ(ok.status, 200) << ok.body;
+  EXPECT_NE(ok.body.find("\"state\":\"done\""), std::string::npos) << ok.body;
+  EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "two");
+  EXPECT_EQ(api(boss, "write/decide", "{\"id\":" + id + ",\"decision\":\"approve\",\"confirm\":true}").status, 404);
+  EXPECT_NE(std::string(call("approval_status", "{\"id\":" + id + "}").at("text").as_string()).find("\"done\""), std::string::npos);
+  // Denied: never runs.
+  auto again = std::string(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"three"})").at("text").as_string());
+  ASSERT_TRUE(std::regex_search(again, m, std::regex(R"re("pending_approval": ([0-9]+))re"))) << again;
+  ASSERT_EQ(api(boss, "write/decide", "{\"id\":" + std::string(m[1]) + ",\"decision\":\"deny\",\"confirm\":true}").status, 200);
+  EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "two");
+  // The audit log says who held, approved, and denied.
+  auto audit = *base::read_file(root / "storage/logs/audit.log");
+  EXPECT_NE(audit.find("\"outcome\":\"held\""), std::string::npos);
+  EXPECT_NE(audit.find("approval.approved"), std::string::npos);
+  EXPECT_NE(audit.find("approval.denied"), std::string::npos);
+  EXPECT_NE(audit.find("\"approved_by\":\"panel:boss@example.com\""), std::string::npos);
+  // Off again: calls run at once.
+  ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":false,"confirm":true})").status, 200);
+  EXPECT_FALSE(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"four"})").at("isError").as_bool());
+  EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "four");
 }

@@ -148,6 +148,10 @@ ssh customer@kcmeatup.com 'sudo cp -p /usr/local/bin/goober-host.prev /usr/local
 
 ## 6. Stop Grok
 
+**Gentlest: make Grok ask first.** In the panel's **Operators** view, the **Approvals** card
+lists each connected agent. Turn approvals on for Grok, and every change it tries waits there
+for you to approve or deny; it can still look around. Turn it off and it acts alone again.
+
 From least to most drastic:
 
 ```sh

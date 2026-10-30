@@ -612,6 +612,7 @@ const views = {
           { label: 'Scope', get: (op) => editor(op) },
           { label: 'Set', get: (op) => op.scope === 'all' ? '' : op.scope.set_by + ' · ' + fmt.time(op.scope.at_ms), cls: () => 'muted small' },
         ], o.operators), status),
+      await approvalsCard(),
       wideCard('Lift a mail block', unblockForm(tenants)),
     ];
   },
@@ -932,6 +933,56 @@ function pager(rows, before, next) {
 }
 
 // Lifting a block takes a person here, with a statement of why (029 § 6): no tool can.
+// Approvals per connected agent (035): off by default; when on, the agent's changing calls wait here.
+async function approvalsCard() {
+  const a = await api('approvals');
+  const status = h('p', { class: 'muted small' });
+  const toggle = (ag) => {
+    if (!ag.may_set) return h('span', { class: 'muted' }, ag.approvals ? 'on' : 'off');
+    const box = h('input', { type: 'checkbox', checked: ag.approvals, onchange: async () => {
+      const words = box.checked ? 'Hold every changing call by ' + ag.name + ' for approval?' : 'Let ' + ag.name + ' act without approval?';
+      if (!confirm(words)) { box.checked = !box.checked; return; }
+      try { await api('write/approvals', { agent: ag.agent, on: box.checked, confirm: true }); render(false); }
+      catch (e) { status.textContent = e.message; box.checked = !box.checked; }
+    } });
+    return h('label', {}, box, ' ', ag.approvals ? 'on' : 'off');
+  };
+  const decide = (r, decision) => h('button', { class: 'small' + (decision === 'deny' ? ' secondary' : ''), onclick: async () => {
+    if (!confirm((decision === 'approve' ? 'Run ' : 'Deny ') + r.tool + ' for ' + r.agent + '?')) return;
+    try {
+      const out = await api('write/decide', { id: r.id, decision, confirm: true });
+      status.textContent = '#' + r.id + ' ' + out.state + (out.is_error ? ' (the tool failed: see Recent)' : '');
+      render(false);
+    } catch (e) { status.textContent = e.message; }
+  } }, decision === 'approve' ? 'Approve' : 'Deny');
+  return wideCard('Approvals',
+    h('p', { class: 'muted small' }, 'Off by default. Turned on for an agent, its changing tool calls wait here until a person ' +
+      'approves (the call then runs as the agent) or denies them; looking never waits. Undecided requests expire in a day.'),
+    table([
+      { label: 'Agent', get: (ag) => ag.name, cls: () => 'mono' },
+      { label: 'Kind', get: (ag) => ag.kind },
+      { label: 'Last call', get: (ag) => ag.last_ms ? fmt.time(ag.last_ms) : '', cls: () => 'muted small' },
+      { label: 'Approvals', get: (ag) => toggle(ag) },
+    ], a.agents),
+    h('h3', {}, 'Waiting (' + a.pending.length + ')'),
+    a.pending.length ? table([
+      { label: '#', get: (r) => String(r.id), cls: () => 'mono' },
+      { label: 'When', get: (r) => fmt.time(r.at_ms), cls: () => 'muted small' },
+      { label: 'Agent', get: (r) => r.agent, cls: () => 'mono small' },
+      { label: 'Tool', get: (r) => r.tool, cls: () => 'mono' },
+      { label: 'Arguments', get: (r) => h('pre', { class: 'small' }, JSON.stringify(r.args, null, 2).slice(0, 4000)) },
+      { label: '', get: (r) => h('span', {}, decide(r, 'approve'), ' ', decide(r, 'deny')) },
+    ], a.pending) : h('p', { class: 'muted' }, 'Nothing waiting.'),
+    a.recent.length ? [h('h3', {}, 'Recent'), table([
+      { label: '#', get: (r) => String(r.id), cls: () => 'mono' },
+      { label: 'Agent', get: (r) => r.agent, cls: () => 'mono small' },
+      { label: 'Tool', get: (r) => r.tool, cls: () => 'mono' },
+      { label: 'State', get: (r) => r.state + (r.is_error ? ' (failed)' : '') },
+      { label: 'By', get: (r) => (r.decided_by || '') + (r.decided_ms ? ' · ' + fmt.time(r.decided_ms) : ''), cls: () => 'muted small' },
+    ], a.recent)] : null,
+    status);
+}
+
 function unblockForm(tenants) {
   const tenant = h('select', {}, tenants.map((t) => h('option', { value: t }, t)));
   const email = h('input', { type: 'email', placeholder: 'person@example.com' });

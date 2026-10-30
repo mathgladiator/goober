@@ -156,7 +156,8 @@ class Host {
   // Writes one operator's scope (all removes the entry). Refuses tenants the config doesn't serve.
   bool set_operator_scope(const std::string& key, const OperatorScope& scope, const std::string& by, std::string* why);
   // The MCP policy for an operator: read-only for an observer, and their scope's checks and filters.
-  mcp::McpServer::Policy operator_policy(const std::string& operator_name, bool read_only);
+  // hold: when approvals are on for the operator (035), changing calls wait for a person.
+  mcp::McpServer::Policy operator_policy(const std::string& operator_name, bool read_only, bool hold = true);
   // The operator tool server, for tests that check every tool has a scope rule.
   const mcp::McpServer& operator_tools() const { return *mcp_; }
   // One step of every running crawl: at most one page each (design/machine/017.Crawl.md).
@@ -425,6 +426,22 @@ class Host {
                                       int64_t now_ms);
   sqlite::Db& connections_db();
   void register_spec_tools();
+  // Approvals per connected agent (design/machine/035.Approvals.md).
+  sqlite::Db& approvals_db();
+  bool approvals_on(const std::string& agent);
+  void saw_agent(const std::string& agent);
+  std::optional<mcp::ToolResult> hold_for_approval(const std::string& agent, const std::string& tool,
+                                                   const boost::json::object& args);
+  static boost::json::object approval_json(sqlite::Stmt& s, bool with_args);
+  boost::json::object panel_approvals(const SignedIn& who);
+  std::pair<int, boost::json::object> panel_set_approvals(const SignedIn& who, const boost::json::object& args,
+                                                          const std::string& request_id);
+  std::pair<int, boost::json::object> panel_decide(const SignedIn& who, const boost::json::object& args,
+                                                   const std::string& request_id);
+  void register_approval_tools();
+  std::mutex approvals_mu_;
+  std::unique_ptr<sqlite::Db> approvals_db_;
+  std::map<std::string, int64_t> agents_seen_;
   void handle_connect(const server::http::Request& req, const Finish& finish, const std::string& path,
                       const std::string& domain, const std::string& tenant);
   std::unique_ptr<specs::Store> specs_;

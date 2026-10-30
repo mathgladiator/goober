@@ -454,6 +454,13 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Pagination, resumable and presigned-POST uploads, GraphQL methods, JWT and template HMAC
       signers, Overlays, Bluesky OAuth, inbound webhook verification; OAuth 1.0a's three-legged flow.
 
+### Phase 26: approvals per connected agent (035)
+- [x] A switch per agent (OAuth agent, token, or the config's token), off by default, flipped
+      in the panel's Operators view by an owner (or an operator for their own agents).
+- [x] Changing calls held as requests; read tools and `approval_status` never wait; approve
+      runs the call as the agent, deny never runs it; requests expire in a day; audited.
+- [ ] Standing rules per tool or tenant, 305's version registry and modes, notifications.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

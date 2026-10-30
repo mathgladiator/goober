@@ -519,6 +519,13 @@ stores the row (a unique column and ON CONFLICT DO NOTHING make repeats harmless
 confirmation mail through a mail service (above), and answers 303 with Location: /thanks. Don't pin
 {!email} in require for anonymous visitors: nobody is signed in, so the call would fail.
 
+## When a call answers pending_approval
+
+A person can turn approvals on for you in the panel. Then a changing tool answers
+{"pending_approval": id, ...} instead of running: nothing has happened yet. Don't retry it or
+work around it with another tool; tell the person what's waiting, and check approval_status
+{id} (pending, done with its result, denied, or expired after a day). Reading tools still run.
+
 ## Agents that can't do OAuth
 
 An agent that sends one fixed bearer header (Grok's remote MCP tool, a script) gets a token from

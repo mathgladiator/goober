@@ -83,3 +83,21 @@ TEST(Mcp, AFilterHidesAndRefusesTools) {
   EXPECT_EQ(direct->value.at("echo"), "hi");
   EXPECT_FALSE(s.call("nope", {}));
 }
+
+TEST(Mcp, AHoldAnswersInTheToolsPlaceUnfiltered) {
+  goober::mcp::McpServer server("t", "1", "");
+  int ran = 0;
+  server.add_tool({"write", "w", goober::mcp::object_schema({}, {}), [&](const boost::json::object&) {
+                     ++ran;
+                     return goober::mcp::ToolResult::ok(boost::json::object{{"ran", true}});
+                   }});
+  goober::mcp::McpServer::Policy policy;
+  policy.hold = [](const std::string& tool, const boost::json::object&) -> std::optional<goober::mcp::ToolResult> {
+    return goober::mcp::ToolResult::ok(boost::json::object{{"pending_approval", 7}, {"tool", tool}});
+  };
+  policy.filter = [](const std::string&, boost::json::value&) { return std::optional<std::string>("filtered"); };
+  auto reply = server.handle(R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write","arguments":{}}})", policy);
+  EXPECT_EQ(ran, 0);
+  EXPECT_NE(reply.body.find("pending_approval"), std::string::npos) << reply.body;
+  EXPECT_EQ(reply.body.find("filtered"), std::string::npos);
+}

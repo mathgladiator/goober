@@ -160,6 +160,9 @@ Read these before doing design work:
   - `design/machine/034.SpeakingHttp.md`: a small language for any API: pinned OpenAPI specs,
     auth appliers, sealed per-user secrets, host-run OAuth 2 and paste connections, form,
     multipart, and raw bodies, chunked uploads, polling, limits; Hevy, Strava, X, and POSSE.
+  - `design/machine/035.Approvals.md`: approvals per connected agent: a switch in the panel, off
+    by default; when on, the agent's changing tool calls wait as requests a person approves (run
+    as the agent) or denies; read tools never wait.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

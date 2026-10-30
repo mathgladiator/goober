@@ -58,7 +58,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     }
     for (const char* t : {"box_guide", "site_guide", "rust_binding", "library_list", "library_get", "schema_list",
                           "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check", "log_search", "spec_put",
-                          "spec_list", "spec_get"}) {
+                          "spec_list", "spec_get", "approval_status"}) {
       m[t] = Rule::kOpen;
     }
     for (const char* t : {"host_health", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
@@ -364,8 +364,13 @@ std::optional<std::string> Host::scope_filter(const OperatorScope& scope, const 
          (tool == "change_get" ? "change" : "job") + " is outside it";
 }
 
-mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, bool read_only) {
+mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, bool read_only, bool hold) {
   mcp::McpServer::Policy policy;
+  if (hold && approvals_on(operator_name)) {
+    policy.hold = [this, operator_name](const std::string& tool, const bj::object& args) {
+      return hold_for_approval(operator_name, tool, args);
+    };
+  }
   OperatorScope scope = operator_scope(operator_name);
   // A tenant left out is filled in when only one is possible: the host serves one tenant, or the
   // operator is focused on one (031 § 5).

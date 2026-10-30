@@ -43,7 +43,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
     "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
-    "spec_list",       "spec_get"};
+    "spec_list",       "spec_get",          "approval_status"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -234,14 +234,27 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     }
     std::string me = "panel:" + who->user.email;
     // The panel's own writes: the only changes it makes, each a human's (030 § 2, 029 § 6).
-    if (tool == "operators") return finish(json_reply(200, panel_operators(*who)), R"({"panel":"operators"})");
+    // The panel's own answers are {"result": ...}, as a tool's are, which is what its script reads.
+    auto own = [](int status, bj::object body) {
+      return status == 200 ? json_reply(200, bj::object{{"result", std::move(body)}}) : json_reply(status, body);
+    };
+    if (tool == "operators") return finish(own(200, panel_operators(*who)), R"({"panel":"operators"})");
+    if (tool == "approvals") return finish(own(200, panel_approvals(*who)), R"({"panel":"approvals"})");
+    // Approvals (035): turning them on or off for an agent, and deciding a held call.
+    if (tool == "write/approvals" || tool == "write/decide") {
+      auto [status, body] = tool == "write/approvals" ? panel_set_approvals(*who, args, request_id) : panel_decide(*who, args, request_id);
+      audit(tool == "write/approvals" ? "panel.approvals_set" : "panel.decide", me,
+            tool == "write/approvals" ? arg_text(args, "agent") : std::to_string(args.contains("id") && args.at("id").is_int64() ? args.at("id").as_int64() : 0),
+            status == 200 ? "ok" : "refused", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
+      return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
     if (tool == "write/scope" || tool == "write/unblock") {
       auto [status, body] = tool == "write/scope" ? panel_set_scope(*who, args, request_id)
                                                   : panel_unblock(*who, args, request_id);
       audit(tool == "write/scope" ? "panel.scope_set" : "panel.block_lift", me,
             tool == "write/scope" ? arg_text(args, "operator") : arg_text(args, "tenant"), status == 200 ? "ok" : "refused",
             bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
-      return finish(json_reply(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+      return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
     if (!is_read_tool(tool)) {
       return finish(json_reply(403, bj::object{{"error", "the panel only looks: " + tool + " isn't a read tool"}}),
