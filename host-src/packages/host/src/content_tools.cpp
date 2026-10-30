@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <set>
 #include <tuple>
 
@@ -21,6 +22,7 @@
 #include "goober/render/mustache.h"
 #include "goober/router/path.h"
 #include "goober/site/includes.h"
+#include "network.h"
 
 
 namespace goober::host {
@@ -32,7 +34,29 @@ namespace {
 constexpr const char* kGuide = R"guide(# Building a site on goober
 
 Each tenant has a content tree. Everything below is written with the tools named in brackets,
-persisted to disk through the host WAL, and live at once.
+persisted to disk through the host WAL, and live at once. tenant may be left out of any tool
+when the host serves one tenant (or you're focused on one).
+
+## A blog in three calls (posts, an index, a feed, the sitemap)
+1. _data/site.json once: content_put {path: "_data/site.json", text: "{\"title\": \"KC Meat Up\",
+   \"description\": \"...\", \"author\": \"Jeffrey M. Barber\"}"}.
+2. The index once: page_put {path: "/updates", format: "markdown", title: "Updates", body: "News.",
+   fields: {list: "updates", "list-template": "post", "per-page": 10}}.
+3. Each post: page_put {path: "/updates/<slug>", format: "markdown", template: "post", title,
+   body, fields: {date: "2026-10-29", summary: "...", author?: "...", tags: ["beef"], image?: "/hero.jpg",
+   draft?: true}}.
+The built-in post template shows the title, the byline (author, else site.author), the date, the
+image, and the tags, and the host builds one BlogPosting JSON-LD from the front matter (unless the
+page has its own json_ld). Every page gets a meta description (summary), a canonical link, and
+Open Graph and Twitter tags from its front matter. The post is then at the top of /updates
+(newest first, drafts hidden, 10 a page with ?page=2, rel prev/next, and canonical URLs per page),
+in /updates/feed.xml and /updates/rss.xml (with its author), in /sitemap.xml (with lastmod: the updated field, else
+date), and in /llms.txt. Preview a draft with page_render {path, drafts: true}. To restyle, copy
+template_get post (or list, base) and template_put your own under the same name.
+Moving hand-written HTML documents to posts: page_put each as markdown (or fragment, for HTML
+you keep) with template: "post" and its title, date, and summary as fields; page_put replaces the
+document at that URL. Then make /updates the listing above and content_delete a hand-kept
+updates/feed.xml (the listing serves the feed).
 
 ## Pages [page_put, page_get, page_list, page_render]
 A page's URL is its path without the extension; an index page is its directory's URL.
@@ -46,7 +70,10 @@ become front matter. Useful fields:
   title, date (YYYY-MM-DD), summary, image (/attachment/1.png), tags (["news"]), order (number),
   draft (true hides the page), requirements ([["owner"]] to restrict it; public otherwise),
   redirect (/new) with redirect-status (301, 302, 307, 308, or 410).
-Preview anything, drafts included, with page_render before telling a person it is done.
+Preview anything, drafts included, with page_render before telling a person it is done: it
+answers status, hashes, and the deploy checks; add verbose: true for the HTML. page_get answers
+the page's etag; give it to page_put as if_etag ("none" for a new page) and the write is refused
+if someone changed the page since. list_etags gives many at once.
 Try before writing: page_render also takes unsaved pages (each shaped like page_put's
 arguments), templates {name: text}, partials {name: html}, and files {path: text}, and renders
 as if they were written; nothing is stored. Add feed: true to get a listing's Atom too:
@@ -77,14 +104,29 @@ So a typical site has base (the <html>, header, nav, footer), page, and list.
 ## Listings
 A page with the field list: blog lists the pages directly inside blog/ (blog/x.md, and
 blog/y/index.md as /blog/y). Drafts and pages the visitor can't open are left out.
+"list-template": "post" keeps only the pages written with that template.
   sort: -date (default), date, title, -title, order, path      per-page: 20 (at most 200)
-  ?page=2 pages through; ?tag=news filters; feed: true also serves /blog/feed.xml (Atom).
+  ?page=2 pages through; ?tag=news filters. Every listing serves /blog/feed.xml (Atom) and
+  /blog/rss.xml (RSS 2.0, for RSS-to-email and automation tools), advertised in the base
+  template's <head>, unless its front matter says feed: false.
 Every format is listed: markdown, fragments, and documents with front matter alike (a
 document's title comes from its title field, else its <title>). The feed holds the newest 20
 by the listing's sort: each entry's title, link, id, updated (its date, else the feed's), summary (the
-summary field, else the start of the text), and a category per tag; the feed's author is the
-site's title. It carries no full content.
+summary field, else the start of the text), its author (the author field, else site.author),
+and a category per tag; the feed's author is the site's title. It carries no full content.
 A directory without an index page is listed only if _templates/directory.html exists.
+
+## Deploying many files, and checking what visitors get [content_deploy, url_check, page_lint]
+content_deploy {pages: [page_put's arguments + sha256? + if_etag?], files: [{path, text | base64,
+sha256?, if_etag?}]} checks every item first (nothing is written if one fails), writes them all,
+then fetches each URL signed out and answers one line each: status, type, etag, ld+json count,
+and any problem (unrendered {{, more than one or an unparseable ld+json, empty <p>, http: links,
+raw markdown links; strict: true adds title 50-60 and description 120-160 characters and exactly
+one ld+json). url_check does the fetching for any of this host's URLs; page_lint runs the
+checks over every listed page. The host serves /sitemap.xml and /llms.txt from the pages' front
+matter unless a file or a box route claims them; a page with noindex: true or sitemap: false is
+left out. A box's own sitemap joins by naming it in _data/site.json: "sitemaps":
+["/places/sitemap.xml"] makes /sitemap.xml an index of it and /sitemap-pages.xml.
 
 ## Site data [content_put]
 _data/site.json holds the site's title, navigation, and footer:
@@ -279,6 +321,105 @@ bj::object attachment_json(const attachments::Attachment& a, const std::vector<s
 
 }  // namespace
 
+namespace {
+
+// What a served HTML page holds that a deploy should check.
+struct Inspection {
+  int ld_json = 0, ld_json_bad = 0, mustache = 0, empty_p = 0, http_links = 0, markdown_links = 0;
+  std::string title, description;
+  bj::object to_json() const {
+    return bj::object{{"ld_json", ld_json}, {"ld_json_unparseable", ld_json_bad}, {"mustache", mustache},
+                      {"empty_p", empty_p}, {"http_links", http_links}, {"markdown_links", markdown_links},
+                      {"title", title}, {"description_chars", int64_t(description.size())}};
+  }
+};
+
+std::string html_unescape_attr(std::string s) {
+  for (auto [from, to] : {std::pair{"&quot;", "\""}, std::pair{"&#39;", "'"}, std::pair{"&lt;", "<"},
+                          std::pair{"&gt;", ">"}, std::pair{"&amp;", "&"}}) {
+    for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + 1)) s.replace(at, std::strlen(from), to);
+  }
+  return s;
+}
+
+Inspection inspect_html(const std::string& html) {
+  Inspection in;
+  std::string lower = base::to_lower(html);
+  for (size_t at = lower.find("<script type=\"application/ld+json\""); at != std::string::npos;
+       at = lower.find("<script type=\"application/ld+json\"", at + 1)) {
+    ++in.ld_json;
+    size_t open = html.find('>', at), close = lower.find("</script>", at);
+    std::string err;
+    if (open == std::string::npos || close == std::string::npos || !json::parse(html.substr(open + 1, close - open - 1), &err)) {
+      ++in.ld_json_bad;
+    }
+  }
+  for (size_t at = html.find("{{"); at != std::string::npos; at = html.find("{{", at + 2)) ++in.mustache;
+  for (size_t at = lower.find("<p"); at != std::string::npos; at = lower.find("<p", at + 2)) {
+    size_t gt = lower.find('>', at);
+    if (gt == std::string::npos || (lower[at + 2] != '>' && lower[at + 2] != ' ')) continue;
+    size_t i = gt + 1;
+    while (i < lower.size() && std::isspace(static_cast<unsigned char>(lower[i]))) ++i;
+    if (lower.compare(i, 4, "</p>") == 0) ++in.empty_p;
+  }
+  for (const char* attr : {"href=\"http:", "src=\"http:"}) {
+    for (size_t at = lower.find(attr); at != std::string::npos; at = lower.find(attr, at + 1)) {
+      // A plain-HTTP host on this machine (local mode) links to itself over http: that's not the problem.
+      size_t host = at + std::strlen(attr) + 2;
+      if (lower.compare(host, 9, "localhost") == 0 || lower.compare(host, 9, "127.0.0.1") == 0) continue;
+      ++in.http_links;
+    }
+  }
+  for (const char* md : {"](http", "](/"}) {
+    for (size_t at = html.find(md); at != std::string::npos; at = html.find(md, at + 1)) ++in.markdown_links;
+  }
+  if (size_t t = lower.find("<title>"); t != std::string::npos) {
+    size_t e = lower.find("</title>", t);
+    if (e != std::string::npos) in.title = html_unescape_attr(html.substr(t + 7, e - t - 7));
+  }
+  if (size_t d = lower.find("<meta name=\"description\" content=\""); d != std::string::npos) {
+    size_t s = d + 34, e = html.find('"', s);
+    if (e != std::string::npos) in.description = html_unescape_attr(html.substr(s, e - s));
+  }
+  return in;
+}
+
+// The problems a deploy must not ship (always), and, when strict, what search wants too.
+bj::array problems_of(const Inspection& in, bool html, bool strict) {
+  bj::array out;
+  if (!html) return out;
+  if (in.mustache) out.push_back(bj::value(std::to_string(in.mustache) + " unrendered {{"));
+  if (in.ld_json_bad) out.push_back(bj::value(std::to_string(in.ld_json_bad) + " ld+json that doesn't parse"));
+  if (in.ld_json > 1) out.push_back(bj::value(std::to_string(in.ld_json) + " ld+json tags (one, please)"));
+  if (in.empty_p) out.push_back(bj::value(std::to_string(in.empty_p) + " empty <p>"));
+  if (in.http_links) out.push_back(bj::value(std::to_string(in.http_links) + " http: links"));
+  if (in.markdown_links) out.push_back(bj::value(std::to_string(in.markdown_links) + " raw markdown links"));
+  if (strict) {
+    if (in.ld_json == 0) out.push_back(bj::value("no ld+json"));
+    size_t t = in.title.size(), d = in.description.size();
+    if (t < 50 || t > 60) out.push_back(bj::value("title is " + std::to_string(t) + " characters (50 to 60)"));
+    if (d < 120 || d > 160) out.push_back(bj::value("description is " + std::to_string(d) + " characters (120 to 160)"));
+  }
+  return out;
+}
+
+// The content file answering a URL or naming itself, like page_get resolves it.
+std::optional<std::string> answering_file(const content::ContentStore& store, const std::string& tenant, const std::string& path) {
+  std::string rel = path;
+  while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
+  if (!rel.empty() && store.get(tenant, rel)) return rel;
+  while (!rel.empty() && rel.back() == '/') rel.pop_back();
+  std::vector<std::string> candidates = rel.empty() ? std::vector<std::string>{"index.md", "index.html"}
+                                                    : std::vector<std::string>{rel + ".md", rel + ".html", rel + "/index.md",
+                                                                               rel + "/index.html"};
+  for (const auto& c : candidates) {
+    if (store.get(tenant, c)) return c;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 void Host::register_content_tools() {
   using mcp::boolean_property;
   using mcp::enum_property;
@@ -314,7 +455,9 @@ void Host::register_content_tools() {
                       {"title", string_property("The title; defaults to the first heading.")},
                       {"template", string_property("The template to wrap the page in; defaults to page, or list.")},
                       {"fields", object_property("More front matter, like {\"date\": \"2026-10-26\", \"tags\": "
-                                                 "[\"news\"]} or {\"list\": \"blog\"} for a listing.")}},
+                                                 "[\"news\"]} or {\"list\": \"blog\"} for a listing.")},
+                      {"if_etag", string_property("Write only if the page's current etag (page_get, list_etags) is "
+                                                  "this; \"none\" writes only a new page.")}},
                      {"tenant", "path", "format", "body"}),
        [this, known_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -328,6 +471,24 @@ void Host::register_content_tools() {
          if (!built) return ToolResult::fail(err);
          const std::string& file = built->file;
          bj::object& fields = built->fields;
+         if (auto want = arg(args, "if_etag")) {
+           std::string current = "none";
+           for (const auto& f : std::vector<std::string>{file}) {
+             if (auto got = content_->get(*tenant, f)) current = got->etag;
+           }
+           if (current == "none") {
+             for (const auto& o : built->others) {
+               if (auto got = content_->get(*tenant, o)) {
+                 current = got->etag;
+                 break;
+               }
+             }
+           }
+           if (*want != current && "\"" + *want + "\"" != current) {
+             return ToolResult::fail("nothing written: if_etag is " + *want + " but the page's etag is " + current +
+                                     " (someone wrote it since you read it)");
+           }
+         }
          if (!content_->put(*tenant, file, built->text, &err)) return ToolResult::fail(err);
          // One page per URL: drop every other file that answers it (the other format, and
          // name.html beside name/index.html), so what was just written is what's served.
@@ -343,12 +504,15 @@ void Host::register_content_tools() {
            warnings.push_back(bj::value("no template named " + tmpl + ": write it with template_put"));
          }
          auto url = site::page_url(file);
+         auto written = content_->get(*tenant, file);
          return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", file}, {"url", url ? *url : ""},
+                                          {"etag", written ? written->etag : ""},
                                           {"replaced", std::move(removed)}, {"warnings", std::move(warnings)}});
        }});
 
   mcp_->add_tool(
-      {"page_get", "Reads the page at a URL (or a file path like blog/hello.md): its file, format, front matter, and body.",
+      {"page_get", "Reads the page at a URL (or a file path like blog/hello.md): its file, format, etag (give it to "
+                   "page_put as if_etag), front matter, and body.",
        object_schema({{"tenant", tenant_prop}, {"path", string_property("A URL like /blog/hello, or a file path.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
@@ -368,8 +532,9 @@ void Host::register_content_tools() {
            if (!p) p = site_->load(*tenant, c);
          }
          if (!p) return ToolResult::fail("no page at " + *path);
+         auto f = content_->get(*tenant, p->path);
          return ToolResult::ok(bj::object{{"file", p->path}, {"url", p->url}, {"kind", site::kind_name(p->kind)},
-                                          {"fields", p->fields}, {"body", p->body}});
+                                          {"etag", f ? f->etag : ""}, {"fields", p->fields}, {"body", p->body}});
        }});
 
   // Shared partials (design/machine/027.Partials.md): _partials/$name.html, included by
@@ -515,7 +680,8 @@ void Host::register_content_tools() {
                       out.push_back(std::move(e));
                     }
                     return ToolResult::ok(std::move(out));
-                  }});
+                  },
+                  {{"path", "dir"}, {"prefix", "dir"}}});
 
   mcp_->add_tool(
       {"page_render",
@@ -535,7 +701,9 @@ void Host::register_content_tools() {
                       {"templates", object_property("Unsaved templates by name, like {\"post\": \"<article>{{{body}}}</article>\"}.")},
                       {"partials", object_property("Unsaved partials by name, like {\"nav\": \"<nav>...</nav>\"}.")},
                       {"files", object_property("Other unsaved files by path, like {\"_data/site.json\": \"{...}\"}.")},
-                      {"feed", boolean_property("Also render the listing's feed, path/feed.xml.")}},
+                      {"feed", boolean_property("Also render the listing's feed, path/feed.xml.")},
+                      {"verbose", boolean_property("Include the HTML (and the feed's XML). Without it: status, hashes, and "
+                                                   "the checks a deploy makes.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -612,15 +780,25 @@ void Host::register_content_tools() {
            fv.path = (v.path == "/" ? "" : v.path) + "/feed.xml";
            fv.query.clear();
            auto f = site_->visit(fv);
-           out["feed"] = bj::object{{"status", f.status}, {"content_type", f.content_type},
-                                    {"body", f.status == 200 ? f.body : f.error}};
+           bj::object fo{{"status", f.status}, {"content_type", f.content_type}, {"sha256", base::sha256_hex(f.body)},
+                         {"bytes", int64_t(f.body.size())}};
+           if (bool_arg(args, "verbose") || f.status != 200) fo["body"] = f.status == 200 ? f.body : f.error;
+           out["feed"] = std::move(fo);
          }
          if (!r.location.empty()) out["location"] = r.location;
          if (!r.error.empty()) out["error"] = r.error;
          constexpr size_t kMax = 200 * 1024;
-         if (r.kind == site::Kind::kStatic && r.content_type.find("text") == std::string::npos) {
-           out["bytes"] = r.body.size();
-         } else {
+         out["bytes"] = r.body.size();
+         out["sha256"] = base::sha256_hex(r.body);
+         out["etag"] = r.etag;
+         bool html = r.content_type.find("text/html") != std::string::npos;
+         if (html) {
+           auto in = inspect_html(r.body);
+           out["checks"] = in.to_json();
+           out["problems"] = problems_of(in, true, false);
+         }
+         // Compact unless asked (031 § 3): the HTML is behind verbose.
+         if (bool_arg(args, "verbose") && !(r.kind == site::Kind::kStatic && r.content_type.find("text") == std::string::npos)) {
            out["body"] = r.body.size() > kMax ? r.body.substr(0, kMax) + "\n[truncated]" : r.body;
          }
          return ToolResult::ok(std::move(out));
@@ -938,6 +1116,309 @@ void Host::register_content_tools() {
                     if (!attachments_->remove(*tenant, id, base::now_unix_ms(), &err)) return ToolResult::fail(err);
                     return ToolResult::ok(bj::object{{"deleted", id}});
                   }});
+}
+
+
+// ---- The content kit (design/machine/031.ContentKit.md): deploying many files in one call with
+// checks before and after, etags, checking served URLs, and linting pages.
+
+HttpOut Host::fetch_self(const std::string& domain, const std::string& path) {
+  auto cfg = config_.get();
+  std::string address = cfg->listen_address == "0.0.0.0" || cfg->listen_address == "::" || cfg->listen_address.empty()
+                            ? "127.0.0.1"
+                            : cfg->listen_address;
+  if (address.find(':') != std::string::npos) address = "[" + address + "]";
+  // Signed out, as a visitor or a search engine sees it: no cookie, no token.
+  return send_http("GET", "http://" + address + ":" + std::to_string(server_->port()) + path,
+                   {{"host", domain}, {"accept", "text/html,application/xhtml+xml,*/*;q=0.8"}}, "", "", true,
+                   cfg->storage / "tmp", 15000);
+}
+
+void Host::register_content_kit_tools() {
+  using mcp::boolean_property;
+  using mcp::object_schema;
+  using mcp::string_property;
+  auto known_tenant = [this](const std::string& t) {
+    for (const auto& [d, e] : config_.get()->domains) {
+      if (e.tenant == t) return true;
+    }
+    return false;
+  };
+  auto tenant_prop = string_property("A tenant name from the host config; may be left out when the host has one.");
+  auto list_of = [](const char* what) {
+    return bj::value(bj::object{{"type", "array"}, {"items", bj::object{{"type", "string"}}}, {"description", what}});
+  };
+  // A served URL checked as a visitor gets it.
+  auto check_path = [this](const std::string& domain, const std::string& path, bool strict) {
+    auto r = fetch_self(domain, path);
+    bool html = r.content_type.find("text/html") != std::string::npos;
+    auto in = inspect_html(html ? r.body : "");
+    bj::object o{{"status", r.status}, {"content_type", r.content_type}, {"bytes", int64_t(r.body.size())},
+                 {"sha256", base::sha256_hex(r.body)}};
+    if (!r.error.empty()) o["error"] = r.error;
+    if (html) o["checks"] = in.to_json();
+    auto problems = problems_of(in, html, strict);
+    if (r.status != 200) problems.push_back(bj::value("status " + std::to_string(r.status)));
+    o["problems"] = std::move(problems);
+    return o;
+  };
+
+  mcp_->add_tool(
+      {"list_etags",
+       "The current etag (and file) of each path: a URL like /updates/hello (the file that answers it) or a file "
+       "like css/site.css. Use them as if_etag in page_put or content_deploy so a write never clobbers a newer one.",
+       object_schema({{"tenant", tenant_prop}, {"paths", list_of("Up to 200 URLs or file paths.")}}, {"tenant", "paths"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         auto* paths = args.if_contains("paths");
+         if (!paths || !paths->is_array() || paths->as_array().size() > 200) return ToolResult::fail("paths is a list of up to 200");
+         bj::object out;
+         for (const auto& p : paths->as_array()) {
+           if (!p.is_string()) continue;
+           std::string path(p.as_string());
+           auto file = answering_file(*content_, *tenant, path);
+           auto f = file ? content_->get(*tenant, *file) : std::nullopt;
+           out[path] = f ? bj::value(bj::object{{"file", *file}, {"etag", f->etag}}) : bj::value(nullptr);
+         }
+         return ToolResult::ok(bj::object{{"tenant", *tenant}, {"etags", std::move(out)}});
+       }});
+
+  mcp_->add_tool(
+      {"content_deploy",
+       "Deploys many pages and files in one call, checked before and after (031 § 4). Before: each item's sha256 "
+       "(of its body or bytes, as you sent them) must match what arrived, and its if_etag (from list_etags; \"none\" "
+       "for a new one) must match what's there; if any item fails, nothing is written. Then everything is written, "
+       "and each URL is fetched signed out, as a visitor gets it: status, content type, and for HTML no unrendered "
+       "{{, at most one parseable ld+json, no empty <p>, no http: links, no raw markdown links (strict adds title and "
+       "description lengths and exactly one ld+json). Answers one line per item, and ok.",
+       object_schema({{"tenant", tenant_prop},
+                      {"pages", bj::object{{"type", "array"},
+                                           {"items", bj::object{{"type", "object"}}},
+                                           {"description", "page_put's arguments each ({path, format, body, title?, template?, "
+                                                           "fields?}), plus sha256? of body and if_etag?."}}},
+                      {"files", bj::object{{"type", "array"},
+                                           {"items", bj::object{{"type", "object"}}},
+                                           {"description", "Files: {path, text | base64, sha256?, if_etag?}."}}},
+                      {"verify", boolean_property("Fetch each URL after writing (default true).")},
+                      {"strict", boolean_property("Also title 50-60, description 120-160, exactly one ld+json.")}},
+                     {"tenant"}),
+       [this, known_tenant, check_path](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         struct Item {
+           std::string kind, path, file, data, url;
+           std::vector<std::string> others;
+         };
+         std::vector<Item> items;
+         bj::array lines;
+         bool ok = true;
+         auto etag_check = [&](const bj::object& o, const std::vector<std::string>& files, std::string* why) {
+           auto want = o.if_contains("if_etag");
+           if (!want || !want->is_string()) return true;
+           std::string current = "none";
+           for (const auto& f : files) {
+             if (auto got = content_->get(*tenant, f)) {
+               current = got->etag;
+               break;
+             }
+           }
+           std::string w(want->as_string());
+           if (w == current || (w.size() + 2 == current.size() && "\"" + w + "\"" == current)) return true;
+           *why = "if_etag " + w + " but it is " + current;
+           return false;
+         };
+         auto sha_check = [&](const bj::object& o, const std::string& data, std::string* why) {
+           auto want = o.if_contains("sha256");
+           if (!want || !want->is_string()) return true;
+           std::string got = base::sha256_hex(data);
+           if (base::to_lower(std::string(want->as_string())) == got) return true;
+           *why = "sha256 " + got + " arrived, not " + std::string(want->as_string());
+           return false;
+         };
+         if (auto* pages = args.if_contains("pages")) {
+           if (!pages->is_array() || pages->as_array().size() > 100) return ToolResult::fail("pages is a list of up to 100");
+           for (const auto& pv : pages->as_array()) {
+             if (!pv.is_object()) return ToolResult::fail("each page is an object of page_put's arguments");
+             const auto& po = pv.as_object();
+             std::string err, path = po.contains("path") && po.at("path").is_string() ? std::string(po.at("path").as_string()) : "";
+             auto built = build_page(*site_, *tenant, po, &err);
+             std::string body = po.contains("body") && po.at("body").is_string() ? std::string(po.at("body").as_string()) : "";
+             std::vector<std::string> answering = built ? built->others : std::vector<std::string>{};
+             if (built) answering.insert(answering.begin(), built->file);
+             std::string why = err;
+             if (built && sha_check(po, body, &why) && etag_check(po, answering, &why)) {
+               auto url = site::page_url(built->file);
+               items.push_back({"page", path, built->file, built->text, url ? *url : path, built->others});
+               continue;
+             }
+             ok = false;
+             lines.push_back(bj::value("✗ " + path + ": " + why));
+           }
+         }
+         if (auto* files = args.if_contains("files")) {
+           if (!files->is_array() || files->as_array().size() > 200) return ToolResult::fail("files is a list of up to 200");
+           for (const auto& fv : files->as_array()) {
+             if (!fv.is_object()) return ToolResult::fail("each file is {path, text | base64, sha256?, if_etag?}");
+             const auto& fo = fv.as_object();
+             std::string path = fo.contains("path") && fo.at("path").is_string() ? std::string(fo.at("path").as_string()) : "";
+             while (!path.empty() && path.front() == '/') path.erase(path.begin());
+             std::string data, why;
+             bool has_text = fo.contains("text") && fo.at("text").is_string();
+             bool has_b64 = fo.contains("base64") && fo.at("base64").is_string();
+             if (path.empty() || has_text == has_b64) {
+               why = "a file is {path, text | base64}";
+             } else if (has_text) {
+               data = std::string(fo.at("text").as_string());
+             } else if (auto d = base::base64_decode(std::string(fo.at("base64").as_string()))) {
+               data = std::move(*d);
+             } else {
+               why = "base64 is not valid";
+             }
+             if (why.empty() && sha_check(fo, data, &why) && etag_check(fo, {path}, &why)) {
+               items.push_back({"file", path, path, std::move(data), "/" + path, {}});
+               continue;
+             }
+             ok = false;
+             lines.push_back(bj::value("✗ " + path + ": " + why));
+           }
+         }
+         if (!ok) {
+           lines.push_back(bj::value("nothing was written"));
+           return ToolResult::ok(bj::object{{"ok", false}, {"lines", std::move(lines)}});
+         }
+         if (items.empty()) return ToolResult::fail("give pages or files");
+         for (const auto& it : items) {
+           std::string err;
+           if (!content_->put(*tenant, it.file, it.data, &err)) {
+             lines.push_back(bj::value("✗ " + it.path + ": " + err));
+             ok = false;
+             continue;
+           }
+           for (const auto& o : it.others) {
+             if (content_->get(*tenant, o)) content_->remove(*tenant, o, &err);
+           }
+         }
+         auto vb = args.if_contains("verify");
+         bool verify = !(vb && vb->is_bool() && !vb->as_bool());
+         auto sb = args.if_contains("strict");
+         bool strict = sb && sb->is_bool() && sb->as_bool();
+         std::string domain = site_of(*tenant);
+         for (const auto& it : items) {
+           auto f = content_->get(*tenant, it.file);
+           std::string etag = f ? f->etag : "";
+           if (!verify) {
+             lines.push_back(bj::value("✓ " + it.url + " written " + etag));
+             continue;
+           }
+           auto c = check_path(domain, it.url == "/index.html" ? "/" : it.url, strict);
+           const auto& problems = c.at("problems").as_array();
+           if (it.kind == "file" && c.at("status").as_int64() == 200 && f && std::string(c.at("sha256").as_string()) != base::sha256_hex(f->data)) {
+             ok = false;
+             lines.push_back(bj::value("✗ " + it.url + " served bytes differ from what was written"));
+             continue;
+           }
+           std::string line = (problems.empty() ? "✓ " : "✗ ") + it.url + " " + std::to_string(c.at("status").as_int64()) +
+                              " " + std::string(c.at("content_type").as_string()) + " " + etag;
+           if (auto* ch = c.if_contains("checks")) line += " ld=" + std::to_string(ch->at("ld_json").as_int64());
+           for (const auto& p : problems) line += "; " + std::string(p.as_string());
+           if (!problems.empty()) ok = false;
+           lines.push_back(bj::value(line));
+         }
+         return ToolResult::ok(bj::object{{"ok", ok}, {"lines", std::move(lines)}});
+       }});
+
+  mcp_->add_tool(
+      {"url_check",
+       "Fetches URLs on this host's sites, signed out, as a visitor gets them, and answers for each: status, content "
+       "type, bytes, sha256, and for HTML the counts a deploy checks (ld+json, unrendered {{, empty <p>, http: links, "
+       "raw markdown links, title, description length) with the problems found. Replaces hand-written curl checks.",
+       object_schema({{"urls", list_of("Up to 50: https://kcmeatup.com/updates, or a path with tenant.")},
+                      {"tenant", string_property("For paths without a host.")},
+                      {"strict", boolean_property("Also title 50-60, description 120-160, exactly one ld+json.")}},
+                     {"urls"}),
+       [this, check_path](const bj::object& args) {
+         auto* urls = args.if_contains("urls");
+         if (!urls || !urls->is_array() || urls->as_array().empty() || urls->as_array().size() > 50) {
+           return ToolResult::fail("urls is a list of 1 to 50");
+         }
+         auto cfg = config_.get();
+         auto sb = args.if_contains("strict");
+         bool strict = sb && sb->is_bool() && sb->as_bool();
+         std::string tenant = arg(args, "tenant").value_or("");
+         bj::array out;
+         for (const auto& u : urls->as_array()) {
+           std::string url = u.is_string() ? std::string(u.as_string()) : "";
+           std::string domain, path;
+           if (url.starts_with("https://") || url.starts_with("http://")) {
+             auto rest = url.substr(url.find("//") + 2);
+             auto slash = rest.find('/');
+             domain = base::to_lower(rest.substr(0, slash));
+             path = slash == std::string::npos ? "/" : rest.substr(slash);
+           } else if (url.starts_with("/") && !tenant.empty()) {
+             domain = site_of(tenant);
+             path = url;
+           }
+           auto d = cfg->domains.find(domain);
+           if (domain.empty() || d == cfg->domains.end()) {
+             out.push_back(bj::object{{"url", url}, {"error", "not a URL of this host's sites (use web_fetch for others)"}});
+             continue;
+           }
+           // A focused operator checks only their tenants' sites.
+           if (auto refused = scope_refusal(operator_scope(current_operator()), current_operator(), "url_check",
+                                            bj::object{{"tenant", d->second.tenant}})) {
+             out.push_back(bj::object{{"url", url}, {"error", *refused}});
+             continue;
+           }
+           auto c = check_path(domain, path, strict);
+           c["url"] = url;
+           out.push_back(std::move(c));
+         }
+         return ToolResult::ok(bj::object{{"results", std::move(out)}});
+       }});
+
+  mcp_->add_tool(
+      {"page_lint",
+       "Lints a tenant's pages as served (signed out): no unrendered {{, at most one parseable ld+json, no empty "
+       "<p>, no http: links, no raw markdown links; strict adds a title of 50 to 60 characters, a description of 120 "
+       "to 160, and exactly one ld+json. Every listed page by default (sitemap's set), or the paths given.",
+       object_schema({{"tenant", tenant_prop}, {"paths", list_of("URLs to lint; default every listed page.")},
+                      {"strict", boolean_property("The search checks too.")}},
+                     {"tenant"}),
+       [this, known_tenant, check_path](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         std::vector<std::string> paths;
+         if (auto* p = args.if_contains("paths"); p && p->is_array()) {
+           for (const auto& v : p->as_array()) {
+             if (v.is_string()) paths.emplace_back(v.as_string());
+           }
+         } else {
+           for (const auto& page : site_->listed_pages(*tenant)) paths.push_back(page.url);
+         }
+         if (paths.size() > 300) paths.resize(300);
+         auto sb = args.if_contains("strict");
+         bool strict = sb && sb->is_bool() && sb->as_bool();
+         std::string domain = site_of(*tenant);
+         bj::array out;
+         int clean = 0;
+         for (const auto& path : paths) {
+           auto c = check_path(domain, path, strict);
+           if (c.at("problems").as_array().empty()) {
+             ++clean;
+             continue;
+           }
+           out.push_back(bj::object{{"url", path}, {"problems", c.at("problems")}});
+         }
+         return ToolResult::ok(bj::object{{"checked", int64_t(paths.size())}, {"clean", clean}, {"pages", std::move(out)}});
+       }});
+
+  mcp_->add_tool({"tool_schemas",
+                  "Each operator tool's schema version (a hash of its input schema, also in tools/list _meta) and the "
+                  "old argument names it still accepts. Compare with what you cached: a changed hash means re-read "
+                  "tools/list. Arguments a tool doesn't know are named in its answer's ignored_arguments.",
+                  object_schema({}, {}),
+                  [this](const bj::object&) { return ToolResult::ok(bj::object{{"tools", mcp_->schemas()}}); }});
 }
 
 }  // namespace goober::host

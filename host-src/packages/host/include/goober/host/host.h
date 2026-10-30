@@ -372,6 +372,10 @@ class Host {
                                           const std::string& tool, boost::json::value& result);
   std::mutex scopes_mu_;
   void register_scope_tools();
+  // The content kit (content_tools.cpp; design/machine/031.ContentKit.md).
+  void register_content_kit_tools();
+  // GET a path of one of this host's sites through its own listener, signed out.
+  struct HttpOut fetch_self(const std::string& domain, const std::string& path);
   // The panel's Operators view, and its two writes (030 § 2; 029 § 6).
   boost::json::object panel_operators(const SignedIn& who);
   std::pair<int, boost::json::object> panel_set_scope(const SignedIn& who, const boost::json::object& args,

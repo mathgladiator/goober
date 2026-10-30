@@ -38,9 +38,26 @@ bj::object file_json(const std::string& path, const std::string& bytes) {
   return o;
 }
 
-bj::object job_json(const BuildJob& j) {
-  bj::object o{{"job", j.id},     {"project", j.project}, {"rev", j.rev},     {"kind", j.kind},
-               {"state", j.state}, {"by", j.author},       {"log", j.log}};
+// A job as a tool answers it: compact by default (031 § 3): the log only when it failed, or
+// with verbose; otherwise its size and last lines.
+bj::object job_json(const BuildJob& j, bool verbose = true) {
+  bj::object o{{"job", j.id}, {"project", j.project}, {"rev", j.rev}, {"kind", j.kind}, {"state", j.state}, {"by", j.author}};
+  if (verbose || j.state == "failed") {
+    o["log"] = j.log;
+  } else {
+    std::vector<std::string> lines;
+    size_t i = 0;
+    while (i < j.log.size()) {
+      size_t n = j.log.find('\n', i);
+      if (n == std::string::npos) n = j.log.size();
+      if (n > i) lines.push_back(j.log.substr(i, n - i));
+      i = n + 1;
+    }
+    bj::array tail;
+    for (size_t k = lines.size() > 3 ? lines.size() - 3 : 0; k < lines.size(); ++k) tail.push_back(bj::value(lines[k]));
+    o["log_bytes"] = j.log.size();
+    o["log_tail"] = std::move(tail);
+  }
   o["queued_at"] = base::format_utc_ms(j.queued_ms);
   if (j.finished_ms) o["finished_at"] = base::format_utc_ms(j.finished_ms);
   for (const auto& kv : j.result) o[kv.key()] = kv.value();
@@ -245,13 +262,15 @@ void Host::register_source_tools() {
                   }});
 
   mcp_->add_tool({"source_diff",
-                  "What changed between two revisions of a project (to defaults to the newest), as a unified diff.",
+                  "What changed between two revisions of a project (to defaults to the newest): each file with lines "
+                  "added and removed, and with verbose the unified diff.",
                   mcp::object_schema({{"project", project_prop},
                                       {"from", mcp::integer_property("The older revision.")},
                                       {"to", rev_prop},
                                       {"paths", bj::value(bj::object{{"type", "array"},
                                                                      {"items", bj::object{{"type", "string"}}},
-                                                                     {"description", "Only these files."}})}},
+                                                                     {"description", "Only these files."}})},
+                                      {"verbose", mcp::boolean_property("Include the unified diff.")}},
                                      {"project", "from"}),
                   [this](const bj::object& args) {
                     std::vector<std::string> paths;
@@ -264,7 +283,35 @@ void Host::register_source_tools() {
                     auto d = source_->diff(arg(args, "project").value_or(""), int_arg(args, "from", -1),
                                            int_arg(args, "to", 0), paths, &err);
                     if (!d) return ToolResult::fail(err);
-                    return ToolResult::ok(bj::value(d->empty() ? "(no differences)" : *d));
+                    // A summary per file; the diff itself with verbose (031 § 3).
+                    bj::array files;
+                    bj::object* cur = nullptr;
+                    int64_t added = 0, removed = 0;
+                    size_t i = 0;
+                    while (i < d->size()) {
+                      size_t n = d->find('\n', i);
+                      if (n == std::string::npos) n = d->size();
+                      std::string_view line(d->data() + i, n - i);
+                      i = n + 1;
+                      if (line.starts_with("+++ ")) {
+                        std::string path(line.substr(4));
+                        if (path.starts_with("b/")) path = path.substr(2);
+                        files.push_back(bj::object{{"path", path}, {"added", 0}, {"removed", 0}});
+                        cur = &files.back().as_object();
+                      } else if (line.starts_with("--- ")) {
+                        continue;
+                      } else if (cur && line.starts_with("+")) {
+                        cur->at("added") = cur->at("added").as_int64() + 1;
+                        ++added;
+                      } else if (cur && line.starts_with("-")) {
+                        cur->at("removed") = cur->at("removed").as_int64() + 1;
+                        ++removed;
+                      }
+                    }
+                    bj::object out{{"files", std::move(files)}, {"added", added}, {"removed", removed}};
+                    auto vb = args.if_contains("verbose");
+                    if (vb && vb->is_bool() && vb->as_bool()) out["diff"] = d->empty() ? "(no differences)" : *d;
+                    return ToolResult::ok(std::move(out));
                   }});
 
   mcp_->add_tool({"source_revert", "A new revision holding an older revision's files: going back without losing history.",
@@ -287,7 +334,9 @@ void Host::register_source_tools() {
                 : "Builds a revision (newest by default) in the host's sandbox (no network; Rust crates from the host's "
                   "vendored set) and reports the log, compiler errors included. Returns once done, or after 25 s with a "
                   "job to follow with source_job.",
-         mcp::object_schema({{"project", project_prop}, {"rev", rev_prop}}, {"project"}),
+         mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
+                             {"verbose", mcp::boolean_property("The whole log even when it succeeds.")}},
+                            {"project"}),
          [this, deploy](const bj::object& args) {
            std::string name = arg(args, "project").value_or("");
            auto project = source_->get(name);
@@ -303,12 +352,15 @@ void Host::register_source_tools() {
            int64_t id = jobs_->submit(job, [this, deploy](BuildJob& j) { run_source_job(j, deploy); });
            auto done = jobs_->get(id, 25000);
            if (!done) return ToolResult::fail("the job vanished");
-           return ToolResult::ok(job_json(*done));
+           auto vb = args.if_contains("verbose");
+           return ToolResult::ok(job_json(*done, vb && vb->is_bool() && vb->as_bool()));
          }});
   }
 
   mcp_->add_tool({"source_job", "A build or deploy job: its state, log, and what it did. Waits up to 20 s for it to finish.",
-                  mcp::object_schema({{"job", mcp::integer_property("The job's number; omit for the recent jobs.")}}, {}),
+                  mcp::object_schema({{"job", mcp::integer_property("The job's number; omit for the recent jobs.")},
+                                      {"verbose", mcp::boolean_property("The whole log even when it succeeded.")}},
+                                     {}),
                   [this](const bj::object& args) {
                     int64_t id = int_arg(args, "job", 0);
                     if (id == 0) {
@@ -322,7 +374,8 @@ void Host::register_source_tools() {
                     }
                     auto j = jobs_->get(id, 20000);
                     if (!j) return ToolResult::fail("no job " + std::to_string(id));
-                    return ToolResult::ok(job_json(*j));
+                    auto vb = args.if_contains("verbose");
+                    return ToolResult::ok(job_json(*j, vb && vb->is_bool() && vb->as_bool()));
                   }});
 }
 

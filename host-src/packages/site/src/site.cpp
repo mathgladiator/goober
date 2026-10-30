@@ -58,6 +58,13 @@ bool flag(const bj::object& o, std::string_view key) {
   return v && ((v->is_bool() && v->get_bool()) || (v->is_string() && v->get_string() == "true"));
 }
 
+// A listing has feeds unless its front matter says feed: false (031 § 2).
+bool feeds_on(const bj::object& fields) {
+  auto* v = fields.if_contains("feed");
+  if (!v) return true;
+  return !((v->is_bool() && !v->get_bool()) || (v->is_string() && v->get_string() == "false"));
+}
+
 // "trip-to-maine" becomes "Trip to maine".
 std::string humanize(std::string_view name) {
   std::string out;
@@ -518,7 +525,11 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
   page_obj["kind"] = kind_name(page.kind);
   page_obj["title"] = title;
   bool is_listing = page.fields.contains("list");
-  if (is_listing && flag(page.fields, "feed")) page_obj["feed_url"] = (page.url == "/" ? "" : page.url) + "/feed.xml";
+  if (is_listing && feeds_on(page.fields)) {
+    page_obj["feed"] = true;
+    page_obj["feed_url"] = (page.url == "/" ? "" : page.url) + "/feed.xml";
+    page_obj["rss_url"] = (page.url == "/" ? "" : page.url) + "/rss.xml";
+  }
   data["user"] = v.user;
   bj::object query;
   for (const auto& [k, val] : v.query) query[k] = val;
@@ -535,6 +546,10 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
       return fail(500, "list: " + dir + " is not a public directory of the content tree");
     }
     auto all = entries(v, dir);
+    // "list-template": "post" keeps only the pages written with that template (031 § 2).
+    if (auto only = str(page.fields, "list-template"); !only.empty()) {
+      std::erase_if(all, [&](const bj::object& e) { return str(e, "template") != only; });
+    }
     std::string tag;
     if (auto it = v.query.find("tag"); it != v.query.end()) {
       tag = it->second;
@@ -568,6 +583,63 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
       if (c == 0) return str(a, "title") < str(b, "title");
       return desc ? c > 0 : c < 0;
     });
+    if (feed && v.path.ends_with("rss.xml")) {
+      // RSS 2.0, from the same entries as the Atom feed.
+      std::string base = v.origin;
+      std::string site_title, site_author;
+      if (auto* st = data.if_contains("site"); st && st->is_object()) {
+        site_title = str(st->as_object(), "title");
+        site_author = str(st->as_object(), "author");
+      }
+      auto rfc822 = [](const std::string& date) -> std::string {
+        // YYYY-MM-DD... as RFC 822 at midnight UTC; nothing for anything else.
+        if (date.size() < 10 || date[4] != '-' || date[7] != '-') return "";
+        static const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        static const char* kDays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        int y = std::atoi(date.substr(0, 4).c_str()), m = std::atoi(date.substr(5, 2).c_str()), d = std::atoi(date.substr(8, 2).c_str());
+        if (m < 1 || m > 12 || d < 1 || d > 31) return "";
+        // Sakamoto's day of the week.
+        static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+        int yy = m < 3 ? y - 1 : y;
+        int w = (yy + yy / 4 - yy / 100 + yy / 400 + t[m - 1] + d) % 7;
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%s, %02d %s %04d 00:00:00 +0000", kDays[w], d, kMonths[m - 1], y);
+        return buf;
+      };
+      std::string link = base + page.url;
+      std::string out = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\" "
+                        "xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n<channel>\n";
+      out += "<title>" + xml_escape(title) + "</title>\n<link>" + xml_escape(link) + "</link>\n";
+      out += "<description>" + xml_escape(summary_of(page).empty() ? title : summary_of(page)) + "</description>\n";
+      out += "<atom:link href=\"" + xml_escape(base + (page.url == "/" ? "" : page.url) + "/rss.xml") +
+             "\" rel=\"self\" type=\"application/rss+xml\"/>\n";
+      if (!all.empty()) {
+        if (auto when = rfc822(str(all.front(), "date")); !when.empty()) out += "<lastBuildDate>" + when + "</lastBuildDate>\n";
+      }
+      for (size_t i = 0; i < all.size() && i < kFeedEntries; ++i) {
+        const auto& e = all[i];
+        std::string item = base + str(e, "url");
+        out += "<item>\n<title>" + xml_escape(str(e, "title")) + "</title>\n<link>" + xml_escape(item) +
+               "</link>\n<guid isPermaLink=\"true\">" + xml_escape(item) + "</guid>\n";
+        if (auto when = rfc822(str(e, "date")); !when.empty()) out += "<pubDate>" + when + "</pubDate>\n";
+        if (auto s = str(e, "summary"); !s.empty()) out += "<description>" + xml_escape(s) + "</description>\n";
+        std::string a = str(e, "author");
+        if (a.empty()) a = site_author;
+        if (!a.empty()) out += "<dc:creator>" + xml_escape(a) + "</dc:creator>\n";
+        for (const auto& t : e.at("tags").as_array()) {
+          if (t.is_string()) out += "<category>" + xml_escape(std::string(t.get_string())) + "</category>\n";
+        }
+        out += "</item>\n";
+      }
+      out += "</channel>\n</rss>\n";
+      (void)site_title;
+      r.kind = Kind::kFeed;
+      r.status = 200;
+      r.content_type = "application/rss+xml; charset=utf-8";
+      r.body = std::move(out);
+      r.etag = etag_of(r.body);
+      return r;
+    }
     if (feed) {
       std::string base = v.origin;
       std::string now = base::format_utc_ms(base::now_unix_ms());
@@ -588,6 +660,11 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
                "\"/>\n<id>" + xml_escape(link) + "</id>\n<updated>" + xml_escape(atom_time(str(e, "date"), updated)) +
                "</updated>\n";
         if (auto s = str(e, "summary"); !s.empty()) out += "<summary>" + xml_escape(s) + "</summary>\n";
+        std::string a = str(e, "author");
+        if (a.empty()) {
+          if (auto* st = data.if_contains("site"); st && st->is_object()) a = str(st->as_object(), "author");
+        }
+        if (!a.empty()) out += "<author><name>" + xml_escape(a) + "</name></author>\n";
         for (const auto& t : e.at("tags").as_array()) {
           if (t.is_string()) out += "<category term=\"" + xml_escape(std::string(t.get_string())) + "\"/>\n";
         }
@@ -635,6 +712,46 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
     return fail(404);
   }
   if (template_name.empty()) template_name = "page";
+  // What a search engine and a link preview read (031 § 2): the canonical URL (a listing's later
+  // pages keep their ?page=), the image as an absolute URL, the author, and the kind of page.
+  {
+    std::string canonical = str(page.fields, "canonical");
+    if (!(canonical.starts_with("https://") || canonical.starts_with("http://"))) {
+      canonical = v.origin.empty() ? "" : v.origin + page.url;
+      if (!canonical.empty() && is_listing) {
+        if (auto it = v.query.find("page"); it != v.query.end() && it->second != "1") canonical += "?page=" + it->second;
+      }
+    }
+    data["canonical"] = canonical;
+    std::string image = str(page.fields, "image");
+    data["image_url"] = image.starts_with("http") ? image : (!image.empty() && image.front() == '/' && !v.origin.empty()) ? v.origin + image : "";
+    if (!data.contains("author") || !data["author"].is_string()) {
+      std::string site_author;
+      if (auto* st = data.if_contains("site"); st && st->is_object()) site_author = str(st->as_object(), "author");
+      data["author"] = site_author;
+    }
+    bool article = template_name == "post";
+    data["og_type"] = article ? "article" : "website";
+    auto* tags = page.fields.if_contains("tags");
+    data["has_tags"] = tags && tags->is_array() && !tags->as_array().empty();
+    // A post without a json_ld field gets a BlogPosting built from its front matter.
+    if (article && !data.contains("json_ld")) {
+      bj::object ld{{"@context", "https://schema.org"}, {"@type", "BlogPosting"}, {"headline", title}};
+      if (!canonical.empty()) ld["mainEntityOfPage"] = canonical, ld["url"] = canonical;
+      if (auto d = str(page.fields, "date"); !d.empty()) ld["datePublished"] = d;
+      std::string updated = str(page.fields, "updated");
+      if (updated.empty()) updated = str(page.fields, "date");
+      if (!updated.empty()) ld["dateModified"] = updated;
+      if (auto s = summary_of(page); !s.empty()) ld["description"] = s;
+      if (auto a = data["author"].as_string(); !a.empty()) ld["author"] = bj::object{{"@type", "Person"}, {"name", a}};
+      if (auto img = std::string(data["image_url"].as_string()); !img.empty()) ld["image"] = img;
+      if (data["has_tags"].as_bool()) ld["keywords"] = *tags;
+      std::string site_title;
+      if (auto* st = data.if_contains("site"); st && st->is_object()) site_title = str(st->as_object(), "title");
+      if (!site_title.empty()) ld["publisher"] = bj::object{{"@type", "Organization"}, {"name", site_title}};
+      data["json_ld"] = std::move(ld);
+    }
+  }
   data["page"] = std::move(page_obj);
   data["body"] = std::move(body_html);
   // A page's json_ld field becomes the host-built tag, as a box's does.
@@ -703,11 +820,13 @@ Result Site::visit_unexpanded(const Visit& v) const {
   if (!rel.empty() && is_private_path(rel)) return fail(404);
 
   // Feeds: /blog/feed.xml is the feed of the listing at /blog.
-  if (rel == "feed.xml" || rel.ends_with("/feed.xml")) {
-    std::string base = rel.size() > 9 ? rel.substr(0, rel.size() - 9) : "";
+  // /blog/rss.xml is the same entries as RSS 2.0.
+  if (rel == "feed.xml" || rel.ends_with("/feed.xml") || rel == "rss.xml" || rel.ends_with("/rss.xml")) {
+    size_t name = rel.ends_with("rss.xml") ? 8 : 9;
+    std::string base = rel.size() > name ? rel.substr(0, rel.size() - name) : "";
     for (const char* ext : {".md", ".html"}) {
       for (const std::string& candidate : {base.empty() ? std::string("index") : base, base.empty() ? std::string("index") : base + "/index"}) {
-        if (auto p = load(v.tenant, candidate + ext); p && p->fields.contains("list") && flag(p->fields, "feed")) {
+        if (auto p = load(v.tenant, candidate + ext); p && p->fields.contains("list") && feeds_on(p->fields)) {
           return render_page(v, *p, true);
         }
       }
@@ -744,7 +863,108 @@ Result Site::visit_unexpanded(const Visit& v) const {
     if (auto p = load(v.tenant, c)) return render_page(v, *p, false);
   }
   if (rel.empty() || !store_.list(v.tenant, rel + "/").empty()) return directory(v, rel);
+  // The platform's own sitemap and llms.txt, when no file of the tenant's answers (031 § 1).
+  if (rel == "sitemap.xml" || rel == "sitemap-pages.xml" || rel == "llms.txt") {
+    Result r;
+    r.status = 200;
+    r.kind = Kind::kStatic;
+    // With "sitemaps" in _data/site.json (a box's own, like /places/sitemap.xml), /sitemap.xml is
+    // an index of those and /sitemap-pages.xml, which lists the pages.
+    bj::array others;
+    {
+      auto data = base_data(v.tenant);
+      if (auto* s = data["site"].as_object().if_contains("sitemaps"); s && s->is_array()) others = s->as_array();
+    }
+    if (rel == "llms.txt") {
+      r.body = llms_txt(v.tenant, v.origin);
+    } else if (rel == "sitemap.xml" && !others.empty()) {
+      r.body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+               "  <sitemap><loc>" + xml_escape(v.origin + "/sitemap-pages.xml") + "</loc></sitemap>\n";
+      for (const auto& o : others) {
+        if (!o.is_string()) continue;
+        std::string u(o.as_string());
+        if (!u.starts_with("http")) u = v.origin + u;
+        r.body += "  <sitemap><loc>" + xml_escape(u) + "</loc></sitemap>\n";
+      }
+      r.body += "</sitemapindex>\n";
+    } else if (rel == "sitemap-pages.xml" && others.empty()) {
+      return fail(404);
+    } else {
+      r.body = sitemap_xml(v.tenant, v.origin);
+    }
+    r.content_type = rel == "llms.txt" ? "text/plain; charset=utf-8" : "application/xml; charset=utf-8";
+    r.etag = etag_of(r.body);
+    return r;
+  }
   return fail(404);
+}
+
+std::vector<Page> Site::listed_pages(std::string_view tenant) const {
+  std::vector<Page> out;
+  for (auto& p : pages(tenant, "")) {
+    if (!p.broken.empty() || is_private_path(p.path) || flag(p.fields, "draft") || flag(p.fields, "noindex")) continue;
+    if (p.fields.contains("requirements") || p.fields.contains("redirect")) continue;
+    if (auto* s = p.fields.if_contains("sitemap"); s && ((s->is_bool() && !s->get_bool()) || (s->is_string() && s->get_string() == "false"))) continue;
+    out.push_back(std::move(p));
+  }
+  std::sort(out.begin(), out.end(), [](const Page& a, const Page& b) { return a.url < b.url; });
+  return out;
+}
+
+namespace {
+
+std::string field_text(const bj::object& o, const char* k) {
+  auto* v = o.if_contains(k);
+  return v && v->is_string() ? std::string(v->get_string()) : std::string();
+}
+
+// The page's canonical URL: its own canonical field when absolute, else the origin and URL.
+std::string canonical_of(const Page& p, const std::string& origin) {
+  std::string c = field_text(p.fields, "canonical");
+  if (c.starts_with("https://") || c.starts_with("http://")) return c;
+  return origin + p.url;
+}
+
+std::string page_title(const Page& p) {
+  std::string t = field_text(p.fields, "title");
+  return t.empty() ? (p.url == "/" ? std::string("Home") : p.url) : t;
+}
+
+}  // namespace
+
+std::string Site::sitemap_xml(std::string_view tenant, const std::string& origin) const {
+  std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n";
+  for (const auto& p : listed_pages(tenant)) {
+    out += "  <url><loc>" + xml_escape(canonical_of(p, origin)) + "</loc>";
+    std::string when = field_text(p.fields, "updated");
+    if (when.empty()) when = field_text(p.fields, "date");
+    if (when.size() >= 10 && when[4] == '-' && when[7] == '-') out += "<lastmod>" + xml_escape(when.substr(0, 10)) + "</lastmod>";
+    out += "</url>\n";
+  }
+  return out + "</urlset>\n";
+}
+
+std::string Site::llms_txt(std::string_view tenant, const std::string& origin) const {
+  auto data = base_data(tenant);
+  const auto& site = data["site"].as_object();
+  std::string title = field_text(site, "title");
+  if (title.empty()) title = origin.substr(origin.find("//") == std::string::npos ? 0 : origin.find("//") + 2);
+  std::string description = field_text(site, "description");
+  auto one_line = [](std::string s) {
+    for (auto& ch : s) {
+      if (ch == '\n' || ch == '\r') ch = ' ';
+    }
+    return s;
+  };
+  std::string out = "# " + one_line(title) + "\n\n";
+  if (!description.empty()) out += "> " + one_line(description) + "\n\n";
+  out += "## Pages\n\n";
+  for (const auto& p : listed_pages(tenant)) {
+    std::string about = field_text(p.fields, "description");
+    if (about.empty()) about = field_text(p.fields, "summary");
+    out += "- [" + one_line(page_title(p)) + "](" + canonical_of(p, origin) + ")" + (about.empty() ? "" : ": " + one_line(about)) + "\n";
+  }
+  return out;
 }
 
 }  // namespace goober::site

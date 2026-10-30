@@ -16,6 +16,18 @@ const std::map<std::string, std::string>& builtin_templates() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}}{{#site.title}} · {{site.title}}{{/site.title}}</title>
 {{#summary}}<meta name="description" content="{{summary}}">{{/summary}}
+{{#canonical}}<link rel="canonical" href="{{canonical}}">{{/canonical}}
+{{#pagination.has_prev}}<link rel="prev" href="{{pagination.prev_url}}">{{/pagination.has_prev}}
+{{#pagination.has_next}}<link rel="next" href="{{pagination.next_url}}">{{/pagination.has_next}}
+<meta property="og:title" content="{{title}}">
+<meta property="og:type" content="{{og_type}}">
+{{#canonical}}<meta property="og:url" content="{{canonical}}">{{/canonical}}
+{{#summary}}<meta property="og:description" content="{{summary}}">{{/summary}}
+{{#site.title}}<meta property="og:site_name" content="{{site.title}}">{{/site.title}}
+{{#image_url}}<meta property="og:image" content="{{image_url}}">{{/image_url}}
+<meta name="twitter:card" content="{{#image_url}}summary_large_image{{/image_url}}{{^image_url}}summary{{/image_url}}">
+{{#author}}<meta name="author" content="{{author}}">{{/author}}
+{{{json_ld}}}
 <!--#include pwa-->
 <style>
 :root{color-scheme:light dark;--fg:#1d1d1f;--bg:#fbfbf8;--muted:#6b6b6b;--line:#e3e1da;--accent:#2457d6;--card:#fff}
@@ -50,7 +62,8 @@ button{font:inherit;font-weight:600;padding:.5rem 1rem;border:0;border-radius:6p
 footer.site{padding-top:1rem;padding-bottom:2rem;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
 </style>
 {{#site.stylesheet}}<link rel="stylesheet" href="{{site.stylesheet}}">{{/site.stylesheet}}
-{{#page.feed}}<link rel="alternate" type="application/atom+xml" title="{{title}}" href="{{page.feed_url}}">{{/page.feed}}
+{{#page.feed}}<link rel="alternate" type="application/atom+xml" title="{{title}}" href="{{page.feed_url}}">
+<link rel="alternate" type="application/rss+xml" title="{{title}}" href="{{page.rss_url}}">{{/page.feed}}
 </head>
 <body>
 <header class="site">
@@ -73,6 +86,17 @@ layout: base
 {{{body}}}
 </article>
 )html"},
+      {"post", R"html(---
+layout: base
+---
+<article class="post">
+<h1>{{title}}</h1>
+<p class="meta">{{#author}}By {{author}}{{/author}}{{#author}}{{#date}} · {{/date}}{{/author}}{{#date}}<time datetime="{{date}}">{{date}}</time>{{/date}}</p>
+{{#image}}<img src="{{image}}" alt="" class="hero">{{/image}}
+{{{body}}}
+{{#has_tags}}<p class="meta">Tagged {{#tags}}<span class="tag">{{.}}</span> {{/tags}}</p>{{/has_tags}}
+</article>
+)html"},
       {"list", R"html(---
 layout: base
 ---
@@ -85,7 +109,7 @@ layout: base
 <li>
 {{#image}}<a href="{{url}}"><img src="{{image}}" alt="" loading="lazy"></a>{{/image}}
 <h2><a href="{{url}}">{{title}}</a></h2>
-{{#date}}<p class="meta"><time datetime="{{date}}">{{date}}</time></p>{{/date}}
+<p class="meta">{{#author}}{{author}} · {{/author}}{{#date}}<time datetime="{{date}}">{{date}}</time>{{/date}}</p>
 {{#summary}}<p>{{summary}}</p>{{/summary}}
 </li>
 {{/pages}}

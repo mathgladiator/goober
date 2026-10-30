@@ -1,9 +1,15 @@
 #include "goober/mcp/mcp.h"
 
+#include "goober/base/hash.h"
+
 namespace goober::mcp {
 
 namespace {
 const char* kVersions[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
+
+std::string schema_hash(const bj::object& schema) {
+  return goober::base::sha256_hex(goober::json::dump(schema)).substr(0, 12);
+}
 
 bj::object error_body(const bj::value& id, int code, std::string message) {
   return bj::object{{"jsonrpc", "2.0"}, {"id", id}, {"error", bj::object{{"code", code}, {"message", message}}}};
@@ -52,7 +58,11 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     for (const auto& [name, tool] : tools_) {
       if (allowed && !allowed(name)) continue;
       bj::object t{{"name", name}, {"description", tool.description}, {"inputSchema", tool.input_schema}};
-      if (auto m = meta_.find(name); m != meta_.end()) t["_meta"] = m->second;
+      bj::object meta{{"goober/schema", schema_hash(tool.input_schema)}};
+      if (auto m = meta_.find(name); m != meta_.end()) {
+        for (const auto& kv : m->second) meta[kv.key()] = kv.value();
+      }
+      t["_meta"] = std::move(meta);
       tools.push_back(std::move(t));
     }
     result = bj::object{{"tools", std::move(tools)}};
@@ -62,6 +72,7 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     std::string name(n->value().get_string());
     bj::object args;
     if (auto a = params.find("arguments"); a != params.end() && a->value().is_object()) args = a->value().get_object();
+    if (policy.prepare && tools_.count(name)) policy.prepare(tools_.at(name), args);
     if (allowed && tools_.count(name) && !allowed(name)) {
       std::string why = "its access is read-only";
       if (policy.check) {
@@ -89,14 +100,55 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
   return bj::object{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}};
 }
 
-std::optional<ToolResult> McpServer::call(const std::string& name, const bj::object& args) const {
+std::optional<ToolResult> McpServer::call(const std::string& name, const bj::object& in) const {
   auto tool = tools_.find(name);
   if (tool == tools_.end()) return std::nullopt;
+  bj::object args = in;
+  for (const auto& [old_name, current] : tool->second.aliases) {
+    if (auto* v = args.if_contains(old_name)) {
+      if (!args.contains(current)) args[current] = *v;
+      args.erase(old_name);
+    }
+  }
+  bj::array ignored;
+  if (auto* props = tool->second.input_schema.if_contains("properties"); props && props->is_object()) {
+    for (auto it = args.begin(); it != args.end();) {
+      if (!props->as_object().contains(it->key())) {
+        ignored.push_back(bj::value(it->key()));
+        it = args.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
   try {
-    return tool->second.run(args);
+    auto out = tool->second.run(args);
+    if (!ignored.empty()) {
+      if (out.value.is_object()) {
+        out.value.as_object()["ignored_arguments"] = std::move(ignored);
+      } else if (out.is_error && out.value.is_string()) {
+        out.value = std::string(out.value.as_string()) + " (ignored unknown arguments: " + goober::json::dump(ignored) + ")";
+      }
+    }
+    return out;
   } catch (const std::exception& e) {
     return ToolResult::fail(std::string("tool failed: ") + e.what());
   }
+}
+
+const Tool* McpServer::tool(const std::string& name) const {
+  auto it = tools_.find(name);
+  return it == tools_.end() ? nullptr : &it->second;
+}
+
+bj::array McpServer::schemas() const {
+  bj::array out;
+  for (const auto& [name, t] : tools_) {
+    bj::object aliases;
+    for (const auto& [a, b] : t.aliases) aliases[a] = b;
+    out.push_back(bj::object{{"tool", name}, {"schema", schema_hash(t.input_schema)}, {"aliases", std::move(aliases)}});
+  }
+  return out;
 }
 
 std::vector<std::string> McpServer::names() const {

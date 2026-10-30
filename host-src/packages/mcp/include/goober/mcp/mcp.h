@@ -25,6 +25,9 @@ struct Tool {
   std::string description;
   bj::object input_schema;  // a JSON Schema object
   std::function<ToolResult(const bj::object& arguments)> run;
+  // Old argument names still accepted, each mapped to its current name: a renamed parameter
+  // keeps working, so a caller's cached schema doesn't cost it a retry.
+  std::map<std::string, std::string> aliases = {};
 };
 
 struct HttpReply {
@@ -46,6 +49,8 @@ class McpServer {
   // is the tool's error), and a filter over each result it gets back.
   struct Policy {
     Allowed allowed;
+    // Fills in what the caller left out (like a tenant when only one is possible), before checks.
+    std::function<void(const Tool& tool, bj::object& arguments)> prepare = {};
     std::function<std::optional<std::string>(const std::string& tool, const bj::object& arguments)> check;
     // A filter may also refuse the result as a whole: the call then answers that refusal.
     std::function<std::optional<std::string>(const std::string& tool, bj::value& result)> filter;
@@ -54,7 +59,13 @@ class McpServer {
   HttpReply handle(std::string_view body, const Policy& policy) const;
   // Every tool's name, sorted.
   std::vector<std::string> names() const;
+  const Tool* tool(const std::string& name) const;
+  // Each tool's schema version: the first 12 hex digits of its input schema's SHA-256, and its
+  // aliases. Also in tools/list as _meta["goober/schema"].
+  bj::array schemas() const;
   // Calls one tool directly, as tools/call would; nullopt for a tool that doesn't exist.
+  // Aliases are renamed first; arguments the schema doesn't know are dropped, and named in an
+  // object result's "ignored_arguments" so a caller learns its filter didn't apply.
   std::optional<ToolResult> call(const std::string& tool, const bj::object& arguments) const;
 
  private:

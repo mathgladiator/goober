@@ -158,8 +158,10 @@ TEST_F(ScopeTest, TenantToolsStayInside) {
   EXPECT_TRUE(out.at("isError").as_bool());
   EXPECT_NE(std::string(out.at("text").as_string()).find("focused on kc"), std::string::npos) << out.at("text");
   EXPECT_FALSE(host->content().get("other", "a.txt"));
-  // Leaving out an optional tenant means every tenant: refused.
+  // Leaving out an optional tenant means every tenant: refused. A required one is filled in,
+  // since only kc is possible.
   EXPECT_TRUE(call("changes", R"({})").at("isError").as_bool());
+  EXPECT_FALSE(call("content_list", R"({})").at("isError").as_bool());
   EXPECT_FALSE(call("changes", R"({"tenant":"kc"})").at("isError").as_bool());
   // Host-wide tools are refused, and not listed.
   EXPECT_TRUE(call("host_health").at("isError").as_bool());

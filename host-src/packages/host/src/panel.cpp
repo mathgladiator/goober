@@ -244,6 +244,9 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     }
     // A focused person sees only their tenants here too (030 § 3).
     auto policy = operator_policy(me, true);
+    if (policy.prepare) {
+      if (const auto* t = mcp_->tool(tool)) policy.prepare(*t, args);
+    }
     if (policy.check) {
       if (auto refused = policy.check(tool, args)) {
         return finish(json_reply(403, bj::object{{"error", *refused}}),

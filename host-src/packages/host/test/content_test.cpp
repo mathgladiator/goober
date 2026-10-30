@@ -135,7 +135,7 @@ TEST_F(SiteRoutesTest, AgentBuildsASiteWithPagesTemplatesAndAListing) {
   EXPECT_EQ(again.at("replaced").at(0), "blog/first.md");
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/blog/first").body, "<!doctype html><p>Whole page</p>");
 
-  auto preview = tool("page_render", {{"tenant", "playground"}, {"path", "/blog"}});
+  auto preview = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/blog"}});
   EXPECT_EQ(preview.at("status"), 200);
   EXPECT_EQ(preview.at("kind"), "listing");
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/_templates/list.html").status, 404);
@@ -336,7 +336,7 @@ TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
                                {"fields", bj::object{{"draft", true}, {"requirements", bj::array{bj::array{"owner"}}}}}});
   ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-meat").status, 404);  // a draft, hidden
-  auto preview = tool("page_render", {{"tenant", "playground"}, {"path", "/future-of-meat"}, {"drafts", true}});
+  auto preview = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/future-of-meat"}, {"drafts", true}});
   EXPECT_EQ(preview.at("kind"), "document");
   std::string html(preview.at("body").as_string());
   EXPECT_EQ(html, doc);  // served as written: no front matter, no template
@@ -374,7 +374,7 @@ TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
   auto put5 = tool("page_put", {{"tenant", "playground"}, {"path", "/entities"}, {"format", "fragment"}, {"body", kEntities}});
   ASSERT_FALSE(put5.as_object().contains("error")) << json::dump(put5);
   EXPECT_EQ(std::string(tool("page_get", {{"tenant", "playground"}, {"path", "/entities"}}).at("body").as_string()), kEntities);
-  EXPECT_NE(std::string(tool("page_render", {{"tenant", "playground"}, {"path", "/entities"}}).at("body").as_string()).find(kEntities),
+  EXPECT_NE(std::string(tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/entities"}}).at("body").as_string()).find(kEntities),
             std::string::npos);
   auto served = fetch(port, bhttp::verb::get, "/entities").body;
   EXPECT_NE(served.find(kEntities), std::string::npos) << served;
@@ -467,7 +467,7 @@ TEST_F(SiteRoutesTest, PageRenderPreviewsUnsavedPagesTemplatesAndFeeds) {
                  {"fields", bj::object{{"title", "I'm back"}, {"date", "2026-10-29"}, {"tags", bj::array{"news"}},
                                        {"json_ld", bj::object{{"@type", "Article"}, {"headline", "I'm back"}}}}}}};
   bj::object templates{{"post", "<head>{{{json_ld}}}</head><article><h1>{{title}}</h1>{{{body}}}</article>"}};
-  auto post = tool("page_render", {{"tenant", "playground"}, {"path", "/updates/hello"}, {"pages", pages}, {"templates", templates}});
+  auto post = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/updates/hello"}, {"pages", pages}, {"templates", templates}});
   ASSERT_EQ(post.at("status").as_int64(), 200) << json::dump(post);
   std::string html(post.at("body").as_string());
   EXPECT_NE(html.find("<h1>I&#39;m back</h1>"), std::string::npos) << html;
@@ -475,7 +475,7 @@ TEST_F(SiteRoutesTest, PageRenderPreviewsUnsavedPagesTemplatesAndFeeds) {
       << html;
   EXPECT_EQ(post.at("stored"), false);
 
-  auto list = tool("page_render", {{"tenant", "playground"}, {"path", "/updates"}, {"pages", pages}, {"feed", true}});
+  auto list = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/updates"}, {"pages", pages}, {"feed", true}});
   ASSERT_EQ(list.at("status").as_int64(), 200) << json::dump(list);
   EXPECT_NE(std::string(list.at("body").as_string()).find("/updates/hello"), std::string::npos);
   std::string feed(list.at("feed").at("body").as_string());
@@ -485,9 +485,9 @@ TEST_F(SiteRoutesTest, PageRenderPreviewsUnsavedPagesTemplatesAndFeeds) {
   // Nothing was written.
   EXPECT_FALSE(host->content().get("playground", "updates/hello.md"));
   EXPECT_FALSE(host->content().get("playground", "_templates/post.html"));
-  EXPECT_EQ(tool("page_render", {{"tenant", "playground"}, {"path", "/updates/hello"}}).at("status").as_int64(), 404);
+  EXPECT_EQ(tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/updates/hello"}}).at("status").as_int64(), 404);
   // A template that doesn't parse is refused, as template_put would.
-  EXPECT_TRUE(tool("page_render", {{"tenant", "playground"}, {"path", "/"}, {"templates", bj::object{{"x", "{{#a}}"}}}})
+  EXPECT_TRUE(tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/"}, {"templates", bj::object{{"x", "{{#a}}"}}}})
                   .as_object()
                   .contains("error"));
 }
@@ -509,4 +509,164 @@ TEST_F(SiteRoutesTest, TemplateGetGivesTheBuiltInsAndContentPutChecksBytes) {
   EXPECT_NE(std::string(bad.at("error").as_string()).find("0 CR bytes"), std::string::npos);
   EXPECT_FALSE(host->content().get("playground", "data/y.csv"));
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/data/x.csv").headers["content-type"], "text/csv; charset=utf-8");
+}
+
+// The blog kcmeatup asked for (031 § 2): one page_put per post, with the built-in post template;
+// the listing, feed, and sitemap follow with no other edits.
+TEST_F(SiteRoutesTest, APostIsOnePagePutAndEverythingElseFollows) {
+  std::string err;
+  ASSERT_TRUE(host->content().put("playground", "_data/site.json",
+                                  R"({"title":"KC Meat Up","description":"Meat in Kansas City.","author":"Jeffrey M. Barber"})", &err));
+  // The index: a listing of every page under updates written with the post template, 2 a page.
+  auto index = tool("page_put", {{"path", "/updates"}, {"format", "markdown"}, {"body", "News from the grill."},
+                                 {"title", "Updates"},
+                                 {"fields", bj::object{{"list", "updates"}, {"list-template", "post"}, {"per-page", 2}, {"feed", true}}}});
+  ASSERT_FALSE(index.as_object().contains("error")) << json::dump(index);  // no tenant: the host has one
+  for (int i = 1; i <= 3; ++i) {
+    auto day = "2026-10-2" + std::to_string(i);
+    auto p = tool("page_put", {{"path", "/updates/post-" + std::to_string(i)}, {"format", "markdown"},
+                               {"template", "post"}, {"title", "Post number " + std::to_string(i)},
+                               {"body", "Brisket *again*."},
+                               {"fields", bj::object{{"date", day}, {"summary", "A summary of post " + std::to_string(i)},
+                                                     {"tags", bj::array{"beef"}}, {"image", "/hero.jpg"}}}});
+    ASSERT_FALSE(p.as_object().contains("error")) << json::dump(p);
+  }
+  tool("page_put", {{"path", "/updates/secret"}, {"format", "markdown"}, {"template", "post"}, {"title", "Not yet"},
+                    {"body", "Soon."}, {"fields", bj::object{{"date", "2026-10-29"}, {"draft", true}}}});
+  tool("page_put", {{"path", "/updates/about-us"}, {"format", "markdown"}, {"title", "Not a post"}, {"body", "Hi."}});
+
+  auto post = fetch(port, bhttp::verb::get, "/updates/post-3", {{"accept", "text/html"}});
+  ASSERT_EQ(post.status, 200) << post.body;
+  EXPECT_NE(post.body.find("By Jeffrey M. Barber"), std::string::npos) << post.body;
+  EXPECT_NE(post.body.find("<meta name=\"description\" content=\"A summary of post 3\">"), std::string::npos);
+  EXPECT_NE(post.body.find("<meta property=\"og:type\" content=\"article\">"), std::string::npos);
+  EXPECT_NE(post.body.find("<meta property=\"og:image\" content=\"http://localhost/hero.jpg\">"), std::string::npos);
+  EXPECT_NE(post.body.find("<link rel=\"canonical\" href=\"http://localhost/updates/post-3\">"), std::string::npos);
+  size_t ld = post.body.find("<script type=\"application/ld+json\">");
+  ASSERT_NE(ld, std::string::npos);
+  EXPECT_EQ(post.body.find("application/ld+json", ld + 40), std::string::npos);  // exactly one
+  std::string script = post.body.substr(post.body.find('>', ld) + 1);
+  script = script.substr(0, script.find("</script>"));
+  auto parsed = json::parse(script, &err);
+  ASSERT_TRUE(parsed) << script;
+  EXPECT_EQ(parsed->at("@type"), "BlogPosting");
+  EXPECT_EQ(parsed->at("author").at("name"), "Jeffrey M. Barber");
+  EXPECT_EQ(parsed->at("datePublished"), "2026-10-23");
+
+  // The listing: newest first, posts only, drafts hidden, 2 a page with prev/next and canonical.
+  auto list = fetch(port, bhttp::verb::get, "/updates", {{"accept", "text/html"}});
+  ASSERT_EQ(list.status, 200);
+  EXPECT_LT(list.body.find("Post number 3"), list.body.find("Post number 2"));
+  EXPECT_EQ(list.body.find("Post number 1"), std::string::npos);  // page 2
+  EXPECT_EQ(list.body.find("Not yet"), std::string::npos);
+  EXPECT_EQ(list.body.find("Not a post"), std::string::npos);
+  EXPECT_NE(list.body.find("<link rel=\"next\" href=\"/updates?page=2\">"), std::string::npos) << list.body;
+  auto page2 = fetch(port, bhttp::verb::get, "/updates?page=2", {{"accept", "text/html"}});
+  EXPECT_NE(page2.body.find("Post number 1"), std::string::npos);
+  EXPECT_NE(page2.body.find("<link rel=\"canonical\" href=\"http://localhost/updates?page=2\">"), std::string::npos);
+  EXPECT_NE(page2.body.find("<link rel=\"prev\" href=\"/updates\">"), std::string::npos);
+  // The feed and the sitemap and llms.txt follow, from the same front matter.
+  auto feed = fetch(port, bhttp::verb::get, "/updates/feed.xml");
+  EXPECT_NE(feed.body.find("Post number 3"), std::string::npos);
+  EXPECT_NE(feed.body.find("<author><name>Jeffrey M. Barber</name></author>"), std::string::npos) << feed.body;
+  // RSS 2.0 beside the Atom, both advertised in the head; every listing has them unless feed: false.
+  auto rss = fetch(port, bhttp::verb::get, "/updates/rss.xml");
+  EXPECT_EQ(rss.status, 200);
+  EXPECT_NE(rss.headers["content-type"].find("application/rss+xml"), std::string::npos);
+  EXPECT_NE(rss.body.find("<pubDate>Fri, 23 Oct 2026 00:00:00 +0000</pubDate>"), std::string::npos) << rss.body;
+  EXPECT_NE(rss.body.find("<dc:creator>Jeffrey M. Barber</dc:creator>"), std::string::npos);
+  EXPECT_NE(list.body.find("type=\"application/rss+xml\" title=\"Updates\" href=\"/updates/rss.xml\""), std::string::npos);
+  tool("page_put", {{"path", "/plain"}, {"format", "markdown"}, {"body", "x"}, {"fields", bj::object{{"list", "updates"}}}});
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/plain/feed.xml").status, 200);
+  tool("page_put", {{"path", "/quiet"}, {"format", "markdown"}, {"body", "x"},
+                    {"fields", bj::object{{"list", "updates"}, {"feed", false}}}});
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/quiet/rss.xml").status, 404);
+  auto sitemap = fetch(port, bhttp::verb::get, "/sitemap.xml");
+  EXPECT_EQ(sitemap.status, 200);
+  EXPECT_NE(sitemap.headers["content-type"].find("application/xml"), std::string::npos);
+  EXPECT_NE(sitemap.body.find("<loc>http://localhost/updates/post-3</loc><lastmod>2026-10-23</lastmod>"), std::string::npos)
+      << sitemap.body;
+  EXPECT_EQ(sitemap.body.find("secret"), std::string::npos);
+  auto llms = fetch(port, bhttp::verb::get, "/llms.txt");
+  EXPECT_NE(llms.body.find("# KC Meat Up\n\n> Meat in Kansas City."), std::string::npos) << llms.body;
+  EXPECT_NE(llms.body.find("- [Post number 3](http://localhost/updates/post-3): A summary of post 3"), std::string::npos);
+  // A drafts preview still renders the draft.
+  auto preview = tool("page_render", {{"path", "/updates/secret"}, {"drafts", true}});
+  EXPECT_EQ(preview.at("status").as_int64(), 200);
+  EXPECT_FALSE(preview.as_object().contains("body"));  // compact unless verbose
+  EXPECT_TRUE(preview.at("problems").as_array().empty()) << json::dump(preview);
+  // A box's sitemap joins by name: /sitemap.xml becomes an index.
+  ASSERT_TRUE(host->content().put("playground", "_data/site.json",
+                                  R"({"title":"KC Meat Up","sitemaps":["/places/sitemap.xml"]})", &err));
+  auto index_map = fetch(port, bhttp::verb::get, "/sitemap.xml").body;
+  EXPECT_NE(index_map.find("<sitemapindex"), std::string::npos) << index_map;
+  EXPECT_NE(index_map.find("<loc>http://localhost/places/sitemap.xml</loc>"), std::string::npos);
+  EXPECT_NE(fetch(port, bhttp::verb::get, "/sitemap-pages.xml").body.find("/updates/post-3"), std::string::npos);
+  // A tenant's own file wins over the generated sitemap.
+  ASSERT_TRUE(host->content().put("playground", "sitemap.xml", "<urlset/>", &err));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/sitemap.xml").body, "<urlset/>");
+}
+
+TEST_F(SiteRoutesTest, EtagsGuardWritesAndPathFiltersPageList) {
+  auto first = tool("page_put", {{"path", "/updates/a"}, {"format", "markdown"}, {"body", "One."}});
+  tool("page_put", {{"path", "/about"}, {"format", "markdown"}, {"body", "Us."}});
+  std::string etag(first.at("etag").as_string());
+  auto got = tool("page_get", {{"path", "/updates/a"}});
+  EXPECT_EQ(std::string(got.at("etag").as_string()), etag);
+  auto stale = tool("page_put", {{"path", "/updates/a"}, {"format", "markdown"}, {"body", "Two."}, {"if_etag", "\"nope\""}});
+  EXPECT_NE(std::string(stale.at("error").as_string()).find("nothing written"), std::string::npos);
+  auto fresh = tool("page_put", {{"path", "/updates/a"}, {"format", "markdown"}, {"body", "Two."}, {"if_etag", etag}});
+  ASSERT_FALSE(fresh.as_object().contains("error")) << json::dump(fresh);
+  EXPECT_NE(std::string(fresh.at("etag").as_string()), etag);
+  EXPECT_TRUE(tool("page_put", {{"path", "/updates/b"}, {"format", "markdown"}, {"body", "B."}, {"if_etag", "none"}})
+                  .as_object().contains("file"));
+  EXPECT_TRUE(tool("page_put", {{"path", "/updates/b"}, {"format", "markdown"}, {"body", "B2."}, {"if_etag", "none"}})
+                  .as_object().contains("error"));
+  // path is page_list's old name for dir; an argument nobody knows is named, not silently dropped.
+  auto listed = tool("page_list", {{"path", "updates"}});
+  ASSERT_TRUE(listed.is_array()) << json::dump(listed);
+  EXPECT_EQ(listed.as_array().size(), 2u);
+  auto odd = tool("page_get", {{"path", "/about"}, {"colour", "red"}});
+  EXPECT_EQ(odd.at("ignored_arguments").at(0), "colour");
+  auto etags = tool("list_etags", {{"paths", bj::array{"/updates/a", "/nowhere"}}});
+  EXPECT_EQ(etags.at("etags").at("/updates/a").at("file"), "updates/a.md");
+  EXPECT_TRUE(etags.at("etags").at("/nowhere").is_null());
+  auto schemas = tool("tool_schemas", {});
+  bool found = false;
+  for (const auto& t : schemas.at("tools").as_array()) {
+    if (t.at("tool") == "page_list") found = t.at("aliases").at("path") == "dir";
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(SiteRoutesTest, ContentDeployChecksBeforeAndAfter) {
+  std::string body = "# Hello\n\nA [link](https://example.com).";
+  std::string sha = base::sha256_hex(body);
+  // A wrong sha (bytes changed on the way) writes nothing, not even the good items.
+  auto bad = tool("content_deploy", {{"pages", bj::array{bj::object{{"path", "/one"}, {"format", "markdown"}, {"body", body}, {"sha256", sha}},
+                                                         bj::object{{"path", "/two"}, {"format", "markdown"}, {"body", body}, {"sha256", "00"}}}}});
+  EXPECT_FALSE(bad.at("ok").as_bool()) << json::dump(bad);
+  EXPECT_FALSE(host->content().get("playground", "one.md"));
+  auto good = tool("content_deploy", {{"pages", bj::array{bj::object{{"path", "/one"}, {"format", "markdown"}, {"body", body}, {"sha256", sha},
+                                                                     {"if_etag", "none"}}}},
+                                      {"files", bj::array{bj::object{{"path", "data/macros.csv"}, {"text", "a,b\r\n1,2\r\n"}}}}});
+  ASSERT_TRUE(good.at("ok").as_bool()) << json::dump(good);
+  const auto& lines = good.at("lines").as_array();
+  ASSERT_EQ(lines.size(), 2u);
+  EXPECT_TRUE(std::string(lines[0].as_string()).starts_with("✓ /one 200 text/html")) << lines[0];
+  EXPECT_TRUE(std::string(lines[1].as_string()).starts_with("✓ /data/macros.csv 200 text/csv")) << lines[1];
+  // A page whose markdown leaves {{ in the HTML is written but flagged.
+  auto flagged = tool("content_deploy", {{"pages", bj::array{bj::object{{"path", "/three"}, {"format", "fragment"},
+                                                                        {"body", "<p>{{oops}}</p><p></p>"}}}}});
+  EXPECT_FALSE(flagged.at("ok").as_bool());
+  std::string line(flagged.at("lines").at(0).as_string());
+  EXPECT_NE(line.find("unrendered {{"), std::string::npos) << line;
+  EXPECT_NE(line.find("empty <p>"), std::string::npos) << line;
+  // url_check and page_lint read what visitors get.
+  auto checked = tool("url_check", {{"urls", bj::array{"http://localhost/one", "https://example.com/"}}});
+  EXPECT_EQ(checked.at("results").at(0).at("status").as_int64(), 200);
+  EXPECT_TRUE(checked.at("results").at(1).as_object().contains("error"));  // not ours
+  auto lint = tool("page_lint", {{"strict", true}, {"paths", bj::array{"/one"}}});
+  ASSERT_EQ(lint.at("pages").as_array().size(), 1u);
+  EXPECT_NE(json::dump(lint).find("title is"), std::string::npos);
 }

@@ -420,6 +420,16 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] SES bounces and complaints as blocks (026 M2); a host-wide block; data subject requests;
       `invites.reminder: false` for CASL's one-message referral rule.
 
+### Phase 23: the content kit (031)
+- [x] /sitemap.xml and /llms.txt from pages' front matter, a sitemap index for boxes' sitemaps.
+- [x] Posts: a built-in post template, BlogPosting JSON-LD, canonical, OG/Twitter, rel
+      prev/next, list-template, authors in feeds.
+- [x] content_deploy (sha and etag before, signed-out checks after), list_etags, url_check,
+      page_lint; etags on page_get and if_etag on page_put.
+- [x] Compact page_render, build logs, and diffs (verbose for the rest); aliases,
+      ignored_arguments, schema hashes, tool_schemas; the tenant filled in when only one fits.
+- [ ] Pinned partials and parameters (031 § 7); an approvals ledger (031 § 7): waiting on the human.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

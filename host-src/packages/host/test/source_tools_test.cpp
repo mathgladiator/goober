@@ -102,7 +102,7 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
   }
   ASSERT_NE(wat.find("hello"), std::string::npos);
 
-  auto deployed = tool("source_deploy", {{"project", "greeter"}});
+  auto deployed = tool("source_deploy", {{"verbose", true}, {"project", "greeter"}});
   ASSERT_EQ(deployed.at("state"), "succeeded") << json::dump(deployed);
   EXPECT_EQ(get("/greeter/hello"), "hello");
 
@@ -113,7 +113,7 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
                                           {"agent", "Engineer A"},
                                           {"changes", bj::array{bj::object{{"path", "box.wat"}, {"text", howdy}}}}});
   ASSERT_EQ(committed.at("rev"), 2) << json::dump(committed);
-  deployed = tool("source_deploy", {{"project", "greeter"}});
+  deployed = tool("source_deploy", {{"verbose", true}, {"project", "greeter"}});
   ASSERT_EQ(deployed.at("state"), "succeeded") << json::dump(deployed);
   EXPECT_EQ(get("/greeter/hello"), "howdy");
   EXPECT_EQ(tool("source_list", {}).at(0).at("deployed_rev"), 2);
@@ -124,8 +124,9 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
   EXPECT_EQ(stale.at("committed"), false);
   EXPECT_EQ(stale.at("conflicts").at(0), "box.wat");
 
-  auto diff = tool("source_diff", {{"project", "greeter"}, {"from", 1}});
-  EXPECT_NE(std::string(diff.as_string()).find("+  (data (i32.const 16) \"howdy\")"), std::string::npos) << diff;
+  auto diff = tool("source_diff", {{"verbose", true}, {"project", "greeter"}, {"from", 1}});
+  EXPECT_NE(std::string(diff.at("diff").as_string()).find("+  (data (i32.const 16) \"howdy\")"), std::string::npos) << diff;
+  EXPECT_EQ(diff.at("files").as_array().size(), 1u);
   auto log = tool("source_log", {{"project", "greeter"}});
   EXPECT_EQ(log.at(0).at("message"), "Say howdy");
   EXPECT_EQ(log.at(0).at("by"), "config (agent: Engineer A)");  // the operator behind the token, and who said they were
@@ -133,14 +134,14 @@ TEST_F(SourceToolsTest, CheckOutChangeBuildDeployAndGoBack) {
   // Going back is a new revision, deployed like any other.
   auto back = tool("source_revert", {{"project", "greeter"}, {"rev", 1}});
   EXPECT_EQ(back.at("rev"), 3);
-  ASSERT_EQ(tool("source_deploy", {{"project", "greeter"}}).at("state"), "succeeded");
+  ASSERT_EQ(tool("source_deploy", {{"verbose", true}, {"project", "greeter"}}).at("state"), "succeeded");
   EXPECT_EQ(get("/greeter/hello"), "hello");
 }
 
 TEST_F(SourceToolsTest, SitesDeployAsContent) {
   auto created = tool("source_create", {{"project", "home"}, {"template", "site"}, {"tenant", "playground"}});
   ASSERT_EQ(created.at("head"), 1) << json::dump(created);
-  auto deployed = tool("source_deploy", {{"project", "home"}});
+  auto deployed = tool("source_deploy", {{"verbose", true}, {"project", "home"}});
   ASSERT_EQ(deployed.at("state"), "succeeded") << json::dump(deployed);
   EXPECT_NE(get("/").find("This page lives in the project home"), std::string::npos);
 }
@@ -150,7 +151,7 @@ TEST_F(SourceToolsTest, BuildFailuresSayWhy) {
   auto c = tool("source_commit", {{"project", "broken"}, {"base_rev", 0}, {"message", "half"},
                                   {"changes", bj::array{bj::object{{"path", "goober.project.json"}, {"text", R"({"boxes":["."]})"}}}}});
   ASSERT_EQ(c.at("rev"), 1);
-  auto built = tool("source_build", {{"project", "broken"}});
+  auto built = tool("source_build", {{"verbose", true}, {"project", "broken"}});
   EXPECT_EQ(built.at("state"), "failed");
   EXPECT_NE(std::string(built.at("log").as_string()).find("manifest.json is missing"), std::string::npos) << json::dump(built);
   // A bad module fails at deploy, with the host's own reason.
@@ -158,11 +159,11 @@ TEST_F(SourceToolsTest, BuildFailuresSayWhy) {
                          {"changes", bj::array{bj::object{{"path", "manifest.json"},
                                                            {"text", R"({"box":"broken","domains":["*"],"routes":{"http":{"/b":{"get":{"name":"b","public":true}}}}})"}},
                                                bj::object{{"path", "box.wat"}, {"text", "(module"}}}}});
-  auto deployed = tool("source_deploy", {{"project", "broken"}});
+  auto deployed = tool("source_deploy", {{"verbose", true}, {"project", "broken"}});
   EXPECT_EQ(deployed.at("state"), "failed");
   EXPECT_NE(std::string(deployed.at("log").as_string()).find("✗ box broken"), std::string::npos) << json::dump(deployed);
   EXPECT_NE(json::dump(tool("source_create", {{"project", "x"}, {"template", "site"}})).find("needs the tenant"), std::string::npos);
-  EXPECT_NE(json::dump(tool("source_job", {})).find("broken"), std::string::npos);
+  EXPECT_NE(json::dump(tool("source_job", {{"verbose", true}, })).find("broken"), std::string::npos);
 }
 
 // A Rust box, built by cargo in the bubblewrap sandbox, where this machine has the tools.
@@ -189,8 +190,8 @@ TEST_F(SourceToolsTest, RustBoxesBuildInTheSandbox) {
   ASSERT_EQ(tool("source_commit", {{"project", "rusty"}, {"base_rev", 0}, {"message", "a rust box"}, {"changes", files}})
                 .at("rev"),
             1);
-  auto job = tool("source_deploy", {{"project", "rusty"}});
-  while (job.at("state") == "running" || job.at("state") == "queued") job = tool("source_job", {{"job", job.at("job")}});
+  auto job = tool("source_deploy", {{"verbose", true}, {"project", "rusty"}});
+  while (job.at("state") == "running" || job.at("state") == "queued") job = tool("source_job", {{"verbose", true}, {"job", job.at("job")}});
   ASSERT_EQ(job.at("state"), "succeeded") << job.at("log").as_string();
   EXPECT_NE(std::string(job.at("log").as_string()).find("in the sandbox"), std::string::npos) << job.at("log").as_string();
   EXPECT_EQ(get("/rusty"), "rusty");
@@ -200,8 +201,8 @@ TEST_F(SourceToolsTest, RustBoxesBuildInTheSandbox) {
                                    {"changes", bj::array{bj::object{{"path", "src/lib.rs"}, {"text", "fn broken( {}\n"}}}}})
                 .at("rev"),
             2);
-  auto failed = tool("source_build", {{"project", "rusty"}});
-  while (failed.at("state") == "running" || failed.at("state") == "queued") failed = tool("source_job", {{"job", failed.at("job")}});
+  auto failed = tool("source_build", {{"verbose", true}, {"project", "rusty"}});
+  while (failed.at("state") == "running" || failed.at("state") == "queued") failed = tool("source_job", {{"verbose", true}, {"job", failed.at("job")}});
   EXPECT_EQ(failed.at("state"), "failed");
   EXPECT_NE(std::string(failed.at("log").as_string()).find("error"), std::string::npos) << failed.at("log").as_string();
 }
@@ -252,8 +253,8 @@ TEST_F(SourceToolsTest, BuildsCantPointTheHostAtItsOwnFiles) {
       bj::object{{"path", "src/lib.rs"},
                  {"text", "#[unsafe(no_mangle)]\npub extern \"C\" fn goober_route_sneaky_hi() -> i32 { 0 }\n"}}};
   ASSERT_EQ(tool("source_commit", {{"project", "sneaky"}, {"base_rev", 0}, {"message", "m"}, {"changes", files}}).at("rev"), 1);
-  auto job = tool("source_deploy", {{"project", "sneaky"}});
-  while (job.at("state") == "running" || job.at("state") == "queued") job = tool("source_job", {{"job", job.at("job")}});
+  auto job = tool("source_deploy", {{"verbose", true}, {"project", "sneaky"}});
+  while (job.at("state") == "running" || job.at("state") == "queued") job = tool("source_job", {{"verbose", true}, {"job", job.at("job")}});
   std::string log(job.at("log").as_string());
   EXPECT_EQ(log.find("TOP-SECRET"), std::string::npos) << log;
   EXPECT_EQ(job.at("state"), "succeeded") << log;  // it built the real crate, sneaky.wasm
@@ -277,11 +278,11 @@ TEST_F(SourceToolsTest, NothingIsStoredUnlessEverythingChecksOut) {
                                       bj::object{{"path", "box.wat"}, {"text", wat}}}}});
   ASSERT_EQ(c.at("rev"), 1) << json::dump(c);
   // The build says what the deploy would say.
-  auto built = tool("source_build", {{"project", "dir"}});
+  auto built = tool("source_build", {{"verbose", true}, {"project", "dir"}});
   EXPECT_EQ(built.at("state"), "failed");
   std::string log(built.at("log").as_string());
   EXPECT_NE(log.find("unknown type \"int32\": in a schema, write {\"type\": \"integer\", \"format\": \"int32\"}"), std::string::npos) << log;
-  auto deployed = tool("source_deploy", {{"project", "dir"}});
+  auto deployed = tool("source_deploy", {{"verbose", true}, {"project", "dir"}});
   EXPECT_EQ(deployed.at("state"), "failed");
   EXPECT_NE(std::string(deployed.at("log").as_string()).find("nothing was stored or deployed"), std::string::npos);
   // The schema wasn't stored, so the fixed revision can still use the name, and change it.
@@ -293,8 +294,8 @@ TEST_F(SourceToolsTest, NothingIsStoredUnlessEverythingChecksOut) {
                                    {"changes", bj::array{bj::object{{"path", "manifest.json"}, {"text", good}},
                                                          bj::object{{"path", "locations_v3.schema.json"}, {"text", schema2}}}}});
   ASSERT_EQ(c2.at("rev"), 2) << json::dump(c2);
-  EXPECT_EQ(tool("source_build", {{"project", "dir"}}).at("state"), "succeeded");
-  auto ok = tool("source_deploy", {{"project", "dir"}});
+  EXPECT_EQ(tool("source_build", {{"verbose", true}, {"project", "dir"}}).at("state"), "succeeded");
+  auto ok = tool("source_deploy", {{"verbose", true}, {"project", "dir"}});
   ASSERT_EQ(ok.at("state"), "succeeded") << json::dump(ok);
   ASSERT_TRUE(host->schemas().get("locations_v3"));
   EXPECT_TRUE(host->schemas().get("locations_v3")->table("locations")->column("city"));
@@ -335,9 +336,9 @@ TEST_F(SourceToolsTest, DeployedToolsAreListedWithTheirTypes) {
     return tool("source_commit", {{"project", "loc"}, {"base_rev", base}, {"message", "rev"}, {"changes", changes}});
   };
   ASSERT_EQ(commit(0, false).at("rev"), 1);
-  ASSERT_EQ(tool("source_deploy", {{"project", "loc"}}).at("state"), "succeeded");
+  ASSERT_EQ(tool("source_deploy", {{"verbose", true}, {"project", "loc"}}).at("state"), "succeeded");
   ASSERT_EQ(commit(1, true).at("rev"), 2);
-  auto deployed = tool("source_deploy", {{"project", "loc"}});
+  auto deployed = tool("source_deploy", {{"verbose", true}, {"project", "loc"}});
   ASSERT_EQ(deployed.at("state"), "succeeded") << json::dump(deployed);
   std::string err;
   ASSERT_TRUE(host->identity().grant("playground", "owner@example.com", "owner", "test", 1'900'000'000'000, &err)) << err;

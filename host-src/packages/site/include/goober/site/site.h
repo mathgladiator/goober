@@ -107,6 +107,16 @@ class Site {
   // The names of the built-in templates.
   static std::vector<std::string> builtin_names();
 
+  // The pages a search engine or a model should see (design/machine/031.ContentKit.md § 1):
+  // published (not drafts), public (no requirements), not redirects, not noindex, and not
+  // "sitemap": false. `origin` is "https://example.com".
+  std::vector<Page> listed_pages(std::string_view tenant) const;
+  // /sitemap.xml from the pages' metadata: canonical (or the URL), lastmod (updated or date).
+  std::string sitemap_xml(std::string_view tenant, const std::string& origin) const;
+  // /llms.txt (llmstxt.org): the site's title and description, then each page as a link with
+  // its description.
+  std::string llms_txt(std::string_view tenant, const std::string& origin) const;
+
  private:
   Result visit_unexpanded(const Visit& visit) const;
   Result render_page(const Visit& v, const Page& page, bool listing_only_for_feed) const;

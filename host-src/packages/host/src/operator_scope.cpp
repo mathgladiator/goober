@@ -38,7 +38,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "partial_put", "push_send", "pwa_delete", "pwa_get", "pwa_list", "pwa_put", "pwa_subscriptions",
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
           "template_put", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
-          "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags", "url_check",
+          "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
           "page_lint", "approval_record", "approval_verify", "approval_list"}) {
       m[t] = Rule::kTenant;
     }
@@ -57,7 +57,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
       m[t] = Rule::kFiltered;
     }
     for (const char* t : {"box_guide", "site_guide", "rust_binding", "library_list", "library_get", "schema_list",
-                          "schema_get", "web_fetch", "operator_scope", "tool_schemas"}) {
+                          "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check"}) {
       m[t] = Rule::kOpen;
     }
     for (const char* t : {"host_health", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
@@ -366,6 +366,25 @@ std::optional<std::string> Host::scope_filter(const OperatorScope& scope, const 
 mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, bool read_only) {
   mcp::McpServer::Policy policy;
   OperatorScope scope = operator_scope(operator_name);
+  // A tenant left out is filled in when only one is possible: the host serves one tenant, or the
+  // operator is focused on one (031 § 5).
+  {
+    std::set<std::string> possible;
+    for (const auto& [d, e] : config_.get()->domains) {
+      if (scope.all || scope.tenants.count(e.tenant)) possible.insert(e.tenant);
+    }
+    if (possible.size() == 1) {
+      policy.prepare = [only = *possible.begin()](const mcp::Tool& tool, bj::object& args) {
+        // Only where a tenant is required: a tool whose tenant is optional means something by its
+        // absence (every tenant, the system's keys, a box project).
+        bool required = false;
+        if (auto* req = tool.input_schema.if_contains("required"); req && req->is_array()) {
+          for (const auto& r : req->as_array()) required |= r.is_string() && r.as_string() == "tenant";
+        }
+        if (required && !args.contains("tenant")) args["tenant"] = only;
+      };
+    }
+  }
   if (read_only || !scope.all) {
     policy.allowed = [read_only, focused = !scope.all](const std::string& tool) {
       if (read_only && !is_read_tool(tool)) return false;
