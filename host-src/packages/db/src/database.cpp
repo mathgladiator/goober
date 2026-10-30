@@ -617,7 +617,10 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
   sqlite::Db db(file(tenant, database));
   Auth auth;
   auth.write = write;
-  auto result = run_statement(db.raw(), sql, params, auth, row_limit, int64_t(1) << 40, [&](bool readonly) {
+  // An operator's statement gets far more room than a box's, but not for ever: a recursive CTE
+  // that never ends would hold a worker (and, from the panel, an observer could start one).
+  constexpr int64_t kOperatorSteps = 500'000'000;
+  auto result = run_statement(db.raw(), sql, params, auth, row_limit, kOperatorSteps, [&](bool readonly) {
     if (write && readonly) return std::string("db_exec changes rows; use db_query to read");
     return std::string();
   });

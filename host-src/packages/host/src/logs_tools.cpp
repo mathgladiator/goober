@@ -181,7 +181,12 @@ void Host::register_log_tools() {
          q.since_ms = *since;
          q.until_ms = *until;
          q.pattern = field(args, "pattern");
+         // A search ends within 10 seconds, whatever it was asked; a regex that can backtrack for
+         // ever is refused before it runs.
+         q.deadline_us = base::monotonic_us() + 10'000'000;
          if (auto rx = field(args, "regex"); !rx.empty()) {
+           std::string why;
+           if (!logs::safe_regex(rx, &why)) return ToolResult::fail("regex: " + why);
            try {
              q.regex = std::regex(rx, std::regex::ECMAScript);
            } catch (const std::exception&) {

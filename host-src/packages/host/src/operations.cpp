@@ -124,58 +124,45 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
     res.headers.emplace_back("allow", "POST");
     return finish(std::move(res), "");
   }
-  current_operator() = operator_name;
-  current_request_id() = req.header("goober-request-id");
+  OperatorContext as(*this, operator_name, req.header("goober-request-id"));
   saw_agent(operator_name);  // the panel lists connected agents, to turn approvals on for one
   // A host:observer only looks (design/machine/028.Panel.md § 2).
   // A focused operator only reaches their tenants (design/machine/030.OperatorScope.md).
-  auto reply = mcp_->handle(req.body, operator_policy(operator_name, !may_change(operator_roles(operator_name))));
-  current_operator().clear();
-  current_request_id().clear();
-  // Which tool, for which tenant: what an operator (or an agent acting as one) did is in the
-  // access log, one line a call.
+  auto policy = operator_policy(operator_name, !may_change(operator_roles(operator_name)));
+  // Every call, one at a time even in a batch: the audit log (032 § 4) and the change log's
+  // actions (028 § 5), by whom, from where, on what, and how it went.
   bj::object extra{{"operations", "mcp"}, {"operator", operator_name}};
-  std::string perr;
-  if (auto call = json::parse(req.body, &perr); call && call->is_object()) {
-    const auto& c = call->as_object();
-    if (const auto* m = c.if_contains("method"); m && m->is_string()) extra["mcp_method"] = m->as_string();
-    if (const auto* p = c.if_contains("params"); p && p->is_object()) {
-      if (const auto* n = p->as_object().if_contains("name"); n && n->is_string()) extra["tool"] = n->as_string();
-      if (const auto* a = p->as_object().if_contains("arguments"); a && a->is_object()) {
-        for (const char* k : {"tenant", "path", "project", "box", "name"}) {
-          if (const auto* v = a->as_object().if_contains(k); v && v->is_string() && v->as_string().size() <= 200) {
-            extra[std::string("arg_") + k] = v->as_string();
-          }
-        }
+  std::string request_id = req.header("goober-request-id"), ip = client_address(req);
+  int calls = 0;
+  policy.after = [&](const std::string& tool, const bj::object& args, const mcp::ToolResult& out, bool held) {
+    ++calls;
+    bj::object named;
+    for (const char* k : {"tenant", "path", "project", "box", "name"}) {
+      if (const auto* v = args.if_contains(k); v && v->is_string() && v->as_string().size() <= 200) named[k] = v->as_string();
+    }
+    std::string outcome = held ? "held" : out.is_error ? "failed" : "ok";
+    audit("operator.tool", operator_name, tool, outcome,
+          bj::object{{"ip", ip}, {"request_id", request_id}, {"via", "mcp"}, {"args", named}});
+    if (changes_) {
+      try {
+        changes_->record_action(operations::Action{base::now_unix_ms(), operator_name, tool, request_id, named, out.is_error});
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: change log: " << e.what() << "\n";
       }
     }
-  }
-  bool failed = reply.body.find("\"isError\":true") != std::string::npos;
-  if (failed) extra["tool_error"] = true;
-  // The audit log (032 § 4): every tool call, by whom, from where, on what, and how it went.
-  if (auto* tool = extra.if_contains("tool"); tool && tool->is_string()) {
-    bj::object args;
-    for (const auto& kv : extra) {
-      if (kv.key().starts_with("arg_")) args[kv.key().substr(4)] = kv.value();
+    // The access log names the call too: the first one's tool and arguments, and how many.
+    if (calls == 1) {
+      extra["tool"] = tool;
+      for (const auto& kv : named) extra[std::string("arg_") + std::string(kv.key())] = kv.value();
+      if (out.is_error) extra["tool_error"] = true;
+      if (held) extra["held"] = true;
     }
-    bool held = !failed && reply.body.find("\"pending_approval\"") != std::string::npos;
-    audit("operator.tool", operator_name, std::string(tool->as_string()),
-          held ? "held" : failed || reply.body.find("\"error\":{") != std::string::npos ? "failed" : "ok",
-          bj::object{{"ip", client_address(req)}, {"request_id", req.header("goober-request-id")}, {"via", "mcp"},
-                     {"args", std::move(args)}});
-  }
-  // The change log's actions: every tool call, linked to its changes by the request id (§ 5).
-  if (auto* tool = extra.if_contains("tool"); changes_ && tool && tool->is_string()) {
-    operations::Action action{base::now_unix_ms(), operator_name, std::string(tool->as_string()),
-                              req.header("goober-request-id"), {}, failed || reply.body.find("\"error\":{") != std::string::npos};
-    for (const auto& kv : extra) {
-      if (kv.key().starts_with("arg_")) action.args[kv.key().substr(4)] = kv.value();
-    }
-    try {
-      changes_->record_action(action);
-    } catch (const std::exception& e) {
-      std::cerr << "goober-host: change log: " << e.what() << "\n";
-    }
+  };
+  auto reply = mcp_->handle(req.body, policy);
+  if (calls > 1) extra["calls"] = calls;
+  std::string perr;
+  if (auto call = json::parse(req.body, &perr); call && call->is_object()) {
+    if (const auto* m = call->as_object().if_contains("method"); m && m->is_string()) extra["mcp_method"] = m->as_string();
   }
   finish(json_response(reply.status, std::move(reply.body)), json::dump(extra));
 }

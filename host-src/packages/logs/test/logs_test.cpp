@@ -198,3 +198,14 @@ TEST(Logs, NamesAndTimes) {
   EXPECT_EQ(*logs::parse_at("2026-10-29T00:00:01.000Z"), kT0 + 1000);
   EXPECT_FALSE(logs::parse_at("yesterday"));
 }
+
+TEST(Logs, RegexesThatCanRunForeverAreRefused) {
+  std::string why;
+  for (const char* ok : {"status\":5..", "^\\{.*\"tenant\":\"kc\"", "(a|b)c+", "[(+]+x", "\\(a+\\)+"}) {
+    EXPECT_TRUE(goober::logs::safe_regex(ok, &why)) << ok << ": " << why;
+  }
+  for (const char* bad : {"(a+)+", "^(\\w+\\s?)*$", "((ab)*)+", "(a|aa)*{2}x", "(x)\\1", "(?:a*)*"}) {
+    EXPECT_FALSE(goober::logs::safe_regex(bad, &why)) << bad;
+  }
+  EXPECT_FALSE(goober::logs::safe_regex(std::string(201, 'a'), &why));
+}

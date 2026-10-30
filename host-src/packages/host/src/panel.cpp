@@ -271,14 +271,14 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
                       json::dump(bj::object{{"panel", tool}, {"why", "outside the operator's scope"}}));
       }
     }
-    current_operator() = me;
-    current_request_id() = request_id;
-    auto out = mcp_->call(tool, args);
-    if (out && !out->is_error && policy.filter) {
-      if (auto refused = policy.filter(tool, out->value)) out = ToolResult::fail(*refused);
+    std::optional<ToolResult> out;
+    {
+      OperatorContext as(*this, me, request_id);
+      out = mcp_->call(tool, args);
+      if (out && !out->is_error && policy.filter) {
+        if (auto refused = policy.filter(tool, out->value)) out = ToolResult::fail(*refused);
+      }
     }
-    current_operator().clear();
-    current_request_id().clear();
     bj::object extra{{"panel", tool}, {"operator", "panel:" + who->user.email}};
     {
       bj::object targs;

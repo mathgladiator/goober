@@ -57,6 +57,8 @@ class McpServer {
     // After the checks pass, may answer in the tool's place (an approval holding the call): the
     // tool isn't run, and the answer isn't filtered.
     std::function<std::optional<ToolResult>(const std::string& tool, const bj::object& arguments)> hold = {};
+    // After every tools/call, refused ones included, batched or not: for an audit.
+    std::function<void(const std::string& tool, const bj::object& arguments, const ToolResult& result, bool held)> after = {};
   };
   HttpReply handle(std::string_view body, const Allowed& allowed = {}) const;
   HttpReply handle(std::string_view body, const Policy& policy) const;

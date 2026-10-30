@@ -11,6 +11,7 @@
 #include "goober/base/files.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
+#include "../src/keys.h"
 #include "goober/json/json.h"
 
 using namespace goober;
@@ -295,4 +296,64 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":false,"confirm":true})").status, 200);
   EXPECT_FALSE(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"four"})").at("isError").as_bool());
   EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "four");
+}
+
+// From the operator-surfaces review: holes a focused agent could reach through.
+TEST_F(ScopeTest, FocusedAgentsCantReachThroughKeysDataBoxesOrVersions) {
+  focus_grok(R"(["kc"])");
+  // A system key is every tenant's.
+  EXPECT_TRUE(call("key_set", R"({"scope":"system","tenant":"kc","name":"openai","value":"x","hosts":["api.openai.com"]})")
+                  .at("isError").as_bool());
+  EXPECT_TRUE(call("key_delete", R"({"scope":"system","tenant":"kc","name":"openai"})").at("isError").as_bool());
+  EXPECT_FALSE(call("key_set", R"({"scope":"tenant","tenant":"kc","name":"mine","value":"x","hosts":["api.example.com"]})")
+                   .at("isError").as_bool());
+  // A strategy pinned to another tenant's database.
+  auto pinned = call("version_upload", R"J({"manifest":{"box":"sneaky","domains":["kc.example.com"],"data":{"sqlite3":{"d":)J"
+                                       R"J({"schema":"s","database":"x","tenant":"other","pattern":"sql","tables":{"t":{}}}}}},"wat":"(module)"})J");
+  EXPECT_TRUE(pinned.at("isError").as_bool());
+  EXPECT_NE(std::string(pinned.at("text").as_string()).find("tenant other"), std::string::npos) << json::dump(pinned);
+  // Replacing another tenant's box under its name.
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(
+      R"({"box":"otherbox","domains":["other.example.com"]})", kModule,
+      &err)) << err;
+  auto replaced = call("version_upload", R"J({"manifest":{"box":"otherbox","domains":["kc.example.com"]},"wat":"(module)"})J");
+  EXPECT_TRUE(replaced.at("isError").as_bool());
+  EXPECT_NE(std::string(replaced.at("text").as_string()).find("already serves"), std::string::npos) << json::dump(replaced);
+  // Promoting a stored version that serves another tenant, of a box that's theirs now.
+  auto v1 = host->boxes().upload(R"({"box":"flip","domains":["other.example.com"]})",
+                                 kModule, &err);
+  ASSERT_TRUE(v1) << err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"flip","domains":["kc.example.com"]})",
+                                   kModule, &err)) << err;
+  auto promote = call("version_promote", R"({"box":"flip","version":")" + v1->version + R"("})");
+  EXPECT_TRUE(promote.at("isError").as_bool()) << json::dump(promote);
+}
+
+TEST_F(ScopeTest, BatchedCallsAreAuditedOneByOneAndHeldSecretsAreHidden) {
+  auto r = fetch(port, "localhost", bhttp::verb::post, "/goober-operations-mcp",
+                 {{"authorization", "Bearer " + token}, {"content-type", "application/json"}},
+                 R"([{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"content_put","arguments":{"tenant":"kc","path":"b1.txt","text":"1"}}},)"
+                 R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"content_put","arguments":{"tenant":"kc","path":"b2.txt","text":"2"}}}])");
+  ASSERT_EQ(r.status, 200) << r.body;
+  auto audit = *base::read_file(root / "storage/logs/audit.log");
+  EXPECT_NE(audit.find("\"path\":\"b1.txt\""), std::string::npos);
+  EXPECT_NE(audit.find("\"path\":\"b2.txt\""), std::string::npos);
+  // A held key_set never shows its value, to the person or the agent, and isn't kept once decided.
+  auto boss = sign_in("boss@example.com");
+  ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 200);
+  auto held = std::string(call("key_set", R"({"scope":"tenant","tenant":"kc","name":"k","value":"sup3r-secret","hosts":["a.example"]})")
+                              .at("text").as_string());
+  EXPECT_EQ(api(boss, "approvals").body.find("sup3r-secret"), std::string::npos);
+  std::smatch m;
+  ASSERT_TRUE(std::regex_search(held, m, std::regex(R"re("pending_approval": ([0-9]+))re"))) << held;
+  EXPECT_EQ(std::string(call("approval_status", "{\"id\":" + std::string(m[1]) + "}").at("text").as_string()).find("sup3r-secret"),
+            std::string::npos);
+  // The token is revoked while its request waits: approving denies it instead.
+  ASSERT_EQ(host::revoke_operator_tokens(root / "storage", "grok"), 1);
+  auto late = api(boss, "write/decide", "{\"id\":" + std::string(m[1]) + ",\"decision\":\"approve\",\"confirm\":true}");
+  EXPECT_EQ(late.status, 409) << late.body;
+  EXPECT_FALSE(host->keys().resolve("keys/tenant/{!tenant}/k", "kc"));
+  auto db = *base::read_file(root / "storage/operations/approvals.db");
+  EXPECT_EQ(db.find("sup3r-secret"), std::string::npos);
 }

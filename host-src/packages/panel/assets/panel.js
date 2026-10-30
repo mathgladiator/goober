@@ -970,7 +970,12 @@ async function approvalsCard() {
       { label: 'When', get: (r) => fmt.time(r.at_ms), cls: () => 'muted small' },
       { label: 'Agent', get: (r) => r.agent, cls: () => 'mono small' },
       { label: 'Tool', get: (r) => r.tool, cls: () => 'mono' },
-      { label: 'Arguments', get: (r) => h('pre', { class: 'small' }, JSON.stringify(r.args, null, 2).slice(0, 4000)) },
+      { label: 'Arguments', get: (r) => {
+        // Never cut silently: what's past the first 20,000 characters is named, so nothing hides there.
+        const s = JSON.stringify(r.args, null, 2);
+        return h('pre', { class: 'small' }, s.length > 20000 ? s.slice(0, 20000) + '\n… and ' + (s.length - 20000) +
+          ' more characters not shown: deny it, or ask the agent to split it' : s);
+      } },
       { label: '', get: (r) => h('span', {}, decide(r, 'approve'), ' ', decide(r, 'deny')) },
     ], a.pending) : h('p', { class: 'muted' }, 'Nothing waiting.'),
     a.recent.length ? [h('h3', {}, 'Recent'), table([
@@ -978,6 +983,7 @@ async function approvalsCard() {
       { label: 'Agent', get: (r) => r.agent, cls: () => 'mono small' },
       { label: 'Tool', get: (r) => r.tool, cls: () => 'mono' },
       { label: 'State', get: (r) => r.state + (r.is_error ? ' (failed)' : '') },
+      { label: 'Result', get: (r) => r.result === undefined ? '' : h('pre', { class: 'small' }, JSON.stringify(r.result).slice(0, 300)) },
       { label: 'By', get: (r) => (r.decided_by || '') + (r.decided_ms ? ' · ' + fmt.time(r.decided_ms) : ''), cls: () => 'muted small' },
     ], a.recent)] : null,
     status);

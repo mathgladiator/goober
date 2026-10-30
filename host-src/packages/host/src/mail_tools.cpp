@@ -123,42 +123,52 @@ void Host::register_mail_tools() {
          return ToolResult::ok(bj::object{{"removed", name}, {"tenant", *tenant}});
        }});
 
+  // Rendering is a look; sending is a change, so it's its own tool: an observer in the panel, or an
+  // agent whose changes wait for approval (035), can preview but never mail anyone.
+  auto render_preview = [this, check_tenant, site_of](const bj::object& args, const std::optional<std::string>& to) {
+    auto tenant = arg(args, "tenant");
+    auto name = arg(args, "name").value_or("");
+    if (!check_tenant(tenant)) return ToolResult::fail("not a tenant in the host config, or _host");
+    bj::object vars;
+    if (const auto* b = mt::builtin(name)) vars = b->sample;
+    vars["site"] = site_of(*tenant);
+    if (to) vars["email"] = *to;
+    if (const auto* v = args.if_contains("vars"); v && v->is_object()) {
+      for (const auto& kv : v->as_object()) vars[kv.key()] = kv.value();
+    }
+    std::string err;
+    auto r = mail_templates_->render(*tenant, name, vars, &err);
+    if (!r) return ToolResult::fail(err);
+    bj::object out{{"subject", r->subject}, {"text", r->text}, {"html", r->html}};
+    if (to) {
+      if (to->find('@') == std::string::npos || to->find_first_of(" \r\n,;<>") != std::string::npos) {
+        return ToolResult::fail("to must be one email address");
+      }
+      identity::Mail m{*to, "[Test] " + r->subject, r->text};
+      m.html = r->html;
+      mail_->send(std::move(m));
+      out["sent_to"] = *to;
+    }
+    return ToolResult::ok(std::move(out));
+  };
   mcp_->add_tool(
       {"mail_template_preview",
        "Renders a template as a tenant would send it, with the sample values (vars overrides any), and returns the "
-       "subject, text, and html. With to, also sends it there, with [Test] before the subject.",
+       "subject, text, and html. Sends nothing; mail_template_send_test sends one.",
        object_schema({{"tenant", tenant_prop},
                       {"name", name_prop},
-                      {"vars", object_property("Values to use instead of the samples, like {\"code\": \"123456\"}.")},
-                      {"to", string_property("An address to send the preview to.")}},
+                      {"vars", object_property("Values to use instead of the samples, like {\"code\": \"123456\"}.")}},
                      {"tenant", "name"}),
-       [this, check_tenant, site_of](const bj::object& args) {
-         auto tenant = arg(args, "tenant");
-         auto name = arg(args, "name").value_or("");
-         if (!check_tenant(tenant)) return ToolResult::fail("not a tenant in the host config, or _host");
-         bj::object vars;
-         if (const auto* b = mt::builtin(name)) vars = b->sample;
-         vars["site"] = site_of(*tenant);
-         auto to = arg(args, "to");
-         if (to) vars["email"] = *to;
-         if (const auto* v = args.if_contains("vars"); v && v->is_object()) {
-           for (const auto& kv : v->as_object()) vars[kv.key()] = kv.value();
-         }
-         std::string err;
-         auto r = mail_templates_->render(*tenant, name, vars, &err);
-         if (!r) return ToolResult::fail(err);
-         bj::object out{{"subject", r->subject}, {"text", r->text}, {"html", r->html}};
-         if (to) {
-           if (to->find('@') == std::string::npos || to->find_first_of(" \r\n,;<>") != std::string::npos) {
-             return ToolResult::fail("to must be one email address");
-           }
-           identity::Mail m{*to, "[Test] " + r->subject, r->text};
-           m.html = r->html;
-           mail_->send(std::move(m));
-           out["sent_to"] = *to;
-         }
-         return ToolResult::ok(std::move(out));
-       }});
+       [render_preview](const bj::object& args) { return render_preview(args, std::nullopt); }});
+  mcp_->add_tool(
+      {"mail_template_send_test",
+       "Renders a template as mail_template_preview does and sends it to one address, with [Test] before the subject.",
+       object_schema({{"tenant", tenant_prop},
+                      {"name", name_prop},
+                      {"vars", object_property("Values to use instead of the samples.")},
+                      {"to", string_property("The one address to send it to.")}},
+                     {"tenant", "name", "to"}),
+       [render_preview](const bj::object& args) { return render_preview(args, arg(args, "to")); }});
 }
 
 }  // namespace goober::host

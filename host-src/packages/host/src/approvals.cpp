@@ -21,6 +21,17 @@ namespace {
 constexpr int64_t kPendingTtlMs = 24 * 3600 * 1000;
 constexpr size_t kMaxArgsBytes = 1 << 20;
 constexpr size_t kMaxResultBytes = 64 << 10;
+constexpr int64_t kMaxPendingPerAgent = 50;
+
+// What a person (or the agent) is shown of a held call: secrets replaced. The tool gets the real
+// arguments when it runs; once decided, only this copy is kept.
+bj::object redacted(const std::string& tool, bj::object args) {
+  if (tool == "key_set" && args.contains("value")) args["value"] = "(hidden: a key's value)";
+  for (const char* k : {"password", "secret", "client_secret", "token"}) {
+    if (args.contains(k)) args[k] = "(hidden)";
+  }
+  return args;
+}
 
 bool has_role(const SignedIn& who, const char* role) {
   return std::find(who.roles.begin(), who.roles.end(), role) != who.roles.end();
@@ -41,6 +52,15 @@ std::string text_arg(const bj::object& args, const char* k) {
   return v && v->is_string() ? std::string(v->as_string()) : std::string();
 }
 
+std::string like_escape(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    if (c == '%' || c == '_' || c == '\\') out += '\\';
+    out += c;
+  }
+  return out;
+}
+
 }  // namespace
 
 sqlite::Db& Host::approvals_db() {
@@ -55,13 +75,33 @@ sqlite::Db& Host::approvals_db() {
         "CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, agent TEXT NOT "
         "NULL, tool TEXT NOT NULL, args TEXT NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
         "decided_by TEXT, decided_ms INTEGER, result TEXT, is_error INTEGER);"
-        "CREATE INDEX IF NOT EXISTS requests_state ON requests (state, id);");
+        "CREATE INDEX IF NOT EXISTS requests_state ON requests (state, id);"
+        "CREATE INDEX IF NOT EXISTS requests_agent ON requests (agent, state);");
+    // A request running when the host stopped may or may not have run: say so, never leave it running.
+    approvals_db_->exec("UPDATE requests SET state = 'interrupted' WHERE state = 'running'");
   }
   // Waiting past a day is a no: the agent asks again if it still wants it.
-  sqlite::Stmt e(*approvals_db_, "UPDATE requests SET state = 'expired', decided_ms = ? WHERE state = 'pending' AND at_ms < ?");
+  sqlite::Stmt e(*approvals_db_, "UPDATE requests SET state = 'expired', decided_ms = ?, args = CASE WHEN tool = 'key_set' "
+                                 "THEN json_set(args, '$.value', '(hidden: a key''s value)') ELSE args END "
+                                 "WHERE state = 'pending' AND at_ms < ?");
   int64_t now = base::now_unix_ms();
   e.bind(1, now).bind(2, now - kPendingTtlMs).run();
   return *approvals_db_;
+}
+
+bool Host::agent_still_signs_in(const std::string& agent) {
+  auto cfg = config_.get();
+  if (agent == "config") return !cfg->operations_token.empty();
+  if (agent.starts_with("token:")) {
+    for (const auto& t : list_operator_tokens(cfg->storage)) {
+      if ("token:" + t.name == agent) return true;
+    }
+    return false;
+  }
+  // An OAuth agent: its person still an operator (operator_roles then decides how much).
+  std::string person = person_of(agent);
+  auto it = cfg->identity.operators.find(person);
+  return !person.empty() && it != cfg->identity.operators.end() && !it->second.empty();
 }
 
 bool Host::approvals_on(const std::string& agent) {
@@ -88,12 +128,24 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
   // Looking never waits; nor does asking about one's own requests.
   if (is_read_tool(tool) || tool == "approval_status") return std::nullopt;
   if (!approvals_on(agent)) return std::nullopt;
-  std::string text = json::dump(args);
+  bj::object held = args;
+  // A deploy or build held without a revision is pinned to the head now, so the person approves
+  // exactly what will run, not whatever head is when they click.
+  if ((tool == "source_deploy" || tool == "source_build") && !held.contains("rev")) {
+    if (auto p = source_->get(text_arg(held, "project")); p && p->head > 0) held["rev"] = p->head;
+  }
+  std::string text = json::dump(held);
   if (text.size() > kMaxArgsBytes) return mcp::ToolResult::fail("the call is too large to hold for approval (1 MiB)");
   int64_t id = 0;
   {
     std::lock_guard lock(approvals_mu_);
     sqlite::Db& db = approvals_db();
+    sqlite::Stmt n(db, "SELECT count(*) FROM requests WHERE agent = ? AND state = 'pending'");
+    n.bind(1, agent);
+    if (n.step() && n.int64(0) >= kMaxPendingPerAgent) {
+      return mcp::ToolResult::fail(std::to_string(kMaxPendingPerAgent) +
+                                   " of your calls already wait for approval; ask the person to decide them first");
+    }
     sqlite::Stmt s(db, "INSERT INTO requests (at_ms, agent, tool, args, request_id) VALUES (?, ?, ?, ?, ?)");
     s.bind(1, base::now_unix_ms()).bind(2, agent).bind(3, tool).bind(4, text).bind(5, current_request_id()).run();
     id = db.last_insert_rowid();
@@ -110,7 +162,7 @@ bj::object Host::approval_json(sqlite::Stmt& s, bool with_args) {
   if (with_args) {
     std::string err;
     auto a = json::parse(s.text(4), &err);
-    o["args"] = a ? *a : bj::value(s.text(4));
+    o["args"] = a && a->is_object() ? bj::value(redacted(s.text(3), a->as_object())) : bj::value("(unreadable)");
   }
   if (!s.is_null(7)) o["decided_by"] = s.text(7);
   if (!s.is_null(8)) o["decided_ms"] = s.int64(8);
@@ -140,6 +192,7 @@ bj::object Host::panel_approvals(const SignedIn& who) {
   auto add = [&](const std::string& agent, const std::string& kind, const std::string& name, int64_t last_ms) {
     std::string person = person_of(agent);
     bool mine = !person.empty() && person == who.user.email;
+    if (!owner && !mine) return;  // others' agents are an owner's business
     agents[agent] = bj::object{{"agent", agent}, {"kind", kind}, {"name", name}, {"person", person}, {"last_ms", last_ms},
                                {"approvals", on.count(agent) > 0}, {"may_set", owner || mine}};
   };
@@ -167,21 +220,18 @@ bj::object Host::panel_approvals(const SignedIn& who) {
   for (auto& [k, v] : agents) list.push_back(std::move(v));
   bj::array pending, recent;
   {
+    // A person who isn't an owner sees their own agents' requests only, selected before the limit.
     sqlite::Stmt s(db, "SELECT id, at_ms, agent, tool, args, request_id, state, decided_by, decided_ms, result, is_error "
-                       "FROM requests WHERE state = 'pending' ORDER BY id LIMIT 200");
-    while (s.step()) {
-      std::string person = person_of(s.text(2));
-      if (!owner && person != who.user.email) continue;
-      pending.push_back(approval_json(s, true));
-    }
+                       "FROM requests WHERE state = 'pending' AND (? OR agent LIKE ? ESCAPE '\\') ORDER BY id LIMIT 200");
+    std::string like = "oauth:" + like_escape(who.user.email) + ":%";
+    s.bind(1, int64_t(owner)).bind(2, like);
+    while (s.step()) pending.push_back(approval_json(s, true));
   }
   {
     sqlite::Stmt s(db, "SELECT id, at_ms, agent, tool, args, request_id, state, decided_by, decided_ms, result, is_error "
-                       "FROM requests WHERE state != 'pending' ORDER BY id DESC LIMIT 30");
-    while (s.step()) {
-      if (!owner && person_of(s.text(2)) != who.user.email) continue;
-      recent.push_back(approval_json(s, false));
-    }
+                       "FROM requests WHERE state != 'pending' AND (? OR agent LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT 30");
+    s.bind(1, int64_t(owner)).bind(2, "oauth:" + like_escape(who.user.email) + ":%");
+    while (s.step()) recent.push_back(approval_json(s, false));
   }
   return bj::object{{"agents", std::move(list)}, {"pending", std::move(pending)}, {"recent", std::move(recent)}};
 }
@@ -200,6 +250,20 @@ std::pair<int, bj::object> Host::panel_set_approvals(const SignedIn& who, const 
   // An operator sets approvals for their own agents; an owner, for anyone's.
   if (!owner && person_of(agent) != who.user.email) {
     return {403, bj::object{{"error", "only a host:owner sets approvals for another operator's agents or a token"}}};
+  }
+  // An owner's switch on someone's agent stays until an owner turns it off.
+  if (!owner && !onv->as_bool()) {
+    std::lock_guard lock(approvals_mu_);
+    sqlite::Stmt s(approvals_db(), "SELECT set_by FROM switches WHERE agent = ?");
+    s.bind(1, agent);
+    if (s.step() && s.text(0).starts_with("panel:")) {
+      auto cfg = config_.get();
+      auto it = cfg->identity.operators.find(s.text(0).substr(6));
+      if (it != cfg->identity.operators.end() &&
+          std::find(it->second.begin(), it->second.end(), "host:owner") != it->second.end() && s.text(0) != "panel:" + who.user.email) {
+        return {403, bj::object{{"error", "an owner turned approvals on for this agent; only an owner turns them off"}}};
+      }
+    }
   }
   {
     std::lock_guard lock(approvals_mu_);
@@ -245,6 +309,13 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
     if (!owner && person_of(agent) != who.user.email) {
       return {403, bj::object{{"error", "only a host:owner decides for another operator's agents or a token"}}};
     }
+    // An agent that can no longer sign in (its token revoked, the config's token removed) has its
+    // requests denied, never run with the roles it used to have.
+    if (decision == "approve" && !agent_still_signs_in(agent)) {
+      sqlite::Stmt d(db, "UPDATE requests SET state = 'denied', decided_by = ?, decided_ms = ? WHERE id = ? AND state = 'pending'");
+      d.bind(1, "host: the agent can no longer sign in").bind(2, base::now_unix_ms()).bind(3, id).run();
+      return {409, bj::object{{"error", agent + " can no longer sign in, so its request was denied"}}};
+    }
     // Claimed before it runs, so two people clicking at once can't run it twice.
     sqlite::Stmt u(db, "UPDATE requests SET state = ?, decided_by = ?, decided_ms = ? WHERE id = ? AND state = 'pending'");
     u.bind(1, decision == "approve" ? "running" : "denied").bind(2, by).bind(3, base::now_unix_ms()).bind(4, id).run();
@@ -252,7 +323,14 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
   }
   audit(decision == "approve" ? "approval.approved" : "approval.denied", by, tool, "ok",
         bj::object{{"request", id}, {"agent", agent}, {"request_id", request_id}});
-  if (decision == "deny") return {200, bj::object{{"id", id}, {"state", "denied"}}};
+  if (decision == "deny") {
+    std::lock_guard lock(approvals_mu_);
+    std::string err;
+    auto parsed = json::parse(args_text, &err);
+    sqlite::Stmt u(approvals_db(), "UPDATE requests SET args = ? WHERE id = ?");
+    u.bind(1, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{}))).bind(2, id).run();
+    return {200, bj::object{{"id", id}, {"state", "denied"}}};
+  }
   // Run as the agent, under the agent's scope and roles as they are now, without holding again.
   std::string err;
   auto parsed = json::parse(args_text, &err);
@@ -261,12 +339,13 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
                   {"method", "tools/call"},
                   {"params", bj::object{{"name", tool}, {"arguments", parsed && parsed->is_object() ? *parsed : bj::object{}}}}};
   auto policy = operator_policy(agent, !may_change(operator_roles(agent)), false);
-  std::string saved_op = current_operator(), saved_req = current_request_id();
-  current_operator() = agent;
-  current_request_id() = request_id;
-  auto reply = mcp_->handle(json::dump(call), policy);
-  current_operator() = saved_op;
-  current_request_id() = saved_req;
+  mcp::HttpReply reply;
+  try {
+    OperatorContext as(*this, agent, request_id);
+    reply = mcp_->handle(json::dump(call), policy);
+  } catch (const std::exception& e) {
+    reply = mcp::HttpReply{500, json::dump(bj::object{{"error", std::string("the call failed: ") + e.what()}})};
+  }
   bj::value result = bj::value(reply.body);
   bool is_error = true;
   if (auto r = json::parse(reply.body, &err); r && r->is_object()) {
@@ -287,8 +366,10 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
   if (stored.size() > kMaxResultBytes) stored = json::dump(bj::value(stored.substr(0, kMaxResultBytes) + "…"));
   {
     std::lock_guard lock(approvals_mu_);
-    sqlite::Stmt u(approvals_db(), "UPDATE requests SET state = 'done', result = ?, is_error = ? WHERE id = ?");
-    u.bind(1, stored).bind(2, int64_t(is_error)).bind(3, id).run();
+    // Decided: the result is kept, and the arguments only as shown (secrets hidden).
+    sqlite::Stmt u(approvals_db(), "UPDATE requests SET state = 'done', result = ?, is_error = ?, args = ? WHERE id = ?");
+    u.bind(1, stored).bind(2, int64_t(is_error)).bind(3, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{})));
+    u.bind(4, id).run();
   }
   // The call itself, in the audit log as any operator call is, naming who approved it.
   audit("operator.tool", agent, tool, is_error ? "failed" : "ok",

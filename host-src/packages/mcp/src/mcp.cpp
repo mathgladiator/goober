@@ -78,6 +78,7 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
       if (policy.check) {
         if (auto refused = policy.check(name, args)) why = *refused;
       }
+      if (policy.after) policy.after(name, args, ToolResult::fail(why), false);
       return error_body(id, -32602, "tool " + name + " is not allowed for this caller: " + why);
     }
     if (!tools_.count(name)) return error_body(id, -32602, "unknown tool: " + name);
@@ -95,6 +96,7 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     if (!out.is_error && policy.filter && !held) {
       if (auto refused = policy.filter(name, out.value)) out = ToolResult::fail(*refused);
     }
+    if (policy.after) policy.after(name, args, out, held);
     std::string text = out.value.is_string() ? std::string(out.value.get_string()) : goober::json::pretty(out.value);
     result = bj::object{{"content", bj::array{bj::object{{"type", "text"}, {"text", text}}}}, {"isError", out.is_error}};
     // An object result is also given as structured content, for clients that read it.

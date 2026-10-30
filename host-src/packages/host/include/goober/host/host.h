@@ -267,6 +267,24 @@ class Host {
   bool check_calls(const manifest::Manifest& m, std::string* error) const;
   // The operator behind the MCP call running on this thread ("config" or "token:$name").
   static std::string& current_operator();
+  // Sets the operator and request id for this thread, and puts the old ones back however the
+  // scope ends (an exception included), so a pool thread never keeps an agent's name.
+  struct OperatorContext {
+    OperatorContext(Host&, const std::string& op, const std::string& request_id)
+        : saved_op_(current_operator()), saved_req_(current_request_id()) {
+      current_operator() = op;
+      current_request_id() = request_id;
+    }
+    ~OperatorContext() {
+      current_operator() = saved_op_;
+      current_request_id() = saved_req_;
+    }
+    OperatorContext(const OperatorContext&) = delete;
+    OperatorContext& operator=(const OperatorContext&) = delete;
+
+   private:
+    std::string saved_op_, saved_req_;
+  };
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
                   const std::string& extra);
 
@@ -429,6 +447,7 @@ class Host {
   // Approvals per connected agent (design/machine/035.Approvals.md).
   sqlite::Db& approvals_db();
   bool approvals_on(const std::string& agent);
+  bool agent_still_signs_in(const std::string& agent);
   void saw_agent(const std::string& agent);
   std::optional<mcp::ToolResult> hold_for_approval(const std::string& agent, const std::string& tool,
                                                    const boost::json::object& args);

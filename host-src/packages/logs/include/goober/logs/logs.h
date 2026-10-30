@@ -117,8 +117,15 @@ struct Query {
   std::string before_log;
   int64_t before_seq = 0, before_at_ms = 0;
   uint64_t max_read = 2ull << 30;
+  int64_t deadline_us = 0;  // monotonic; past it the search stops (truncated); 0 for none
   std::function<bool(const std::string& log, const bj::object& line)> allow;  // scope
 };
+// Whether a regex is safe to run over every line: at most 200 characters, no backreferences,
+// and no quantified group that holds a quantifier ((a+)+ backtracks exponentially). why when not.
+bool safe_regex(std::string_view pattern, std::string* why);
+// The most of a line a regex sees (libstdc++'s matcher recurses per character).
+inline constexpr size_t kRegexLineBytes = 4096;
+
 struct Hit {
   std::string log;
   int64_t seq = 0, at_ms = 0;

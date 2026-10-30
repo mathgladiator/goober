@@ -32,7 +32,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
          {"agent_token_mint", "attachment_delete", "attachment_get", "attachment_list", "attachment_put",
           "attachment_upload_url", "changes", "client_list", "client_put", "client_remove", "content_delete",
           "content_get", "content_list", "content_put", "db_describe", "db_exec", "db_list", "db_query", "key_delete",
-          "key_set", "mail_activity", "mail_template_get", "mail_template_list", "mail_template_preview",
+          "key_set", "mail_activity", "mail_template_get", "mail_template_list", "mail_template_preview", "mail_template_send_test",
           "mail_template_put", "mail_template_remove", "mail_unsubscribed", "outbox_discard", "outbox_retry",
           "page_get", "page_list", "page_put", "page_render", "partial_delete", "partial_get", "partial_list",
           "partial_put", "push_send", "pwa_delete", "pwa_get", "pwa_list", "pwa_put", "pwa_subscriptions",
@@ -186,6 +186,8 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
     return it->second.tenant;
   };
   // A box is in scope when every domain it names is configured and in scope; "*" is every tenant.
+  // ...and every database it pins to a fixed tenant is in scope too, since a pinned strategy
+  // reaches that tenant's data whatever domains the box serves.
   auto manifest_in = [&](const manifest::Manifest& m, std::string* out_of) {
     for (const auto& d : m.domains) {
       if (d == "*") return *out_of = "every tenant (\"*\")", false;
@@ -193,6 +195,16 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       if (!t) return *out_of = d + " (no tenant yet)", false;
       if (!in(*t)) return *out_of = *t, false;
     }
+    for (const auto& s : m.data) {
+      if (!s.tenant.empty() && !in(s.tenant)) return *out_of = "tenant " + s.tenant + "'s database (data." + s.name + ")", false;
+    }
+    return true;
+  };
+  // A new version replaces the box of that name: if one exists outside the scope, it's not theirs.
+  auto existing_in = [&](const std::string& name, std::string* out_of) {
+    auto active = boxes_->active();
+    auto it = active->boxes.find(name);
+    if (it != active->boxes.end()) return manifest_in(it->second->manifest, out_of);
     return true;
   };
   auto box_in = [&](const std::string& name, std::string* out_of) {
@@ -223,11 +235,23 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       std::string t = text_arg(args, "tenant");
       if (t.empty()) return who + ": name the tenant (" + tool + " without one means every tenant)";
       if (!in(t)) return who + ", not " + t + widen;
+      // Keys act on their scope, and a system key is every tenant's.
+      if ((tool == "key_set" || tool == "key_delete") && text_arg(args, "scope") != "tenant") {
+        return who + ", and a system key is every tenant's: only scope \"tenant\" is theirs" + widen;
+      }
       return std::nullopt;
     }
     case Rule::kBox: {
       std::string out_of;
       if (!box_in(text_arg(args, "box"), &out_of)) return who + ", and box " + text_arg(args, "box") + " serves " + out_of + widen;
+      // Promoting makes that version's manifest the one that runs, so it is the one checked.
+      if (tool == "version_promote") {
+        std::string err;
+        auto text = boxes_->manifest_text(text_arg(args, "box"), text_arg(args, "version"));
+        auto m = text ? manifest::parse_manifest(*text, &err) : std::nullopt;
+        if (!m) return std::nullopt;  // the tool says there's no such version
+        if (!manifest_in(*m, &out_of)) return who + ", and that version of " + text_arg(args, "box") + " serves " + out_of + widen;
+      }
       return std::nullopt;
     }
     case Rule::kManifest: {
@@ -238,6 +262,7 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       if (!m) return std::nullopt;  // the tool itself says what's wrong with it
       std::string out_of;
       if (!manifest_in(*m, &out_of)) return who + ", and this box would serve " + out_of + widen;
+      if (!existing_in(m->box, &out_of)) return who + ", and box " + m->box + " already serves " + out_of + widen;
       return std::nullopt;
     }
     case Rule::kDomain: {
@@ -296,6 +321,9 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
         std::string out_of;
         if (m && !manifest_in(*m, &out_of)) {
           return who + ", and project " + project + "'s box " + m->box + " serves " + out_of + widen;
+        }
+        if (m && !existing_in(m->box, &out_of)) {
+          return who + ", and project " + project + "'s box " + m->box + " would replace one serving " + out_of + widen;
         }
       }
       return std::nullopt;

@@ -238,6 +238,10 @@ TEST_F(DbTest, OperatorsQueryAndExec) {
   EXPECT_FALSE(dbs->operate("playground", "guestbook", "DELETE FROM goober_schemas", nullptr, 100, true, &err));
   EXPECT_FALSE(dbs->operate("playground", "guestbook", "DROP TABLE entries", nullptr, 100, true, &err));
   EXPECT_FALSE(dbs->operate("playground", "nope", "SELECT 1", nullptr, 100, false, &err));
+  // A query that never ends stops at the operator's step budget.
+  EXPECT_FALSE(dbs->operate("playground", "guestbook",
+                            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n", nullptr,
+                            100, false, &err));
   EXPECT_EQ(dbs->tenants(), (std::vector<std::string>{"playground"}));
   EXPECT_EQ(dbs->databases("playground"), (std::vector<std::string>{"guestbook"}));
 }
