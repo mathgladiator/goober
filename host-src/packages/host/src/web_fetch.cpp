@@ -247,6 +247,10 @@ WebFetcher::Raw WebFetcher::get(const web::Url& u, const std::vector<std::pair<s
                                 int64_t timeout_ms, size_t max_bytes) {
   Raw out;
   auto cfg = config_();
+  if (cfg->sandbox) {
+    out.error = "this host is a sandbox: it fetches nothing from the web";
+    return out;
+  }
   std::string why;
   auto addr = pick_address(u.host, cfg->local, &why);
   if (!addr) {

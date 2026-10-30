@@ -4,6 +4,7 @@
 
 #include <iostream>
 
+#include "goober/base/hash.h"
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/time.h"
@@ -288,7 +289,7 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
         } catch (...) {
         }
       }
-      if (inv && inv->email == in->user.email && token.substr(dot + 1) == invite_mac(tenant, inv->id, inv->email) &&
+      if (inv && inv->email == in->user.email && base::equal_constant_time(token.substr(dot + 1), invite_mac(tenant, inv->id, inv->email)) &&
           inv->state == "open") {
         std::string err;
         if (auto next = accept_invite_for(tenant, *inv, in->user, "code", request_id, &err)) {

@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <regex>
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
@@ -275,6 +277,20 @@ TEST_F(AgentsTest, OperatorsMintLongLivedAgentTokens) {
   EXPECT_FALSE(id.mint_agent_token("playground", "phone", "exec@example.com", 30 * day, now, &err));
   EXPECT_FALSE(id.mint_agent_token("playground", "grokbot", "nobody@example.com", 30 * day, now, &err));
   EXPECT_FALSE(id.mint_agent_token("playground", "grokbot", "exec@example.com", 400 * day, now, &err));
+  // Granted a role but never signed in: nobody has proved the address, so no token for it.
+  EXPECT_FALSE(id.mint_agent_token("playground", "grokbot", "exec@example.com", 30 * day, now, &err));
+  {
+    id.start_email("playground", "exec@example.com", "localhost", true, now);
+    host->drain_mail();
+    std::string code;
+    for (const auto& f : base::list_files(root / "storage/mail/outbox")) {
+      std::smatch m;
+      auto text = *base::read_file(root / "storage/mail/outbox" / f);
+      if (text.find("exec@example.com") != std::string::npos && std::regex_search(text, m, std::regex("is ([0-9]{6})"))) code = m[1];
+    }
+    std::string why;
+    ASSERT_TRUE(id.verify_email("playground", "exec@example.com", code, true, now, day, &why)) << why;
+  }
   auto token = id.mint_agent_token("playground", "grokbot", "exec@example.com", 30 * day, now, &err);
   ASSERT_TRUE(token) << err;
   // It works on /mcp as an agent, well past the hour an OAuth access token lives.

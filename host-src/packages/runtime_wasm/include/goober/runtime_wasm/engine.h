@@ -1,5 +1,9 @@
 #pragma once
 
+#include <optional>
+
+#include <array>
+
 #include <atomic>
 #include <functional>
 #include <cstdint>
@@ -33,6 +37,10 @@ struct CallInput {
   std::string request_json;
   int64_t now_ms = 0;
   uint64_t seed = 0;
+  // With a key, goober_random_fill is ChaCha20 keyed by HMAC-SHA-256(key, seed): the seed alone
+  // (in the access log, for replay) can't predict a box's random bytes, and one output doesn't
+  // reveal the others. Without one (tests), a seeded xoshiro stream.
+  std::optional<std::array<uint8_t, 32>> random_key = std::nullopt;
   // Runs one statement for goober_sql: (strategy, sql, params JSON) to a result JSON.
   // Without it, goober_sql answers {"error": ...}.
   std::function<std::string(std::string_view, std::string_view, std::string_view)> sql = {};

@@ -123,7 +123,9 @@ def main():
     check(st == 303 and cookie, "emailed code accepted, session cookie set")
     st, h, page = web.call("GET", f"{auth_path}?{q}", headers={"Cookie": cookie})
     check(st == 200 and "dumb terminal" in page and "com.mathgladiator.dumb:" in page, "consent names the app and its scheme")
-    form = dict(urllib.parse.parse_qsl(q), decision="allow")
+    token = re.search(r'name="consent" value="([^"]+)"', page)
+    check(token is not None, "the consent page carries its token")
+    form = dict(urllib.parse.parse_qsl(q), decision="allow", consent=token.group(1) if token else "")
     st, h, _ = web.call("POST", auth_path, form=form, headers={"Cookie": cookie, **same_site})
     # The answer is a page that sends the browser on: a Refresh header and an "Open" button.
     loc = h.get("refresh", "").removeprefix("0;url=")

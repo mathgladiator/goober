@@ -305,17 +305,35 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       if (tool == "source_deploy" || tool == "source_build") {
         if (const auto* r = args.if_contains("rev"); r && r->is_int64() && r->as_int64() > 0) rev = r->as_int64();
       }
-      if (rev == 0) return std::nullopt;  // nothing committed yet: nothing to reach
+      // A commit is checked as the project will be after it: the files it writes, over the head.
+      const bj::array* changes = nullptr;
+      if (tool == "source_commit") {
+        if (const auto* ch = args.if_contains("changes"); ch && ch->is_array()) changes = &ch->as_array();
+      }
       std::string err;
-      auto text = source_->read(project, rev, "goober.project.json", &err);
+      auto read = [&](const std::string& path) -> std::optional<std::string> {
+        if (changes) {
+          for (const auto& ch : *changes) {
+            const auto* o = ch.if_object();
+            if (!o || text_arg(*o, "path") != path) continue;
+            if (const auto* d = o->if_contains("delete"); d && d->is_bool() && d->as_bool()) return std::nullopt;
+            if (const auto* t = o->if_contains("text"); t && t->is_string()) return std::string(t->as_string());
+            if (const auto* b = o->if_contains("base64"); b && b->is_string()) return base::base64_decode(b->as_string());
+          }
+        }
+        if (rev == 0) return std::nullopt;
+        return source_->read(project, rev, path, &err);
+      };
+      if (rev == 0 && !changes) return std::nullopt;  // nothing committed yet: nothing to reach
+      auto text = read("goober.project.json");
       if (!text) return std::nullopt;
       auto spec = read_spec(*text, &err);
-      if (!spec) return std::nullopt;
+      if (!spec) return std::nullopt;  // the tool says what's wrong with it
       for (const auto& [dir, tenant] : spec->sites) {
         if (!in(tenant)) return who + ", and project " + project + " writes tenant " + tenant + "'s site" + widen;
       }
       for (const auto& dir : spec->boxes) {
-        auto mtext = source_->read(project, rev, dir == "." ? "manifest.json" : dir + "/manifest.json", &err);
+        auto mtext = read(dir == "." ? "manifest.json" : dir + "/manifest.json");
         if (!mtext) continue;
         auto m = manifest::parse_manifest(*mtext, &err);
         std::string out_of;
@@ -418,6 +436,17 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
         if (required && !args.contains("tenant")) args["tenant"] = only;
       };
     }
+  }
+  // A deploy or build without a revision is pinned to the head before the scope check, so the
+  // revision checked is the one that runs (a commit landing in between can't slip past it).
+  {
+    auto fill_tenant = policy.prepare;
+    policy.prepare = [this, fill_tenant](const mcp::Tool& tool, bj::object& args) {
+      if (fill_tenant) fill_tenant(tool, args);
+      if ((tool.name == "source_deploy" || tool.name == "source_build") && !args.contains("rev")) {
+        if (auto p = source_->get(text_arg(args, "project")); p && p->head > 0) args["rev"] = p->head;
+      }
+    };
   }
   if (read_only || !scope.all) {
     policy.allowed = [read_only, focused = !scope.all](const std::string& tool) {

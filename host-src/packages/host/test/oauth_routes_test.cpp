@@ -127,11 +127,19 @@ class OAuthRoutesTest : public ::testing::Test {
     EXPECT_NE(r.body.find("class=\"button\" href=\"" + href + "\""), std::string::npos) << r.body;
     return target;
   }
+  // The consent page's token for this authorization, as a browser would hold it.
+  std::string consent_token(const std::string& query) {
+    auto page = fetch(port, bhttp::verb::get, "/oauth/authorize?" + query, {{"cookie", cookie}});
+    std::smatch m;
+    EXPECT_TRUE(std::regex_search(page.body, m, std::regex(R"re(name="consent" value="([0-9]+\.[0-9a-f]+)")re"))) << page.body;
+    return m.size() > 1 ? std::string(m[1]) : "";
+  }
   // Consents as the signed-in person and returns the code from the redirect.
   std::string consent(const std::string& redirect = kApp) {
+    std::string token = consent_token(authorize_query(redirect));
     auto r = fetch(port, bhttp::verb::post, "/oauth/authorize",
                    {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie}, {"origin", "http://localhost:8080"}},
-                   authorize_query(redirect) + "&decision=allow");
+                   authorize_query(redirect) + "&decision=allow&consent=" + token);
     std::string loc = handed_to(r);
     EXPECT_TRUE(loc.starts_with(redirect + "?code=")) << loc;
     EXPECT_NE(loc.find("&state=xyz"), std::string::npos);
@@ -213,7 +221,7 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
                       {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
                        {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "navigate"}, {"sec-fetch-dest", "document"},
                        {"sec-fetch-site", "same-origin"}, {"user-agent", kSafari}},
-                      authorize_query() + "&decision=allow");
+                      authorize_query() + "&decision=allow&consent=" + consent_token(authorize_query()));
   EXPECT_TRUE(handed_to(webkit).starts_with(std::string(kApp) + "?code="));
   // Even in WebKit, a fetch() is no navigation.
   EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
@@ -221,6 +229,14 @@ TEST_F(OAuthRoutesTest, TheTerminalSignsInAndCallsBoxRoutesAsThePerson) {
                    {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "cors"}, {"sec-fetch-dest", "empty"},
                    {"user-agent", kSafari}},
                   authorize_query() + "&decision=allow")
+                .status,
+            403);
+  // A plain form elsewhere on the site, without the consent page's token, can't Allow either.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/oauth/authorize",
+                  {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", cookie},
+                   {"origin", "http://localhost:8080"}, {"sec-fetch-mode", "navigate"}, {"sec-fetch-dest", "document"},
+                   {"sec-fetch-site", "same-origin"}, {"user-agent", kSafari}},
+                  authorize_query() + "&decision=allow&consent=1.00")
                 .status,
             403);
   // The consent screen ignores the tenant's sign-in stylesheet.

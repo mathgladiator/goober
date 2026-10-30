@@ -184,6 +184,7 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
 constexpr int64_t kStatementMs = 2000;
 constexpr int kMaxValueBytes = 4 << 20;
 constexpr size_t kMaxResultBytes = 8 << 20;
+constexpr int kMaxColumns = 128;
 constexpr int kMaxLikePattern = 1000;
 
 struct Progress {
@@ -313,6 +314,15 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   auto owner = auth.strategy ? root_pages(db) : std::map<int64_t, std::string>{};
   sqlite3_limit(db, SQLITE_LIMIT_LENGTH, kMaxValueBytes);
   sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, kMaxLikePattern);
+  // At most 128 result columns: 2000 columns of a 4 MiB value would be gigabytes in one row.
+  sqlite3_limit(db, SQLITE_LIMIT_COLUMN, kMaxColumns);
+  // A backstop for all of SQLite in this process: past it, statements fail out of memory
+  // instead of the kernel ending the host.
+  static const bool heap_limited = [] {
+    sqlite3_hard_heap_limit64(int64_t(1536) << 20);
+    return true;
+  }();
+  (void)heap_limited;
   // The authorizer stays on until the statement is finished: SQLite re-prepares a statement
   // whose schema changed underneath it, and that must be checked too.
   sqlite3_set_authorizer(db, authorize, &auth);
@@ -374,12 +384,13 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
     }
     bj::array row;
     for (int i = 0; i < ncol; ++i) {
+      // Checked before each column is copied, not after the row: a row is the size of all of it.
       result_bytes += size_t(sqlite3_column_bytes(st.s, i)) + 16;
+      if (result_bytes > kMaxResultBytes) {
+        sqlite3_progress_handler(db, 0, nullptr, nullptr);
+        return fail("the result is larger than " + std::to_string(kMaxResultBytes) + " bytes; select less");
+      }
       row.push_back(column_value(st.s, i));
-    }
-    if (result_bytes > kMaxResultBytes) {
-      sqlite3_progress_handler(db, 0, nullptr, nullptr);
-      return fail("the result is larger than " + std::to_string(kMaxResultBytes) + " bytes; select less");
     }
     rows.push_back(std::move(row));
   }

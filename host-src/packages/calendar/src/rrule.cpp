@@ -132,7 +132,8 @@ std::optional<Rule> parse_rule(std::string_view text, std::string* error) {
       for (const auto& x : split(val, ',')) {
         auto v = int_of(x);
         if (!v || *v == 0 || std::abs(*v) < lo || std::abs(*v) > hi || (!neg && *v < 0)) return false;
-        out->push_back(*v);
+        // Each value once: a list repeated a hundred thousand times would multiply the work.
+        if (std::find(out->begin(), out->end(), *v) == out->end()) out->push_back(*v);
       }
       return true;
     };
@@ -180,19 +181,19 @@ std::optional<Rule> parse_rule(std::string_view text, std::string* error) {
       for (const auto& x : split(val, ',')) {
         auto v = int_of(x);
         if (!v || *v < 0 || *v > 60) return bad("BYSECOND is 0 to 60");
-        r.bysecond.push_back(*v);
+        if (!in(r.bysecond, *v)) r.bysecond.push_back(*v);
       }
     } else if (key == "BYMINUTE") {
       for (const auto& x : split(val, ',')) {
         auto v = int_of(x);
         if (!v || *v < 0 || *v > 59) return bad("BYMINUTE is 0 to 59");
-        r.byminute.push_back(*v);
+        if (!in(r.byminute, *v)) r.byminute.push_back(*v);
       }
     } else if (key == "BYHOUR") {
       for (const auto& x : split(val, ',')) {
         auto v = int_of(x);
         if (!v || *v < 0 || *v > 23) return bad("BYHOUR is 0 to 23");
-        r.byhour.push_back(*v);
+        if (!in(r.byhour, *v)) r.byhour.push_back(*v);
       }
     } else if (key == "BYDAY") {
       for (const auto& x : split(upper, ',')) {
@@ -305,10 +306,19 @@ Expansion expand(const Civil& dtstart, const Rule& r, const Civil& horizon, size
     if (!r.byday.empty() && !weekday_fits(r.byday, weekday(y, m, d))) return false;
     return true;
   };
+  // The work an expansion may do, in candidate times made, whatever it emits: BYSETPOS can throw
+  // nearly all of a period away, so emitted instances alone don't bound it. Past it, the
+  // expansion stops, truncated.
+  constexpr size_t kMaxWork = 2'000'000;
+  size_t work = 0;
   auto with_times = [&](std::vector<Civil>& set, int64_t y, int m, int d) {
     for (int h : hours) {
       for (int mi : minutes) {
-        for (int s : seconds) set.push_back(Civil{y, m, d, h, mi, s});
+        for (int s : seconds) {
+          if (work >= kMaxWork) return;
+          ++work;
+          set.push_back(Civil{y, m, d, h, mi, s});
+        }
       }
     }
   };
@@ -342,7 +352,7 @@ Expansion expand(const Civil& dtstart, const Rule& r, const Civil& horizon, size
   emit(dtstart);
 
   constexpr int kMaxPeriods = 200000;
-  for (int64_t p = 0; p < kMaxPeriods && !done; ++p) {
+  for (int64_t p = 0; p < kMaxPeriods && !done && work < kMaxWork; ++p) {
     std::vector<Civil> set;
     int64_t step = p * r.interval;
     switch (r.freq) {
@@ -535,6 +545,7 @@ Expansion expand(const Civil& dtstart, const Rule& r, const Civil& horizon, size
     }
     if (p == kMaxPeriods - 1) out.truncated = true;
   }
+  if (work >= kMaxWork) out.truncated = true;
   return out;
 }
 

@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "goober/calendar/ics.h"
 #include "goober/calendar/rrule.h"
 #include "goober/calendar/zones.h"
@@ -167,4 +169,21 @@ TEST(Zones, GapsOverlapsAndTheCalendarsOwnRules) {
     EXPECT_EQ(rules->at(ms).offset_s, chicago->at(ms).offset_s) << civil_text(when);
   }
   EXPECT_EQ(rules->to_utc(Civil{2026, 7, 4, 18, 0, 0}, nullptr), chicago->to_utc(Civil{2026, 7, 4, 18, 0, 0}, nullptr));
+}
+
+TEST(RRule, AnExpansionsWorkIsBoundedWhateverItEmits) {
+  using namespace goober::calendar;
+  std::string err;
+  std::string hours, mins, secs;
+  for (int i = 0; i < 24; ++i) hours += (i ? "," : "") + std::to_string(i);
+  for (int i = 0; i < 60; ++i) mins += (i ? "," : "") + std::to_string(i);
+  secs = mins;
+  for (int i = 0; i < 5000; ++i) secs += ",0";  // repeated values count once
+  auto rule = parse_rule("FREQ=DAILY;BYHOUR=" + hours + ";BYMINUTE=" + mins + ";BYSECOND=" + secs + ";BYSETPOS=366", &err);
+  ASSERT_TRUE(rule) << err;
+  EXPECT_LE(rule->bysecond.size(), 60u);
+  auto started = std::chrono::steady_clock::now();
+  auto out = expand(Civil{2026, 1, 1, 0, 0, 0}, *rule, Civil{2076, 1, 1, 0, 0, 0}, 1000, nullptr);
+  EXPECT_TRUE(out.truncated);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3));
 }

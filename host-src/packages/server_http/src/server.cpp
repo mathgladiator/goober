@@ -1,5 +1,7 @@
 #include "goober/server_http/server.h"
 
+#include <fcntl.h>
+
 #include <atomic>
 #include <deque>
 #include <future>
@@ -330,6 +332,8 @@ struct Server::Impl {
           beast::error_code ignored;
           socket.close(ignored);
         } else {
+          // Never inherited by a child process (asio's accept doesn't set it).
+          ::fcntl(socket.native_handle(), F_SETFD, FD_CLOEXEC);
           std::make_shared<Session>(std::move(socket), options, handler, open)->run();
         }
       }
@@ -356,6 +360,7 @@ void Server::start() {
   auto& im = *impl_;
   tcp::endpoint ep(asio::ip::make_address(im.options.address), im.options.port);
   im.acceptor.open(ep.protocol());
+  ::fcntl(im.acceptor.native_handle(), F_SETFD, FD_CLOEXEC);
   im.acceptor.set_option(asio::socket_base::reuse_address(true));
   im.acceptor.bind(ep);
   im.acceptor.listen(asio::socket_base::max_listen_connections);

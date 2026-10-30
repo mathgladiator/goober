@@ -163,7 +163,11 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
   EXPECT_NE(consent.body.find("action=\"/oauth/operator/authorize\""), std::string::npos);
   auto allowed = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
                        {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
-                       authorize_query(client_id) + "&decision=allow");
+                       authorize_query(client_id) + "&decision=allow&consent=" + [&] {
+                         std::smatch m;
+                         std::regex_search(consent.body, m, std::regex(R"re(name="consent" value="([^"]+)")re"));
+                         return m.size() > 1 ? std::string(m[1]) : std::string();
+                       }());
   // A web client too gets a page that sends it on: its callback may redirect again (www.cursor.com
   // does), and Chrome would hold every hop of a post's redirects to form-action.
   ASSERT_EQ(allowed.status, 200) << allowed.body;
@@ -174,11 +178,18 @@ TEST_F(OperatorOAuthTest, AnOAuthOnlyClientReachesTheOperatorTools) {
   EXPECT_NE(loc.find("&iss=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Foperator"), std::string::npos) << loc;
   std::string code = router::parse_query(loc.substr(loc.find('?') + 1))["code"];
   // Back to an app, the same page opens it.
+  std::string cursor_query = "response_type=code&client_id=" + cursor_id + "&redirect_uri=" +
+                             base::percent_encode("cursor://anysphere.cursor-mcp/oauth/callback") + "&code_challenge=" +
+                             kChallenge + "&code_challenge_method=S256&state=s";
+  std::string cursor_token;
+  {
+    auto page = fetch(port, bhttp::verb::get, "/oauth/operator/authorize?" + cursor_query, {{"cookie", boss}});
+    std::smatch m;
+    if (std::regex_search(page.body, m, std::regex(R"re(name="consent" value="([^"]+)")re"))) cursor_token = m[1];
+  }
   auto to_app = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
                       {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
-                      "response_type=code&client_id=" + cursor_id + "&redirect_uri=" +
-                          base::percent_encode("cursor://anysphere.cursor-mcp/oauth/callback") + "&code_challenge=" +
-                          kChallenge + "&code_challenge_method=S256&state=s&decision=allow");
+                      cursor_query + "&decision=allow&consent=" + cursor_token);
   ASSERT_EQ(to_app.status, 200) << to_app.body;
   EXPECT_TRUE(to_app.headers["refresh"].starts_with("0;url=cursor://anysphere.cursor-mcp/oauth/callback?code="))
       << to_app.headers["refresh"];

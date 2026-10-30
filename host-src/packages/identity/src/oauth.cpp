@@ -321,7 +321,21 @@ int64_t Identity::last_event_id(std::string_view realm_name) {
 std::optional<Client> Identity::register_client(std::string_view realm_name, std::string_view name,
                                                 const std::vector<std::string>& redirect_uris, int64_t now_ms,
                                                 std::string* why) {
-  prune(realm_name, now_ms);
+  // At most 1000 self-registered clients a realm: past it, the idle ones are pruned (once, here,
+  // not on every registration), and if that frees none, registration waits for the timer's prune.
+  auto dynamic_count = [&] {
+    auto& r = realm(realm_name);
+    std::lock_guard lock(r.mu);
+    sqlite::Stmt n(r.db, "SELECT count(*) FROM clients WHERE source = 'dynamic'");
+    return n.step() ? n.int64(0) : 0;
+  };
+  constexpr int64_t kMaxDynamicClients = 1000;
+  if (dynamic_count() >= kMaxDynamicClients) {
+    prune(realm_name, now_ms);
+    if (dynamic_count() >= kMaxDynamicClients) {
+      return *why = "too many apps have registered themselves here; try again later", std::nullopt;
+    }
+  }
   Client c;
   c.client_id = "dyn_" + random_hex(12);
   c.name = std::string(name);
@@ -457,6 +471,10 @@ std::optional<Tokens> Identity::exchange_code(std::string_view realm_name, std::
   if (code_client != client_id) return fail("invalid_grant", "authorization code issued to another client");
   if (code_redirect != redirect_uri) return fail("invalid_grant", "redirect_uri doesn't match the authorization");
   if (!is_code_verifier(code_verifier) || !constant_time_equal(s256(code_verifier), challenge)) {
+    // A wrong verifier spends the code (RFC 9700 § 4.8): no second guess at it.
+    sqlite::Stmt spend(r.db, "UPDATE authorization_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL");
+    spend.bind(1, now_ms).bind(2, hash_secret(code)).run();
+    tx.commit();
     return fail("invalid_grant", "PKCE verification failed");
   }
   auto c = find_client(r.db, client_id);
@@ -499,6 +517,14 @@ std::optional<Tokens> Identity::refresh(std::string_view realm_name, std::string
   if (token_client != client_id) return fail("invalid_grant", "refresh token issued to another client");
   if (revoked) return fail("invalid_grant", "refresh token revoked");
   bool raced = rotated && rotated_at > 0 && now_ms - rotated_at <= kRefreshReuseGraceMs;
+  if (raced) {
+    // A race forgives a few agents sharing one sign-in, not a replay: each forgiven reuse leaves
+    // another live refresh token in the family, and past six at once it's treated as reuse.
+    sqlite::Stmt live(r.db, "SELECT count(*) FROM tokens WHERE family = ? AND kind = 'refresh' AND rotated_to IS NULL "
+                            "AND revoked_at IS NULL AND expires_at > ?");
+    live.bind(1, family).bind(2, now_ms);
+    if (live.step() && live.int64(0) >= 6) raced = false;
+  }
   if (rotated && !raced) {
     // Reuse: two parties hold this grant, so neither keeps it.
     int n = revoke_family(r.db, family, now_ms);
@@ -694,7 +720,8 @@ std::optional<std::string> Identity::mint_agent_token(std::string_view realm_nam
   auto c = find_client(r.db, client_id);
   if (!c) return *why = "no client " + std::string(client_id) + "; register one with client_put, acts_as agent", std::nullopt;
   if (c->person) return *why = "only agent clients get minted tokens; a person client signs in itself", std::nullopt;
-  sqlite::Stmt find(r.db, "SELECT id FROM users WHERE email = ?");
+  // Only an address someone has proved by signing in: an invited account that never did isn't one.
+  sqlite::Stmt find(r.db, "SELECT id FROM users WHERE email = ? AND verified_at IS NOT NULL");
   find.bind(1, normalize_email(email_in));
   if (!find.step()) return *why = "nobody with that email has signed in to this realm yet", std::nullopt;
   int64_t user_id = find.int64(0);

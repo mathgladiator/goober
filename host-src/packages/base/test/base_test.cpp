@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
+#include <sstream>
+
 #include <filesystem>
 
 #include "goober/base/chacha20.h"
@@ -207,4 +210,22 @@ TEST(Files, LogsRotateAndKeepThreeOld) {
   EXPECT_TRUE(std::filesystem::exists(dir / "x.log.1"));
   EXPECT_TRUE(std::filesystem::exists(dir / "x.log.3"));
   EXPECT_FALSE(std::filesystem::exists(dir / "x.log.4"));
+}
+
+TEST(Process, AChildInheritsOnlyItsStandardStreams) {
+  // Descriptors the parent holds open without close-on-exec, like a listening socket.
+  int a = ::open("/dev/null", O_RDONLY), b = ::open("/dev/null", O_RDONLY);
+  ASSERT_GE(b, 4);
+  auto r = goober::base::run_process({"ls", "/proc/self/fd"}, "", 4096, 5000);
+  ::close(a);
+  ::close(b);
+  ASSERT_TRUE(r.started);
+  // 0, 1, and 2, and the one ls opens to list the directory: never the parent's.
+  std::istringstream in(r.out);
+  int fd = 0, count = 0;
+  while (in >> fd) {
+    EXPECT_LE(fd, 3) << r.out;
+    ++count;
+  }
+  EXPECT_LE(count, 4) << r.out;
 }

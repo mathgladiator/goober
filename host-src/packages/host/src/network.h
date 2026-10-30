@@ -26,6 +26,11 @@ struct OutboxElement {
   int64_t timeout_ms = 10000;     // one delivery's time
 };
 
+// A sandbox host (a rehydrated devbox) sends nothing off the machine; the host sets this from
+// its config at start and on reload.
+void set_outbound_sandbox(bool on);
+bool outbound_sandbox();
+
 // One bare address, ASCII, no display name or comments: what every mail ledger may key.
 bool plain_email(std::string_view s);
 

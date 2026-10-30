@@ -34,7 +34,7 @@ Import only from module "goober":
 | goober_respond | (status, type_ptr, type_len, body_ptr, body_len) -> i32 | Sets the response: status 200..599, a content type, a body up to 16 MiB. The last call wins. |
 | goober_header_set | (name_ptr, name_len, value_ptr, value_len) -> i32 | Adds a header; set-cookie, content-type, content-length, and goober-* are the host's. |
 | goober_now_ms | () -> i64 | The request's time, fixed for the whole request. |
-| goober_random_fill | (ptr, len) -> i32 | Random bytes from a per-request seed (logged, so replayable). |
+| goober_random_fill | (ptr, len) -> i32 | Random bytes, safe for tokens: a stream keyed by a host secret and the request's seed (the seed is logged, the key isn't, so a replay on this host repeats them and the log alone predicts nothing). |
 | goober_log | (level, ptr, len) -> i32 | A line for box_logs, written after the call. |
 | goober_sql | (strategy_ptr, strategy_len, sql_ptr, sql_len, params_ptr, params_len) -> i32 | Runs one SQL statement through a data strategy; returns the result's length. |
 | goober_result_read | (ptr, len) -> i32 | Copies the last SQL or call result into memory. |

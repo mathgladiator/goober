@@ -343,16 +343,25 @@ std::optional<std::string> header(const Headers& headers, std::string_view name)
 }
 
 std::string decode_words(std::string_view in) {
+  // A header worth decoding is short: past 64 KiB the rest is dropped. Each encoded word is
+  // looked for within 1 KiB of its "=?" (RFC 2047 says 75; senders run longer), so a header
+  // of "=?" after "=?" is linear, not quadratic.
+  constexpr size_t kMaxHeader = 64 * 1024, kMaxWord = 1024;
+  if (in.size() > kMaxHeader) in = in.substr(0, kMaxHeader);
   std::string out;
   size_t i = 0;
   bool last_was_word = false;
   std::string pending_space;
   while (i < in.size()) {
     if (in.substr(i, 2) == "=?") {
-      size_t q1 = in.find('?', i + 2);
-      size_t q2 = q1 == std::string_view::npos ? q1 : in.find('?', q1 + 1);
-      size_t end = q2 == std::string_view::npos ? q2 : in.find("?=", q2 + 1);
-      if (end != std::string_view::npos && q2 == q1 + 2) {
+      std::string_view win = in.substr(i, kMaxWord);
+      size_t q1 = win.find('?', 2);
+      size_t q2 = q1 == std::string_view::npos || q1 + 2 >= win.size() || win[q1 + 2] != '?' ? std::string_view::npos : q1 + 2;
+      size_t end = q2 == std::string_view::npos ? q2 : win.find("?=", q2 + 1);
+      if (end != std::string_view::npos) {
+        q1 += i;
+        q2 += i;
+        end += i;
         std::string charset(in.substr(i + 2, q1 - i - 2));
         if (auto star = charset.find('*'); star != std::string::npos) charset.resize(star);  // RFC 2231 language
         char enc = in[q1 + 1];

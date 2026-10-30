@@ -5,6 +5,7 @@
 // the same transaction as the box's writes, for delivery after commit with retries and an
 // idempotency key.
 
+#include <atomic>
 #include <set>
 #include "network.h"
 #include "goober/render/markdown.h"
@@ -161,11 +162,33 @@ std::optional<BuiltCall> build_call(const manifest::ExternalService& svc, const 
   return out;
 }
 
+namespace {
+std::atomic<bool> g_outbound_sandbox{false};
+}  // namespace
+
+void set_outbound_sandbox(bool on) { g_outbound_sandbox = on; }
+bool outbound_sandbox() { return g_outbound_sandbox; }
+
 HttpOut send_http(const std::string& verb, const std::string& url, const std::vector<std::pair<std::string, std::string>>& headers,
                   const std::string& body, const std::string& content_type, bool allow_loopback_http,
                   const fs::path& scratch, int64_t timeout_ms) {
   HttpOut out;
   bool loopback = is_loopback_http(url);
+  // A sandbox (a rehydrated devbox) reaches nothing outside the machine, whichever path asked:
+  // a box's call, an outbox delivery, a token refresh, a push (663, 019 § 7).
+  if (g_outbound_sandbox && !loopback) {
+    out.error = "this host is a sandbox: no calls leave it";
+    return out;
+  }
+  // User info in a URL ("https://8.8.8.8:x@10.0.0.5/") would name one host to the checks and
+  // another to curl.
+  {
+    std::string_view rest = std::string_view(url).substr(url.find("://") == std::string::npos ? 0 : url.find("://") + 3);
+    if (rest.substr(0, rest.find_first_of("/?#")).find('@') != std::string_view::npos) {
+      out.error = "a URL with user info (@ before the host) isn't called";
+      return out;
+    }
+  }
   if (!url.starts_with("https://") && !(loopback && allow_loopback_http)) {
     out.error = "only https services can be called";
     return out;

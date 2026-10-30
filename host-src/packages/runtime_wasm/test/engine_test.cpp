@@ -243,3 +243,51 @@ TEST(Engine, TablesInstancesAndStatusesAreBounded) {
   std::string err;
   EXPECT_FALSE(engine().compile(R"((module (memory (export "memory") 1) (table 200000 funcref)))", {}, &err));
 }
+
+// What a box hands the host is bounded before it's copied: a long header value, a long content
+// type, and headers that reach past the box's own answer (refresh, clear-site-data, HSTS).
+TEST(Engine, HeadersAreBoundedAndTheFarReachingOnesAreTheHosts) {
+  const char* wat = R"((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_header_set" (func $header (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "x-big")
+  (data (i32.const 16) "refresh")
+  (data (i32.const 32) "clear-site-data")
+  (data (i32.const 48) "strict-transport-security")
+  (data (i32.const 80) "text/plain")
+  (func (export "goober_route_go") (result i32)
+    ;; 9000 bytes of value: over the 8 KiB a header may be.
+    (if (i32.ne (call $header (i32.const 0) (i32.const 5) (i32.const 1024) (i32.const 9000)) (i32.const -1)) (then (unreachable)))
+    (if (i32.ne (call $header (i32.const 16) (i32.const 7) (i32.const 80) (i32.const 4)) (i32.const -1)) (then (unreachable)))
+    (if (i32.ne (call $header (i32.const 32) (i32.const 15) (i32.const 80) (i32.const 4)) (i32.const -1)) (then (unreachable)))
+    (if (i32.ne (call $header (i32.const 48) (i32.const 25) (i32.const 80) (i32.const 4)) (i32.const -1)) (then (unreachable)))
+    ;; A content type of 300 bytes is refused; a short one answers.
+    (if (i32.ne (call $respond (i32.const 200) (i32.const 1024) (i32.const 300) (i32.const 0) (i32.const 0)) (i32.const -1)) (then (unreachable)))
+    (drop (call $respond (i32.const 200) (i32.const 80) (i32.const 10) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+))";
+  auto box = compile(wat, {"goober_route_go"});
+  CallInput in{"{}", 1, 2};
+  auto r = engine().call(*box, "goober_route_go", in, {});
+  ASSERT_EQ(r.outcome, CallResult::Outcome::kOk) << r.error;
+  EXPECT_TRUE(r.headers.empty());
+  EXPECT_EQ(r.content_type, "text/plain");
+}
+
+TEST(Engine, AKeyedSeedIsUnpredictableFromTheSeedAlone) {
+  auto box = compile(kDeterminism, {"goober_route_go"});
+  CallInput plain{"{}", 5, 42};
+  CallInput keyed{"{}", 5, 42};
+  keyed.random_key = std::array<uint8_t, 32>{1, 2, 3};
+  CallInput other_key{"{}", 5, 42};
+  other_key.random_key = std::array<uint8_t, 32>{9};
+  auto a = engine().call(*box, "goober_route_go", plain, {});
+  auto b = engine().call(*box, "goober_route_go", keyed, {});
+  auto b2 = engine().call(*box, "goober_route_go", keyed, {});
+  auto c = engine().call(*box, "goober_route_go", other_key, {});
+  ASSERT_EQ(b.outcome, CallResult::Outcome::kOk) << b.error;
+  EXPECT_EQ(b.body, b2.body);              // the same key and seed replay
+  EXPECT_NE(a.body.substr(8), b.body.substr(8));  // the seed alone doesn't give the bytes
+  EXPECT_NE(b.body.substr(8), c.body.substr(8));  // nor does another key
+}

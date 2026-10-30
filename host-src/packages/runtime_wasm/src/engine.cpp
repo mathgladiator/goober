@@ -10,6 +10,8 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/random.h"
+#include "goober/base/hash.h"
+#include "goober/base/chacha20.h"
 
 namespace goober::runtime::wasm {
 
@@ -28,6 +30,7 @@ constexpr int64_t kDryMemoryBytes = int64_t(512) << 20;
 struct CallState {
   const CallInput* input = nullptr;
   base::SeededRandom random{0};
+  std::optional<base::ChaCha20> secure_random;
   bool responded = false;
   int32_t status = 0;
   std::string content_type;
@@ -58,10 +61,26 @@ std::optional<std::string_view> view(wasmtime::Span<uint8_t> mem, int32_t ptr, i
   return std::string_view(reinterpret_cast<const char*>(mem.data()) + ptr, size_t(len));
 }
 
+// Headers a box may not set: framing, cookies, and those whose reach goes past the box's own
+// answer (refresh redirects anywhere; clear-site-data and HSTS with includeSubDomains reach the
+// whole registrable domain, every sibling tenant and the panel).
 bool host_owned_header(std::string_view lower) {
-  return lower == "set-cookie" || lower == "content-length" || lower == "connection" ||
-         lower == "transfer-encoding" || lower == "content-type" || lower.starts_with("goober-");
+  return lower == "set-cookie" || lower == "set-cookie2" || lower == "content-length" || lower == "connection" ||
+         lower == "transfer-encoding" || lower == "content-type" || lower == "content-encoding" || lower == "refresh" ||
+         lower == "clear-site-data" || lower == "strict-transport-security" || lower == "alt-svc" ||
+         lower == "public-key-pins" || lower == "keep-alive" || lower == "upgrade" || lower.starts_with("goober-");
 }
+
+// What a box may hand the host in one import, checked before anything is copied out of its
+// memory: a box that allocates 60 MB once could otherwise make the host copy it many times.
+constexpr int32_t kMaxHeaderName = 128;
+constexpr int32_t kMaxHeaderValue = 8192;
+constexpr size_t kMaxHeaderBytes = 32 * 1024;
+constexpr int32_t kMaxContentType = 256;
+constexpr int32_t kMaxName = 256;           // a strategy, service, method, library, or function
+constexpr int32_t kMaxSqlParams = 8 << 20;  // a few 4 MiB values
+constexpr int32_t kMaxCallRequest = 8 << 20;
+constexpr int32_t kMaxLibArgument = 1 << 20;
 
 bool valid_header_text(std::string_view s, bool name) {
   if (s.empty() && name) return false;
@@ -161,7 +180,7 @@ struct Engine::Impl {
                             auto type = view(mem, type_ptr, type_len);
                             auto body = view(mem, body_ptr, body_len);
                             // No 1xx: a box can't send an interim response, which would desync the connection.
-                            if (!type || !body || status < 200 || status > 599) return -1;
+                            if (!type || !body || status < 200 || status > 599 || type_len > kMaxContentType) return -1;
                             if (body->size() > kMaxResponseBytes || !valid_header_text(*type, false)) return -1;
                             st.responded = true;
                             st.status = status;
@@ -175,9 +194,13 @@ struct Engine::Impl {
                              int32_t value_len) -> int32_t {
                             auto& st = state_of(caller);
                             auto mem = memory_of(caller);
+                            if (name_len > kMaxHeaderName || value_len > kMaxHeaderValue) return -1;
                             auto name = view(mem, name_ptr, name_len);
                             auto value = view(mem, value_ptr, value_len);
                             if (!name || !value || st.headers.size() >= kMaxHeaders) return -1;
+                            size_t total = size_t(name_len) + size_t(value_len);
+                            for (const auto& [k, v] : st.headers) total += k.size() + v.size();
+                            if (total > kMaxHeaderBytes) return -1;
                             std::string lower = base::to_lower(*name);
                             if (!valid_header_text(lower, true) || !valid_header_text(*value, false) ||
                                 host_owned_header(lower)) {
@@ -195,7 +218,12 @@ struct Engine::Impl {
                             auto& st = state_of(caller);
                             auto mem = memory_of(caller);
                             if (!view(mem, ptr, len)) return -1;
-                            st.random.fill(std::span<uint8_t>(mem.data() + ptr, size_t(len)));
+                            if (st.secure_random) {
+                              std::fill(mem.data() + ptr, mem.data() + ptr + len, uint8_t(0));
+                              st.secure_random->apply(mem.data() + ptr, size_t(len));
+                            } else {
+                              st.random.fill(std::span<uint8_t>(mem.data() + ptr, size_t(len)));
+                            }
                             return 0;
                           }),
          "goober_random_fill");
@@ -221,6 +249,10 @@ struct Engine::Impl {
                             auto sql = view(mem, sql_ptr, sql_len);
                             auto params = view(mem, params_ptr, params_len);
                             if (!strategy || !sql || !params) return -1;
+                            if (st_len > kMaxName || params_len > kMaxSqlParams) {
+                              st.result = R"J({"error":"the strategy's name or the params are too large (params: 8 MiB)"})J";
+                              return int32_t(st.result.size());
+                            }
                             if (st.input->sql) {
                               // An exception must never unwind through wasmtime's frames.
                               try {
@@ -243,6 +275,10 @@ struct Engine::Impl {
                             auto method = view(mem, m_ptr, m_len);
                             auto request = view(mem, req_ptr, req_len);
                             if (!service || !method || !request) return -1;
+                            if (sv_len > kMaxName || m_len > kMaxName || req_len > kMaxCallRequest) {
+                              st.result = R"J({"error":"the call is too large (a request is at most 8 MiB)"})J";
+                              return int32_t(st.result.size());
+                            }
                             // Copied out first: the call may take a while, and the views point into box memory.
                             std::string sv(*service), me(*method), rq(*request);
                             if (st.input->call) {
@@ -266,6 +302,10 @@ struct Engine::Impl {
                             auto fn = view(mem, fn_ptr, fn_len);
                             auto in = view(mem, in_ptr, in_len);
                             if (!lib || !fn || !in) return -1;
+                            if (lib_len > kMaxName || fn_len > kMaxName || in_len > kMaxLibArgument) {
+                              st.result = R"J({"error":"the argument is too large (at most 1 MiB)","code":"limit"})J";
+                              return int32_t(st.result.size());
+                            }
                             std::string l(*lib), f(*fn), a(*in);
                             if (st.input->lib) {
                               try {
@@ -388,6 +428,11 @@ CallResult Engine::call(const CompiledBox& box, const std::string& export_name, 
   CallState st;
   st.input = &input;
   st.random = base::SeededRandom(input.seed);
+  if (input.random_key) {
+    std::string seed_bytes(reinterpret_cast<const char*>(&input.seed), sizeof(input.seed));
+    auto k = base::hmac_sha256(std::string_view(reinterpret_cast<const char*>(input.random_key->data()), 32), seed_bytes);
+    st.secure_random.emplace(k, std::array<uint8_t, 12>{});
+  }
 
   wasmtime::Store store(impl_->engine);
   // One instance, one memory, one table of at most 10,000 elements: a box can't make the

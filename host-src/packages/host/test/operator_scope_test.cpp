@@ -357,3 +357,18 @@ TEST_F(ScopeTest, BatchedCallsAreAuditedOneByOneAndHeldSecretsAreHidden) {
   auto db = *base::read_file(root / "storage/operations/approvals.db");
   EXPECT_EQ(db.find("sup3r-secret"), std::string::npos);
 }
+
+// A commit is checked as the project will be after it, even a project's first.
+TEST_F(ScopeTest, ACommitCantWriteAnotherTenantsBoxIntoAProject) {
+  focus_grok(R"(["kc"])");
+  ASSERT_FALSE(call("source_create", R"({"project":"mine","tenant":"kc"})").at("isError").as_bool());
+  auto sneaky = call("source_commit", R"J({"project":"mine","base_rev":0,"message":"x","changes":[
+      {"path":"goober.project.json","text":"{\"boxes\":[\".\"]}"},
+      {"path":"manifest.json","text":"{\"box\":\"theirs\",\"domains\":[\"other.example.com\"]}"}]})J");
+  EXPECT_TRUE(sneaky.at("isError").as_bool()) << json::dump(sneaky);
+  EXPECT_NE(std::string(sneaky.at("text").as_string()).find("other"), std::string::npos);
+  auto fine = call("source_commit", R"J({"project":"mine","base_rev":0,"message":"x","changes":[
+      {"path":"goober.project.json","text":"{\"boxes\":[\".\"]}"},
+      {"path":"manifest.json","text":"{\"box\":\"ours\",\"domains\":[\"kc.example.com\"]}"}]})J");
+  EXPECT_FALSE(fine.at("isError").as_bool()) << json::dump(fine);
+}

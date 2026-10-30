@@ -379,6 +379,20 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
                                           "PATH=" + fs::path(cargo).parent_path().string() + ":/usr/bin:/bin"};
         if (!rustup_home.empty()) po.env->push_back("RUSTUP_HOME=" + rustup_home);
       }
+      // Limits the sandbox doesn't give: address space, the size of any one file, and processes
+      // (a fork bomb), through prlimit when the machine has it; and a build doesn't start on a
+      // nearly full disk, which the WAL and every tenant's databases share.
+      if (std::string prlimit = find_program("prlimit"); !prlimit.empty()) {
+        argv.insert(argv.begin(), {prlimit, "--as=" + std::to_string(int64_t(8) << 30),
+                                   "--fsize=" + std::to_string(int64_t(2) << 30), "--nproc=2048", "--"});
+      }
+      {
+        std::error_code ec;
+        auto space = fs::space(target, ec);
+        if (!ec && space.available < (uintmax_t(2) << 30)) {
+          return fail("the disk has less than 2 GiB free, so the build didn't start");
+        }
+      }
       out.log += "box " + b.box + ": cargo build --release --target wasm32-unknown-unknown" +
                  (sandbox ? " (in the sandbox: no network)" : " (no sandbox)") + "\n";
       int64_t started = base::monotonic_us();

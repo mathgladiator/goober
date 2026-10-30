@@ -16,6 +16,7 @@
 #include "goober/json/json.h"
 #include "goober/server_http/server.h"
 #include "../src/keys.h"
+#include "../src/network.h"
 #include "goober/signing/oauth1.h"
 
 using namespace goober;
@@ -542,4 +543,17 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   EXPECT_EQ(api.seen("/busy").size(), 1u);  // its backoff alone would have been a second
   host->outbox_tick(now + 121000);
   EXPECT_EQ(api.seen("/busy").size(), 2u);
+}
+
+// A sandbox (a rehydrated devbox) sends nothing off the machine, whatever path asks; and a URL
+// with user info is never called (it names one host to the checks, another to curl).
+TEST(SendHttp, ASandboxReachesNothingOutsideAndUserInfoIsRefused) {
+  auto scratch = fs::path(GOOBER_TEST_TMP) / "send_http";
+  fs::create_directories(scratch);
+  host::set_outbound_sandbox(true);
+  auto out = host::send_http("GET", "https://example.com/", {}, "", "", false, scratch, 2000);
+  host::set_outbound_sandbox(false);
+  EXPECT_NE(out.error.find("sandbox"), std::string::npos) << out.error;
+  auto ui = host::send_http("GET", "https://8.8.8.8:x@10.0.0.5/", {}, "", "", false, scratch, 2000);
+  EXPECT_NE(ui.error.find("user info"), std::string::npos) << ui.error;
 }

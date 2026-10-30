@@ -70,8 +70,11 @@ bool prefers_html(std::string_view accept) {
 
 // The endpoints worth slowing down per client address: guessing codes, minting tokens,
 // registering clients, uploading, and agents' calls. Everything else shares one budget.
-std::optional<std::pair<const char*, RateRule>> sensitive(const std::string& path, const std::string& method) {
+std::optional<std::pair<const char*, RateRule>> sensitive(const std::string& path_in, const std::string& method) {
   if (method != "post") return std::nullopt;
+  // The operator issuer's endpoints (023) are the same endpoints under /oauth/operator, and
+  // share their buckets: a guess or a registration there is one here.
+  std::string path = path_in.starts_with("/oauth/operator/") ? "/oauth/" + path_in.substr(16) : path_in;
   if (path == "/identity/email/start") return std::pair{"sign-in-start", RateRule{10, 5}};
   if (path == "/identity/email/verify") return std::pair{"sign-in-verify", RateRule{20, 10}};
   if (path == "/oauth/token") return std::pair{"token", RateRule{60, 30}};
@@ -113,14 +116,20 @@ bool valid_host_header(std::string_view h) {
   return true;
 }
 
-// Request headers a box never sees: credentials belong to the host.
-bool hidden_from_box(std::string_view name) { return name == "authorization" || name == "cookie"; }
+// Request headers a box never sees: credentials belong to the host, and the client's address
+// (from the proxy in front) stays with the host too, which gives boxes client_key instead.
+bool hidden_from_box(std::string_view name) {
+  return name == "authorization" || name == "cookie" || name.starts_with("x-forwarded-") || name == "forwarded" ||
+         name == "x-real-ip" || name == "via" || name == "cf-connecting-ip" || name == "true-client-ip" ||
+         name.starts_with("goober-");
+}
 
 }  // namespace
 
 Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::path config_file)
     : config_file_(std::move(config_file)), config_(config) {
   started_ms_ = base::now_unix_ms();
+  set_outbound_sandbox(config->sandbox);
   // Every log line goes through one set of writers (design/machine/032.Logs.md), named for this host.
   {
     std::string host_name = config->public_url;
@@ -268,9 +277,15 @@ uint16_t Host::start() {
   opts.body_limit_for = [this](std::string_view target, std::string_view authorization) -> uint64_t {
     // A whole message from Stalwart, as JSON: up to the largest a route takes, plus room for
     // JSON's escapes. The token is checked again, fully, by the handler.
+    // The token is checked here, in constant time, before the large limit applies: anyone can
+    // send "Bearer x", and 4096 connections at 51 MiB each would hold the host's memory.
     if (target.substr(0, target.find('?')) == kMailHookPath && authorization.starts_with("Bearer ")) {
       auto cfg = config_.get();
-      return cfg->mail.inbound.enabled() ? uint64_t(cfg->mail.inbound.max_bytes) * 2 + (1 << 20) : 0;
+      if (!cfg->mail.inbound.enabled()) return 0;
+      auto token = base::read_file(cfg->mail.inbound.token_file);
+      std::string expected = token ? std::string(token->substr(0, token->find_first_of("\r\n"))) : "";
+      if (expected.size() < 32 || !base::equal_constant_time(authorization, "Bearer " + expected)) return 0;
+      return uint64_t(cfg->mail.inbound.max_bytes) * 2 + (1 << 20);
     }
     // Attachment uploads: as large as attachment_put takes with an operator's token, and an image
     // of 1 MiB from a browser (whose session cookie the handler checks once the body is in).
@@ -364,6 +379,7 @@ std::string Host::reload() {
   if (!next) return "reload refused: " + err;
   if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
+  set_outbound_sandbox(next->sandbox);
   audit("config.reload", "signal", "host.json", "ok", bj::object{{"notes", notes}});
   return "config reloaded. " + notes;
 }
@@ -997,6 +1013,9 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   const auto& m = ref.box->manifest;
   const auto& route = *ref.route;
   runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64(), {}};
+  // A box's random bytes come from the seed and a key the logs don't hold (the host's reply key),
+  // so reading the access log's seed predicts nothing; a replay on this host repeats them.
+  input.random_key = base::hmac_sha256(reply_key(), "goober-box-random");
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
   if (!m.data.empty()) {
@@ -1038,9 +1057,15 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   // a request at most.
   int64_t library_calls = 0;
   bool used_tzdata = false;
+  int64_t lib_deadline_us = 0;  // set with the call's limits below
   if (!m.libraries.empty()) {
-    input.lib = [&m, &library_calls, &used_tzdata, now = input.now_ms](std::string_view alias, std::string_view fn,
-                                                                         std::string_view arg) -> std::string {
+    input.lib = [&m, &library_calls, &used_tzdata, &lib_deadline_us, now = input.now_ms](
+                    std::string_view alias, std::string_view fn, std::string_view arg) -> std::string {
+      // A library runs on the host, where the box's deadline can't interrupt it: it's checked
+      // before each call, so many calls can't outlast the request.
+      if (lib_deadline_us && base::monotonic_us() > lib_deadline_us) {
+        return R"({"error":"the request's time is up","code":"limit"})";
+      }
       const manifest::Manifest::LibraryImport* import = nullptr;
       for (const auto& l : m.libraries) {
         if (l.alias == alias) import = &l;
@@ -1060,6 +1085,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                    cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
   net.deadline_us = base::monotonic_us() + limits.timeout_ms * 1000;
+  lib_deadline_us = net.deadline_us;
   auto result = engine_->call(*ref.box->compiled, ref.route->export_name(), input, limits);
 
   // Logs are side effects, written after the call, never interleaved.

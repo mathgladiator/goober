@@ -238,6 +238,12 @@ TEST_F(DbTest, OperatorsQueryAndExec) {
   EXPECT_FALSE(dbs->operate("playground", "guestbook", "DELETE FROM goober_schemas", nullptr, 100, true, &err));
   EXPECT_FALSE(dbs->operate("playground", "guestbook", "DROP TABLE entries", nullptr, 100, true, &err));
   EXPECT_FALSE(dbs->operate("playground", "nope", "SELECT 1", nullptr, 100, false, &err));
+  // Wide rows of big values are refused before they're built: too many columns, or too many bytes.
+  EXPECT_FALSE(dbs->operate("playground", "guestbook", "WITH x(s) AS (SELECT printf('%.4000000c','a')) SELECT s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s,s FROM x",
+                            nullptr, 100, false, &err));
+  EXPECT_FALSE(dbs->operate("playground", "guestbook", "WITH x(s) AS (SELECT printf('%.4000000c','a')) SELECT s,s,s FROM x",
+                            nullptr, 100, false, &err));
+  EXPECT_NE(err.find("larger than"), std::string::npos) << err;
   // A query that never ends stops at the operator's step budget.
   EXPECT_FALSE(dbs->operate("playground", "guestbook",
                             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n", nullptr,

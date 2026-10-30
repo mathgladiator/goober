@@ -50,6 +50,10 @@ ProcessResult run_process(const std::vector<std::string>& argv_in, const std::st
   posix_spawn_file_actions_adddup2(&actions, in[0], 0);
   posix_spawn_file_actions_adddup2(&actions, out[1], 1);
   posix_spawn_file_actions_adddup2(&actions, err[1], 2);
+  // Nothing else crosses into the child: not the host's listening socket, not its open
+  // connections, not its databases. A build script (in its sandbox) that found an inherited
+  // socket could accept the site's traffic, whatever network namespace it runs in.
+  posix_spawn_file_actions_addclosefrom_np(&actions, 3);
   if (options.cwd) posix_spawn_file_actions_addchdir_np(&actions, options.cwd->c_str());
   posix_spawnattr_t attr;
   posix_spawnattr_init(&attr);

@@ -286,6 +286,7 @@ std::optional<BuiltPage> build_page(const site::Site& site, const std::string& t
 // Fetches an https URL with the system curl, for attachment_put (007 §7).
 std::optional<std::string> fetch_https(const std::string& url, size_t max_bytes, std::string* error) {
   if (!url.starts_with("https://")) return *error = "only https URLs can be fetched", std::nullopt;
+  if (outbound_sandbox()) return *error = "this host is a sandbox: nothing is fetched from outside it", std::nullopt;
   for (char c : url) {
     if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) return *error = "the URL holds a space or control character", std::nullopt;
   }

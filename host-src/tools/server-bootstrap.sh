@@ -153,6 +153,19 @@ else
   systemctl reload caddy || systemctl restart caddy
 fi
 
+# Caddyfiles written before 2026-10-30 proxy /internal/* (the mail hook's path) from outside.
+# The host refuses it there too; Caddy now answers 404 first.
+if [[ -f /etc/caddy/Caddyfile ]] && grep -q "health_uri /goober/health" /etc/caddy/Caddyfile && ! grep -q "respond /internal/\* 404" /etc/caddy/Caddyfile; then
+  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-internal
+  sed -i 's|^  encode zstd gzip$|  encode zstd gzip\n  respond /internal/* 404|' /etc/caddy/Caddyfile
+  if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+    systemctl reload caddy
+  else
+    cp -p /etc/caddy/Caddyfile.before-internal /etc/caddy/Caddyfile  # put back what worked
+    echo "!! couldn't add 'respond /internal/* 404' to /etc/caddy/Caddyfile; it's unchanged"
+  fi
+fi
+
 # No multipath TCP (2026-10-30). The host listens on plain TCP, but Caddy is built with Go 1.24+,
 # whose listeners take MPTCP whenever the kernel offers it, and the kernel's MPTCP code has had
 # remotely reachable flaws (CVE-2026-98432, CVE-2026-80587). Off in the kernel, and off in Caddy

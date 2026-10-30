@@ -332,6 +332,10 @@ void Host::handle_invite(const Request& req, const Finish& finish, const std::st
   if (who && who->host) who.reset();
   if (is_post) {
     if (!same_origin(req, origin_of(req))) return finish(error_page(tenant, 403, request_id), R"({"invite":"cross-origin"})");
+    // Accepting grants roles and joins lists: a person's click, not a script on the site.
+    if (who && who->user.email == inv->email && !user_submitted(req, origin_of(req))) {
+      return finish(error_page(tenant, 403, request_id), R"({"invite":"not a click"})");
+    }
     if (who && who->user.email == inv->email) {
       std::string why;
       auto next = accept_invite_for(tenant, *inv, who->user, "session", request_id, &why);

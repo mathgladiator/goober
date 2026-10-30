@@ -8,6 +8,7 @@
 #include <iostream>
 
 #include "goober/base/encoding.h"
+#include "goober/base/hash.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
@@ -258,7 +259,26 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       res.headers.emplace_back("cache-control", "no-store");
       return finish(std::move(res), log("authorize_sign_in"));
     }
+    // The Allow form carries a token only the consent page itself makes, bound to this person,
+    // client, redirect, and challenge, and good for 10 minutes: a plain form somewhere else on
+    // the site, which a box or page could hold without any script, can't fake an Allow.
+    auto consent_mac = [&](int64_t at_s) {
+      return base::hmac_sha256_hex(reply_key(), "goober-consent\n" + std::string(realm) + "\n" +
+                                                    std::to_string(who->user.user_id) + "\n" + client_id + "\n" +
+                                                    redirect_uri + "\n" + challenge + "\n" + std::to_string(at_s))
+          .substr(0, 32);
+    };
     if (is_post) {
+      {
+        std::string token = get(p, "consent");
+        auto dot = token.find('.');
+        int64_t at_s = dot == std::string::npos ? 0 : std::atoll(token.substr(0, dot).c_str());
+        int64_t now_s = now / 1000;
+        if (dot == std::string::npos || at_s > now_s + 60 || now_s - at_s > 600 ||
+            !base::equal_constant_time(token.substr(dot + 1), consent_mac(at_s))) {
+          return finish(error_page(tenant, 403, request_id), log("authorize_no_consent_token"));
+        }
+      }
       // The answer is a page of our own that sends the browser on, with a button, never a bare
       // 303: Chrome checks every hop of a form post's redirects against form-action, so a client
       // whose callback redirects again (www.cursor.com does) is stopped without a word, and a
@@ -326,7 +346,8 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
         "</p><p class=\"muted\">Only allow it if you just started this sign-in yourself. You can remove it later "
         "from <a href=\"/identity/account\">your account</a>.</p>"
         "<form method=\"post\" action=\"" + base_path + "/authorize\">" +
-        hidden +
+        hidden + "<input type=\"hidden\" name=\"consent\" value=\"" + std::to_string(now / 1000) + "." +
+        consent_mac(now / 1000) + "\">" +
         "<button name=\"decision\" value=\"allow\">Allow</button>"
         "<button name=\"decision\" value=\"deny\" class=\"secondary\">Don't allow</button></form>";
     return finish(identity_page(tenant, 200, "Allow " + client->name + "?", body, "", false),

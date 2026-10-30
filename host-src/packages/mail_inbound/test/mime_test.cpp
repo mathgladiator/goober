@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "goober/mail_inbound/mime.h"
 
 using namespace goober::mail::inbound;
@@ -164,4 +166,14 @@ TEST(Mime, AutomaticMailIsRecognized) {
   EXPECT_TRUE(is_automatic({{"Precedence", "Bulk"}}, "a@b.org"));
   EXPECT_FALSE(is_automatic({{"Precedence", "list"}}, "a@b.org"));  // a mailing list's discussion
   EXPECT_TRUE(is_automatic({{"Content-Type", "multipart/report; report-type=delivery-status"}}, "a@b.org"));
+}
+
+TEST(Mime, EncodedWordsDecodeInLinearTime) {
+  std::string evil;
+  for (int i = 0; i < 25000; ++i) evil += "=?ab";  // 100 KB: 1.5 s when each "=?" searched to the end
+  auto started = std::chrono::steady_clock::now();
+  auto out = goober::mail::inbound::decode_words(evil);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(200));
+  EXPECT_FALSE(out.empty());
+  EXPECT_EQ(goober::mail::inbound::decode_words("=?utf-8?Q?caf=C3=A9?= au =?UTF-8?B?bGFpdA==?="), "café au lait");
 }

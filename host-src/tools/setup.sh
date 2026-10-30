@@ -432,6 +432,8 @@ EOF
     done
     echo "$sites {"
     echo "  encode zstd gzip"
+    echo "  # Host-only paths (Stalwart's hook, hooks to come) are never reached from outside."
+    echo "  respond /internal/* 404"
     echo "  reverse_proxy $ADDRESS:$PORT {"
     echo "    health_uri /goober/health"
     echo "    # A restart takes a moment: hold requests for it rather than answer 503 at once."
