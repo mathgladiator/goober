@@ -134,9 +134,8 @@ Read these before doing design work:
   - `design/machine/025.Telephony.md`: a proposal: a phone number per tenant from a rented
     provider, `routes.phone` for texts and calls, a `phone` service for texts out, host-config
     grants checked at upload, spending as `host:owner`, STOP/HELP in the host; Q42 to Q49 open.
-  - `design/machine/026.KcMeatUp.md`: what kcmeatup.com needs next: lessons from GrokBot's
-    feedback, the email worker GrokBot should build (outbox model calls, result routes,
-    threading, unsubscribe), needs per goal (directory, social network, email agent), M1 to M6.
+  - `design/machine/026.CaseStudy.md`: a case study: a directory run by an agent team, what it
+    needed, how the agents behaved, the email worker recipe, and needs per goal.
   - `design/machine/027.Partials.md`: shared partials: `_partials/$name.html` included by
     `<!--#include name-->` in pages and box HTML, active links by `data-match`, `@auth` variants,
     ETags after expansion, and the `partial_*` tools.

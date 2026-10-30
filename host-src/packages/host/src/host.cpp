@@ -953,6 +953,7 @@ void Host::serve_content(const Request& req, const Finish& finish, const std::st
   }
   for (auto& h : r.headers) {
     if (h.first == "x-goober-partial-missing") extra["partial_missing"] = h.second;
+    if (h.first == "x-goober-partial-error") extra["partial_error"] = h.second;
     res.headers.push_back(std::move(h));
   }
   if (req.header("if-none-match") == r.etag) {
@@ -1351,6 +1352,11 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         std::erase_if(res.headers, [](const auto& h) { return h.first == "cache-control" || h.first == "vary"; });
         res.headers.emplace_back("cache-control", "private, no-cache");
         res.headers.emplace_back("vary", "accept, cookie");
+      }
+      if (!e.errors.empty()) {
+        std::string why;
+        for (const auto& n : e.errors) why += (why.empty() ? "" : "; ") + n;
+        res.headers.emplace_back("x-goober-partial-error", why.substr(0, 400));
       }
       if (!e.missing.empty()) {
         std::string names;

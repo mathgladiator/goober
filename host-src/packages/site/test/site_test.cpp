@@ -293,3 +293,33 @@ TEST_F(SiteTest, PartialsAreSplicedIntoPagesOnce) {
   EXPECT_NE(signed_in.body.find("<a href=\"/me\">Me</a>"), std::string::npos) << signed_in.body;
   EXPECT_TRUE(signed_in.restricted);
 }
+
+TEST(Partials, ParametersRenderThePartialAsMustache) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "partial_params";
+  fs::remove_all(root);
+  wal::HostWal w(root);
+  content::ContentStore store(w);
+  std::string err;
+  ASSERT_TRUE(store.put("t", "_partials/card.html",
+                        R"(<a class="card" href="{{href}}" data-match="{{href}}">{{title}}{{#badge}} <b>{{badge}}</b>{{/badge}}</a>)", &err))
+      << err;
+  ASSERT_TRUE(store.put("t", "_partials/raw.html", "<p>{{kept}}</p>", &err));
+  auto out = site::expand_includes(store, "t",
+                                   R"(<!--#include card title="Ribs & brisket" href="/ribs"--><!--#include card
+      title="<script>" href="/x" badge="new"--><!--#include raw-->)",
+                                   "/ribs", false);
+  EXPECT_EQ(out.html,
+            R"(<a class="card active" href="/ribs" data-match="/ribs" aria-current="page">Ribs &amp; brisket</a>)"
+            R"(<a class="card" href="/x" data-match="/x">&lt;script&gt; <b>new</b></a><p>{{kept}}</p>)");
+  EXPECT_TRUE(out.errors.empty());
+  EXPECT_EQ(site::include_names(R"(<!--#include card title="a"-->)"), std::vector<std::string>{"card"});
+  // Not markers: no space before a key, an unquoted value, "--" in a value, a repeated key.
+  for (const char* bad : {R"(<!--#include card"x"-->)", R"(<!--#include card title=a-->)", R"(<!--#include card t="a--b"-->)",
+                          R"(<!--#include card t="a" t="b"-->)"}) {
+    EXPECT_EQ(site::expand_includes(store, "t", bad, "/", false).html, bad) << bad;
+  }
+  ASSERT_TRUE(store.put("t", "_partials/broken.html", "{{#open}}", &err));
+  auto broken = site::expand_includes(store, "t", R"(<!--#include broken a="1"-->)", "/", false);
+  EXPECT_EQ(broken.html, "{{#open}}");
+  ASSERT_EQ(broken.errors.size(), 1u);
+}

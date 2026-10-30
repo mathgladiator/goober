@@ -857,6 +857,11 @@ Result Site::visit(const Visit& v) const {
   if (r.status != 200 || r.kind == Kind::kStatic || !r.content_type.starts_with("text/html")) return r;
   auto e = expand_includes(store_, v.tenant, r.body, v.path, !v.user.is_null());
   if (e.used.empty() && e.missing.empty() && !e.by_auth) return r;
+  if (!e.errors.empty()) {
+    std::string why;
+    for (const auto& n : e.errors) why += (why.empty() ? "" : "; ") + n;
+    r.headers.emplace_back("x-goober-partial-error", why.substr(0, 400));
+  }
   r.body = std::move(e.html);
   r.etag = etag_of(r.body);
   // A signed-in variant: the answer depends on the cookie, so no shared cache may keep it.

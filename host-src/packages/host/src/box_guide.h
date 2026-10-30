@@ -478,6 +478,10 @@ x-goober-partial-missing header. Check with page_render (shows the page expanded
 partial_list (which pages include each partial, and kept versions: partial_get with a version,
 then partial_put, rolls back). A box template's values are escaped, so a person's text can
 never pull a partial in.
+Components: <!--#include card title="Ribs" href="/ribs" badge="new"--> renders _partials/card.html
+as Mustache over those values ({{title}} escaped, {{#badge}}...{{/badge}} a section); without
+parameters a partial is spliced as written. A render error leaves it as written and sets
+x-goober-partial-error.
 
 ## Installable apps (PWA) and push
 

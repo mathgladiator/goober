@@ -17,7 +17,7 @@
 | 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction, built for hundreds of sites, not millions. |
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
 | 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
-| 7. An agent people reach by email | **Yes, to build tomorrow** | Mail from the site's own address, in the person's thread, with unsubscribe; model calls through the outbox with result routes. `design/machine/026.KcMeatUp.md` § 3 is the plan. |
+| 7. An agent people reach by email | **Yes** | Mail from the site's own address, in the person's thread, with unsubscribe and consent; model calls through the outbox with result routes. `design/machine/026.CaseStudy.md` § 3 is the recipe. |
 | 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
 | 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
 | 10. A community that meets by mail (one digest, one reply a day) | **Yes, to build** | Markdown digests, reply-token replies cut to the person's words, calendar invites with RSVPs, attachments (`design/machine/783.ThesisCommunity.md` § 4 is the recipe). |

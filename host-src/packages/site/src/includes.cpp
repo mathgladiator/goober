@@ -2,6 +2,8 @@
 
 #include "goober/site/pwa.h"
 
+#include "goober/render/mustache.h"
+
 #include <algorithm>
 #include <cctype>
 #include <optional>
@@ -14,18 +16,51 @@ constexpr std::string_view kMarker = "<!--#include";
 
 bool name_char(char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'; }
 
-// One marker at `at`: its name and where it ends, or nullopt when it isn't one.
-std::optional<std::pair<std::string, size_t>> marker_at(std::string_view html, size_t at) {
+struct Marker {
+  std::string name;
+  size_t end = 0;
+  boost::json::object params;  // key="value" pairs after the name (027 § 7)
+};
+
+bool key_char(char c, bool first) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (!first && c >= '0' && c <= '9');
+}
+
+constexpr size_t kMaxParams = 32;
+constexpr size_t kMaxValue = 2048;
+
+// One marker at `at`: its name, its parameters, and where it ends, or nullopt when it isn't one.
+std::optional<Marker> marker_at(std::string_view html, size_t at) {
   size_t i = at + kMarker.size();
   if (i >= html.size() || (html[i] != ' ' && html[i] != '\t')) return std::nullopt;
   while (i < html.size() && (html[i] == ' ' || html[i] == '\t')) ++i;
   size_t start = i;
   // A name may hold "-", so it stops where the comment closes.
   while (i < html.size() && name_char(html[i]) && html.substr(i, 3) != "-->") ++i;
-  std::string name(html.substr(start, i - start));
-  while (i < html.size() && (html[i] == ' ' || html[i] == '\t')) ++i;
-  if (!is_partial_name(name) || html.substr(i, 3) != "-->") return std::nullopt;
-  return std::pair{name, i + 3};
+  Marker m;
+  m.name = std::string(html.substr(start, i - start));
+  if (!is_partial_name(m.name)) return std::nullopt;
+  for (;;) {
+    size_t gap = i;
+    while (i < html.size() && (html[i] == ' ' || html[i] == '\t' || html[i] == '\n')) ++i;
+    if (html.substr(i, 3) == "-->") break;
+    // A parameter: key="value", after at least one space. The value is taken as written, up to
+    // the next quote; it may not hold "--", so the comment can't close inside it.
+    if (i == gap || i >= html.size() || !key_char(html[i], true)) return std::nullopt;
+    size_t ks = i;
+    while (i < html.size() && key_char(html[i], false)) ++i;
+    std::string key(html.substr(ks, i - ks));
+    if (html.substr(i, 2) != "=\"") return std::nullopt;
+    i += 2;
+    size_t close = html.find('"', i);
+    if (close == std::string_view::npos || close - i > kMaxValue) return std::nullopt;
+    std::string_view value = html.substr(i, close - i);
+    if (value.find("--") != std::string_view::npos || m.params.contains(key) || m.params.size() >= kMaxParams) return std::nullopt;
+    m.params[key] = boost::json::string(value);
+    i = close + 1;
+  }
+  m.end = i + 3;
+  return m;
 }
 
 struct Attr {
@@ -147,7 +182,7 @@ std::vector<std::string> include_names(std::string_view html) {
   std::vector<std::string> out;
   for (size_t at = html.find(kMarker); at != std::string_view::npos; at = html.find(kMarker, at + 1)) {
     auto m = marker_at(html, at);
-    if (m && std::find(out.begin(), out.end(), m->first) == out.end()) out.push_back(m->first);
+    if (m && std::find(out.begin(), out.end(), m->name) == out.end()) out.push_back(m->name);
   }
   return out;
 }
@@ -220,8 +255,8 @@ Expanded expand_includes(const content::ContentStore& store, std::string_view te
     auto m = marker_at(html, at);
     if (!m) continue;
     out.html.append(html.substr(from, at - from));
-    from = m->second;
-    const std::string& name = m->first;
+    from = m->end;
+    const std::string& name = m->name;
     std::string file = "_partials/" + name + ".html";
     auto auth = store.get(tenant, "_partials/" + name + "@auth.html");
     if (auth) out.by_auth = true;
@@ -241,7 +276,21 @@ Expanded expand_includes(const content::ContentStore& store, std::string_view te
       continue;
     }
     if (std::find(out.used.begin(), out.used.end(), file) == out.used.end()) out.used.push_back(file);
-    out.html += mark_active(f->data, path, key);
+    std::string text = f->data;
+    if (!m->params.empty()) {
+      // With parameters, the partial is a Mustache template over them: {{title}} is escaped,
+      // {{#featured}}…{{/featured}} a section. Without, it's spliced as written, as before.
+      render::TemplateOptions opts;
+      opts.max_output_bytes = 1 << 20;
+      std::string err;
+      auto rendered = render::render_mustache(text, boost::json::value(m->params), opts, &err);
+      if (rendered) {
+        text = std::move(*rendered);
+      } else {
+        out.errors.push_back(name + ": " + err);
+      }
+    }
+    out.html += mark_active(text, path, key);
   }
   out.html.append(html.substr(from));
   return out;

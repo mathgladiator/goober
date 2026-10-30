@@ -322,7 +322,7 @@ that upload checks, `host:owner`-only spending, STOP/HELP and opt-outs in the ho
 spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] The human ratifies 025 and picks a provider (Q42) and a first path (Q43).
 
-### Phase 15: the email worker and kcmeatup (026)
+### Phase 15: the email worker (026)
 - [x] Outreach mail: a service's own `from`, threading headers, one-click unsubscribe and a
       per-tenant list (018 § 3).
 - [x] Result routes and two-minute deliveries, for model calls (015 § 3).
@@ -331,9 +331,9 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] M1: Stalwart's DMARC strict, once real mail arrives (Q39).
 - [ ] M2: SES bounces and complaints through SNS, unsubscribing hard bounces and complaints.
 - [x] M3: `mail_activity`, a tenant's mail in and out for operators and agents.
-- [ ] M4: attachments on `send`.
+- [x] M4: attachments on `send` (783).
 - [x] M5: per-tenant daily caps on outbox calls per service (`limits.outbox-daily-per-service`).
-- [ ] M6: markdown in `send`.
+- [x] M6: markdown in `send` (783).
 
 ### Phase 16: shared partials (027)
 - [x] `_partials/$name.html` included by `<!--#include name-->` in pages, box templates, and box
@@ -417,8 +417,8 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       account page's Mail section, and `consent.db` with a five-year log.
 - [x] Blocks lifted only by the person (signed in, with a statement) or in the panel.
 - [x] `tenants` in the host config: postal address, terms, privacy, invite roles and limits.
-- [ ] SES bounces and complaints as blocks (026 M2); a host-wide block; data subject requests;
-      `invites.reminder: false` for CASL's one-message referral rule.
+- [ ] SES bounces and complaints as blocks (026 § 6); a host-wide block; data subject requests.
+      (CASL's one-message referral rule isn't planned: the human chose US law, 2026-10-30.)
 
 ### Phase 23: the content kit (031)
 - [x] /sitemap.xml and /llms.txt from pages' front matter, a sitemap index for boxes' sitemaps.

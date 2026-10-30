@@ -16,6 +16,7 @@ struct Expanded {
   std::string html;
   std::vector<std::string> used;     // the partial files spliced in, like "_partials/nav.html"
   std::vector<std::string> missing;  // names with no partial
+  std::vector<std::string> errors;   // "name: why" for a partial with parameters that didn't render (spliced as written)
   bool by_auth = false;              // a partial has an @auth variant: the answer depends on the cookie
 };
 
@@ -23,7 +24,9 @@ struct Expanded {
 std::vector<std::string> include_names(std::string_view html);
 
 // Expands every marker in `html` for a request to `path`. A signed-in visitor gets
-// _partials/$name@auth.html when it exists. The partials' own markers stay as they are.
+// _partials/$name@auth.html when it exists. The partials' own markers stay as they are. A
+// marker with parameters (<!--#include card title="Ribs" href="/ribs"-->) renders its partial
+// as Mustache over them, each value escaped where {{key}} uses it.
 Expanded expand_includes(const content::ContentStore& store, std::string_view tenant, std::string_view html,
                          std::string_view path, bool signed_in);
 

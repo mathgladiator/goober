@@ -64,6 +64,15 @@ Every log line is chained to the one before; to check nothing was edited or dele
 for `log_verify`, or see `log_status` for what's waiting to be archived. Rotated logs go to the
 backup bucket under `logs/`, sealed, for 400 days.
 
+**Is the kernel patched, and is multipath TCP off?** Deploys turn MPTCP off (the kernel's MPTCP
+code has had remotely reachable flaws), but only a newer kernel fixes the kernel:
+
+```sh
+sysctl net.mptcp.enabled        # want: net.mptcp.enabled = 0
+sudo ss -Mln | tail -n +2       # MPTCP listeners; want: nothing
+uname -r; sudo apt list --upgradable 2>/dev/null | grep -i linux-image   # then apt upgrade and reboot
+```
+
 ## 4. Are backups and mail fine?
 
 ```sh
