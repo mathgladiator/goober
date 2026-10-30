@@ -58,6 +58,11 @@ struct HttpRoute {
   // An identity route (design/machine/021.IdentityEvents.md), verb "identity", is called only by
   // the host, after a sign-in commits: "first-verified" or "signed-in".
   std::string identity_event;
+  // A subscription (040; design/machine/036.Bus.md), verb "subscribe", under routes.sse: the
+  // topics that wake it, its coalescing window, and its safety refresh.
+  std::vector<std::string> wake;
+  int64_t coalesce_ms = 250;
+  int64_t refresh_ms = 30000;
   // A mail route (038; design/machine/024.MailIn.md), verb "receive": its address pattern
   // (support@example.com, support@, *@, reply+{ticket : token}@...), the attachments it takes
   // (more is refused), and whether automatic mail (auto-replies, bounces) reaches it.
@@ -114,6 +119,8 @@ struct DataStrategy {
   std::string table;
   std::string timezone_field;
   std::string active_field;
+  // The bus topic its committed writes move (040, design/machine/036.Bus.md § 2), or "".
+  std::string publish;
   bool runnable() const { return pattern == "sql"; }
   // Whether any grant lets the box write.
   bool may_write() const {

@@ -23,6 +23,20 @@ struct Request {
   std::string header(std::string_view name) const;
 };
 
+// A response that stays open (server-sent events, design/machine/036.Bus.md § 4). Safe to use
+// from any thread.
+class Stream {
+ public:
+  virtual ~Stream() = default;
+  // Queues bytes to send; false once the stream is closed (by either side, or for falling more
+  // than the response's stream_max_behind bytes behind).
+  virtual bool send(std::string bytes) = 0;
+  virtual void close() = 0;
+  virtual bool closed() const = 0;
+  // Called once when the stream closes, for whatever reason; at once if it already has.
+  virtual void on_close(std::function<void()> f) = 0;
+};
+
 struct Response {
   int status = 200;
   std::vector<std::pair<std::string, std::string>> headers;
@@ -31,6 +45,10 @@ struct Response {
   // A host-generated error page, which the host may re-render (as JSON, for an API
   // caller) before it is sent. The server ignores it.
   bool host_error = false;
+  // Set: the status and headers go out with no length and "connection: close", the body is
+  // ignored, and this is called with the open stream (on a network thread; it must not block).
+  std::function<void(std::shared_ptr<Stream>)> stream;
+  size_t stream_max_behind = 256 * 1024;
 };
 
 // Called exactly once per request, from any thread.

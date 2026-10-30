@@ -1,7 +1,9 @@
 #include "goober/server_http/server.h"
 
 #include <atomic>
+#include <deque>
 #include <future>
+#include <mutex>
 #include <thread>
 
 #include <boost/asio.hpp>
@@ -143,6 +145,7 @@ class Session : public std::enable_shared_from_this<Session> {
         throw std::invalid_argument("a header holds a control character");
       }
     }
+    if (res.stream && !res.head_only) return open_stream(std::move(res));
     auto status = static_cast<bhttp::status>(res.status);
     std::optional<bhttp::message_generator> gen;
     if (res.head_only) {
@@ -174,6 +177,134 @@ class Session : public std::enable_shared_from_this<Session> {
   void close() {
     beast::error_code ec;
     stream_.socket().shutdown(tcp::socket::shutdown_send, ec);
+  }
+
+  // An open stream: its own queue of writes on the session's strand. It holds the session
+  // until it closes; the session holds nothing of it.
+  class Open : public Stream, public std::enable_shared_from_this<Open> {
+   public:
+    Open(std::shared_ptr<Session> s, size_t max_behind) : session_(std::move(s)), max_behind_(max_behind) {}
+    bool send(std::string bytes) override {
+      std::shared_ptr<Session> s;
+      bool start = false, over = false;
+      {
+        std::lock_guard lock(mu_);
+        if (closed_) return false;
+        if (queued_ + bytes.size() > max_behind_) {
+          // Falling behind: a reader this slow is let go rather than let it grow the queue.
+          over = true;
+        } else {
+          queued_ += bytes.size();
+          queue_.push_back(std::move(bytes));
+          start = !writing_;
+          writing_ = writing_ || start;
+          s = session_;
+        }
+      }
+      if (over) {
+        close();
+        return false;
+      }
+      if (start && s) asio::post(s->stream_.get_executor(), [self = shared_from_this()] { self->pump(); });
+      return true;
+    }
+    void close() override {
+      std::vector<std::function<void()>> callbacks;
+      std::shared_ptr<Session> s;
+      {
+        std::lock_guard lock(mu_);
+        if (closed_) return;
+        closed_ = true;
+        callbacks.swap(on_close_);
+        s = std::move(session_);
+      }
+      if (s) {
+        asio::post(s->stream_.get_executor(), [s] {
+          beast::error_code ec;
+          s->stream_.socket().shutdown(tcp::socket::shutdown_both, ec);
+          s->stream_.socket().close(ec);
+        });
+      }
+      for (auto& f : callbacks) f();
+    }
+    bool closed() const override {
+      std::lock_guard lock(mu_);
+      return closed_;
+    }
+    void on_close(std::function<void()> f) override {
+      {
+        std::lock_guard lock(mu_);
+        if (!closed_) {
+          on_close_.push_back(std::move(f));
+          return;
+        }
+      }
+      f();
+    }
+    // Reads until the client goes away; anything it sends is ignored.
+    void watch_peer() {
+      std::shared_ptr<Session> s;
+      {
+        std::lock_guard lock(mu_);
+        s = session_;
+      }
+      if (!s) return;
+      s->stream_.socket().async_read_some(asio::buffer(sink_), [self = shared_from_this()](beast::error_code ec, size_t) {
+        if (ec) return self->close();
+        self->watch_peer();
+      });
+    }
+
+   private:
+    void pump() {
+      std::shared_ptr<Session> s;
+      {
+        std::lock_guard lock(mu_);
+        if (closed_ || queue_.empty()) {
+          writing_ = false;
+          return;
+        }
+        current_ = std::move(queue_.front());
+        queue_.pop_front();
+        s = session_;
+      }
+      if (!s) return;
+      asio::async_write(s->stream_.socket(), asio::buffer(current_), [self = shared_from_this()](beast::error_code ec, size_t n) {
+        {
+          std::lock_guard lock(self->mu_);
+          self->queued_ -= std::min(self->queued_, n);
+        }
+        if (ec) return self->close();
+        self->pump();
+      });
+    }
+
+    mutable std::mutex mu_;
+    std::shared_ptr<Session> session_;
+    size_t max_behind_, queued_ = 0;
+    std::deque<std::string> queue_;
+    std::string current_;
+    bool writing_ = false, closed_ = false;
+    std::vector<std::function<void()>> on_close_;
+    char sink_[512];
+  };
+
+  void open_stream(Response res) {
+    keep_alive_ = false;
+    unsigned code = unsigned(res.status);
+    std::string head = "HTTP/1.1 " + std::to_string(code) + " " +
+                       std::string(bhttp::obsolete_reason(static_cast<bhttp::status>(res.status))) + "\r\n";
+    for (const auto& [k, v] : res.headers) head += k + ": " + v + "\r\n";
+    head += "server: goober\r\nconnection: close\r\n\r\n";
+    stream_.expires_never();
+    auto open = std::make_shared<Open>(shared_from_this(), res.stream_max_behind + head.size());
+    open->send(std::move(head));
+    open->watch_peer();
+    try {
+      res.stream(open);
+    } catch (...) {
+      open->close();
+    }
   }
 
   beast::tcp_stream stream_;

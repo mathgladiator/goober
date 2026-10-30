@@ -1182,7 +1182,31 @@ const std::set<std::string> kVerbs = {"get", "post", "put", "patch", "delete"};
 
 const std::set<std::string> kPatterns = {"by_id", "by_index", "query", "sql", "by_timer"};
 const std::set<std::string> kLaterStrategy = {"table", "id-is", "index", "index-is", "limit", "sql", "params",
-                                              "result", "read", "writes", "timezone-field", "active-field", "publish"};
+                                              "result", "read", "writes", "timezone-field", "active-field"};
+
+// A bus topic template (design/machine/036.Bus.md § 2): 1 to 8 segments joined by "/", each
+// [A-Za-z0-9_-]{1,64} or one of {!tenant}, {!user_id}, {!domain}.
+bool valid_topic(std::string_view t, std::string* why) {
+  size_t n = 0;
+  size_t start = 0;
+  while (true) {
+    size_t slash = t.find('/', start);
+    std::string_view seg = t.substr(start, slash == std::string_view::npos ? std::string_view::npos : slash - start);
+    ++n;
+    bool reserved = seg == "{!tenant}" || seg == "{!user_id}" || seg == "{!domain}";
+    bool plain = !seg.empty() && seg.size() <= 64;
+    for (char c : seg) {
+      plain = plain && (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-');
+    }
+    if (!reserved && !plain) {
+      return *why = "topic \"" + std::string(t) + "\": each segment is letters, digits, _ or -, or {!tenant}, {!user_id}, {!domain}", false;
+    }
+    if (slash == std::string_view::npos) break;
+    start = slash + 1;
+  }
+  if (n > 8) return *why = "topic \"" + std::string(t) + "\" has more than 8 segments", false;
+  return true;
+}
 
 bool is_sql_name(std::string_view n) {
   return base::is_valid_name(n) && !n.starts_with("sqlite_");
@@ -1252,12 +1276,17 @@ bool parse_data(const bj::object& data, Manifest* m, std::string* error) {
         std::string key(f.key());
         if (key == "schema" || key == "database" || key == "pattern" || key == "tenant") continue;
         if (st.pattern == "by_timer" && (key == "table" || key == "timezone-field" || key == "active-field")) continue;
-        if (st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget")) continue;
+        if (st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget" || key == "publish")) continue;
         if (kLaterStrategy.count(key) || (!st.runnable() && (key == "tables" || key == "row-limit" || key == "step-budget"))) {
           if (st.runnable()) return *error = where + "." + key + " doesn't apply to pattern sql", false;
           continue;
         }
         return *error = where + ": unknown field \"" + key + "\"", false;
+      }
+      if (auto pub = get_string(def, "publish", &err)) {
+        std::string why;
+        if (!valid_topic(*pub, &why)) return *error = where + ".publish: " + why, false;
+        st.publish = *pub;
       }
       if (st.pattern == "by_timer") {
         // Read only by the scheduler: the box can't call it from code (045).
@@ -1469,22 +1498,24 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
         if (!parse_mail(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
-      if (protocol != "http") {
+      if (protocol != "http" && protocol != "sse") {
         m.warnings.push_back("routes." + protocol + " is accepted but not implemented in v1");
         continue;
       }
-      if (!proto.value().is_object()) return *error = "routes.http must be an object", std::nullopt;
+      bool sse = protocol == "sse";
+      if (!proto.value().is_object()) return *error = "routes." + protocol + " must be an object", std::nullopt;
       for (const auto& path : proto.value().get_object()) {
         auto pattern = router::parse_pattern(path.key(), &err);
         if (!pattern) return *error = err, std::nullopt;
         if (under_reserved(*pattern)) {
           return *error = "route " + pattern->source + " is under a host-reserved prefix", std::nullopt;
         }
-        if (!path.value().is_object()) return *error = "routes.http." + pattern->source + " must be an object", std::nullopt;
+        if (!path.value().is_object()) return *error = "routes." + protocol + "." + pattern->source + " must be an object", std::nullopt;
         for (const auto& verb : path.value().get_object()) {
           std::string v(verb.key());
-          std::string where = "routes.http." + pattern->source + "." + v;
-          if (!kVerbs.count(v)) return *error = where + ": unknown verb (get, post, put, patch, delete)", std::nullopt;
+          std::string where = "routes." + protocol + "." + pattern->source + "." + v;
+          if (sse && v != "subscribe") return *error = where + ": an sse route is {\"subscribe\": {...}}", std::nullopt;
+          if (!sse && !kVerbs.count(v)) return *error = where + ": unknown verb (get, post, put, patch, delete)", std::nullopt;
           if (!verb.value().is_object()) return *error = where + " must be an object", std::nullopt;
           const auto& def = verb.value().get_object();
           for (const auto& f : def) {
@@ -1492,8 +1523,12 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
                 key == "response" || key == "cors" || key == "includes") {
+              if (sse && (key == "body" || key == "max-body-bytes" || key == "template")) {
+                return *error = where + "." + key + " doesn't apply to a subscription", std::nullopt;
+              }
               continue;
             }
+            if (sse && (key == "wake" || key == "coalesce-ms" || key == "refresh-ms")) continue;
             if (kLaterRoute.count(key)) {
               m.warnings.push_back(where + "." + key + " is accepted but not implemented in v1");
               continue;
@@ -1519,6 +1554,21 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           }
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           route.agents = goober::json::get_bool(def, "agents", &err).value_or(false);
+          if (sse) {
+            const auto* w = def.if_contains("wake");
+            if (!w || !w->is_array() || w->as_array().empty() || w->as_array().size() > 8) {
+              return *error = where + ".wake is a list of 1 to 8 topics, like [\"orders\"]", std::nullopt;
+            }
+            for (const auto& t : w->as_array()) {
+              std::string why;
+              if (!t.is_string() || !valid_topic(t.as_string(), &why)) return *error = where + ".wake: " + why, std::nullopt;
+              route.wake.emplace_back(t.as_string());
+            }
+            route.coalesce_ms = get_int(def, "coalesce-ms", &err).value_or(250);
+            route.refresh_ms = get_int(def, "refresh-ms", &err).value_or(30000);
+            if (route.coalesce_ms < 50 || route.coalesce_ms > 60000) return *error = where + ".coalesce-ms is 50 to 60000", std::nullopt;
+            if (route.refresh_ms < 1000 || route.refresh_ms > 3600000) return *error = where + ".refresh-ms is 1000 to 3600000", std::nullopt;
+          }
           // The box's own text/html gets the tenant's partials (design/machine/027.Partials.md).
           route.includes = goober::json::get_bool(def, "includes", &err).value_or(false);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
@@ -1536,6 +1586,11 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             }
           } else if (is_public.value_or(false)) {
             route.is_public = true;
+            for (const auto& t : route.wake) {
+              if (t.find("{!user_id}") != std::string::npos) {
+                return *error = where + ": a public subscription has no {!user_id} to wake on", std::nullopt;
+              }
+            }
           } else {
             return *error = where + ": needs \"public\": true or \"requirements\" ([] is any signed-in user); "
                                     "a route with neither is denied to everyone",
