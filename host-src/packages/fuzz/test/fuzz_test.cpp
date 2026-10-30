@@ -31,6 +31,10 @@
 #include "goober/types/types.h"
 #include "goober/web/html.h"
 #include "goober/web/robots.h"
+#include "goober/signing/oauth1.h"
+#include "goober/site/includes.h"
+#include "goober/specs/specs.h"
+#include "goober/vault/vault.h"
 
 using namespace goober;
 namespace bj = boost::json;
@@ -375,5 +379,62 @@ TEST(Fuzz, IcalendarAndRecurrence) {
                                           [](const calendar::Civil& c) { return calendar::civil_seconds(c) * 1000; });
                 EXPECT_LE(e.instances.size(), 2000u);
               }
+            });
+}
+
+// OpenAPI documents an agent puts (034 § 2): parsing, $refs (including cycles), and finding ops.
+TEST(Fuzz, OpenApiSpecs) {
+  fuzz::run("specs",
+            {R"({"openapi":"3.1.0","info":{"title":"T","version":"1"},"servers":[{"url":"https://a.example/v1"}],"paths":{)"
+             R"("/w/{id}":{"parameters":[{"$ref":"#/components/parameters/id"}],"get":{"operationId":"getW"},)"
+             R"("post":{"requestBody":{"$ref":"#/components/requestBodies/b"}}}},"components":{"parameters":{"id":)"
+             R"({"name":"id","in":"path","required":true}},"requestBodies":{"b":{"content":{"multipart/form-data":{}}}}}})",
+             R"({"swagger":"2.0","basePath":"/api/v3","host":"x.example","paths":{"/a":{"get":{"operationId":"a",)"
+             R"("parameters":[{"name":"f","in":"formData","type":"file"}]}}}})",
+             R"({"openapi":"3.0.0","paths":{"/c":{"$ref":"#/paths/~1c"}}})"},
+            {"{", "}", "\"$ref\":\"#/\"", "\"#/components/x\"", "~1", "~0", "\"paths\"", "\"in\":\"path\"", "[", "]", ",", ":",
+             "\"get\"", "\"operationId\"", "null", "\"/{x}\""},
+            fuzz::iterations(3000), [](const std::string& in) {
+              std::string err;
+              if (auto s = specs::parse(in, &err)) {
+                for (const char* ref : {"getW", "GET /w/{id}", "POST /a", "a", ""}) (void)s->find(ref);
+              }
+            });
+}
+
+// Include markers with parameters, in any served HTML (027 § 7).
+TEST(Fuzz, IncludeMarkers) {
+  fuzz::run("includes",
+            {R"(<nav><!--#include nav--></nav><!--#include card title="Ribs & brisket" href="/ribs" badge="new"-->)",
+             R"(<a href="/x" data-match="/x" class=a>x</a><meta name="nav-key" content="k"><a data-key="k">)"},
+            {"<!--#include ", "-->", "\"", "=", " ", "--", "<a ", "class=", "data-match=\"", "data-key=", ">", "<meta "},
+            fuzz::iterations(3000), [](const std::string& in) {
+              (void)site::include_names(in);
+              (void)site::mark_active(in, "/x/y", "k");
+              (void)site::mark_active(in, "/", "");
+            });
+}
+
+// Sealed values come back from boxes' tables: anything that isn't the host's opens to nothing.
+TEST(Fuzz, SealedValues) {
+  vault::Key root{};
+  for (size_t i = 0; i < root.size(); ++i) root[i] = uint8_t(i * 7);
+  auto key = vault::tenant_key(root, "t");
+  std::string good = vault::seal_for(key, "t", "svc", "42", R"({"kind":"key","value":"k"})");
+  fuzz::run("sealed", {good, "gsv1.42.AAAA", "gsv1.."}, {"gsv1.", ".", "A", "_", "-", "=", "42", "%"}, fuzz::iterations(3000),
+            [&](const std::string& in) {
+              auto opened = vault::open_for(key, "t", "svc", in);
+              // Only the real value opens; a mutation never does.
+              if (opened) EXPECT_EQ(in, good);
+            });
+}
+
+// OAuth 1.0a signing over box-supplied URLs and form fields (any-public methods).
+TEST(Fuzz, OAuth1Urls) {
+  signing::OAuth1 o{"ck", "cs", "t", "ts", "nonce", "1"};
+  fuzz::run("oauth1", {"https://a.example/1.1/statuses/update.json?include_entities=true&b=%41+c"},
+            {"%", "%zz", "%4", "+", "&", "=", "?", "#", "/", ":", "@", "%2B"}, fuzz::iterations(3000), [&](const std::string& in) {
+              (void)signing::oauth1_base_string("POST", in, {{"status", in}}, o);
+              (void)signing::oauth1_header("GET", in, {}, o);
             });
 }

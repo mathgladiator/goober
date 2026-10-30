@@ -73,6 +73,7 @@ void Sha256::reset() {
 }
 
 void Sha256::update(std::string_view data) {
+  if (data.empty()) return;  // an empty view may have no data pointer at all
   const auto* bytes = reinterpret_cast<const uint8_t*>(data.data());
   size_t n = data.size();
   total_ += n;

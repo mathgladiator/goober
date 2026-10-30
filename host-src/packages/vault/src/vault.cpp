@@ -62,6 +62,9 @@ std::optional<std::string> unseal(const Key& key, std::string_view sealed, std::
   if (!sealed.starts_with(kPrefix) || sealed.size() > 65536) return std::nullopt;
   auto raw = base::base64url_decode(sealed.substr(kPrefix.size()));
   if (!raw || raw->size() < kSalt + kTag) return std::nullopt;
+  // One spelling per value: padding or stray bits that decode the same are refused, so a sealed
+  // value can be compared and stored as text.
+  if (base::base64url_encode(*raw) != sealed.substr(kPrefix.size())) return std::nullopt;
   std::string_view all(*raw);
   std::string_view body = all.substr(0, all.size() - kTag), tag = all.substr(all.size() - kTag);
   Key enc{}, mac{};

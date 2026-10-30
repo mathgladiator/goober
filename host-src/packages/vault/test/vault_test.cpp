@@ -41,3 +41,12 @@ TEST(Vault, TheOwnerTravelsInTheClearAndIsChecked) {
   EXPECT_FALSE(open_for(kc, "kc", "hevy", s));
   EXPECT_FALSE(open_for(tenant_key(root, "other"), "other", "strava", s));
 }
+
+TEST(Vault, OneSpellingPerSealedValue) {
+  goober::vault::Key root{};
+  auto key = goober::vault::tenant_key(root, "t");
+  std::string good = goober::vault::seal_for(key, "t", "svc", "42", "x");
+  ASSERT_TRUE(goober::vault::open_for(key, "t", "svc", good));
+  EXPECT_FALSE(goober::vault::open_for(key, "t", "svc", good + "="));
+  EXPECT_FALSE(goober::vault::open_for(key, "t", "svc", good + "=="));
+}
