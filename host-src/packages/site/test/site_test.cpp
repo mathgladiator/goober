@@ -147,6 +147,13 @@ TEST_F(SiteTest, ListingsSortPageFilterAndSkipDrafts) {
   // Valid Atom needs an author; tags become categories.
   EXPECT_NE(feed.body.find("<author><name>"), std::string::npos);
   EXPECT_NE(feed.body.find("<category term=\"news\"/>"), std::string::npos);
+  // A control character or broken UTF-8 in a title would make readers reject the whole feed.
+  put("blog/z.md", std::string("---\ntitle: \"Fish\x0c & Chips \xff\"\ndate: 2026-05-01\n---\nFried."));
+  auto clean = get("/blog/feed.xml");
+  ASSERT_EQ(clean.status, 200) << clean.error;
+  EXPECT_EQ(clean.body.find('\x0c'), std::string::npos);
+  EXPECT_EQ(clean.body.find('\xff'), std::string::npos);
+  EXPECT_NE(clean.body.find("Fish &amp; Chips"), std::string::npos) << clean.body.substr(0, 600);
 }
 
 TEST_F(SiteTest, APagesJsonLdFieldIsTheHostBuiltTag) {

@@ -139,9 +139,13 @@ std::string atom_time(const std::string& date, const std::string& fallback) {
   return fallback;
 }
 
-std::string xml_escape(std::string_view s) {
+std::string xml_escape(std::string_view raw) {
+  // XML 1.0 refuses C0 controls (but tab, newline, return) and broken UTF-8: one such byte in a
+  // title would make every reader reject the whole feed or sitemap.
+  std::string s = base::valid_utf8(raw);
   std::string out;
   for (char c : s) {
+    if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' && c != '\r') continue;
     switch (c) {
       case '&': out += "&amp;"; break;
       case '<': out += "&lt;"; break;

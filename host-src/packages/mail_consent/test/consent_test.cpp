@@ -119,3 +119,18 @@ TEST(Consent, PruningKeepsFiveYearsAndTheOldUnsubscribesBecomeBlocks) {
   EXPECT_EQ(s.history("kc", kAnn).size(), 0u);  // the log row aged out
   EXPECT_TRUE(s.block("kc", kAnn));             // the block itself never does
 }
+
+TEST(Consent, OneMailboxOneHashAndOldBlocksStillHold) {
+  EXPECT_EQ(canonical_address("Alice+News@Example.COM."), "alice@example.com");
+  EXPECT_EQ(canonical_address("A.Lice+1@GoogleMail.com"), "alice@gmail.com");
+  EXPECT_EQ(canonical_address("a.lice@example.com"), "a.lice@example.com");  // dots only fold at gmail
+  EXPECT_EQ(canonical_address("+tag@example.com"), "+tag@example.com");       // a name that is all tag stays
+  EXPECT_EQ(address_hash("alice+1@gmail.com"), address_hash("a.l.i.c.e@gmail.com"));
+  Fixture f("consent_canonical");
+  ASSERT_TRUE(f.store->add_block("t", address_hash("alice@gmail.com"), "unsubscribed", {}, 1));
+  EXPECT_TRUE(f.store->block_of("t", "Alice+promo@gmail.com"));
+  // A block written before 2026-10-30 under the lowercased-only hash is still found.
+  ASSERT_TRUE(f.store->add_block("t", legacy_address_hash("bob+x@example.com"), "unsubscribed", {}, 1));
+  EXPECT_TRUE(f.store->block_of("t", "Bob+X@example.com"));
+  EXPECT_FALSE(f.store->block_of("t", "carol@example.com"));
+}

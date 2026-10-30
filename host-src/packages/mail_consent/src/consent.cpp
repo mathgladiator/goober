@@ -89,7 +89,23 @@ bj::object parse_object(const std::string& text) {
 
 }  // namespace
 
+std::string canonical_address(std::string_view address) {
+  std::string a = base::to_lower(address);
+  auto at = a.rfind('@');
+  if (at == std::string::npos) return a;
+  std::string local = a.substr(0, at), domain = a.substr(at + 1);
+  while (domain.ends_with(".")) domain.pop_back();
+  if (auto plus = local.find('+'); plus != std::string::npos && plus > 0) local.resize(plus);
+  if (domain == "googlemail.com") domain = "gmail.com";
+  if (domain == "gmail.com") std::erase(local, '.');
+  return local + "@" + domain;
+}
+
 std::string address_hash(std::string_view address) {
+  return base::sha256_hex("goober-mail-address\n" + canonical_address(address)).substr(0, 32);
+}
+
+std::string legacy_address_hash(std::string_view address) {
   return base::sha256_hex("goober-mail-address\n" + base::to_lower(address)).substr(0, 32);
 }
 
@@ -105,6 +121,12 @@ void Store::log(const std::string& tenant, const std::string& hash, const std::s
                 const std::string& how, const bj::object& evidence, int64_t now_ms) {
   sqlite::Stmt s(*db_, "INSERT INTO consent_log (tenant, address, at_ms, what, list, how, evidence) VALUES (?, ?, ?, ?, ?, ?, ?)");
   s.bind(1, tenant).bind(2, hash).bind(3, now_ms).bind(4, what).bind(5, list).bind(6, how).bind(7, json::dump(evidence)).run();
+}
+
+std::optional<Block> Store::block_of(const std::string& tenant, std::string_view address) {
+  if (auto b = block(tenant, address_hash(address))) return b;
+  std::string legacy = legacy_address_hash(address);
+  return legacy == address_hash(address) ? std::nullopt : block(tenant, legacy);
 }
 
 std::optional<Block> Store::block(const std::string& tenant, const std::string& hash) {

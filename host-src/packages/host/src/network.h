@@ -26,6 +26,9 @@ struct OutboxElement {
   int64_t timeout_ms = 10000;     // one delivery's time
 };
 
+// One bare address, ASCII, no display name or comments: what every mail ledger may key.
+bool plain_email(std::string_view s);
+
 // What one box call needs to make external calls.
 struct CallContext {
   const manifest::Manifest* manifest = nullptr;

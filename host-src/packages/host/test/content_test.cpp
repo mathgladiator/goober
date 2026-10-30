@@ -669,6 +669,11 @@ TEST_F(SiteRoutesTest, ContentDeployChecksBeforeAndAfter) {
   auto lint = tool("page_lint", {{"strict", true}, {"paths", bj::array{"/one"}}});
   ASSERT_EQ(lint.at("pages").as_array().size(), 1u);
   EXPECT_NE(json::dump(lint).find("title is"), std::string::npos);
+  // A path that would name another host after the port is no path (it was an SSRF).
+  auto ssrf = tool("page_lint", {{"paths", bj::array{"@10.0.0.5:8500/v1/agent/self", "//evil.example/x"}}});
+  std::string dumped = json::dump(ssrf);
+  EXPECT_EQ(dumped.find("\"status\":"), std::string::npos) << dumped;
+  EXPECT_NE(dumped.find("a path on the site"), std::string::npos) << dumped;
 }
 
 // Engineer B's case: a child template adds to <head>, JSON-LD built in a template survives

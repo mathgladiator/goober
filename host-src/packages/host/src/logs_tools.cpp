@@ -3,6 +3,7 @@
 // audit log, hourly housekeeping, and the tools: log_search, log_verify, log_status, uri_stats,
 // uri_tree, uri_flow, and agent_audit.
 
+#include <cstring>
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -84,6 +85,37 @@ void Host::log_line(const std::string& log, bj::object line) {
     line[std::string(k) + "_h"] = address_hash_for_logs(addr);
     line[std::string(k) + "_domain"] = base::to_lower(addr.substr(addr.rfind('@') + 1));
     line.erase(k);
+  }
+  // Free text the host wrote (an error naming who was refused, an agent's tool input) can hold an
+  // address too: each becomes [address <hash>], still found by the log dive's address search.
+  // Box logs are the box's own words, said in 032 § 8, and stay as written.
+  if (!log.starts_with("boxes/")) {
+    for (auto& kv : line) {
+      // Operators' and staff addresses stay: they're who acted (032 § 4); a tenant's own sender too.
+      static const std::set<std::string, std::less<>> kStaff = {"actor", "operator", "decided_by", "approved_by", "set_by",
+                                                                "by", "from_address", "agent"};
+      if (kStaff.count(kv.key()) || kv.key().ends_with("_h") || kv.key().ends_with("_domain") || !kv.value().is_string()) continue;
+      std::string s(kv.value().as_string());
+      if (s.find('@') == std::string::npos) continue;
+      auto local_char = [](char ch) { return std::isalnum(static_cast<unsigned char>(ch)) || std::strchr("._%+-'", ch); };
+      auto domain_char = [](char ch) { return std::isalnum(static_cast<unsigned char>(ch)) || ch == '.' || ch == '-'; };
+      std::string out;
+      size_t from = 0;
+      for (size_t at = s.find('@'); at != std::string::npos; at = s.find('@', at + 1)) {
+        size_t b = at, e = at + 1;
+        while (b > from && local_char(s[b - 1])) --b;
+        while (e < s.size() && domain_char(s[e])) ++e;
+        while (e > at + 1 && s[e - 1] == '.') --e;  // a sentence's full stop
+        std::string domain = s.substr(at + 1, e - at - 1);
+        if (b == at || domain.find('.') == std::string::npos) continue;
+        out += s.substr(from, b - from) + "[address " + address_hash_for_logs(s.substr(b, e - b)) + "]";
+        from = e;
+        at = e - 1;
+      }
+      if (from == 0) continue;
+      out += s.substr(from);
+      kv.value() = bj::string(out);
+    }
   }
   try {
     logs_->write(log, line, now);

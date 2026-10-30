@@ -1148,6 +1148,14 @@ void Host::register_content_tools() {
 // checks before and after, etags, checking served URLs, and linting pages.
 
 HttpOut Host::fetch_self(const std::string& domain, const std::string& path) {
+  // A path on this host, nothing else: "@10.0.0.5/x" after the port would name another host.
+  bool ok = path.starts_with("/") && !path.starts_with("//") && path.size() <= 2048;
+  for (char c : path) ok = ok && c != '@' && c != '\\' && static_cast<unsigned char>(c) > 0x20 && c != 0x7f;
+  if (!ok) {
+    HttpOut bad;
+    bad.error = "a path on the site, starting with / (no @, \\, spaces, or control characters)";
+    return bad;
+  }
   auto cfg = config_.get();
   std::string address = cfg->listen_address == "0.0.0.0" || cfg->listen_address == "::" || cfg->listen_address.empty()
                             ? "127.0.0.1"
@@ -1183,7 +1191,7 @@ void Host::register_content_kit_tools() {
     if (!r.error.empty()) o["error"] = r.error;
     if (html) o["checks"] = in.to_json();
     auto problems = problems_of(in, html, strict);
-    if (r.status != 200) problems.push_back(bj::value("status " + std::to_string(r.status)));
+    if (r.status != 200) problems.push_back(bj::value(r.status == 0 && !r.error.empty() ? r.error : "status " + std::to_string(r.status)));
     o["problems"] = std::move(problems);
     return o;
   };

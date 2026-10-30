@@ -1,4 +1,5 @@
 #include "goober/logs/logs.h"
+#include "goober/base/files.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -35,6 +36,10 @@ bool write_all(int fd, std::string_view data) {
 }
 
 // The last complete line of a file, read from its end.
+// The last line that carries a chain, within the last MiB, and whether the file ends mid-line
+// (a write torn by a crash or a full disk).
+std::string last_chained_line(const fs::path& file, bool* torn);
+
 std::string last_line(const fs::path& file) {
   std::ifstream in(file, std::ios::binary);
   if (!in) return "";
@@ -61,6 +66,31 @@ std::string last_line(const fs::path& file) {
   while (!tail.empty() && tail.back() == '\n') tail.pop_back();
   size_t nl = tail.rfind('\n');
   return nl == std::string::npos ? tail : tail.substr(nl + 1);
+}
+
+std::string last_chained_line(const fs::path& file, bool* torn) {
+  *torn = false;
+  std::ifstream in(file, std::ios::binary);
+  if (!in) return "";
+  in.seekg(0, std::ios::end);
+  int64_t size = in.tellg();
+  if (size <= 0) return "";
+  int64_t start = std::max<int64_t>(0, size - (1 << 20));
+  std::string tail(size_t(size - start), '\0');
+  in.seekg(start);
+  in.read(tail.data(), size - start);
+  *torn = tail.back() != '\n';
+  // From the end back, the first line that splits into a body and its chain.
+  size_t end = tail.size();
+  while (end > 0) {
+    size_t nl = tail.rfind('\n', end - 1);
+    size_t b = nl == std::string::npos ? 0 : nl + 1;
+    std::string_view line(tail.data() + b, end - b);
+    if (!line.empty() && line.back() != '\n' && split_chain(line)) return std::string(line);
+    if (nl == std::string::npos) break;
+    end = nl;
+  }
+  return "";
 }
 
 std::string first_line(const fs::path& file) {
@@ -212,10 +242,16 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
   fs::create_hard_link(rotated, r.queued, ec);
   if (ec) fs::copy_file(rotated, r.queued, fs::copy_options::overwrite_existing, ec);
   // The chain before this file: the line before its first, which is the previous file's last.
-  fs::path older = file_.string() + ".2";
+  // It's kept beside the log at each rotation (name.log.chain), since the numbered files that
+  // held it are deleted after 7 days; a log's first line ever chains from genesis.
+  fs::path older = file_.string() + ".2", sidecar = file_.string() + ".chain";
   std::string prev = kGenesis.data();
-  if (fs::exists(older, ec)) {
-    if (auto sc = split_chain(last_line(older))) prev = sc->second;
+  if (first_seq > 1) {
+    if (auto kept = base::read_file(sidecar); kept && kept->size() == 32) {
+      prev = *kept;
+    } else if (fs::exists(older, ec)) {
+      if (auto sc = split_chain(last_line(older))) prev = sc->second;
+    }
   }
   r.manifest_json = bj::object{{"log", name_},
                                {"file", base_name + ".log"},
@@ -228,6 +264,7 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
                                {"lines", lines},
                                {"sha256", base::hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()))}};
   std::ofstream(r.manifest) << json::pretty(r.manifest_json);
+  if (!last_chain.empty()) base::write_file_durable(sidecar, last_chain);
   return r;
 }
 
@@ -253,7 +290,11 @@ std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, b
     // The tail and the file's day: cached, and read again from the file when another process
     // (or a rotation) changed it since this writer last wrote.
     if (uint64_t(mine.st_ino) != seen_ino_ || int64_t(mine.st_size) != seen_size_) {
-      std::string prev_line = mine.st_size > 0 ? last_line(file_) : "";
+      bool torn = false;
+      std::string prev_line = mine.st_size > 0 ? last_chained_line(file_, &torn) : "";
+      // A torn last write is ended with a newline, so it stands as its own (unchained) line,
+      // which log_verify reports, and the chain carries on from the last whole line.
+      if (torn && write_all(fd, "\n")) mine.st_size += 1;
       if (prev_line.empty()) prev_line = last_line(file_.string() + ".1");
       seen_chain_ = std::string(kGenesis);
       seen_seq_ = 0;

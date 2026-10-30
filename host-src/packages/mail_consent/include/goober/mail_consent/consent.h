@@ -25,8 +25,15 @@ namespace goober::mail::consent {
 
 namespace bj = boost::json;
 
-// The hash every mail ledger keys an address by: lowercased, SHA-256, 32 hex digits.
+// The mailbox an address reaches, as far as can be known: lowercased, a trailing dot on the
+// domain dropped, a +tag dropped, and for gmail.com (and googlemail.com, the same mailboxes) the
+// dots in the name dropped. So a block or an unsubscribe can't be stepped around with
+// alice+1@ or a.lice@.
+std::string canonical_address(std::string_view address);
+// The hash every mail ledger keys an address by: of the canonical address, SHA-256, 32 hex digits.
 std::string address_hash(std::string_view address);
+// The hash before 2026-10-30 (lowercased only), still checked for blocks made then.
+std::string legacy_address_hash(std::string_view address);
 
 inline constexpr int64_t kOutreachEveryMs = 30LL * 24 * 3600 * 1000;
 inline constexpr int64_t kLogKeepMs = 5LL * 366 * 24 * 3600 * 1000;
@@ -55,6 +62,8 @@ class Store {
 
   // ---- blocks (§ 6)
   std::optional<Block> block(const std::string& tenant, const std::string& hash);
+  // A block on the address under either hash.
+  std::optional<Block> block_of(const std::string& tenant, std::string_view address);
   // Adds a block; an existing live block is kept as it was. Returns true when one was added.
   bool add_block(const std::string& tenant, const std::string& hash, const std::string& how, const bj::object& evidence,
                  int64_t now_ms);

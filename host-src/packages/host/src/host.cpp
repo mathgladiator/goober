@@ -491,7 +491,19 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
     if (auto tenant = cfg->tenant_for_host(domain)) {
       // Every access line names its tenant, so the log dive can keep to an operator's scope.
       if (!line.contains("tenant")) line["tenant"] = *tenant;
-      std::string path = req.path.substr(0, req.path.find('?'));
+      // Links that are capabilities (unsubscribe, list confirm, invites) are counted by their
+      // prefix: their MACs would let anyone who reads the stats or the log act for the person.
+      // Pages that weren't found are counted together, so a scan can't push out the real ones.
+      auto stat_path = [](std::string p, int st) {
+        for (const char* cap : {"/goober/unsubscribe/", "/goober/mail/", "/goober/list/", "/identity/invite/"}) {
+          if (p.starts_with(cap)) return std::string(cap) + "*";
+        }
+        return st == 404 ? std::string("(not found)") : p;
+      };
+      std::string path = stat_path(req.path.substr(0, req.path.find('?')), status);
+      if (auto* lp = line.if_contains("path"); lp && lp->is_string() && std::string(lp->as_string()) != path && path.ends_with("*")) {
+        line["path"] = path;
+      }
       std::string from;
       std::string ref = req.header("referer");
       if (auto at = ref.find("://"); at != std::string::npos) {
@@ -501,6 +513,7 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
         if (host.substr(0, host.find(':')) == base::to_lower(domain) && slash != std::string::npos) {
           from = rest.substr(slash);
           from = from.substr(0, from.find_first_of("?#"));
+          from = stat_path(from, 200);
         }
       }
       auto text = [&](const char* k) {
@@ -923,7 +936,15 @@ void Host::serve_content(const Request& req, const Finish& finish, const std::st
   v.path = path;
   for (const auto& [k, val] : router::parse_query(req.query)) v.query[k] = val;
   v.accept = req.header("accept");
-  v.origin = (config_.get()->identity.cookie_secure ? "https://" : "http://") + req.header("host");
+  // The origin canonical links, og:url, feeds, and the sitemap name: the configured domain, never
+  // the raw Host header (any case, any port, a trailing dot), which a cache in front would keep.
+  // Plain-http local play keeps the header's port, lowercased, for links that work there.
+  {
+    auto cfg = config_.get();
+    auto resolved = cfg->resolve_host(req.header("host"));
+    if (cfg->identity.cookie_secure && resolved) v.origin = "https://" + resolved->first;
+    else v.origin = std::string(cfg->identity.cookie_secure ? "https://" : "http://") + base::to_lower(req.header("host"));
+  }
   v.user = user_json(who);
   v.authorize = [&](const bj::value& requirements) { return authorize(requirements, who, tenant); };
   auto r = site_->visit(v);

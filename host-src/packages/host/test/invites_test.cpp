@@ -439,6 +439,8 @@ TEST_F(InvitesHostTest, ABoxRunsAListOnlyWithConsent) {
   auto record = tool("mail_consent_record", R"({"tenant":"kc","email":"jo@example.com","list":"digest",
       "statement":"Signed up at the 11/2 meetup"})");
   EXPECT_TRUE(record.at("isError").as_bool());
+  // Nor can the box ask them again: only they rejoin, signed in.
+  EXPECT_NE(call("/sub").find("left digest"), std::string::npos);
   auto lists = tool("mail_lists", R"({"tenant":"kc"})").at("value").at("lists").as_array();
   ASSERT_EQ(lists.size(), 1u);
   EXPECT_EQ(lists[0].at("box"), "club");

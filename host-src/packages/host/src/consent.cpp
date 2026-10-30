@@ -61,7 +61,7 @@ std::string field(const bj::object& o, const char* k) {
 }  // namespace
 
 bool Host::mail_suppressed(const std::string& tenant, const std::string& address) {
-  return consent_->block(tenant, address_hash(address)).has_value();
+  return consent_->block_of(tenant, address).has_value();
 }
 
 std::string Host::site_of(const std::string& tenant) const {
@@ -127,7 +127,7 @@ std::optional<Host::MailCheck> Host::check_mail_category(const std::string& tena
                                                          bool at_delivery, std::string* why) {
   auto cfg = config_.get();
   std::string hash = address_hash(to);
-  if (auto b = consent_->block(tenant, hash)) {
+  if (auto b = consent_->block_of(tenant, to)) {
     return *why = "blocked: " + to + " asked for no more mail from this site (" + b->how + ")", std::nullopt;
   }
   MailCheck c;
@@ -387,7 +387,7 @@ std::string Host::mail_preferences_call(CallContext& ctx, const bj::value& reque
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   if (!request.is_object()) return fail("preferences takes {email}");
   std::string to = base::to_lower(field(request.as_object(), "email"));
-  if (to.find('@') == std::string::npos) return fail("email is one address");
+  if (!plain_email(to)) return fail("email is one address");
   std::string hash = address_hash(to);
   bj::object lists;
   for (const auto& [name, l] : tenant_lists(ctx.tenant)) {
@@ -406,7 +406,7 @@ std::string Host::mail_preferences_call(CallContext& ctx, const bj::value& reque
     }
   }
   return json::dump(bj::object{{"email", to},
-                               {"blocked", consent_->block(ctx.tenant, hash).has_value()},
+                               {"blocked", consent_->block_of(ctx.tenant, to).has_value()},
                                {"lists", std::move(lists)},
                                {"relationship", relationship},
                                {"outreach", std::move(outreach)}});
@@ -417,7 +417,7 @@ std::string Host::mail_subscribe_call(CallContext& ctx, const manifest::External
   if (!request.is_object()) return fail("subscribe takes {email, list}");
   const auto& r = request.as_object();
   std::string to = base::to_lower(field(r, "email")), list = field(r, "list");
-  if (to.find('@') == std::string::npos || to.find_first_of(" <>,\"") != std::string::npos) return fail("email is one address");
+  if (!plain_email(to)) return fail("email is one address");
   auto mine = svc.mail_lists.find(list);
   if (mine == svc.mail_lists.end()) return fail("list " + list + " isn't one this mail service declares");
   auto cfg = config_.get();
@@ -426,9 +426,14 @@ std::string Host::mail_subscribe_call(CallContext& ctx, const manifest::External
     return fail("list mail needs the tenant's postal address: set tenants." + ctx.tenant + ".postal-address in the host config");
   }
   std::string hash = address_hash(to);
-  if (consent_->block(ctx.tenant, hash)) return fail("blocked: " + to + " asked for no more mail from this site");
+  if (consent_->block_of(ctx.tenant, to)) return fail("blocked: " + to + " asked for no more mail from this site");
   if (auto s = consent_->list_state(ctx.tenant, hash, list); s && s->state == "in") {
     return json::dump(bj::object{{"accepted", false}, {"already", true}});
+  } else if (s && s->state == "out") {
+    // Leaving is final until the person joins again themselves: signed in as that address.
+    bool themselves = ctx.who && !ctx.who->host &&
+                      mail::consent::canonical_address(ctx.who->user.email) == mail::consent::canonical_address(to);
+    if (!themselves) return fail(to + " left " + list + "; only they can join again, signed in on the site");
   }
   int64_t now = base::now_unix_ms();
   if (consent_->asked_since(ctx.tenant, hash, "list-confirm:" + list, now - 30 * kDay) > 0) {
@@ -483,7 +488,7 @@ std::string Host::account_mail_section(const std::string& tenant, const std::str
   std::string hash = address_hash(email);
   std::string site = site_of(tenant);
   std::string out = "<p><strong>Mail</strong></p>";
-  if (auto b = consent_->block(tenant, hash)) {
+  if (auto b = consent_->block_of(tenant, email)) {
     out += "<p>You asked " + html_escape(site) + " not to email you on " + base::format_utc_ms(b->at_ms).substr(0, 10) +
            ". Nothing comes but the sign-in codes you ask for.</p><form method=\"post\" action=\"/identity/mail/allow\">"
            "<label class=\"check\"><input type=\"checkbox\" name=\"statement\" value=\"I'm asking " + html_escape(site) +
@@ -522,8 +527,18 @@ bool Host::account_mail_post(const std::string& tenant, const SignedIn& who, con
   };
   bj::object evidence{{"request_id", request_id}, {"user_id", std::to_string(who.user.user_id)}, {"page", "account"}};
   if (path == "/identity/mail/allow") {
-    // The person, signed in (the address proved by a code), lifts their own block (029 § 6).
-    return consent_->lift(tenant, hash, "person", get("statement"), request_id, now, why).has_value();
+    // The person, signed in (the address proved by a code), lifts their own block (029 § 6). A
+    // block covers every spelling of the mailbox (alice+x@, a.lice@ at gmail), but only the
+    // mailbox's own address lifts it: on other providers alice+x@ may be someone else.
+    std::string legacy = mail::consent::legacy_address_hash(who.user.email);
+    bool own = mail::consent::canonical_address(who.user.email) == base::to_lower(who.user.email);
+    bool lifted = own && consent_->lift(tenant, hash, "person", get("statement"), request_id, now, why).has_value();
+    if (legacy != hash) {
+      std::string w2;
+      lifted = consent_->lift(tenant, legacy, "person", get("statement"), request_id, now, &w2).has_value() || lifted;
+    }
+    if (!own && !lifted) *why = "sign in with " + mail::consent::canonical_address(who.user.email) + " to allow mail again";
+    return lifted;
   }
   if (path == "/identity/mail/stop") return consent_->add_block(tenant, hash, "unsubscribed", evidence, now) || true;
   std::string list = get("list");
@@ -557,6 +572,12 @@ std::pair<int, bj::object> Host::panel_unblock(const SignedIn& who, const bj::ob
   std::string why;
   auto lifted = consent_->lift(tenant, address_hash(email), "operator:" + who.user.email, statement, request_id,
                                base::now_unix_ms(), &why);
+  if (std::string legacy = mail::consent::legacy_address_hash(email); legacy != address_hash(email)) {
+    std::string w2;
+    if (auto old = consent_->lift(tenant, legacy, "operator:" + who.user.email, statement, request_id, base::now_unix_ms(), &w2)) {
+      lifted = old;
+    }
+  }
   if (!lifted) {
     if (why == "that address isn't blocked") return {200, bj::object{{"lifted", false}}};
     return {400, bj::object{{"error", why}}};
@@ -595,7 +616,7 @@ void Host::register_consent_tools() {
          if (email.find('@') == std::string::npos) return ToolResult::fail("email is one address");
          std::string hash = address_hash(email);
          bj::value block = nullptr;
-         if (auto b = consent_->block(tenant, hash)) {
+         if (auto b = consent_->block_of(tenant, email)) {
            block = bj::object{{"at", base::format_utc_ms(b->at_ms)}, {"how", b->how}};
          }
          bj::object lists;

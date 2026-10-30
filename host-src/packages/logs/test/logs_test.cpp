@@ -114,6 +114,15 @@ TEST(Logs, RotationByDayAndSizeKeepsTheChainAndQueuesAManifest) {
   auto v = logs::verify(dir, "access");
   EXPECT_TRUE(v.ok) << v.broken;
   EXPECT_EQ(v.lines, 43);
+  // chain_before survives the numbered files being deleted (7 days on): the next rotation's
+  // manifest still names the chain the last one ended with.
+  for (int i = 2; i <= 64; ++i) fs::remove(dir / ("access.log." + std::to_string(i)));
+  fs::remove(dir / "access.log.1");
+  auto next = set.write("access", bj::object{{"n", "later"}}, kT0 + 3 * kDay);
+  ASSERT_TRUE(next);
+  auto first_after = lines_of(dir / "access.log.1").front();
+  EXPECT_EQ(logs::chain_of(std::string(next->manifest_json.at("chain_before").as_string()), logs::split_chain(first_after)->first),
+            logs::split_chain(first_after)->second);
   // A quiet log rotates at the tick.
   set.write("db", bj::object{{"sql", "SELECT 1"}}, kT0);
   auto stale = set.rotate_stale(kT0 + 2 * kDay);
@@ -208,4 +217,29 @@ TEST(Logs, RegexesThatCanRunForeverAreRefused) {
     EXPECT_FALSE(goober::logs::safe_regex(bad, &why)) << bad;
   }
   EXPECT_FALSE(goober::logs::safe_regex(std::string(201, 'a'), &why));
+}
+
+TEST(Logs, ATornWriteIsReportedAndTheChainCarriesOn) {
+  auto dir = fresh("logs_torn");
+  {
+    logs::Set set(dir, "h");
+    set.write("access", bj::object{{"n", 1}}, kT0 + 1);
+    set.write("access", bj::object{{"n", 2}}, kT0 + 2);
+  }
+  // A crash mid-write leaves half a line.
+  {
+    std::ofstream out(dir / "access.log", std::ios::app | std::ios::binary);
+    out << R"({"at":"2026-10-29T00:00:00.003Z","log":"access","seq":3,"ho)";
+  }
+  logs::Set again(dir, "h");
+  again.write("access", bj::object{{"n", 3}}, kT0 + 4);
+  auto lines = lines_of(dir / "access.log");
+  ASSERT_EQ(lines.size(), 4u);
+  EXPECT_NE(lines[3].find(R"("seq":3)"), std::string::npos) << lines[3];  // numbered on from the last whole line
+  auto two = logs::split_chain(lines[1]), four = logs::split_chain(lines[3]);
+  ASSERT_TRUE(two && four);
+  EXPECT_EQ(four->second, logs::chain_of(two->second, four->first));
+  auto v = logs::verify(dir, "access");
+  EXPECT_FALSE(v.ok);  // the torn line is shown, not hidden
+  EXPECT_NE(v.broken.find("3"), std::string::npos) << v.broken;
 }

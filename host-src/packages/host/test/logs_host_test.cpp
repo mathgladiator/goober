@@ -205,3 +205,28 @@ TEST_F(LogsHostTest, AnAgentGoingHamIsFlagged) {
   EXPECT_NE(flags.find("looping"), std::string::npos) << flags;
   EXPECT_EQ(actors[0].at("writes").as_int64(), 70);
 }
+
+TEST_F(LogsHostTest, AddressesInFreeTextAreHashedAndStillFound) {
+  host->log_line("egress", bj::object{{"error", "blocked: Alice.B+x@Example.com asked for no more mail."},
+                                      {"actor", "panel:boss@example.com"}});
+  auto text = *base::read_file(root / "storage/logs/egress.log");
+  EXPECT_EQ(text.find("Alice.B+x@Example.com"), std::string::npos) << text;
+  EXPECT_NE(text.find("[address "), std::string::npos) << text;
+  EXPECT_NE(text.find("asked for no more mail."), std::string::npos);  // the full stop isn't the domain's
+  EXPECT_NE(text.find("panel:boss@example.com"), std::string::npos);   // who acted stays
+  auto found = op("log_search", R"({"log":"egress","email":"Alice.B+x@Example.com"})");
+  EXPECT_EQ(found.at("value").at("count").as_int64(), 1) << found.at("text");
+}
+
+TEST_F(LogsHostTest, CapabilityLinksArentKeptInStatsOrTheAccessLog) {
+  fetch(port, "kc.example.com", bhttp::verb::get, "/goober/unsubscribe/kc/abcdef0123456789/deadbeefcafe");
+  for (int i = 0; i < 3; ++i) fetch(port, "kc.example.com", bhttp::verb::get, "/scan-" + std::to_string(i));
+  auto access = *base::read_file(root / "storage/logs/access.log");
+  EXPECT_EQ(access.find("deadbeefcafe"), std::string::npos);
+  EXPECT_NE(access.find("/goober/unsubscribe/*"), std::string::npos);
+  EXPECT_NE(access.find("/scan-1"), std::string::npos);  // the log keeps what wasn't found
+  auto stats = op("uri_stats", R"({"tenant":"kc","window":"5m"})");
+  std::string text = json::dump(stats.at("value"));
+  EXPECT_EQ(text.find("/scan-"), std::string::npos) << text;  // the stats count them together
+  EXPECT_NE(text.find("(not found)"), std::string::npos) << text;
+}

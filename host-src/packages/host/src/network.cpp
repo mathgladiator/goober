@@ -33,9 +33,29 @@ namespace {
 
 constexpr size_t kMaxReplyBytes = 4 << 20;
 
+// The whole authority is checked, not a prefix: "http://127.0.0.1:80@10.0.0.5/" names 10.0.0.5.
 bool is_loopback_http(std::string_view url) {
-  return url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/") ||
-         url.starts_with("http://localhost:") || url.starts_with("http://localhost/");
+  if (!url.starts_with("http://")) return false;
+  std::string_view rest = url.substr(7);
+  std::string_view authority = rest.substr(0, rest.find_first_of("/?#"));
+  if (authority.find_first_of("@\\ \t\r\n") != std::string_view::npos) return false;
+  std::string_view host = authority;
+  if (authority.starts_with("[")) {
+    auto close = authority.find(']');
+    if (close == std::string_view::npos) return false;
+    host = authority.substr(0, close + 1);
+    authority.remove_prefix(close + 1);
+  } else {
+    host = authority.substr(0, authority.find(':'));
+    authority.remove_prefix(host.size());
+  }
+  if (!authority.empty()) {  // the port: ":" and digits only
+    if (authority[0] != ':' || authority.size() < 2) return false;
+    for (char c : authority.substr(1)) {
+      if (c < '0' || c > '9') return false;
+    }
+  }
+  return host == "127.0.0.1" || host == "localhost" || host == "[::1]";
 }
 
 std::string text_of(const bj::value& v) {
@@ -384,8 +404,6 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   return json::dump(result);
 }
 
-namespace {
-
 bool plain_email(std::string_view s) {
   auto at = s.find('@');
   if (at == std::string_view::npos || at == 0 || at + 1 >= s.size() || s.size() > 254) return false;
@@ -398,8 +416,6 @@ bool plain_email(std::string_view s) {
   }
   return true;
 }
-
-}  // namespace
 
 bool Host::outbox_quota_take(const std::string& tenant, const std::string& service, std::string* why) {
   auto cfg = config_.get();

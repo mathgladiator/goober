@@ -83,6 +83,8 @@ Found search(const fs::path& dir, const std::vector<std::string>& names, const Q
             if (!kv.key().ends_with("_h") || !kv.value().is_string()) continue;
             for (const auto& h : q.hashes) any |= kv.value().as_string() == h;
           }
+          // An address inside free text, written as [address <hash>].
+          for (const auto& h : q.hashes) any = any || line.find("[address " + h + "]") != std::string::npos;
           match = any;
         }
         if (!match || (q.allow && !q.allow(name, o))) continue;

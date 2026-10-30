@@ -103,7 +103,7 @@ std::optional<std::pair<std::string, std::string>> Host::terms_now(const std::st
 
 bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& inv, bool reminder, std::string* why) {
   auto cfg = config_.get();
-  if (consent_->block(tenant, address_hash(inv.email))) return *why = "blocked", false;
+  if (consent_->block_of(tenant, inv.email)) return *why = "blocked", false;
   // Invites count against the tenant's mail for the day, in the same ledger as box mail.
   std::lock_guard lock(sent_mu_);
   fs::create_directories(cfg->storage / "mail");
@@ -187,7 +187,7 @@ std::optional<identity::Invite> Host::make_invite(const std::string& tenant, ide
     return *why = "invites need the tenant's postal address: set tenants." + tenant + ".postal-address in the host config",
            std::nullopt;
   }
-  if (consent_->block(tenant, address_hash(inv.email))) {
+  if (consent_->block_of(tenant, inv.email)) {
     return *code = "blocked", *why = inv.email + " asked for no invites or mail from this site", std::nullopt;
   }
   auto lists = tenant_lists(tenant);
@@ -404,7 +404,7 @@ std::string Host::invites_call(CallContext& ctx, const manifest::ExternalService
     bj::object out{{"email", email}, {"state", list.empty() ? "none" : list[0].state}};
     if (!list.empty()) out["invite_id"] = std::to_string(list[0].id);
     std::string why;
-    if (consent_->block(ctx.tenant, address_hash(email))) why = "blocked";
+    if (consent_->block_of(ctx.tenant, email)) why = "blocked";
     else if (identity_->proved(ctx.tenant, email)) why = "member";
     else if (!list.empty() && list[0].state == "open") why = "open";
     else if (!list.empty() && (list[0].state == "lapsed" || list[0].state == "revoked") &&
@@ -432,9 +432,7 @@ std::string Host::invites_call(CallContext& ctx, const manifest::ExternalService
     if (!kFields.count(kv.key())) return fail("send takes {email, roles?, lists?, note?, inviter_name?, return?}; \"" + std::string(kv.key()) + "\" isn't one");
   }
   std::string email = base::to_lower(field(r, "email"));
-  if (email.find('@') == std::string::npos || email.find_first_of(" <>,\"") != std::string::npos || email.size() > 254) {
-    return fail("email is one address");
-  }
+  if (!plain_email(email)) return fail("email is one address");
   bool ok = true;
   auto roles = strings(r, "roles", &ok);
   auto lists = strings(r, "lists", &ok);
@@ -477,7 +475,7 @@ std::string Host::invites_call(CallContext& ctx, const manifest::ExternalService
   if (tc.postal_address.empty()) {
     return fail("invites need the tenant's postal address: set tenants." + ctx.tenant + ".postal-address in the host config");
   }
-  if (consent_->block(ctx.tenant, address_hash(email))) return fail("blocked: " + email + " asked for no invites from this site");
+  if (consent_->block_of(ctx.tenant, email)) return fail("blocked: " + email + " asked for no invites from this site");
   if (identity_->proved(ctx.tenant, email)) return fail("member: " + email + " already has an account here");
   if (identity_->open_invite_for(ctx.tenant, email)) return fail("open: an invite to " + email + " is still open");
   OutboxElement e;
