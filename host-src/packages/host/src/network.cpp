@@ -792,7 +792,7 @@ void Host::egress_log(const std::string& tenant, const std::string& box, const s
   if (!error.empty()) line["error"] = error;
   if (!request_id.empty()) line["request_id"] = request_id;
   if (outbox_id) line["outbox_id"] = outbox_id;
-  base::append_line(config_.get()->storage / "logs" / "egress.log", json::dump(line));
+  log_line("egress", (line));
 }
 
 }  // namespace goober::host

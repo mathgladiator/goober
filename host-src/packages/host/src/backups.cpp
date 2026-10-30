@@ -175,6 +175,11 @@ void BackupService::tick(int64_t now_ms) {
   } catch (const std::exception& e) {
     record_error("assets", e.what(), now_ms);
   }
+  try {
+    if (run_logs(now_ms, &error) < 0) record_error("logs", error, now_ms);
+  } catch (const std::exception& e) {
+    record_error("logs", e.what(), now_ms);
+  }
   // Tonight's slot: today at nightly-at, or yesterday's if that hasn't come yet.
   int64_t slot = now_ms / kDayMs * kDayMs + int64_t(cfg->backup.nightly_minute) * 60000;
   if (slot > now_ms) slot -= kDayMs;
@@ -304,6 +309,20 @@ void BackupService::rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t n
     std::string night = o.key.substr(11, 20);
     if (night != newest_night && old(night) && !s3.remove(o.key, &error)) record_error("rotation", error, now_ms);
   }
+  // Archived logs are kept 400 days (032 § 2), by the day in their key: logs/$name/yyyy/mm/dd/...
+  if (auto archived = s3.list("logs/", &error)) {
+    int64_t log_cutoff = now_ms - 400 * kDayMs;
+    for (const auto& o : *archived) {
+      // The date is the three path segments before the file name.
+      auto last = o.key.rfind('/');
+      if (last == std::string::npos || last < 11) continue;
+      std::string ymd = o.key.substr(last - 10, 10);  // yyyy/mm/dd
+      auto at = backup::parse_moment(ymd.substr(0, 4) + "-" + ymd.substr(5, 2) + "-" + ymd.substr(8, 2));
+      if (at && *at < log_cutoff && !s3.remove(o.key, &error)) record_error("rotation", error, now_ms);
+    }
+  } else {
+    record_error("rotation", error, now_ms);
+  }
   // Attachments deleted here more than keep-days ago leave the bucket too.
   std::vector<std::tuple<std::string, int64_t, std::string>> gone;
   {
@@ -317,6 +336,58 @@ void BackupService::rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t n
       d.bind(1, tenant).bind(2, id).run();
     }
   }
+}
+
+int BackupService::run_logs(int64_t now_ms, std::string* error) {
+  std::lock_guard lock(mu_);
+  auto cfg = config_();
+  if (!cfg->backup.enabled() || cfg->sandbox) return 0;
+  fs::path queue = cfg->storage / "logs" / "archive";
+  std::error_code ec;
+  if (!fs::exists(queue, ec)) return 0;
+  std::vector<fs::path> files;
+  for (auto it = fs::directory_iterator(queue, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    if (it->path().extension() == ".log") files.push_back(it->path());
+  }
+  if (files.empty()) return 0;
+  auto key = this->key(error);
+  if (!key) return -1;
+  auto s3 = bucket(*cfg);
+  std::sort(files.begin(), files.end());
+  int put = 0;
+  for (const auto& f : files) {
+    fs::path manifest = f;
+    manifest.replace_extension(".manifest.json");
+    std::string log = "unknown", rotated = base::format_utc_ms(now_ms);
+    if (auto text = base::read_file(manifest)) {
+      std::string err;
+      if (auto v = json::parse(*text, &err); v && v->is_object()) {
+        if (auto* l = v->as_object().if_contains("log"); l && l->is_string()) log = std::string(l->as_string());
+        if (auto* r = v->as_object().if_contains("rotated_at"); r && r->is_string()) rotated = std::string(r->as_string());
+      }
+    }
+    for (auto& ch : log) {
+      if (ch == '/') ch = '_';
+    }
+    std::string stem = f.stem().string();
+    std::string prefix = "logs/" + log + "/" + rotated.substr(0, 4) + "/" + rotated.substr(5, 2) + "/" + rotated.substr(8, 2) + "/";
+    fs::path packed = cfg->storage / "tmp" / (stem + ".log.tar.gz");
+    fs::create_directories(packed.parent_path(), ec);
+    if (!run_tar({"-czf", packed.string(), "-C", queue.string(), f.filename().string()}, error)) return -1;
+    bool ok = seal_and_put(*s3, *key, packed, prefix + stem + ".log.tar.gz.sealed", error);
+    fs::remove(packed, ec);
+    if (!ok) return -1;
+    // The manifest goes up as it is: it holds no log content, and lets the chain be checked
+    // without the key.
+    if (fs::exists(manifest, ec)) {
+      if (!s3->put_file(prefix + stem + ".manifest.json", manifest, error)) return -1;
+      fs::remove(manifest, ec);
+    }
+    fs::remove(f, ec);
+    ++put;
+    set_meta("last_logs_ms", std::to_string(now_ms));
+  }
+  return put;
 }
 
 bool BackupService::run_increment(int64_t now_ms, std::string* error) {
@@ -581,6 +652,7 @@ bj::object BackupService::status(bool with_points, int64_t now_ms) {
   out["night"] = meta("night");
   out["last_nightly_at"] = when("last_nightly_ms");
   out["last_increment_at"] = when("last_increment_ms");
+  out["last_logs_at"] = when("last_logs_ms");
   out["last_error"] = meta("last_error");
   out["last_error_at"] = when("last_error_ms");
   out["key_confirmed_at"] = when("key_confirmed_ms");

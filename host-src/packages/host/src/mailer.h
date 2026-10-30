@@ -44,6 +44,9 @@ class MailQueue {
   using DevFn = std::function<void(const identity::Mail&)>;
   MailQueue(ConfigFn config, CredentialsFn credentials, DevFn dev);
   ~MailQueue();
+  // Where mail.log lines go (the host's logs, 032); without one, nothing is logged.
+  using LogFn = std::function<void(const std::string& log, boost::json::object line)>;
+  void set_log(LogFn log) { log_ = std::move(log); }
   // Queues a mail for the background thread, with three tries.
   void send(identity::Mail mail);
   // Delivers one mail now, on the calling thread, once; the outbox calls this.
@@ -52,6 +55,7 @@ class MailQueue {
   void drain();
 
  private:
+  LogFn log_;
   void run();
   bool deliver_smtp(const config::HostConfig& cfg, const identity::Mail& mail, std::string* error);
 

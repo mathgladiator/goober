@@ -40,6 +40,9 @@ class BackupService {
   bool run_increment(int64_t now_ms, std::string* error);
   // Uploads what's queued and due; returns how many went up.
   int run_assets(int64_t now_ms, std::string* error);
+  // Rotated logs queued under logs/archive/ (design/machine/032.Logs.md § 2): each packed,
+  // sealed, and put under logs/, its manifest beside it, then its queue link removed.
+  int run_logs(int64_t now_ms, std::string* error);
 
   // Health is judged at now_ms (the wall clock, except in tests).
   boost::json::object status(bool with_points, int64_t now_ms);

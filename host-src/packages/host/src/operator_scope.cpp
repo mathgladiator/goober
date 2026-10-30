@@ -39,7 +39,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
           "template_put", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
           "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
-          "page_lint", "approval_record", "approval_verify", "approval_list"}) {
+          "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow"}) {
       m[t] = Rule::kTenant;
     }
     for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote"}) m[t] = Rule::kBox;
@@ -53,16 +53,16 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     m["source_create"] = Rule::kProjectCreate;
     m["attachment_upload_part"] = Rule::kTicket;
     for (const char* t : {"change_get", "source_job"}) m[t] = Rule::kResult;
-    for (const char* t : {"domain_list", "box_list", "source_list", "timers_list", "outbox_dead_letters"}) {
+    for (const char* t : {"domain_list", "box_list", "source_list", "timers_list", "outbox_dead_letters", "uri_stats"}) {
       m[t] = Rule::kFiltered;
     }
     for (const char* t : {"box_guide", "site_guide", "rust_binding", "library_list", "library_get", "schema_list",
-                          "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check"}) {
+                          "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check", "log_search"}) {
       m[t] = Rule::kOpen;
     }
     for (const char* t : {"host_health", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
                           "backup_status", "crawl_list", "crawl_pages", "crawl_records", "crawl_rerun", "crawl_start",
-                          "crawl_stop", "web_optout"}) {
+                          "crawl_stop", "web_optout", "log_verify", "log_status", "agent_audit"}) {
       m[t] = Rule::kHost;
     }
     return m;

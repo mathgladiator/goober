@@ -75,6 +75,19 @@ constexpr const char* kUsage =
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
     "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n";
 
+namespace bj = boost::json;
+
+// The CLI's own audit and db lines, through the same chained logs the host writes (032): the
+// writer takes the file's lock and re-reads its tail, so the chain stays one chain.
+void cli_log(const goober::config::HostConfig& config, const std::string& log, bj::object line) {
+  std::string host = config.public_url;
+  if (auto at = host.find("://"); at != std::string::npos) host = host.substr(at + 3);
+  host = host.substr(0, host.find_first_of(":/"));
+  if (host.empty()) host = config.platform_domain;
+  goober::logs::Set set(config.storage / "logs", host);
+  set.write(log, line, goober::base::now_unix_ms());
+}
+
 std::string shell_quote(const std::string& s) {
   std::string out = "'";
   for (char c : s) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
@@ -113,6 +126,8 @@ int run_token(const std::vector<std::string>& args, const std::string& config_pa
       std::cerr << "goober-host: " << err << "\n";
       return 1;
     }
+    cli_log(*config, "audit", bj::object{{"action", "token.create"}, {"actor", "cli"}, {"target", "token:" + name}, {"outcome", "ok"},
+                                         {"tenants", tenants}});
     if (!focus.empty() && !goober::host::write_operator_scope(config->storage, "token:" + name, focus, "cli",
                                                              goober::base::now_unix_ms(), &err)) {
       std::cerr << "goober-host: " << err << "\n";
@@ -135,6 +150,8 @@ int run_token(const std::vector<std::string>& args, const std::string& config_pa
   }
   if (verb == "revoke" && args.size() > 2) {
     int n = goober::host::revoke_operator_tokens(config->storage, args[2]);
+    cli_log(*config, "audit", bj::object{{"action", "token.revoke"}, {"actor", "cli"}, {"target", args[2]},
+                                         {"outcome", n > 0 ? "ok" : "refused"}, {"count", n}});
     std::cout << "revoked " << n << " token" << (n == 1 ? "" : "s") << "\n";
     return n > 0 ? 0 : 1;
   }
@@ -185,8 +202,7 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
     bool write = verb == "exec";
     auto r = dbs.operate(args[2], args[3], args[4], nullptr, write ? 1000 : 10000, write, &err);
     if (write) {
-      goober::base::append_line(config->storage / "logs" / "db.log",
-                                goober::json::dump(bj::object{{"at", goober::base::format_utc_ms(goober::base::now_unix_ms())},
+      cli_log(*config, "db", (bj::object{
                                                               {"operator", "cli"},
                                                               {"tenant", args[2]},
                                                               {"database", args[3]},
@@ -425,6 +441,8 @@ int main(int argc, char** argv) {
     if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
     goober::identity::Identity id(config->storage / "identity", [](const goober::identity::Mail&) {});
     int n = id.revoke_sessions(goober::identity::kHostRealm, positional[2], "cli", goober::base::now_unix_ms());
+    cli_log(*config, "audit", bj::object{{"action", "operator.revoke"}, {"actor", "cli"}, {"outcome", "ok"}, {"count", n},
+                                         {"target", "operator:" + positional[2]}});
     std::cout << "ended " << n << " session(s) and token(s) for " << positional[2]
               << "; minted operator tokens are listed by `goober-host token list`\n";
     return 0;

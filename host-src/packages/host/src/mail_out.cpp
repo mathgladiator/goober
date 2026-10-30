@@ -29,8 +29,10 @@ void Host::register_mail_out_tools() {
        "A tenant's recent mail, newest last: what arrived for its addresses (from, to, which box and route took "
        "it, and the answer: delivered, refused, deferred, dropped as automatic) and what its boxes sent (to, from, "
        "subject, sent or failed and why). Use it to answer \"did my mail arrive?\" and \"did my reply go?\". "
-       "Mail a box queued but the host hasn't sent yet is in outbox_list.",
+       "Mail a box queued but the host hasn't sent yet is in outbox_list. Logs keep addresses only as hashes (032): "
+       "each entry shows the address's domain and hash; give email to see only that address's mail, by name.",
        object_schema({{"tenant", string_property("A tenant name from the host config.")},
+                      {"email", string_property("Only this address's mail.")},
                       {"limit", mcp::integer_property("How many entries, 1 to 200. Default 30.")}},
                      {"tenant"}),
        [this](const bj::object& args) {
@@ -48,6 +50,24 @@ void Host::register_mail_out_tools() {
            auto* v = o.if_contains(k);
            return v && v->is_string() ? std::string(v->as_string()) : std::string();
          };
+         // An address as the log keeps it (a hash and a domain), or the asked-for address when it matches.
+         std::string want;
+         if (auto* e = args.if_contains("email"); e && e->is_string()) want = base::to_lower(std::string(e->as_string()));
+         std::string want_h = want.empty() ? "" : address_hash_for_logs(want);
+         auto who = [&](const bj::object& o, const std::string& k) -> std::string {
+           std::string h = str(o, (k + "_h").c_str());
+           if (h.empty()) return str(o, k.c_str());  // lines from before 032
+           if (!want_h.empty() && h == want_h) return want;
+           return "#" + h + "@" + str(o, (k + "_domain").c_str());
+         };
+         auto matches = [&](const bj::object& o) {
+           if (want.empty()) return true;
+           for (const char* k : {"to", "from"}) {
+             if (str(o, (std::string(k) + "_h").c_str()) == want_h || base::to_lower(str(o, k)) == want) return true;
+           }
+           return false;
+         };
+         auto when = [&](const bj::object& o) { return str(o, "event_at").empty() ? str(o, "at") : str(o, "event_at"); };
          std::vector<std::pair<std::string, bj::object>> out;
          std::string err;
          // Mail in: the hook's lines in the access log. A refused recipient has no tenant yet,
@@ -57,30 +77,33 @@ void Host::register_mail_out_tools() {
            auto v = json::parse(line, &err);
            if (!v || !v->is_object()) continue;
            const auto& o = v->as_object();
-           std::string to = str(o, "to"), outcome = str(o, "outcome");
-           if (to.empty() || outcome == "pass") continue;
+           std::string to = who(o, "to"), outcome = str(o, "outcome");
+           if (to.empty() || outcome == "pass" || !matches(o)) continue;
            std::string owner = str(o, "tenant");
-           if (owner.empty()) owner = domains.count(to.substr(to.find('@') + 1)) ? tenant : "";
+           std::string to_domain = str(o, "to_domain").empty() ? to.substr(to.find('@') + 1) : str(o, "to_domain");
+           if (owner.empty()) owner = domains.count(to_domain) ? tenant : "";
            if (owner != tenant) continue;
-           bj::object e{{"at", str(o, "at")}, {"direction", "in"}, {"stage", str(o, "mail_in")}, {"from", str(o, "from")},
+           bj::object e{{"at", when(o)}, {"direction", "in"}, {"stage", str(o, "mail_in")}, {"from", who(o, "from")},
                         {"to", to}, {"outcome", outcome}};
            for (const char* k : {"box", "route", "why"}) {
              if (auto s = str(o, k); !s.empty()) e[k] = s;
            }
            if (auto* s = o.if_contains("status"); s && s->is_int64() && str(o, "mail_in") == "data") e["box_status"] = *s;
-           out.emplace_back(str(o, "at"), std::move(e));
+           out.emplace_back(when(o), std::move(e));
          }
          // Mail out: what the mailer did with each of the tenant's boxes' mails.
          for (const auto& line : base::tail_lines(cfg->storage / "logs" / "mail.log", 5000)) {
            auto v = json::parse(line, &err);
-           if (!v || !v->is_object() || str(v->as_object(), "tenant") != tenant) continue;
+           if (!v || !v->is_object() || str(v->as_object(), "tenant") != tenant || !matches(v->as_object())) continue;
            const auto& o = v->as_object();
-           bj::object e{{"at", str(o, "at")}, {"direction", "out"}, {"to", str(o, "to")}, {"subject", str(o, "subject")},
+           bj::object e{{"at", when(o)}, {"direction", "out"}, {"to", who(o, "to")}, {"subject", str(o, "subject")},
                         {"outcome", str(o, "status")}};
-           for (const char* k : {"from", "in_reply_to", "error", "message_id"}) {
+           if (auto f = str(o, "from_address"); !f.empty()) e["from"] = f;
+           else if (auto g = who(o, "from"); !g.empty()) e["from"] = g;
+           for (const char* k : {"in_reply_to", "error", "message_id"}) {
              if (auto s = str(o, k); !s.empty()) e[k] = s;
            }
-           out.emplace_back(str(o, "at"), std::move(e));
+           out.emplace_back(when(o), std::move(e));
          }
          std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
          bj::array list;

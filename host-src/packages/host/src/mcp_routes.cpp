@@ -150,8 +150,7 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
     extra["tool"] = audit_tool;
     extra["tool_status"] = audit_status;
     // Every tool call is written down: the agent, the person, the input, and the result (050).
-    base::append_line(config_.get()->storage / "logs" / "agents.log",
-                      json::dump(bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},
+    log_line("agents", (bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},
                                             {"request_id", request_id},
                                             {"tenant", tenant},
                                             {"user_id", std::to_string(who->user.user_id)},

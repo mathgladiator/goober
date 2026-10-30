@@ -16,6 +16,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/logs/logs.h"
 #include "goober/mail_consent/consent.h"
 #include "goober/mail_inbound/mime.h"
 #include "goober/mail_templates/templates.h"
@@ -23,6 +24,7 @@
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
 #include "goober/operations/changes.h"
+#include "goober/operations/live.h"
 #include "goober/operations/traffic.h"
 #include "goober/runtime_wasm/engine.h"
 #include "goober/server_http/server.h"
@@ -120,6 +122,8 @@ class Host {
   // The operator panel's rollups and change log (design/machine/028.Panel.md).
   operations::Traffic& traffic() { return *traffic_; }
   operations::ChangeLog& changes() { return *changes_; }
+  logs::Set& logs() { return *logs_; }
+  operations::LiveStats& live() { return live_; }
   // Whether the host is ready (GET /goober/ready):
   // storage writable (when probed), identity answering, boxes loaded, the queue not full.
   std::pair<int, boost::json::object> readiness(bool probe_storage);
@@ -372,6 +376,17 @@ class Host {
                                           const std::string& tool, boost::json::value& result);
   std::mutex scopes_mu_;
   void register_scope_tools();
+  // Logs (logs_tools.cpp; design/machine/032.Logs.md): every log line goes through log_line,
+  // which hashes addresses and writes the envelope and chain; audit() writes the audit log.
+  void log_line(const std::string& log, boost::json::object line);
+  void audit(const std::string& action, const std::string& actor, const std::string& target, const std::string& outcome,
+             boost::json::object more = {});
+  std::string address_hash_for_logs(const std::string& address);
+  void register_log_tools();
+  // Hourly: rotate quiet logs, and keep 7 days of rotated files on the machine (§ 2).
+  void logs_housekeeping(int64_t now_ms);
+  std::unique_ptr<logs::Set> logs_;
+  operations::LiveStats live_;
   // The content kit (content_tools.cpp; design/machine/031.ContentKit.md).
   void register_content_kit_tools();
   // GET a path of one of this host's sites through its own listener, signed out.

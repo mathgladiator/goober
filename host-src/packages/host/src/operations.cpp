@@ -105,6 +105,10 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
       res.headers.emplace_back("retry-after", std::to_string(wait));
       return finish(std::move(res), R"({"why":"rate limited","bucket":"operator-auth"})");
     }
+    if (!req.header("authorization").empty()) {
+      audit("operator.auth_failed", "", "goober-operations-mcp", "refused",
+            bj::object{{"ip", client_address(req)}, {"request_id", req.header("goober-request-id")}});
+    }
     auto res = json_response(
         401, R"({"error":"a bearer token is required: sign in with OAuth as a host operator, or mint one with goober-host token create"})");
     // Where an MCP client learns to sign in (RFC 9728): the operator issuer.
@@ -147,6 +151,17 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   }
   bool failed = reply.body.find("\"isError\":true") != std::string::npos;
   if (failed) extra["tool_error"] = true;
+  // The audit log (032 § 4): every tool call, by whom, from where, on what, and how it went.
+  if (auto* tool = extra.if_contains("tool"); tool && tool->is_string()) {
+    bj::object args;
+    for (const auto& kv : extra) {
+      if (kv.key().starts_with("arg_")) args[kv.key().substr(4)] = kv.value();
+    }
+    audit("operator.tool", operator_name, std::string(tool->as_string()),
+          failed || reply.body.find("\"error\":{") != std::string::npos ? "failed" : "ok",
+          bj::object{{"ip", client_address(req)}, {"request_id", req.header("goober-request-id")}, {"via", "mcp"},
+                     {"args", std::move(args)}});
+  }
   // The change log's actions: every tool call, linked to its changes by the request id (§ 5).
   if (auto* tool = extra.if_contains("tool"); changes_ && tool && tool->is_string()) {
     operations::Action action{base::now_unix_ms(), operator_name, std::string(tool->as_string()),

@@ -92,7 +92,8 @@ cat > "$dir/stdin"
   EXPECT_FALSE(fs::exists(root / "storage/mail/outbox"));
   // consent.db (who the tenants may mail, by hash) is the only file there: no code, no mail.
   for (const auto& e : fs::directory_iterator(root / "storage/mail")) {
-    if (e.path().filename() != "consent.db") ADD_FAILURE() << e.path();
+    // consent.db, and reply.key (the key logs hash addresses under): no code, no mail.
+    if (e.path().filename() != "consent.db" && e.path().filename() != "reply.key") ADD_FAILURE() << e.path();
   }
   EXPECT_NE(base::read_file(root / "storage/logs/mail.log")->find(R"("status":"sent")"), std::string::npos);
 }

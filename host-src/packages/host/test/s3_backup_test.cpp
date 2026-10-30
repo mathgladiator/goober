@@ -247,3 +247,35 @@ TEST_F(S3BackupTest, FailuresAreRecordedAndRetried) {
   EXPECT_EQ(keys("nightly/").size(), 1u);
   EXPECT_EQ(host->backup_status(false).at("last_error"), "");
 }
+
+// Rotated logs go up sealed, with their manifests beside them, and leave the queue (032 § 2).
+TEST_F(S3BackupTest, RotatedLogsAreArchivedSealedWithTheirManifests) {
+  int64_t yesterday = utc(2026, 10, 28, 12, 0), today = utc(2026, 10, 29, 12, 0);
+  host->logs().write("access", bj::object{{"path", "/old"}}, yesterday);
+  auto rotated = host->logs().write("access", bj::object{{"path", "/new"}}, today);
+  ASSERT_TRUE(rotated);
+  ASSERT_TRUE(fs::exists(rotated->queued));
+  host->backup_tick(today);
+  auto archived = keys("logs/");
+  std::string sealed, manifest;
+  for (const auto& k : archived) {
+    if (k.ends_with(".log.tar.gz.sealed")) sealed = k;
+    if (k.ends_with(".manifest.json")) manifest = k;
+  }
+  ASSERT_FALSE(sealed.empty()) << archived.size();
+  EXPECT_TRUE(sealed.starts_with("logs/access/2026/10/29/access-")) << sealed;
+  ASSERT_FALSE(manifest.empty());
+  std::string perr;
+  auto m = json::parse(fake.objects("backups").at("host1/" + manifest), &perr);
+  ASSERT_TRUE(m);
+  EXPECT_EQ(m->at("first_seq").as_int64(), 1);
+  EXPECT_EQ(m->at("lines").as_int64(), 1);
+  EXPECT_FALSE(fs::exists(rotated->queued));  // uploaded: the queue's link is gone
+  EXPECT_TRUE(fs::exists(root / "storage/logs/access.log.1"));  // the local copy stays its 7 days
+  // The archive opens with the backup key and holds the line.
+  auto sealed_file = root / "archived.sealed";
+  base::write_file_durable(sealed_file, fake.objects("backups").at("host1/" + sealed));
+  std::string err;
+  ASSERT_TRUE(backup::unseal_file(key(), sealed_file, root / "archived.tar.gz", &err, sealed)) << err;
+  EXPECT_GT(fs::file_size(root / "archived.tar.gz"), 0u);
+}

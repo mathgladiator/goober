@@ -152,6 +152,9 @@ Read these before doing design work:
   - `design/machine/031.ContentKit.md`: kcmeatup's engineers' requests: platform sitemap.xml and
     llms.txt, markdown posts with a built-in post template and BlogPosting, content_deploy with
     checks before and after, url_check, page_lint, compact output, and stable tool schemas.
+  - `design/machine/032.Logs.md`: logs with an envelope and a hash chain, daily rotation, sealed
+    archives kept 400 days, addresses as keyed hashes, an audit log, the log dive, live per-URI
+    p99 and flow in memory, agent auditing, the panel's new views, and a SOC2 mapping.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

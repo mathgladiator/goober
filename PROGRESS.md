@@ -430,6 +430,17 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       ignored_arguments, schema hashes, tool_schemas; the tenant filled in when only one fits.
 - [ ] Pinned partials and parameters (031 § 7); an approvals ledger (031 § 7): waiting on the human.
 
+### Phase 24: logs, performance, and auditing agents (032)
+- [x] The `logs` package: an envelope (at, log, seq, host), a hash chain through every line and
+      across rotations and processes, daily and size rotation with manifests, verify, search.
+- [x] Every host log through it, addresses as keyed hashes; an `audit` log of operator tool
+      calls, auth failures, sign-ins, panel writes, reloads, start and stop, and CLI tokens.
+- [x] Rotated logs uploaded sealed with their manifests, kept 400 days; 7 days on the machine.
+- [x] Live per-URI statistics and flow in memory; `uri_stats`, `uri_tree`, `uri_flow`,
+      `agent_audit`, `log_search`, `log_verify`, `log_status`.
+- [x] Panel views: Sitemap (an icicle of the site), Performance, Agents, Content, Logs.
+- [ ] Alerting a person when a flag goes up; S3 object lock (set outside goober).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

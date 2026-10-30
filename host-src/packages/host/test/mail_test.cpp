@@ -192,7 +192,8 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
   auto mail_log = base::read_file(root / "storage/logs/mail.log");
   ASSERT_TRUE(mail_log);
   EXPECT_NE(mail_log->find(R"("tenant":"playground")"), std::string::npos) << *mail_log;
-  EXPECT_NE(mail_log->find(R"("from":"hello@kc.example")"), std::string::npos) << *mail_log;
+  EXPECT_NE(mail_log->find(R"("from_address":"hello@kc.example")"), std::string::npos) << *mail_log;
+  EXPECT_EQ(mail_log->find("fan@example.org"), std::string::npos) << *mail_log;  // the person: a hash
   std::string url = m.substr(at + 19, m.find('>', at) - at - 19);
   std::string path = url.substr(std::string("https://kc.example").size());
 

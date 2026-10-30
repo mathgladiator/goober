@@ -23,7 +23,7 @@ constexpr int64_t kHoursKeptMs = 400 * 24 * kHourMs;
 // The most bytes one pass reads from a log before it commits, so a first start over a
 // large history stays within memory.
 constexpr size_t kChunkBytes = 8u << 20;
-constexpr int kRotationsKept = 3;
+constexpr int kRotationsKept = 64;  // logs::kKeepFiles (032 § 2)
 
 std::string text(const bj::object& o, std::string_view k) {
   auto* v = o.if_contains(k);

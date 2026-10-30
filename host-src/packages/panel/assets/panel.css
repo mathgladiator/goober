@@ -156,3 +156,16 @@ details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
 .scope label { white-space: nowrap; margin-right: 6px; }
 .unblock input[type=email], .unblock textarea { display: block; width: 100%; max-width: 32rem; margin: 6px 0; font: inherit; padding: 6px 8px;
   border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+svg.icicle { width: 100%; height: auto; display: block; }
+svg.icicle .seg-node { cursor: pointer; }
+svg.icicle .seg-node:hover rect { opacity: .82; }
+svg.icicle .seg-label { font-size: 11px; fill: #fff; pointer-events: none; }
+svg.spark { width: 160px; height: 26px; display: block; }
+pre.source { white-space: pre-wrap; word-break: break-word; max-height: 70vh; overflow: auto; font-size: .82rem; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+form.logform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+form.logform input[type=text] { flex: 1 1 18rem; }
+form.logform input, form.logform select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.loglines { font-size: .8rem; }
+.logline { padding: 4px 2px; border-bottom: 1px solid var(--line); cursor: pointer; word-break: break-all; }
+.logline:hover { background: var(--bg); }

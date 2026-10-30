@@ -41,7 +41,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "site_guide",      "rust_binding",      "pwa_get",          "pwa_list",        "pwa_subscriptions",
     "library_list",    "library_get",       "operator_scope",   "invite_list",     "invite_get",
     "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
-    "approval_verify", "approval_list",     "tool_schemas"};
+    "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
+    "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -236,6 +237,9 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     if (tool == "write/scope" || tool == "write/unblock") {
       auto [status, body] = tool == "write/scope" ? panel_set_scope(*who, args, request_id)
                                                   : panel_unblock(*who, args, request_id);
+      audit(tool == "write/scope" ? "panel.scope_set" : "panel.block_lift", me,
+            tool == "write/scope" ? arg_text(args, "operator") : arg_text(args, "tenant"), status == 200 ? "ok" : "refused",
+            bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(json_reply(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
     if (!is_read_tool(tool)) {
@@ -262,6 +266,14 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     current_operator().clear();
     current_request_id().clear();
     bj::object extra{{"panel", tool}, {"operator", "panel:" + who->user.email}};
+    {
+      bj::object targs;
+      for (const char* k : {"tenant", "path", "box", "name", "log"}) {
+        if (auto* v = args.if_contains(k); v && v->is_string()) targs[k] = *v;
+      }
+      audit("operator.tool", me, tool, !out ? "refused" : out->is_error ? "failed" : "ok",
+            bj::object{{"ip", client_address(req)}, {"request_id", request_id}, {"via", "panel"}, {"args", std::move(targs)}});
+    }
     if (!out) return finish(json_reply(404, bj::object{{"error", "no such tool"}}), json::dump(extra));
     if (out->is_error) {
       extra["tool_error"] = true;

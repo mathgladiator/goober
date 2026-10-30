@@ -56,6 +56,14 @@ sudo journalctl -u goober-host --since today | grep -iE 'error|failed' | tail -n
 A few 5xx from a box Grok just deployed is normal while it iterates. Steady 5xx on a page
 people use is not.
 
+**The panel says more:** **Performance** (each URI's p99, live), **Sitemap** (the whole site,
+colored by p99), **Agents** (who called what; red flags when an agent goes ham), and **Logs**
+(search the last 7 days, newest first; click a line to follow its request id). Logs keep
+addresses only as hashes: type an address in the Logs view's address box to find its lines.
+Every log line is chained to the one before; to check nothing was edited or deleted, ask Grok
+for `log_verify`, or see `log_status` for what's waiting to be archived. Rotated logs go to the
+backup bucket under `logs/`, sealed, for 400 days.
+
 ## 4. Are backups and mail fine?
 
 ```sh

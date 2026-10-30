@@ -616,6 +616,225 @@ const views = {
     ];
   },
 
+  // The whole site as an icicle (a flame graph laid flat): width is traffic, or structure; color is p99.
+  async sitemap(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || tenants[0] || '';
+    const mode = params.get('mode') || 'traffic';
+    const zoom = params.get('path') || '/';
+    const win = params.get('window') || '1h';
+    const go = (k, v) => { params.set(k, v); location.hash = '#/sitemap?' + params; };
+    const tree = await api('uri_tree', { tenant, window: win });
+    const find = (n, path) => {
+      if (n.path === path) return n;
+      for (const k of n.children || []) { const f = find(k, path); if (f) return f; }
+      return null;
+    };
+    const root = find(tree, zoom) || tree;
+    const detail = h('div', { class: 'card' }, h('p', { class: 'muted' }, 'Click a segment to see its numbers and flow; double-click to zoom in.'));
+    const eps = Math.max(1, root.total * 0.004);
+    const leaves = (n) => (n.children || []).length ? n.children.reduce((a, k) => a + leaves(k), 0) : 1;
+    const weight = (n) => mode === 'traffic' ? n.total + eps * leaves(n) : leaves(n);
+    const color = (n) => {
+      if (!n.total) return '#9aa0a6';
+      const ms = n.p99_us / 1000;
+      if (ms < 100) return '#3a9a5b';
+      if (ms < 300) return '#9bbf3b';
+      if (ms < 1000) return '#d99a1e';
+      return '#c9372c';
+    };
+    const W = 1000, RH = 24;
+    let depth = 0;
+    const rects = [];
+    const lay = (n, x, w, d) => {
+      depth = Math.max(depth, d + 1);
+      rects.push({ n, x, w, d });
+      let cx = x;
+      const total = (n.children || []).reduce((a, k) => a + weight(k), 0) || 1;
+      for (const k of n.children || []) {
+        const kw = w * weight(k) / total;
+        lay(k, cx, kw, d + 1);
+        cx += kw;
+      }
+    };
+    lay(root, 0, W, 0);
+    const show = async (n) => {
+      clear(detail);
+      append(detail, [h('h2', {}, n.path), h('div', { class: 'stats' }, stat(n.kind, 'kind'), stat(fmt.n(n.total), 'requests (' + win + ')'),
+        stat(fmt.us(n.p99_us), 'p99'), stat(fmt.n(n.total_5xx), '5xx'))]);
+      try {
+        const f = await api('uri_flow', { tenant, path: n.path, window: win });
+        const list = (title, rows, key) => rows.length ? [h('h3', {}, title), h('ul', {}, rows.slice(0, 12).map((r) =>
+          h('li', {}, h('code', {}, r[key]), ' · ' + fmt.n(r.n))))] : null;
+        append(detail, [list('Came from', f.in, 'from'), list('Went next', f.out, 'to'),
+          !f.in.length && !f.out.length ? h('p', { class: 'muted' }, 'No same-site flow through it in this window.') : null]);
+      } catch (e) { append(detail, [errorBox(e)]); }
+      append(detail, [h('p', {}, h('a', { href: '#/perf?' + new URLSearchParams({ tenant, prefix: n.path }) }, 'Its paths in Performance →'))]);
+    };
+    const svg = s('svg', { viewBox: `0 0 ${W} ${depth * RH}`, class: 'icicle', role: 'img' },
+      rects.filter((r) => r.w >= 0.6).map((r) => {
+        const g = s('g', { class: 'seg-node' },
+          s('rect', { x: r.x + 0.5, y: r.d * RH + 0.5, width: Math.max(r.w - 1, 0.5), height: RH - 1, rx: 3, fill: color(r.n),
+            stroke: r.n.total_5xx ? '#c9372c' : 'none', 'stroke-width': r.n.total_5xx ? 2 : 0 }),
+          r.w > 40 ? s('text', { x: r.x + 6, y: r.d * RH + 16, class: 'seg-label' }, clip(r.n.name, Math.floor(r.w / 7))) : null,
+          s('title', {}, `${r.n.path}\n${r.n.kind} · ${r.n.total} requests · p99 ${fmt.us(r.n.p99_us)}`));
+        g.addEventListener('click', () => show(r.n));
+        g.addEventListener('dblclick', () => go('path', r.n.path));
+        return g;
+      }));
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Sitemap'),
+        h('select', { onchange: (e) => { params.delete('path'); go('tenant', e.target.value); } }, tenants.map((t) => h('option', { value: t, selected: t === tenant }, t))),
+        segmented(['traffic', 'structure'], mode, (m) => go('mode', m)),
+        segmented(['5m', '15m', '1h'], win, (w) => go('window', w)),
+        zoom !== '/' ? h('a', { href: '#/sitemap?' + new URLSearchParams({ tenant, mode, window: win }) }, '↑ the whole site') : null),
+      wideCard('', h('p', { class: 'muted small' }, 'Each row is one more path segment. Width is ' +
+        (mode === 'traffic' ? 'requests in the window (pages nobody visited keep a sliver)' : 'the number of pages and files under it') +
+        '. Green is a p99 under 100 ms, then yellow, orange, and red past a second; gray had no traffic; a red edge had 5xx. ' +
+        'Pages, files, and box routes show even unvisited.'), svg),
+      detail,
+    ];
+  },
+
+  async perf(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || (focus() ? focus()[0] : '');
+    const win = params.get('window') || '15m', sort = params.get('sort') || 'p99', prefix = params.get('prefix') || '';
+    const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); location.hash = '#/perf?' + params; };
+    const rows = await api('uri_stats', { tenant, window: win, sort, prefix, limit: 300 });
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Performance'),
+        h('select', { onchange: (e) => go('tenant', e.target.value) }, focus() ? null : h('option', { value: '' }, 'all tenants'),
+          tenants.map((t) => h('option', { value: t, selected: t === tenant }, t))),
+        segmented(['5m', '15m', '1h'], win, (w) => go('window', w)), h('label', {}, 'Sort '), segmented(['p99', 'count', 'errors'], sort, (x) => go('sort', x)),
+        prefix ? h('span', { class: 'pill' }, 'under ' + prefix, ' ', h('a', { href: '#/perf?' + new URLSearchParams({ tenant, window: win, sort }) }, '×')) : null),
+      wideCard('', h('p', { class: 'muted small' }, 'Measured in memory as requests happen, so it is current to the second; it starts over when the host restarts. History is in Traffic.'),
+        rows.length ? table([
+          { label: 'Tenant', get: (r) => r.tenant, cls: () => 'muted' },
+          { label: 'Path', get: (r) => r.path, cls: () => 'mono' },
+          { label: 'Box · route', get: (r) => r.box ? r.box + ' · ' + (r.route || '') : '', cls: () => 'muted' },
+          { label: 'Requests', num: true, get: (r) => fmt.n(r.n) },
+          { label: '4xx', num: true, get: (r) => r.n4 ? fmt.n(r.n4) : '', cls: (r) => r.n4 ? 'warn' : '' },
+          { label: '5xx', num: true, get: (r) => r.n5 ? fmt.n(r.n5) : '', cls: (r) => r.n5 ? 'err' : '' },
+          { label: 'p50', num: true, get: (r) => fmt.us(r.p50_us) },
+          { label: 'p95', num: true, get: (r) => fmt.us(r.p95_us) },
+          { label: 'p99', num: true, get: (r) => fmt.us(r.p99_us), cls: (r) => r.p99_us > 1e6 ? 'err' : r.p99_us > 3e5 ? 'warn' : '' },
+          { label: 'Max', num: true, get: (r) => fmt.us(r.max_us) },
+        ], rows) : h('p', { class: 'muted' }, 'No requests in this window yet.')),
+    ];
+  },
+
+  async agents(params) {
+    const win = params.get('window') || '24h';
+    const a = await api('agent_audit', { window: win });
+    const spark = (vals) => {
+      const max = Math.max(1, ...vals), W = 160, H = 26, step = W / Math.max(vals.length, 1);
+      return s('svg', { viewBox: `0 0 ${W} ${H}`, class: 'spark' },
+        vals.map((v, i) => s('rect', { x: i * step + 0.5, y: H - (H - 2) * v / max, width: Math.max(step - 1, 1), height: (H - 2) * v / max, fill: 'var(--accent)' })));
+    };
+    const flagText = (f) => {
+      const { flag, ...rest } = f;
+      return flag + ' (' + Object.entries(rest).map(([k, v]) => k.replace(/_/g, ' ') + ' ' + v).join(', ') + ')';
+    };
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Agents'), segmented(['1h', '24h', '7d'], win, (w) => { params.set('window', w); location.hash = '#/agents?' + params; })),
+      wideCard('', h('p', { class: 'muted small' }, 'Every operator, token, and site agent: what it called, wrote, deleted, and failed, from the audit log. ' +
+        'Flags: burst (more than 60 calls in 5 minutes or 30 writes in 10), failing (over a quarter of 20+ calls), deleting (more than 10 in an hour), looping (the same call 10+ times in 10 minutes).'),
+        a.actors.length ? table([
+          { label: 'Who', get: (r) => r.actor, cls: () => 'mono' },
+          { label: 'Activity', get: (r) => spark(r.spark) },
+          { label: 'Calls', num: true, get: (r) => fmt.n(r.calls) },
+          { label: 'Writes', num: true, get: (r) => fmt.n(r.writes) },
+          { label: 'Deletes', num: true, get: (r) => r.deletes ? fmt.n(r.deletes) : '', cls: (r) => r.deletes ? 'warn' : '' },
+          { label: 'Failed', num: true, get: (r) => r.failed ? fmt.n(r.failed) : '', cls: (r) => r.failed ? 'err' : '' },
+          { label: 'Peak 5m', num: true, get: (r) => fmt.n(r.peak_5m) },
+          { label: 'Flags', get: (r) => r.flags.length ? h('span', {}, r.flags.map((f) => h('span', { class: 'pill failed', title: flagText(f) }, f.flag))) : h('span', { class: 'muted' }, 'ok') },
+          { label: 'Last', get: (r) => fmt.ago(Date.parse(r.last)), cls: () => 'muted' },
+        ], a.actors, (r) => { location.hash = '#/logs?' + new URLSearchParams({ log: 'audit', pattern: '"actor":"' + r.actor + '"', since: win }); })
+          : h('p', { class: 'muted' }, 'No agent or operator activity in this window.')),
+    ];
+  },
+
+  async content(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || tenants[0] || '';
+    const tab = params.get('tab') || 'templates', item = params.get('item') || '';
+    const go = (o) => { location.hash = '#/content?' + new URLSearchParams({ tenant, tab, ...o }); };
+    let names = [], source = null, extra = null;
+    if (tab === 'templates') {
+      const t = await api('template_list', { tenant });
+      names = [...new Set([...(t.templates || []), ...Object.keys(t.defaults || {})])].sort();
+      if (item) { const g = await api('template_get', { tenant, name: item }); source = g.template; extra = 'from ' + g.source; }
+    } else if (tab === 'partials') {
+      const t = await api('partial_list', { tenant });
+      names = (t.partials || []).map((p) => typeof p === 'string' ? p : p.name);
+      if (item) { const g = await api('partial_get', { tenant, name: item }); source = g.html ?? g.text ?? JSON.stringify(g, null, 2); }
+    } else {
+      const pages = await api('page_list', { tenant });
+      names = pages.map((p) => p.url);
+      if (item) {
+        const [g, r] = await Promise.all([api('page_get', { tenant, path: item }), api('page_render', { tenant, path: item, drafts: true })]);
+        source = g.body;
+        extra = [g.kind + ' · ' + g.file + ' · etag ' + g.etag + ' · renders ' + r.status + ' · ' + fmt.bytes(r.bytes),
+          (r.problems || []).length ? ' · ' + r.problems.join('; ') : ' · no problems'].join('');
+      }
+    }
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Content'),
+        h('select', { onchange: (e) => { location.hash = '#/content?' + new URLSearchParams({ tenant: e.target.value, tab }); } },
+          tenants.map((t) => h('option', { value: t, selected: t === tenant }, t))),
+        segmented(['templates', 'partials', 'pages'], tab, (t) => { location.hash = '#/content?' + new URLSearchParams({ tenant, tab: t }); })),
+      h('div', { class: 'db' },
+        h('div', { class: 'card list' }, names.length ? names.map((n) => h('a', { href: '#/content?' + new URLSearchParams({ tenant, tab, item: n }), class: n === item ? 'on' : '' }, n))
+          : h('p', { class: 'muted' }, 'None.')),
+        h('div', { class: 'card' }, item ? [h('h2', {}, item), extra ? h('p', { class: 'muted small' }, extra) : null,
+          h('pre', { class: 'source' }, source ?? '')] : h('p', { class: 'muted' }, 'Pick one to read its source. Look-only: agents change these with template_put, partial_put, and page_put.'))),
+    ];
+  },
+
+  async logs(params) {
+    const st = await api('log_status', {}).catch(() => ({ logs: [], archive: {} }));
+    const log = params.get('log') || 'all', pattern = params.get('pattern') || '', regex = params.get('regex') === '1';
+    const email = params.get('email') || '', since = params.get('since') || '24h', before = params.get('before') || '';
+    const q = h('input', { type: 'text', value: pattern, placeholder: regex ? 'regex, like "status":5[0-9][0-9]' : 'text to find, like a request id' });
+    const em = h('input', { type: 'email', value: email, placeholder: 'an address (logs keep hashes)' });
+    const pick = h('select', {}, ['all', ...st.logs.map((l) => l.log)].map((n) => h('option', { value: n, selected: n === log }, n)));
+    const rx = h('input', { type: 'checkbox', checked: regex });
+    const submit = (extra) => {
+      const p = new URLSearchParams({ log: pick.value, pattern: q.value, since, ...(rx.checked ? { regex: '1' } : {}), ...(em.value ? { email: em.value } : {}), ...(extra || {}) });
+      location.hash = '#/logs?' + p;
+    };
+    let out = null;
+    if (params.toString()) {
+      const args = { log, since, limit: 200 };
+      if (pattern) args[regex ? 'regex' : 'pattern'] = pattern;
+      if (email) args.email = email;
+      if (before) args.before = before;
+      try {
+        const r = await api('log_search', args);
+        out = [h('p', { class: 'muted small' }, `${r.count} line${r.count === 1 ? '' : 's'}, newest first · ${fmt.bytes(r.bytes_read)} read`),
+          h('div', { class: 'loglines' }, r.lines.map((l) => {
+            let o = {};
+            try { o = JSON.parse(l); } catch { /* shown raw */ }
+            const row = h('div', { class: 'logline' }, h('span', { class: 'muted' }, (o.at || '').replace('T', ' ').slice(0, 19)), ' ',
+              h('span', { class: 'pill' }, o.log || ''), ' ', h('code', {}, l));
+            if (o.request_id) row.addEventListener('click', () => submit({ log: 'all', pattern: o.request_id, regex: '' }));
+            return row;
+          })),
+          r.next ? h('p', {}, h('a', { href: '#/logs?' + new URLSearchParams({ log, pattern, since, ...(regex ? { regex: '1' } : {}), ...(email ? { email } : {}), before: r.next }) }, 'Older →')) : null];
+      } catch (e) { out = [errorBox(e)]; }
+    }
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Logs'), segmented(['1h', '24h', '3d', '7d'], since, (w) => { params.set('since', w); params.delete('before'); location.hash = '#/logs?' + params; })),
+      wideCard('', h('form', { class: 'logform', onsubmit: (e) => { e.preventDefault(); submit(); } },
+        pick, q, h('label', {}, rx, ' regex'), em, h('button', {}, 'Search')),
+        h('p', { class: 'muted small' }, 'Every line is chained to the one before it (log_verify), rotated daily, kept 7 days here, and archived sealed ' +
+          (st.archive.enabled ? 'to the backup bucket for 400 days' : '— but backups are off, so nothing is archived') +
+          '. Click a line to see everything with its request id. Searches are themselves audited.'),
+        out),
+    ];
+  },
+
   async db(params) {
     const tenants = state.me.tenants || [];
     const tenant = params.get('tenant') || tenants[0] || '';
@@ -781,7 +1000,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'flow', 'boxes', 'box'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'flow', 'boxes', 'box', 'perf', 'agents'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

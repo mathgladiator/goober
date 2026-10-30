@@ -57,6 +57,8 @@ void Host::identity_tick(int64_t now_ms) {
     // Invites' one reminder each, and consent's old log rows (029).
     remind_invites(now_ms);
     consent_->prune(now_ms);
+    // Quiet logs rotate, and rotated files past 7 days leave the machine (032 § 2).
+    logs_housekeeping(now_ms);
   }
 
   struct Delivery {

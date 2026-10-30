@@ -480,8 +480,7 @@ void Host::register_data_tools() {
          bj::value params = it == args.end() ? bj::value(nullptr) : it->value();
          std::string err;
          auto r = databases_->operate(*tenant, *database, *sql, params, 1000, true, &err);
-         base::append_line(config_.get()->storage / "logs" / "db.log",
-                           json::dump(bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},
+         log_line("db", (bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},
                                                  {"operator", current_operator()},
                                                  {"tenant", *tenant},
                                                  {"database", *database},

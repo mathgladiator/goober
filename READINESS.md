@@ -23,6 +23,7 @@
 | 10. A community that meets by mail (one digest, one reply a day) | **Yes, to build** | Markdown digests, reply-token replies cut to the person's words, calendar invites with RSVPs, attachments (`design/machine/783.ThesisCommunity.md` § 4 is the recipe). |
 | 12. Invites, and mail that follows the law | **Yes, needs the postal address** | The host invites (roles, terms, lists, accept by code, decline for good), every box mail has a category with its rule, lists need a confirmed opt-in, and a person lifts a block (`design/machine/029.Invites.md`). Set `tenants.kcmeatup.postal-address` first. |
 | 13. A blog, and deploys that check themselves | **Yes** | One `page_put` per markdown post (built-in post template, BlogPosting, OG tags); the index, feed, sitemap, and llms.txt follow. `content_deploy` writes many files and checks what visitors get (`design/machine/031.ContentKit.md`). |
+| 14. Logs an auditor would accept | **Yes, archives untried with real S3** | Chained, rotated daily, kept 7 days and archived sealed for 400; an audit log; a grep-like dive; live p99 per URI; the panel's Sitemap, Performance, Agents, and Logs (`design/machine/032.Logs.md`). |
 | 11. Boxes that work with time and calendars | **Yes** | `time@1` and `ics@1` host libraries: zones, recurrence, invites, RSVPs, and proposals, tested against RFC 5545 and real clients' messages (`design/machine/831.Libraries.md`). |
 
 ## 1. Static content: yes

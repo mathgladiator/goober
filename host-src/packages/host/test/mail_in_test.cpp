@@ -259,8 +259,14 @@ TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
     EXPECT_EQ(m.at("direction"), "in");
     outcomes += std::string(m.at("to").as_string()) + "=" + std::string(m.at("outcome").as_string()) + " ";
   }
-  EXPECT_NE(outcomes.find("support@kcmeatup.com=delivered"), std::string::npos) << outcomes;
-  EXPECT_NE(outcomes.find("later@kcmeatup.com="), std::string::npos) << outcomes;
+  // Logs keep addresses as hashes (032 § 1): each shows as #hash@domain, and by name when asked for.
+  EXPECT_NE(outcomes.find("@kcmeatup.com=delivered"), std::string::npos) << outcomes;
+  EXPECT_EQ(outcomes.find("support@kcmeatup.com"), std::string::npos) << outcomes;
+  auto one = tool("mail_activity", {{"tenant", "kc"}, {"email", "Support@kcmeatup.com"}}).at("mail").as_array();
+  ASSERT_EQ(one.size(), 1u);
+  EXPECT_EQ(one[0].at("to"), "support@kcmeatup.com");
+  EXPECT_EQ(one[0].at("outcome"), "delivered");
+  EXPECT_EQ(tool("mail_activity", {{"tenant", "kc"}, {"email", "later@kcmeatup.com"}}).at("mail").as_array().size(), 1u);
   EXPECT_TRUE(tool("mail_activity", {{"tenant", "other"}}).at("mail").as_array().empty());
 }
 

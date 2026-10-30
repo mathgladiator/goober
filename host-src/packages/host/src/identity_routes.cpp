@@ -268,9 +268,13 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
       }
     }
     if (!in) {
+      audit("identity.sign_in_failed", "", as_host ? std::string(identity::kHostRealm) : tenant, "refused",
+            bj::object{{"email", email}, {"ip", client_address(req)}, {"request_id", request_id}, {"why", why}});
       return finish(page(400, "Check your email", code_form(email, ret, as_host, why, get(form, "invite"))),
                     R"({"identity":"verify_failed"})");
     }
+    audit("identity.sign_in", "user:" + std::to_string(in->user.user_id), in->user.realm, "ok",
+          bj::object{{"email", in->user.email}, {"ip", client_address(req)}, {"request_id", request_id}});
     // An invite: accepted now if the code form came from its Continue; else an open one is shown
     // before anything else, since nothing is accepted without its page (029 § 2.4).
     std::string invite_note;

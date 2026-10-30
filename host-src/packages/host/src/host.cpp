@@ -121,6 +121,14 @@ bool hidden_from_box(std::string_view name) { return name == "authorization" || 
 Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::path config_file)
     : config_file_(std::move(config_file)), config_(config) {
   started_ms_ = base::now_unix_ms();
+  // Every log line goes through one set of writers (design/machine/032.Logs.md), named for this host.
+  {
+    std::string host_name = config->public_url;
+    if (auto at = host_name.find("://"); at != std::string::npos) host_name = host_name.substr(at + 3);
+    host_name = host_name.substr(0, host_name.find_first_of(":/"));
+    if (host_name.empty()) host_name = config->platform_domain;
+    logs_ = std::make_unique<logs::Set>(config->storage / "logs", host_name);
+  }
   wal_ = std::make_unique<wal::HostWal>(config->storage);
   // The change log sees every bundle from here on (design/machine/028.Panel.md § 5). The
   // panel's stores are never a reason not to start: without them the host serves, and says so.
@@ -160,6 +168,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   keys_ = std::make_unique<KeyStore>(config->storage);
   mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
+  mail_->set_log([this](const std::string& log, bj::object line) { log_line(log, std::move(line)); });
   mail_templates_ = std::make_unique<mail::templates::Store>(config->storage / "mail" / "templates");
   // Who each tenant may mail (design/machine/029.Invites.md): the old unsubscribes become blocks once.
   consent_ = std::make_unique<mail::consent::Store>(config->storage / "mail" / "consent.db");
@@ -195,11 +204,15 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_library_tools();
   register_scope_tools();
   register_content_kit_tools();
+  register_log_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
 
-Host::~Host() { stop(); }
+Host::~Host() {
+  if (server_) audit("host.stop", "host", "", "ok");
+  stop();
+}
 
 void Host::backup_tick(int64_t now_ms) { backups_->tick(now_ms); }
 
@@ -242,6 +255,7 @@ void Host::run_backups() {
 
 uint16_t Host::start() {
   auto cfg = config_.get();
+  audit("host.start", "host", "", "ok", bj::object{{"build", std::string(kBuildCommit)}, {"version", std::string(kVersion)}});
   server::http::ServerOptions opts;
   opts.address = cfg->listen_address;
   opts.port = cfg->listen_port;
@@ -348,6 +362,7 @@ std::string Host::reload() {
   if (!next) return "reload refused: " + err;
   if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
+  audit("config.reload", "signal", "host.json", "ok", bj::object{{"notes", notes}});
   return "config reloaded. " + notes;
 }
 
@@ -439,8 +454,7 @@ void Host::write_dev_mail(const identity::Mail& mail) {
                                  base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), 4)));
   auto file = cfg->storage / "mail" / "outbox" / name;
   base::write_file_durable(file, eml);
-  base::append_line(cfg->storage / "logs" / "mail.log",
-                    json::dump(bj::object{{"at", base::format_utc_ms(now)},
+  log_line("mail", (bj::object{{"at", base::format_utc_ms(now)},
                                           {"to", mail.to},
                                           {"subject", mail.subject},
                                           {"file", "mail/outbox/" + name}}));
@@ -468,7 +482,34 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
       }
     }
   }
-  base::append_line(config_.get()->storage / "logs" / "access.log", json::dump(line));
+  // Live statistics (032 § 6): per tenant and path, with the route, and where the visitor came
+  // from on the same site.
+  if (!domain.empty()) {
+    auto cfg = config_.get();
+    if (auto tenant = cfg->tenant_for_host(domain)) {
+      // Every access line names its tenant, so the log dive can keep to an operator's scope.
+      if (!line.contains("tenant")) line["tenant"] = *tenant;
+      std::string path = req.path.substr(0, req.path.find('?'));
+      std::string from;
+      std::string ref = req.header("referer");
+      if (auto at = ref.find("://"); at != std::string::npos) {
+        std::string rest = ref.substr(at + 3);
+        auto slash = rest.find('/');
+        std::string host = base::to_lower(rest.substr(0, slash));
+        if (host.substr(0, host.find(':')) == base::to_lower(domain) && slash != std::string::npos) {
+          from = rest.substr(slash);
+          from = from.substr(0, from.find_first_of("?#"));
+        }
+      }
+      auto text = [&](const char* k) {
+        auto* v = line.if_contains(k);
+        return v && v->is_string() ? std::string(v->as_string()) : std::string();
+      };
+      live_.record(base::now_unix_ms(), *tenant, path, text("route"), text("box"), status,
+                   line.at("us").as_int64(), from);
+    }
+  }
+  log_line("access", std::move(line));
 }
 
 Response Host::error_page(const std::string& tenant, int status, const std::string& request_id) const {
@@ -989,14 +1030,14 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   // Logs are side effects, written after the call, never interleaved.
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
   for (const auto& line : result.logs) {
-    base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+    log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
                                                      {"request_id", request_id},
                                                      {"version", ref.box->version},
                                                      {"level", line.level},
                                                      {"text", line.text}}));
   }
   if (result.outcome != runtime::wasm::CallResult::Outcome::kOk) {
-    base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+    log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
                                                      {"request_id", request_id},
                                                      {"version", ref.box->version},
                                                      {"level", "host"},
@@ -1022,7 +1063,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     auto parsed = json::parse(result.body, &err);
     auto checked = parsed ? ref.box->types->check(type, *parsed, &err) : std::nullopt;
     if (!checked) {
-      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+      log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
                                                        {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
@@ -1065,7 +1106,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
       result.error = err;
       extra["outcome"] = "commit_failed";
-      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(input.now_ms)},
+      log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
                                                        {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
@@ -1225,7 +1266,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       }
     }
     if (!why.empty()) {
-      base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
+      log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
                                                        {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
@@ -1277,7 +1318,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         res.body = std::move(*html);
         templated = true;
       } else {
-        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
+        log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
                                                          {"request_id", request_id},
                                                          {"version", ref.box->version},
                                                          {"level", "host"},
@@ -1303,7 +1344,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         std::string names;
         for (const auto& n : e.missing) names += (names.empty() ? "" : ", ") + n;
         res.headers.emplace_back("x-goober-partial-missing", names);
-        base::append_line(log_file, json::dump(bj::object{{"at", base::format_utc_ms(now_ms)},
+        log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
                                                          {"request_id", request_id},
                                                          {"version", ref.box->version},
                                                          {"level", "host"},
