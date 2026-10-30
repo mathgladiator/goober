@@ -144,6 +144,16 @@ std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error
   auto dir_ok = [](const std::string& d) { return d == "." || source::valid_path(d); };
   for (const auto& kv : v->as_object()) {
     std::string k(kv.key());
+    if (k == "specs") {
+      // OpenAPI documents for the spec store (034 § 2), named by their file's stem.
+      if (!kv.value().is_array()) return *error = "goober.project.json: specs is a list", std::nullopt;
+      for (const auto& e : kv.value().as_array()) {
+        std::string s = e.is_string() ? std::string(e.as_string()) : "";
+        if (!source::valid_path(s) || !s.ends_with(".json")) return *error = "goober.project.json: specs holds .json paths: " + s, std::nullopt;
+        spec.specs.push_back(s);
+      }
+      continue;
+    }
     if (k == "boxes" || k == "schemas") {
       if (!kv.value().is_array()) return *error = "goober.project.json: " + k + " is a list", std::nullopt;
       for (const auto& e : kv.value().as_array()) {
@@ -165,7 +175,7 @@ std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error
         spec.sites.emplace_back(std::string(dir->as_string()), std::string(tenant->as_string()));
       }
     } else if (k != "description") {
-      return *error = "goober.project.json: unknown field \"" + k + "\" (boxes, schemas, sites)", std::nullopt;
+      return *error = "goober.project.json: unknown field \"" + k + "\" (boxes, schemas, specs, sites)", std::nullopt;
     }
   }
   if (spec.boxes.empty() && spec.schemas.empty() && spec.sites.empty()) {
@@ -297,6 +307,12 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
   }
   out.log += "revision " + std::to_string(rev) + " of " + project + ": " + std::to_string(files->size()) + " files\n";
 
+  for (const auto& s : spec->specs) {
+    auto text = read(s);
+    if (!text) return fail("specs names " + s + ", which isn't in the project");
+    std::string stem = fs::path(s).stem().string();
+    out.specs.emplace_back(stem, *text);
+  }
   for (const auto& s : spec->schemas) {
     auto text = read(s);
     if (!text) return fail("schemas names " + s + ", which isn't in the project");

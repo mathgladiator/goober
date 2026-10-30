@@ -387,14 +387,26 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
         reply = deliver_outbox_mail(tenant, r.body, now_ms);
       } else if (r.verb == "INVITE") {
         reply = deliver_outbox_invite(tenant, r.body, r.idem_key, now_ms);
+      } else if (r.verb == "HTTPX") {
+        reply = deliver_outbox_httpx(tenant, *db, r.id, r.box, r.service, r.method, r.body, r.idem_header, r.idem_key,
+                                     r.timeout_ms, now_ms);
       } else if (r.verb == "PUSH") {
         reply = deliver_outbox_push(tenant, r.body, r.idem_key, now_ms);
       } else if (reply.error.empty()) {
         reply = send_http(r.verb, r.url, headers, r.body, r.content_type, cfg->local, cfg->storage / "tmp", r.timeout_ms);
       }
       // A mail's address stays out of the egress log, like a URL's query.
-      egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.verb == "INVITE" ? "invite:" : r.url, reply.status, reply.error,
-                 base::monotonic_us() - started, r.body.size(), reply.body.size(), "", r.id);
+      // HTTPX logs each request it makes itself (an upload is several).
+      if (r.verb != "HTTPX") {
+        egress_log(tenant, r.box, r.service, r.method, r.verb, r.verb == "MAIL" ? "mail:" : r.verb == "INVITE" ? "invite:" : r.url,
+                   reply.status, reply.error, base::monotonic_us() - started, r.body.size(), reply.body.size(), "", r.id);
+      }
+      // Polling an async job (034 § 8) isn't an attempt: the element waits for its next look.
+      if (reply.polling) {
+        sqlite::Stmt w(*db, "UPDATE goober_outbox SET next_ms = ? WHERE id = ?");
+        w.bind(1, reply.retry_at_ms).bind(2, r.id).run();
+        break;
+      }
       int64_t attempts = r.attempts + 1;
       bool ok = reply.error.empty() && reply.status >= 200 && reply.status < 300;
       // A 4xx other than 408 or 429 won't get better by asking again.
@@ -403,6 +415,8 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       std::string state = ok ? "done" : (permanent || attempts >= r.max_attempts || now_ms >= r.deadline_ms) ? "dead" : "pending";
       int64_t backoff = r.backoff_ms << std::min<int64_t>(attempts - 1, 20);
       int64_t next_ms = now_ms + std::min<int64_t>(backoff, 3'600'000);
+      // Retry-After or a spent rate-limit window says when (034 § 9).
+      if (reply.retry_at_ms > next_ms) next_ms = reply.retry_at_ms;
       // The call went out, so its outcome must be written down: a busy database is waited out
       // rather than leaving the element pending to be sent again.
       bool recorded = false;
@@ -445,8 +459,8 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
   return delivered;
 }
 
-void Host::deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
-                          const bj::object& outcome) {
+bool Host::deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
+                          const bj::object& outcome, const std::optional<SignedIn>& who) {
   auto active = boxes_->active();
   auto it = active->boxes.find(box);
   const manifest::HttpRoute* target = nullptr;
@@ -474,22 +488,23 @@ void Host::deliver_result(const std::string& tenant, const std::string& box, con
     // The box was removed or changed since: the outcome is in the outbox list, not lost.
     access_log(pseudo, 404, started_us, domain,
                json::dump(bj::object{{"result", route}, {"box", box}, {"tenant", tenant}, {"why", "no such result route now"}}));
-    return;
+    return false;
   }
   bj::object doc{{"request_id", request_id}, {"method", "result"},       {"path", "result:" + route},
                  {"params", bj::object{}},   {"query", bj::object{}},     {"headers", bj::object{}},
                  {"body", json::dump(outcome)}, {"domain", domain},       {"tenant", tenant},
-                 {"user", nullptr}};
+                 {"user", user_json(who)}};
   CallOptions options;
   options.timeout_ms = target->timeout_ms;
   options.no_response_ok = true;
-  auto call = call_box(boxes::RouteRef{it->second, target}, doc, tenant, request_id, std::nullopt, options);
+  auto call = call_box(boxes::RouteRef{it->second, target}, doc, tenant, request_id, who, options);
   bool ok = (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk && call.result.status < 500) ||
             call.result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
   call.extra["result"] = route;
   call.extra["tenant"] = tenant;
-  call.extra["key"] = outcome.at("key");
+  if (auto* k = outcome.if_contains("key")) call.extra["key"] = *k;
   access_log(pseudo, ok ? (call.result.status ? call.result.status : 204) : 500, started_us, domain, json::dump(call.extra));
+  return ok;
 }
 
 bj::array Host::outbox_list(const std::string& state) {

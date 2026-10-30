@@ -57,7 +57,8 @@ const std::map<std::string, Rule, std::less<>>& rules() {
       m[t] = Rule::kFiltered;
     }
     for (const char* t : {"box_guide", "site_guide", "rust_binding", "library_list", "library_get", "schema_list",
-                          "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check", "log_search"}) {
+                          "schema_get", "web_fetch", "operator_scope", "tool_schemas", "url_check", "log_search", "spec_put",
+                          "spec_list", "spec_get"}) {
       m[t] = Rule::kOpen;
     }
     for (const char* t : {"host_health", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",

@@ -132,8 +132,53 @@ struct DataStrategy {
 
 // One method of an external service (030.TheLargerEnvironment.md, 035.TheOutBox.md;
 // design/machine/015.Network.md): what the box may call, and how the host sends it.
+// A test on a JSON answer (design/machine/034.SpeakingHttp.md §§ 8, 9): the value at a dotted
+// path ("body.data.state") is present, or equals a JSON value.
+struct Condition {
+  std::string at;
+  bool present = false;
+  std::string equals;  // JSON text, or "" when the test is presence
+  bool empty() const { return at.empty(); }
+};
+
+// Polling an async job (034 § 8).
+struct Poll {
+  std::string op;
+  std::map<std::string, std::string> path, query;  // values may hold {body.x} from the first answer
+  Condition done, failed;
+  int64_t every_ms = 2000;
+  std::string every_from;  // a field in seconds, like body.data.processing_info.check_after_secs
+  int64_t within_ms = 600000;
+};
+
+// A chunked upload of a stored attachment (034 § 7).
+struct UploadStep {
+  std::string op;
+  std::map<std::string, std::string> path;
+  std::string body;   // JSON text of a template object, for init and finalize
+  std::map<std::string, std::string> parts;  // multipart parts, for append
+  std::string id_at;  // where init's answer holds the upload id
+};
+struct Upload {
+  std::string attachment_at;  // where the box's call names the attachment, like body.media
+  UploadStep init, append, finalize;
+  int64_t chunk_bytes = 4 << 20;
+  bool empty() const { return attachment_at.empty(); }
+};
+
 struct ExternalMethod {
   std::string name;
+  // An operation of the service's spec: an operationId, or "VERB /path" (034 § 2). The host
+  // resolves the verb and path from the spec; verb and path are then empty here.
+  std::string op;
+  bool effect_given = false;
+  std::string body;         // json, form, multipart, raw, or "" (the spec's, else json)
+  std::string form_arrays = "brackets";  // brackets or repeat
+  bool any_public = false;  // the call gives the whole URL (034 § 10)
+  Condition error_when;
+  Poll poll;
+  bool polls = false;
+  Upload upload;
   std::string verb;  // get, post, put, patch, delete
   std::string path;  // like /v1/messages/{message_id}, appended to the service's base
   std::string effect;  // "none" (sent now), "outbox" (after commit), or "immediate" (now, effectful)
@@ -150,8 +195,32 @@ struct ExternalMethod {
   int64_t timeout_ms = 10000;
 };
 
+// How a person connects an account (034 § 5).
+struct Connect {
+  std::string kind;  // paste or oauth2, or ""
+  std::string label, help, check;  // paste: the form, and a method that tests the key
+  std::string authorize, token, client_id, client_secret, client_auth = "body";
+  std::vector<std::string> scopes;
+  std::string scope_separator = " ";
+  bool pkce = false;
+  std::map<std::string, std::string> extra;
+  std::string result_route;
+  int64_t early_ms = 300000;
+};
+
 struct ExternalService {
   std::string name;
+  std::string spec;  // a pinned spec, name@sha12, or ""
+  std::string auth_kind;  // header, bearer, basic, query, oauth1; "" is 015's header and prefix
+  std::string basic_user;
+  std::string oauth1_consumer_key, oauth1_consumer_secret;  // key names
+  std::string oauth1_token, oauth1_token_secret;  // key names, for a service that isn't sealed
+  bool sealed = false;  // credentials: "sealed": each call carries its own (034 § 4)
+  std::map<std::string, std::string> headers;
+  Connect connect;
+  bool retry_after = true;
+  std::string limit_remaining, limit_reset;  // header names
+  bool any_public = false;  // base "*"
   std::string box;  // another box on this host: methods name its internal routes (039)
   // The web through the host's crawler (design/machine/017.Crawl.md): the hosts it may read,
   // like "ranch.example", "*.ranch.example", or "*" for any. Its one method is fetch.

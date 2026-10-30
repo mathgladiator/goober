@@ -26,7 +26,7 @@ namespace goober::host {
 
 // What goober.project.json says a project builds.
 struct ProjectSpec {
-  std::vector<std::string> boxes, schemas;
+  std::vector<std::string> boxes, schemas, specs;
   std::vector<std::pair<std::string, std::string>> sites;  // dir, tenant
 };
 std::optional<ProjectSpec> read_spec(const std::string& text, std::string* error);
@@ -48,6 +48,7 @@ struct BuildResult {
   bool ok = false;
   std::string log;  // what the build said, compiler errors included (the end, when long)
   std::vector<std::pair<std::string, std::string>> schemas;  // file, text
+  std::vector<std::pair<std::string, std::string>> specs;    // name (the file's stem), text (034 § 2)
   std::vector<BuiltBox> boxes;
   std::vector<BuiltSite> sites;
 };

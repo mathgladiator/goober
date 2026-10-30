@@ -205,6 +205,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_scope_tools();
   register_content_kit_tools();
   register_log_tools();
+  register_spec_tools();
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
@@ -733,6 +734,17 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
       } catch (const std::exception& e) {
         std::cerr << "goober-host: pwa: " << e.what() << "\n";
         finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"pwa failed"})");
+      }
+    });
+    return;
+  }
+  if (path->path.starts_with("/goober/connect/")) {
+    pool_->post([this, req, finish, p = path->path, domain, tenant = *tenant] {
+      try {
+        handle_connect(req, finish, p, domain, tenant);
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: connect: " << e.what() << "\n";
+        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"connect failed"})");
       }
     });
     return;

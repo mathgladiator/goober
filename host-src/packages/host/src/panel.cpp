@@ -42,7 +42,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "library_list",    "library_get",       "operator_scope",   "invite_list",     "invite_get",
     "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
-    "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit"};
+    "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
+    "spec_list",       "spec_get"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 

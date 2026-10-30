@@ -40,7 +40,7 @@ const char* kSlow = R"((module
   (data (i32.const 0) "text/plain")
   (func (export "goober_route_slow") (result i32)
     (local $i i32)
-    (loop $l (local.set $i (i32.add (local.get $i) (i32.const 1))) (br_if $l (i32.lt_u (local.get $i) (i32.const 150000000))))
+    (loop $l (local.set $i (i32.add (local.get $i) (i32.const 1))) (br_if $l (i32.lt_u (local.get $i) (i32.const 250000000))))
     (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 0)))
     (i32.const 0))
 ))";
@@ -69,12 +69,15 @@ TEST(Lifecycle, HealthAndGracefulShutdown) {
   // A request in flight when the host is told to stop still gets its answer.
   int status = 0;
   auto started = std::chrono::steady_clock::now();
-  std::thread caller([&] { status = get(port, "/slow"); });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  std::string slow_body;
+  std::thread caller([&] { status = get(port, "/slow", &slow_body); });
+  // Time for the request to arrive before stop (20 ms was sometimes too little on a busy machine);
+  // the slow route runs about 80 ms, under the host's 2e9 fuel cap.
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
   h.stop();
   auto stopped_after = std::chrono::steady_clock::now() - started;
   caller.join();
-  EXPECT_EQ(status, 200);
-  EXPECT_GT(stopped_after, std::chrono::milliseconds(40));  // stop() waited for the request
+  EXPECT_EQ(status, 200) << slow_body;
+  EXPECT_GT(stopped_after, std::chrono::milliseconds(50));  // stop() waited for the request
   EXPECT_EQ(get(port, "/goober/health"), -1);  // and then nothing is listening
 }

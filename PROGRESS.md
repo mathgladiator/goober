@@ -441,6 +441,19 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Panel views: Sitemap (an icicle of the site), Performance, Agents, Content, Logs.
 - [ ] Alerting a person when a flag goes up; S3 object lock (set outside goober).
 
+### Phase 25: speaking HTTP to any API (033, 034)
+- [x] The research (033): description formats, an audit of popular APIs, the gaps.
+- [x] `vault` (sealed values bound to tenant, service, and owner), `specs` (pinned OpenAPI
+      2.0 to 3.2 with operations by id or `VERB /path`), `signing` (OAuth 1.0a, checked against
+      X's published example).
+- [x] Manifests: `spec`, `op`, auth kinds (header, bearer, basic, query, oauth1), `credentials:
+      "sealed"`, `connect` (paste, oauth2 with PKCE), constant headers, json/form/multipart/raw
+      bodies, chunked uploads, polling, `error-when`, `limits`, `any-public`.
+- [x] Host-run connections at /goober/connect/ with single-flight refresh and remembered
+      generations; spec_put/list/get; specs in source projects; `goober-host vault key`.
+- [ ] Pagination, resumable and presigned-POST uploads, GraphQL methods, JWT and template HMAC
+      signers, Overlays, Bluesky OAuth, inbound webhook verification; OAuth 1.0a's three-legged flow.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023), the bus (040),

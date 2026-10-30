@@ -24,6 +24,7 @@
 | 12. Invites, and mail that follows the law | **Yes, needs the postal address** | The host invites (roles, terms, lists, accept by code, decline for good), every box mail has a category with its rule, lists need a confirmed opt-in, and a person lifts a block (`design/machine/029.Invites.md`). Set `tenants.kcmeatup.postal-address` first. |
 | 13. A blog, and deploys that check themselves | **Yes** | One `page_put` per markdown post (built-in post template, BlogPosting, OG tags); the index, feed, sitemap, and llms.txt follow. `content_deploy` writes many files and checks what visitors get (`design/machine/031.ContentKit.md`). |
 | 14. Logs an auditor would accept | **Yes, archives untried with real S3** | Chained, rotated daily, kept 7 days and archived sealed for 400; an audit log; a grep-like dive; live p99 per URI; the panel's Sitemap, Performance, Agents, and Logs (`design/machine/032.Logs.md`). |
+| 15. Boxes that talk to any API (Hevy, Strava, X, POSSE) | **Yes, untried against the real APIs** | Pinned OpenAPI specs, host-run OAuth 2 and pasted keys sealed in the box's database, multipart and chunked uploads, polling, rate limits (`design/machine/034.SpeakingHttp.md`). Each provider needs an app registered with `https://<domain>/goober/connect/callback`. |
 | 11. Boxes that work with time and calendars | **Yes** | `time@1` and `ics@1` host libraries: zones, recurrence, invites, RSVPs, and proposals, tested against RFC 5545 and real clients' messages (`design/machine/831.Libraries.md`). |
 
 ## 1. Static content: yes

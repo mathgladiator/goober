@@ -388,6 +388,17 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
     job.state = "failed";
     return;
   }
+  // Specs first: content-addressed and shared, so storing one changes nothing a box uses until a
+  // manifest pins it; the log says each pin, to write into the manifest (034 § 2).
+  for (const auto& [name, text] : built.specs) {
+    std::string serr;
+    auto pin = specs_->put(name, text, &serr);
+    job.log += pin ? "✓ spec " + name + " is " + *pin + "\n" : "✗ spec " + name + ": " + serr + "\n";
+    if (!pin) {
+      job.state = "failed";
+      return;
+    }
+  }
   // Everything is checked before anything is stored: each schema (new, or the same as the one
   // stored under its name), then each box against those schemas and the active boxes, exactly
   // as an upload would check it. A build runs the same checks, so a green build deploys.

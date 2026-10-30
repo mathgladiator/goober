@@ -181,4 +181,17 @@ std::string valid_utf8(std::string_view s) {
   return out;
 }
 
+std::optional<std::string> base64url_decode(std::string_view text) {
+  std::string s;
+  s.reserve(text.size() + 3);
+  for (char c : text) {
+    if (c == '+' || c == '/') return std::nullopt;  // the other alphabet
+    s += c == '-' ? '+' : c == '_' ? '/' : c;
+  }
+  while (!s.empty() && s.back() == '=') s.pop_back();
+  if (s.size() % 4 == 1) return std::nullopt;
+  while (s.size() % 4) s += '=';
+  return base64_decode(s);
+}
+
 }  // namespace goober::base

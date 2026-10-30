@@ -383,7 +383,10 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
     svc.name = std::string(kv.key());
     for (const auto& f : def) {
       std::string k(f.key());
-      if (k == "base" || k == "credentials" || k == "methods" || k == "auth") continue;
+      if (k == "base" || k == "credentials" || k == "methods" || k == "auth" || k == "spec" || k == "connect" ||
+          k == "headers" || k == "limits") {
+        continue;
+      }
       if (k == "openapi" || k == "operation") {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;
@@ -657,8 +660,11 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       continue;
     }
     svc.base = get_string(def, "base", &err).value_or("");
-    // https, or a loopback http address for local development, which the host calls only
-    // in local mode.
+    // "*": every call gives its whole URL, on methods marked any-public (034 § 10).
+    if (svc.base == "*") {
+      svc.any_public = true;
+      svc.base = "https://any-public.invalid";
+    }
     std::string_view scheme_rest = svc.base.starts_with("https://")                ? std::string_view(svc.base).substr(8)
                                    : svc.base.starts_with("http://127.0.0.1:") ||
                                            svc.base.starts_with("http://localhost:") ? std::string_view(svc.base).substr(7)
@@ -669,6 +675,11 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
     }
     while (svc.base.ends_with("/")) svc.base.pop_back();
     svc.credentials = get_string(def, "credentials", &err).value_or("");
+    if (svc.credentials == "sealed") {
+      // Each call carries a sealed secret the host made in a connection (034 § 4).
+      svc.sealed = true;
+      svc.credentials.clear();
+    }
     if (!svc.credentials.empty()) {
       std::string_view c = svc.credentials;
       std::string_view rest = c.starts_with("keys/system/") ? c.substr(12)
@@ -678,11 +689,148 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         return *error = where + ".credentials names a key: keys/system/$name or keys/tenant/{!tenant}/$name", false;
       }
       // The host's own keys (AWS, for SES and backups; the backup key) are never handed to a box's service.
-      if (c.starts_with("keys/system/") && (rest.starts_with("aws_") || rest == "backup_key")) {
+      if (c.starts_with("keys/system/") && (rest.starts_with("aws_") || rest == "backup_key" || rest == "vault_key")) {
         return *error = where + ".credentials: " + svc.credentials + " is the host's own key", false;
       }
     }
-    if (const auto* auth = get_object(def, "auth", &err)) {
+    // A pinned spec (034 § 2): name@sha12.
+    if (auto sp = get_string(def, "spec", &err)) {
+      auto at = sp->find('@');
+      bool ok = at != std::string::npos && at > 0 && sp->size() == at + 13;
+      for (size_t i = at + 1; ok && i < sp->size(); ++i) ok = std::isxdigit(static_cast<unsigned char>((*sp)[i])) && !std::isupper(static_cast<unsigned char>((*sp)[i]));
+      if (!ok) return *error = where + ".spec pins a stored spec: name@ and the first 12 hex digits of its SHA-256 (spec_put)", false;
+      svc.spec = *sp;
+    }
+    if (const auto* h = get_object(def, "headers", &err)) {
+      for (const auto& kv : *h) {
+        std::string name = base::to_lower(kv.key());
+        bool ok = !name.empty() && kv.value().is_string() && name != "authorization" && name != "host" &&
+                  name != "content-length" && name != "content-type";
+        for (char ch : name) ok = ok && ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-');
+        std::string value = kv.value().is_string() ? std::string(kv.value().as_string()) : "";
+        for (char ch : value) ok = ok && static_cast<unsigned char>(ch) >= 0x20;
+        if (!ok) return *error = where + ".headers: \"" + name + "\" is a constant header with a text value (not authorization, host, or content-*)", false;
+        svc.headers[name] = value;
+      }
+    }
+    if (const auto* lim = get_object(def, "limits", &err)) {
+      for (const auto& kv : *lim) {
+        if (kv.key() == "retry-after" && kv.value().is_bool()) {
+          svc.retry_after = kv.value().as_bool();
+        } else if (kv.key() == "remaining" && kv.value().is_string()) {
+          svc.limit_remaining = base::to_lower(kv.value().as_string());
+        } else if (kv.key() == "reset" && kv.value().is_string()) {
+          svc.limit_reset = base::to_lower(kv.value().as_string());
+        } else {
+          return *error = where + ".limits is {retry-after?: bool, remaining?: header, reset?: header}", false;
+        }
+      }
+    }
+    if (const auto* conn = get_object(def, "connect", &err)) {
+      if (!svc.sealed) return *error = where + ".connect needs \"credentials\": \"sealed\": a connection makes sealed values", false;
+      if (conn->size() != 1 || (!conn->contains("paste") && !conn->contains("oauth2"))) {
+        return *error = where + ".connect is {\"paste\": {...}} or {\"oauth2\": {...}}", false;
+      }
+      auto& cn = svc.connect;
+      if (const auto* paste = conn->if_contains("paste")) {
+        if (!paste->is_object()) return *error = where + ".connect.paste is {label, help?, check?, result-route}", false;
+        cn.kind = "paste";
+        for (const auto& f : paste->as_object()) {
+          if (f.key() != "label" && f.key() != "help" && f.key() != "check" && f.key() != "result-route") {
+            return *error = where + ".connect.paste: unknown field \"" + std::string(f.key()) + "\"", false;
+          }
+        }
+        cn.label = get_string(paste->as_object(), "label", &err).value_or("API key");
+        cn.help = get_string(paste->as_object(), "help", &err).value_or("");
+        cn.check = get_string(paste->as_object(), "check", &err).value_or("");
+        cn.result_route = get_string(paste->as_object(), "result-route", &err).value_or("");
+        if (cn.label.size() > 80 || cn.help.size() > 300) return *error = where + ".connect.paste: label up to 80, help up to 300", false;
+      } else {
+        const auto* o2 = conn->if_contains("oauth2");
+        if (!o2->is_object()) return *error = where + ".connect.oauth2 is an object", false;
+        cn.kind = "oauth2";
+        const auto& o = o2->as_object();
+        static const std::set<std::string, std::less<>> kFields = {"authorize", "token", "client-id", "client-secret", "client-auth",
+                                                                   "scopes", "scope-separator", "pkce", "extra", "result-route",
+                                                                   "early-ms"};
+        for (const auto& f : o) {
+          if (!kFields.count(f.key())) return *error = where + ".connect.oauth2: unknown field \"" + std::string(f.key()) + "\"", false;
+        }
+        cn.authorize = get_string(o, "authorize", &err).value_or("");
+        cn.token = get_string(o, "token", &err).value_or("");
+        if (!cn.authorize.starts_with("https://") || !cn.token.starts_with("https://")) {
+          if (!(cn.token.starts_with("http://127.0.0.1:") && cn.authorize.starts_with("http://127.0.0.1:"))) {
+            return *error = where + ".connect.oauth2: authorize and token are https URLs", false;
+          }
+        }
+        auto key_name = [&](const char* k, std::string* out) {
+          auto v = get_string(o, k, &err);
+          if (!v) return true;
+          std::string_view s = *v;
+          std::string_view rest = s.starts_with("keys/system/") ? s.substr(12) : s.starts_with("keys/tenant/{!tenant}/") ? s.substr(22) : std::string_view();
+          if (!base::is_valid_name(rest)) return false;
+          *out = *v;
+          return true;
+        };
+        if (!key_name("client-id", &cn.client_id) || cn.client_id.empty() || !key_name("client-secret", &cn.client_secret)) {
+          return *error = where + ".connect.oauth2: client-id (and client-secret) name keys: keys/system/$name or keys/tenant/{!tenant}/$name", false;
+        }
+        cn.client_auth = get_string(o, "client-auth", &err).value_or("body");
+        if (cn.client_auth != "body" && cn.client_auth != "basic") return *error = where + ".connect.oauth2.client-auth is body or basic", false;
+        if (auto* sc = o.if_contains("scopes"); sc && sc->is_array()) {
+          for (const auto& s : sc->as_array()) {
+            if (s.is_string()) cn.scopes.emplace_back(s.as_string());
+          }
+        }
+        cn.scope_separator = get_string(o, "scope-separator", &err).value_or(" ");
+        if (auto* pk = o.if_contains("pkce"); pk && pk->is_bool()) cn.pkce = pk->as_bool();
+        if (auto* ex = o.if_contains("extra"); ex && ex->is_object()) {
+          for (const auto& kv : ex->as_object()) {
+            if (kv.value().is_string()) cn.extra[std::string(kv.key())] = std::string(kv.value().as_string());
+          }
+        }
+        cn.result_route = get_string(o, "result-route", &err).value_or("");
+        cn.early_ms = get_int(o, "early-ms", &err).value_or(cn.early_ms);
+        if (cn.early_ms < 0 || cn.early_ms > 7LL * 24 * 3600 * 1000) return *error = where + ".connect.oauth2.early-ms is up to 7 days", false;
+      }
+      if (!base::is_valid_name(cn.result_route)) {
+        return *error = where + ".connect.*.result-route names the routes.result route that gets the sealed value", false;
+      }
+    }
+    if (const auto* auth = get_object(def, "auth", &err); auth && auth->contains("kind")) {
+      // 034 § 3: how the secret is applied.
+      svc.auth_kind = get_string(*auth, "kind", &err).value_or("");
+      for (const auto& f : *auth) {
+        if (f.key() != "kind" && f.key() != "name" && f.key() != "prefix" && f.key() != "user" && f.key() != "consumer-key" &&
+            f.key() != "consumer-secret" && f.key() != "token" && f.key() != "token-secret") {
+          return *error = where + ".auth: unknown field \"" + std::string(f.key()) + "\"", false;
+        }
+      }
+      if (svc.auth_kind == "header" || svc.auth_kind == "query") {
+        auto n = get_string(*auth, "name", &err);
+        if (!n || n->empty() || n->size() > 64) return *error = where + ".auth." + svc.auth_kind + " needs a name", false;
+        svc.auth_header = svc.auth_kind == "header" ? base::to_lower(*n) : *n;
+        svc.auth_prefix = get_string(*auth, "prefix", &err).value_or("");
+      } else if (svc.auth_kind == "bearer") {
+        svc.auth_header = "authorization";
+        svc.auth_prefix = "Bearer ";
+      } else if (svc.auth_kind == "basic") {
+        svc.auth_header = "authorization";
+        svc.basic_user = get_string(*auth, "user", &err).value_or("");
+      } else if (svc.auth_kind == "oauth1") {
+        svc.oauth1_consumer_key = get_string(*auth, "consumer-key", &err).value_or("");
+        svc.oauth1_consumer_secret = get_string(*auth, "consumer-secret", &err).value_or("");
+        // An app's own access token (X's portal gives one), when the service isn't sealed per person.
+        svc.oauth1_token = get_string(*auth, "token", &err).value_or("");
+        svc.oauth1_token_secret = get_string(*auth, "token-secret", &err).value_or("");
+        if (svc.oauth1_consumer_key.empty() || svc.oauth1_consumer_secret.empty()) {
+          return *error = where + ".auth.oauth1 names consumer-key and consumer-secret keys", false;
+        }
+      } else {
+        return *error = where + ".auth.kind is header, bearer, basic, query, or oauth1", false;
+      }
+    } else if (const auto* auth2 = get_object(def, "auth", &err)) {
+      const auto* auth = auth2;
       if (auto h = get_string(*auth, "header", &err)) svc.auth_header = base::to_lower(*h);
       if (auto p = get_string(*auth, "prefix", &err)) svc.auth_prefix = *p;
       for (char c : svc.auth_header) {
@@ -702,7 +850,8 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       for (const auto& f : md) {
         std::string k(f.key());
         if (k == "verb" || k == "path" || k == "effect" || k == "idempotency" || k == "delivery" || k == "budget" ||
-            k == "require") {
+            k == "require" || k == "op" || k == "body" || k == "form-arrays" || k == "any-public" || k == "error-when" ||
+            k == "poll" || k == "upload") {
           continue;
         }
         if (k == "result-route") continue;
@@ -710,9 +859,103 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       }
       ExternalMethod em;
       em.name = std::string(mk.key());
-      em.verb = base::to_lower(get_string(md, "verb", &err).value_or(""));
+      em.op = get_string(md, "op", &err).value_or("");
+      if (!em.op.empty()) {
+        if (svc.spec.empty()) return *error = mw + ".op imports an operation of the service's spec, and it has none", false;
+        if (md.contains("verb") || md.contains("path")) return *error = mw + ": give op, or verb and path, not both", false;
+        if (em.op.size() > 300) return *error = mw + ".op is an operationId or \"VERB /path\"", false;
+      }
+      em.verb = base::to_lower(get_string(md, "verb", &err).value_or(em.op.empty() ? "" : "post"));
       if (em.verb != "get" && em.verb != "post" && em.verb != "put" && em.verb != "patch" && em.verb != "delete") {
         return *error = mw + ".verb is get, post, put, patch, or delete", false;
+      }
+      if (!em.op.empty() && em.op.size() > 4 && base::to_lower(em.op.substr(0, 4)) == "get ") em.verb = "get";
+      em.effect_given = md.contains("effect");
+      em.body = get_string(md, "body", &err).value_or("");
+      if (!em.body.empty() && em.body != "json" && em.body != "form" && em.body != "multipart" && em.body != "raw") {
+        return *error = mw + ".body is json, form, multipart, or raw", false;
+      }
+      em.form_arrays = get_string(md, "form-arrays", &err).value_or("brackets");
+      if (em.form_arrays != "brackets" && em.form_arrays != "repeat") return *error = mw + ".form-arrays is brackets or repeat", false;
+      if (auto* ap = md.if_contains("any-public")) {
+        if (!ap->is_bool()) return *error = mw + ".any-public is true or false", false;
+        em.any_public = ap->as_bool();
+        if (em.any_public && !svc.any_public) return *error = mw + ".any-public needs the service's base to be \"*\"", false;
+      }
+      auto condition = [&](const bj::value* v, Condition* out, const std::string& what) {
+        if (!v) return true;
+        if (!v->is_object() || !v->as_object().contains("at") || !v->as_object().at("at").is_string()) {
+          *error = mw + "." + what + " is {\"at\": \"body.a.b\", \"present\": true} or {\"at\": ..., \"equals\": value}";
+          return false;
+        }
+        out->at = std::string(v->as_object().at("at").as_string());
+        if (!out->at.starts_with("body") && !out->at.starts_with("status")) {
+          *error = mw + "." + what + ".at starts with body (or is status)";
+          return false;
+        }
+        if (auto* pr = v->as_object().if_contains("present"); pr && pr->is_bool()) out->present = pr->as_bool();
+        if (auto* eq = v->as_object().if_contains("equals")) out->equals = json::dump(*eq);
+        if (!out->present && out->equals.empty()) {
+          *error = mw + "." + what + " needs present: true or equals";
+          return false;
+        }
+        return true;
+      };
+      if (!condition(md.if_contains("error-when"), &em.error_when, "error-when")) return false;
+      auto strings_map = [&](const bj::object& o, const char* k, std::map<std::string, std::string>* out) {
+        if (auto* v = o.if_contains(k); v && v->is_object()) {
+          for (const auto& kv : v->as_object()) {
+            if (!kv.value().is_string() && !kv.value().is_number()) return false;
+            (*out)[std::string(kv.key())] = kv.value().is_string() ? std::string(kv.value().as_string()) : json::dump(kv.value());
+          }
+        }
+        return true;
+      };
+      if (auto* pv = md.if_contains("poll")) {
+        if (!pv->is_object()) return *error = mw + ".poll is an object", false;
+        const auto& po = pv->as_object();
+        em.polls = true;
+        em.poll.op = get_string(po, "op", &err).value_or("");
+        if (em.poll.op.empty() || svc.spec.empty()) return *error = mw + ".poll.op names an operation of the service's spec", false;
+        if (!strings_map(po, "path", &em.poll.path) || !strings_map(po, "query", &em.poll.query)) {
+          return *error = mw + ".poll.path and query map names to text like {body.id}", false;
+        }
+        if (!condition(po.if_contains("done-when"), &em.poll.done, "poll.done-when")) return false;
+        if (!condition(po.if_contains("failed-when"), &em.poll.failed, "poll.failed-when")) return false;
+        if (em.poll.done.empty()) return *error = mw + ".poll needs done-when", false;
+        em.poll.every_ms = get_int(po, "every-ms", &err).value_or(em.poll.every_ms);
+        em.poll.every_from = get_string(po, "every-from", &err).value_or("");
+        em.poll.within_ms = get_int(po, "within-ms", &err).value_or(em.poll.within_ms);
+        if (em.poll.every_ms < 1000 || em.poll.every_ms > 600000 || em.poll.within_ms < 1000 ||
+            em.poll.within_ms > 24LL * 3600 * 1000) {
+          return *error = mw + ".poll: every-ms 1000 to 600000, within-ms up to a day", false;
+        }
+      }
+      if (auto* uv = md.if_contains("upload")) {
+        if (!uv->is_object()) return *error = mw + ".upload is an object", false;
+        const auto& uo = uv->as_object();
+        em.upload.attachment_at = get_string(uo, "attachment", &err).value_or("");
+        if (!em.upload.attachment_at.starts_with("body.") || svc.spec.empty()) {
+          return *error = mw + ".upload.attachment is where the call names the attachment, like body.media, on a service with a spec", false;
+        }
+        auto step = [&](const char* k, UploadStep* s, bool need) {
+          auto* sv = uo.if_contains(k);
+          if (!sv) return !need;
+          if (!sv->is_object()) return false;
+          const auto& so = sv->as_object();
+          s->op = get_string(so, "op", &err).value_or("");
+          if (s->op.empty()) return false;
+          if (!strings_map(so, "path", &s->path) || !strings_map(so, "parts", &s->parts)) return false;
+          if (auto* b = so.if_contains("body"); b && b->is_object()) s->body = json::dump(*b);
+          s->id_at = get_string(so, "id", &err).value_or("");
+          return true;
+        };
+        if (!step("init", &em.upload.init, true) || !step("append", &em.upload.append, true) || !step("finalize", &em.upload.finalize, true)) {
+          return *error = mw + ".upload has init {op, body?, id}, append {op, path?, parts, chunk-bytes?}, and finalize {op, path?}", false;
+        }
+        if (em.upload.init.id_at.empty()) return *error = mw + ".upload.init.id is where init's answer holds the upload id", false;
+        if (auto* ab = uo.at("append").as_object().if_contains("chunk-bytes"); ab && ab->is_int64()) em.upload.chunk_bytes = ab->as_int64();
+        if (em.upload.chunk_bytes < 65536 || em.upload.chunk_bytes > (64 << 20)) return *error = mw + ".upload.append.chunk-bytes is 64 KiB to 64 MiB", false;
       }
       em.path = get_string(md, "path", &err).value_or("/");
       if (em.path.empty() || em.path[0] != '/' || em.path.find_first_of("?# \\") != std::string::npos ||
@@ -727,6 +970,9 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       }
       bool safe = em.verb == "get";
       em.effect = get_string(md, "effect", &err).value_or(safe ? "none" : "outbox");
+      if ((em.polls || !em.upload.empty()) && (em.effect != "outbox" || em.result_route.empty() && !md.contains("result-route"))) {
+        return *error = mw + ": an upload or a poll is an outbox call with a result-route", false;
+      }
       if (em.effect != "none" && em.effect != "outbox" && em.effect != "immediate") {
         return *error = mw + ".effect is none, outbox, or immediate", false;
       }

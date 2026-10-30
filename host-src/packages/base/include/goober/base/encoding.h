@@ -12,6 +12,8 @@ std::string base64_encode(std::string_view bytes);
 
 // base64url without padding (RFC 4648 §5), as PKCE and URL-safe tokens use it.
 std::string base64url_encode(std::string_view bytes);
+// base64url, padded or not, back to bytes; nullopt for anything else.
+std::optional<std::string> base64url_decode(std::string_view text);
 
 // Decodes standard base64, with or without padding. Whitespace is ignored.
 // Returns nullopt on any other character.

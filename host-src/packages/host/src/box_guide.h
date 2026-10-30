@@ -203,6 +203,54 @@ the request later fails. require pins fields to {!email}, {!user_id}, {!tenant},
 literal, overriding whatever the box sent. The box never sees the key; logs/egress.log records
 every call without query strings or bodies.
 
+## Speaking to any API (specs, connections, uploads)
+
+design/machine/034.SpeakingHttp.md. The host owns mechanisms; your manifest says how to speak.
+1. Store the API's OpenAPI document (JSON; 2.0 to 3.2): spec_put {name: "strava", text} answers a
+   pin like strava@3f2a9c1e0b7d (or list it in goober.project.json "specs": ["specs/strava.json"];
+   the deploy log prints each pin). spec_get lists its operations.
+2. Declare the service with the pin, and import operations by operationId or "VERB /path":
+"external": {"strava": {"base": "https://www.strava.com/api/v3", "spec": "strava@3f2a9c1e0b7d",
+  "auth": {"kind": "bearer"}, "credentials": "sealed",
+  "connect": {"oauth2": {"authorize": "https://www.strava.com/oauth/authorize",
+    "token": "https://www.strava.com/oauth/token", "client-id": "keys/tenant/{!tenant}/strava_client_id",
+    "client-secret": "keys/tenant/{!tenant}/strava_client_secret", "client-auth": "body",
+    "scopes": ["activity:write", "read"], "scope-separator": ",", "pkce": false, "result-route": "strava_connected"}},
+  "headers": {"user-agent": "my-site/1.0"},
+  "methods": {"athlete": {"op": "getLoggedInAthlete"},
+              "upload": {"op": "createUpload", "body": "multipart", "result-route": "strava_uploaded",
+                         "poll": {"op": "getUploadById", "path": {"uploadId": "{body.id}"},
+                                  "done-when": {"at": "body.activity_id", "present": true},
+                                  "failed-when": {"at": "body.error", "present": true}, "every-ms": 2000}}}}}
+auth.kind: header {name, prefix?} (Hevy: {"kind": "header", "name": "api-key"}), bearer, basic
+{user?}, query {name}, or oauth1 {consumer-key, consumer-secret, token?, token-secret?} (key names).
+credentials: a key name for the site's own key, or "sealed" for each person's own.
+Sealed secrets: a person connects at /goober/connect/<box>/<service>?return=/settings&ref=<yours>
+(link them there, signed in). "paste" ({"paste": {"label": "Hevy API key", "check": "GET /v1/user",
+"result-route": "hevy_connected"}}) shows a host form and checks the key; "oauth2" runs the dance
+for them (register https://<your domain>/goober/connect/callback as the redirect URI with the
+provider; put the app's id and secret with key_set, hosts set to the token endpoint's). Either way
+your result route gets {"service", "kind", "credential": "gsv1.<owner>....", "owner" (their
+user id), "ref", "scope"} as that person: store credential in your own table. You never see the
+key or tokens; the host unseals them only to make the call, and refreshes OAuth tokens itself.
+Call with it: goober_call("strava", "athlete", {"credential": "<stored value>"}). When an answer
+carries "credential", it was refreshed: store the new one (the host remembers it anyway). An
+answer {"error": "connection_expired...", "connect": "/goober/connect/..."} means send the person
+back to connect.
+A call is {path, query, headers (only header parameters the spec declares), body, credential, url}.
+Bodies: "body": "json" (default; or the spec's), "form" (objects as a[b], arrays as a[] or
+"form-arrays": "repeat"), "multipart" (a field per key; {"attachment": "12"} is a file part from
+the tenant's attachments; {"json": {...}} a JSON part), "raw" ({"attachment": "12"} as the body).
+Chunked uploads (X media): "upload": {"attachment": "body.media", "init": {op, body template with
+{content_type} {bytes} {filename}, "id": "body.data.id"}, "append": {op, "path": {"id": "{id}"},
+"parts": {"media": "{chunk}", "segment_index": "{index}"}, "chunk-bytes": 4194304}, "finalize":
+{op, "path": {"id": "{id}"}}}. Uploads and polls are outbox calls with a result-route; the result
+route gets the last answer. "error-when": {"at": "body.ok", "equals": false} makes a 200 a failure
+(Slack). "limits": {"remaining": "x-rate-limit-remaining", "reset": "x-rate-limit-reset"} waits
+out a spent window; Retry-After is always honored. "base": "*" with "any-public": true on a method
+takes the whole https URL from the call's url (Webmention, Micropub, a person's Mastodon).
+Effects: an op that is a GET is sent now; others go through the outbox unless "effect" says.
+
 ## Sending mail
 
 A box sends mail through the host's own mailer (SES or SMTP, set by the operator):

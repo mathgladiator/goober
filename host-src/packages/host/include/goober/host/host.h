@@ -30,6 +30,8 @@
 #include "goober/server_http/server.h"
 #include "goober/site/site.h"
 #include "goober/source/source.h"
+#include "goober/specs/specs.h"
+#include "goober/vault/vault.h"
 #include "goober/wal/wal.h"
 #include "goober/webpush/webpush.h"
 
@@ -81,6 +83,10 @@ class Host {
   // so fires run on the calling thread.
   void timer_tick(int64_t now_ms);
   void set_timers_inline(bool inline_fires);
+  // For tests: one goober_call as a box would make it, for a tenant, with nobody signed in; an
+  // outbox call's element is enqueued at once (as a request that committed). Returns the answer.
+  std::string call_as_box(const std::string& box, const std::string& tenant, const std::string& service,
+                          const std::string& method, const std::string& request);
   // What the scheduler plans next, and firing a timer now for one tenant (operators):
   // returns how many fires ran, or nullopt with `error`.
   boost::json::array timers_due();
@@ -291,8 +297,9 @@ class Host {
   std::set<std::pair<std::string, std::string>> outbox_scanned_;
   std::unique_ptr<sqlite::Db> open_outbox(const std::string& tenant, const std::string& database);
   // 035 § results: an element's outcome, as a request to the box's routes.result route.
-  void deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
-                      const boost::json::object& outcome);
+  // Calls a box's routes.result route with an outcome, as nobody or as a person; true when it took it.
+  bool deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
+                      const boost::json::object& outcome, const std::optional<SignedIn>& who = std::nullopt);
   bool enqueue_outbox(const manifest::Manifest& m, const std::string& tenant, std::vector<struct OutboxElement>& pending,
                       db::Session* session, std::string* error);
   std::string external_call(struct CallContext& ctx, std::string_view service, std::string_view method,
@@ -376,6 +383,53 @@ class Host {
                                           const std::string& tool, boost::json::value& result);
   std::mutex scopes_mu_;
   void register_scope_tools();
+  // Speaking HTTP (http_out.cpp, connect_routes.cpp; design/machine/034.SpeakingHttp.md).
+  struct Secret {
+    std::string kind, value, token, token_secret, owner;
+  };
+  struct HttpxCall {
+    std::string verb, url, body, content_type;
+    std::vector<std::pair<std::string, std::string>> headers, form;
+  };
+  struct FileBytes {
+    std::string filename, content_type, bytes;
+  };
+  static bool uses_httpx(const manifest::ExternalService& s, const manifest::ExternalMethod& m);
+  std::optional<vault::Key> vault_tenant_key(const std::string& tenant, std::string* error);
+  std::string seal_secret(const std::string& tenant, const std::string& service, const std::string& owner,
+                          const std::string& plaintext, std::string* error);
+  std::optional<Secret> open_secret(const std::string& tenant, const manifest::ExternalService& svc, const std::string& sealed,
+                                    std::string* resealed, std::string* error);
+  std::optional<Secret> secret_for(const std::string& tenant, const manifest::ExternalService& svc,
+                                   const boost::json::object& request, const std::string& url, std::string* resealed,
+                                   std::string* error);
+  std::optional<boost::json::object> oauth2_token(const std::string& tenant, const manifest::ExternalService& svc,
+                                                  std::vector<std::pair<std::string, std::string>> form, std::string* error);
+  std::optional<HttpxCall> build_httpx(const std::string& tenant, const boost::json::value& user, const std::string& domain,
+                                       const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                                       const std::string& op_ref, const boost::json::object& request,
+                                       const std::string& body_mode, std::string* error);
+  std::optional<FileBytes> attachment_bytes(const std::string& tenant, const boost::json::value& id, std::string* error);
+  bool apply_secret(const std::string& tenant, const manifest::ExternalService& svc, const Secret& secret, HttpxCall* call,
+                    std::string* error);
+  struct HttpOut send_httpx(const std::string& tenant, const std::string& box, const manifest::ExternalService& svc,
+                            const manifest::ExternalMethod& m, const HttpxCall& call, int64_t timeout_ms,
+                            const std::string& request_id, int64_t outbox_id);
+  static boost::json::object answer_of(const struct HttpOut& out);
+  std::string httpx_call(struct CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
+                         const boost::json::value& request);
+  struct HttpOut deliver_outbox_httpx(const std::string& tenant, sqlite::Db& db, int64_t id, const std::string& box,
+                                      const std::string& service, const std::string& method, const std::string& body,
+                                      const std::string& idem_header, const std::string& idem_key, int64_t timeout_ms,
+                                      int64_t now_ms);
+  sqlite::Db& connections_db();
+  void register_spec_tools();
+  void handle_connect(const server::http::Request& req, const Finish& finish, const std::string& path,
+                      const std::string& domain, const std::string& tenant);
+  std::unique_ptr<specs::Store> specs_;
+  std::mutex vault_mu_;
+  std::map<std::string, std::mutex> refresh_locks_;
+  std::unique_ptr<sqlite::Db> connections_db_;
   // Logs (logs_tools.cpp; design/machine/032.Logs.md): every log line goes through log_line,
   // which hashes addresses and writes the envelope and chain; audit() writes the audit log.
   void log_line(const std::string& log, boost::json::object line);

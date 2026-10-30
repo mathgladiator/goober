@@ -40,6 +40,41 @@ bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
       return false;
     }
   }
+  // Services spoken in 034's language: the pinned spec is stored, every op resolves in it, and a
+  // connection's result route exists.
+  for (const auto& svc : m.external) {
+    std::string where = "external." + svc.name;
+    if (!svc.connect.kind.empty()) {
+      bool found = false;
+      for (const auto& r : m.results) found |= r.name == svc.connect.result_route;
+      if (!found) {
+        *error = where + ".connect.result-route names " + svc.connect.result_route + ", which isn't a routes.result route of this box";
+        return false;
+      }
+    }
+    if (svc.spec.empty()) continue;
+    std::string err;
+    auto spec = specs_ ? specs_->get(svc.spec, &err) : nullptr;
+    if (!spec) {
+      *error = where + ".spec: " + err;
+      return false;
+    }
+    auto resolves = [&](const std::string& ref, const std::string& what) {
+      if (ref.empty() || spec->find(ref)) return true;
+      *error = where + "." + what + ": " + svc.spec + " has no operation " + ref + " (spec_get lists them)";
+      return false;
+    };
+    for (const auto& [name, em] : svc.methods) {
+      std::string mw = "methods." + name;
+      if (!resolves(em.op, mw + ".op") || !resolves(em.poll.op, mw + ".poll.op") || !resolves(em.upload.init.op, mw + ".upload.init.op") ||
+          !resolves(em.upload.append.op, mw + ".upload.append.op") || !resolves(em.upload.finalize.op, mw + ".upload.finalize.op")) {
+        return false;
+      }
+    }
+    if (!svc.connect.check.empty() && !svc.methods.count(svc.connect.check) && !resolves(svc.connect.check, "connect.paste.check")) {
+      return false;
+    }
+  }
   auto active = boxes_->active();
   // Invites grant only roles the host config allows for every tenant the box serves, and a
   // list's title is one thing per tenant, whichever box declares it (029 §§ 2.6, 4).

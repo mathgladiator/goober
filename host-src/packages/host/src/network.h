@@ -52,6 +52,17 @@ std::optional<BuiltCall> build_call(const manifest::ExternalService& svc, const 
 struct HttpOut {
   int status = 0;  // 0 when nothing came back
   std::string body, content_type, error;
+  std::vector<std::pair<std::string, std::string>> headers;  // the reply's, names lowercased
+  // For the outbox (034 §§ 8, 9): wait until this before the next attempt (Retry-After, a rate
+  // limit's reset), and whether the element is polling rather than failing.
+  int64_t retry_at_ms = 0;
+  bool polling = false;
+  std::string header(std::string_view name) const {
+    for (const auto& [k, v] : headers) {
+      if (k == name) return v;
+    }
+    return "";
+  }
 };
 
 // Sends one request with curl; credentials and headers travel in a private config file.

@@ -239,13 +239,20 @@ HttpOut send_http(const std::string& verb, const std::string& url, const std::ve
     auto sp = head.find(' ');
     out.status = sp == std::string_view::npos ? 0 : std::atoi(std::string(head.substr(sp + 1, 3)).c_str());
     if (out.status >= 200 || out.status == 0) {
-      std::string lower = base::to_lower(head);
-      if (auto ct = lower.find("\r\ncontent-type:"); ct != std::string::npos) {
-        auto eol = lower.find("\r\n", ct + 2);
-        std::string v(head.substr(ct + 15, (eol == std::string::npos ? head.size() : eol) - ct - 15));
-        while (!v.empty() && v.front() == ' ') v.erase(0, 1);
-        out.content_type = v;
+      // Every header, names lowercased (034 § 9 reads rate limits and Retry-After from them).
+      size_t at = head.find("\r\n");
+      while (at != std::string_view::npos) {
+        size_t next = head.find("\r\n", at + 2);
+        std::string_view line = head.substr(at + 2, (next == std::string_view::npos ? head.size() : next) - at - 2);
+        if (auto colon = line.find(':'); colon != std::string_view::npos) {
+          std::string v(line.substr(colon + 1));
+          while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(0, 1);
+          while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+          out.headers.emplace_back(base::to_lower(line.substr(0, colon)), v);
+        }
+        at = next;
       }
+      out.content_type = out.header("content-type");
       break;
     }
   }
@@ -258,6 +265,25 @@ namespace {
 thread_local int internal_depth = 0;
 constexpr int kMaxInternalDepth = 4;
 }  // namespace
+
+std::string Host::call_as_box(const std::string& box, const std::string& tenant, const std::string& service,
+                              const std::string& method, const std::string& request) {
+  auto active = boxes_->active();
+  auto it = active->boxes.find(box);
+  if (it == active->boxes.end()) return R"({"error":"no such box"})";
+  CallContext ctx;
+  ctx.manifest = &it->second->manifest;
+  ctx.tenant = tenant;
+  ctx.domain = site_of(tenant);
+  ctx.request_id = "test-" + std::to_string(base::now_unix_ms()) + "-" + std::to_string(base::os_random_u64() % 100000);
+  ctx.deadline_us = base::monotonic_us() + 10'000'000;
+  std::string out = external_call(ctx, service, method, request);
+  if (!ctx.pending.empty()) {
+    std::string err;
+    if (!enqueue_outbox(it->second->manifest, tenant, ctx.pending, nullptr, &err)) return json::dump(bj::object{{"error", err}});
+  }
+  return out;
+}
 
 std::string Host::external_call(CallContext& ctx, std::string_view service, std::string_view method,
                                 std::string_view request_text) {
@@ -288,6 +314,8 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (svc->invites) return invites_call(ctx, *svc, m, request);
   if (svc->mail) return mail_call(ctx, *svc, m, request);
   if (svc->push) return push_call(ctx, *svc, m, request);
+  // A service spoken in 034's language: specs, auth kinds, sealed secrets, bodies, uploads, polls.
+  if (uses_httpx(*svc, m)) return httpx_call(ctx, *svc, m, request);
   std::string err;
   auto built = build_call(*svc, m, request, ctx, &err);
   if (!built) return fail(err);

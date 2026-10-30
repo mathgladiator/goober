@@ -470,3 +470,51 @@ TEST(Manifest, MailListsAndInvites) {
     EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
   }
 }
+
+TEST(Manifest, ServicesSpokenFromSpecs) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"app","domains":["*"],"routes":{"result":{"connected":{},"done":{}}},"external":{
+    "hevy":{"base":"https://api.hevyapp.com","spec":"hevy@0123456789ab","credentials":"sealed",
+      "auth":{"kind":"header","name":"api-key"},"headers":{"x-version":"2"},
+      "connect":{"paste":{"label":"Hevy API key","check":"GET /v1/user","result-route":"connected"}},
+      "methods":{"workouts":{"op":"GET /v1/workouts"},"save":{"op":"POST /v1/workouts","body":"json"}}},
+    "x":{"base":"https://api.x.com","spec":"x@0123456789ab","credentials":"sealed","auth":{"kind":"bearer"},
+      "connect":{"oauth2":{"authorize":"https://x.com/i/oauth2/authorize","token":"https://api.x.com/2/oauth2/token",
+        "client-id":"keys/tenant/{!tenant}/x_id","pkce":true,"scopes":["tweet.write"],"result-route":"connected"}},
+      "methods":{"media":{"op":"init","result-route":"done","upload":{"attachment":"body.media",
+          "init":{"op":"init","body":{"total_bytes":"{bytes}"},"id":"body.data.id"},
+          "append":{"op":"append","path":{"id":"{id}"},"parts":{"media":"{chunk}"}},"finalize":{"op":"fin","path":{"id":"{id}"}}},
+        "poll":{"op":"status","query":{"media_id":"{body.data.id}"},"done-when":{"at":"body.data.state","equals":"succeeded"}}}}},
+    "anywhere":{"base":"*","methods":{"mention":{"verb":"post","path":"/","body":"form","any-public":true,"effect":"none"}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  const goober::manifest::ExternalService* hevy = nullptr;
+  for (const auto& s : m->external) {
+    if (s.name == "hevy") hevy = &s;
+  }
+  ASSERT_TRUE(hevy);
+  EXPECT_TRUE(hevy->sealed);
+  EXPECT_EQ(hevy->auth_kind, "header");
+  EXPECT_EQ(hevy->auth_header, "api-key");
+  EXPECT_EQ(hevy->connect.kind, "paste");
+  EXPECT_EQ(hevy->methods.at("workouts").verb, "get");
+  EXPECT_EQ(hevy->methods.at("workouts").effect, "none");
+  EXPECT_EQ(hevy->methods.at("save").effect, "outbox");
+  for (const char* bad : {
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","methods":{"m":{"op":"getX"}}}}})",  // no spec
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","spec":"s@zz","methods":{"m":{"op":"x"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","spec":"s@0123456789ab",
+              "methods":{"m":{"op":"x","verb":"get","path":"/"}}}}})",  // op and verb both
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","credentials":"keys/system/vault_key",
+              "methods":{"m":{"verb":"get","path":"/"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","connect":{"paste":{"result-route":"r"}},
+              "methods":{"m":{"verb":"get","path":"/"}}}}})",  // connect without sealed
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","auth":{"kind":"magic"},
+              "methods":{"m":{"verb":"get","path":"/"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","headers":{"authorization":"x"},
+              "methods":{"m":{"verb":"get","path":"/"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","methods":{"m":{"verb":"get","path":"/","any-public":true}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","spec":"s@0123456789ab",
+              "methods":{"m":{"op":"x","poll":{"op":"y","done-when":{"at":"body.x","present":true}}}}}}})"}) {  // poll without result
+    EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
+  }
+}

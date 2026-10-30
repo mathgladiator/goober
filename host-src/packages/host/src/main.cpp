@@ -70,6 +70,7 @@ constexpr const char* kUsage =
     "       goober-host key set NAME [--hosts H,...] [--tenant T] [--config host.json]   (the value on stdin)\n"
     "       goober-host key list [--config host.json]\n"
     "       goober-host backup key [--confirm] [--config host.json]\n"
+    "       goober-host vault key [--config host.json]   (prints the key that seals people's secrets)\n"
     "       goober-host backup list [--config host.json]\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
@@ -445,6 +446,22 @@ int main(int argc, char** argv) {
                                          {"target", "operator:" + positional[2]}});
     std::cout << "ended " << n << " session(s) and token(s) for " << positional[2]
               << "; minted operator tokens are listed by `goober-host token list`\n";
+    return 0;
+  }
+  // The vault key (034 § 4): it seals every person's secrets the boxes keep. Printed for safekeeping.
+  if (positional.size() == 2 && positional[0] == "vault" && positional[1] == "key") {
+    std::string err;
+    auto config = goober::config::load_config(config_path, &err);
+    if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+    goober::host::KeyStore keys(config->storage);
+    auto v = keys.resolve("keys/system/vault_key", "");
+    if (!v) {
+      std::cout << "no vault key yet: the host makes one the first time a person connects an account\n";
+      return 0;
+    }
+    std::cout << *v << "\n";
+    std::cerr << "Keep this key somewhere other than this machine, beside the backup key. Without it every sealed\n"
+                 "secret (people's API keys and connected accounts) is lost, and people must connect again.\n";
     return 0;
   }
   if (positional.size() == 2 && positional[0] == "backup" && (positional[1] == "key" || positional[1] == "list")) {

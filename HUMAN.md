@@ -91,6 +91,13 @@ them, signing in and accepting an invite say "by continuing, you accept" and rec
 blocked until they allow mail on their account page, or you lift it in the panel
 (**Operators**, **Lift a mail block**, saying why). Grok can't lift one.
 
+**Connecting people's accounts (Strava, X, Hevy).** Boxes keep people's keys and tokens sealed
+by the host. Copy the vault key beside the backup key:
+`sudo -u goober goober-host vault key --config /srv/goober/host/host.json`. Without it, everyone
+must connect again. For an OAuth provider (Strava, X), register an app with the redirect URI
+`https://kcmeatup.com/goober/connect/callback`, then have Grok `key_set` its client id and secret
+(hosts: the provider's token host).
+
 Is the backup key copied somewhere safe? Without it no backup can be read
 (`goober-host backup key --confirm` once you've copied it).
 
