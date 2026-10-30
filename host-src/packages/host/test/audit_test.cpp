@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <map>
+#include <set>
 
 #include "goober/host/audit.h"
 
@@ -119,4 +120,50 @@ TEST(Audit, MailBackupsAndOperators) {
   EXPECT_EQ(find(all, "backup").level, "ok");
   EXPECT_EQ(find(all, "operators").level, "ok");
   EXPECT_EQ(find(all, "caddy").level, "ok");
+}
+
+// A missing setting says what to ask for, so a deploy can ask and set it (028 § 8.2).
+TEST(Audit, MissingSettingsSayWhatToAskFor) {
+  auto cfg = parse(R"({"platform-domain": "shop.example",
+    "domains": {"shop.example": {"tenant": "shop"}, "blog.example": {"tenant": "blog"}, "localhost": {"tenant": "dev"}},
+    "tenants": {"blog": {"postal-address": "1 Main St, Springfield"}}})");
+  std::set<std::string> keys;
+  auto has = [&](const std::string& k) { return keys.count(k) > 0; };
+  auto all = host::audit_operations(*cfg, "", dns({}), has);
+
+  const auto& postal = find(all, "postal");
+  EXPECT_EQ(postal.level, "warn");
+  ASSERT_EQ(postal.asks.size(), 1u);  // shop only: blog has one, and localhost isn't public
+  EXPECT_EQ(postal.asks[0].path, (std::vector<std::string>{"tenants", "shop", "postal-address"}));
+
+  const auto& mailer = find(all, "mailer");
+  ASSERT_EQ(mailer.asks.size(), 3u);  // the from address, then both AWS keys
+  EXPECT_EQ(mailer.asks[0].path, (std::vector<std::string>{"identity", "ses", "from"}));
+  EXPECT_EQ(mailer.asks[0].also.at(0).second, "ses");
+  EXPECT_EQ(mailer.asks[1].key, "aws_access_key_id");
+  EXPECT_EQ(mailer.asks[2].kind, "key");
+  EXPECT_EQ(find(all, "backup").asks.at(0).path, (std::vector<std::string>{"backup", "s3", "bucket"}));
+  EXPECT_EQ(find(all, "operators").asks.at(0).kind, "operator");
+  auto j = host::audit_json(all);
+  EXPECT_EQ(j.at("findings").as_array().back().at("asks").at(0).at("path").at(1), "shop");
+
+  // Keys set: SES with a from address is ok; a key-less SES is a warning asking for the keys.
+  cfg = parse("{" + kBase + R"(, "backup": {"s3": {"bucket": "shop-backups"}},
+    "tenants": {"shop": {"postal-address": "1 Main St"}, "blog": {"postal-address": "2 Main St"}}})");
+  all = host::audit_operations(*cfg, "", dns({}), has);
+  EXPECT_EQ(find(all, "mailer").level, "warn");
+  EXPECT_EQ(find(all, "mailer").asks.size(), 2u);
+  EXPECT_EQ(find(all, "backup").level, "warn");
+  EXPECT_EQ(find(all, "postal").level, "ok");
+  keys = {"aws_access_key_id", "aws_secret_access_key"};
+  all = host::audit_operations(*cfg, "", dns({}), has);
+  EXPECT_EQ(find(all, "mailer").level, "ok");
+  EXPECT_EQ(find(all, "backup").level, "ok");
+
+  // Quiet: nothing asked.
+  cfg = parse(R"({"platform-domain": "shop.example", "domains": {"shop.example": {"tenant": "shop"}},
+    "audit": {"quiet": ["postal"]}})");
+  all = host::audit_operations(*cfg, "", dns({}), has);
+  EXPECT_EQ(find(all, "postal").level, "quiet");
+  EXPECT_TRUE(find(all, "postal").asks.empty());
 }

@@ -135,7 +135,10 @@ must be `✓ every check passed`. Any `✗` line says what is wrong.
 
 Before that last line, `── operations audit` says how the host is run: `✓` fine, `!` worth
 fixing, `?` a suggestion with its steps, `·` one you silenced. It never fails the deploy. It
-offers to set up the panel at ops.kcmeatup.com (answer `y`), or `v` to never ask again. To
+offers to set up the panel at ops.kcmeatup.com (answer `y`), or `v` to never ask again. Then
+`── settings` asks for anything missing (the postal address, the mail's from address, the
+backup bucket, AWS keys, an operator): `y` and type each value (Enter skips one), `n` for
+next time, `v` never. If the host won't start with them, host.json is put back. To
 silence any check, add its id to host.json: `"audit": {"quiet": ["backup"]}`. The same
 audit any time: `sudo -u goober goober-host audit --config /srv/goober/host/host.json
 --caddyfile /etc/caddy/Caddyfile`.

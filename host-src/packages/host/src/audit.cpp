@@ -108,7 +108,7 @@ bj::array strings(const std::vector<std::string>& v) {
 }
 
 AuditFinding panel_finding(const config::HostConfig& config, const std::string& site, const Resolver& resolve) {
-  AuditFinding f{"panel", "ok", "", {}, {}};
+  AuditFinding f{"panel", "ok", "", {}, {}, {}};
   auto ours = resolve(site);
   if (!config.operations_domain.empty()) {
     const auto& d = config.operations_domain;
@@ -152,10 +152,25 @@ AuditFinding panel_finding(const config::HostConfig& config, const std::string& 
   return f;
 }
 
+const char* kEmail = R"([^@\s]+@[^@\s]+\.[^@\s]+)";
+
+// The AWS keys SES and S3 sign with, when the host can tell they're missing.
+std::vector<AuditAsk> aws_key_asks(const HasKey& has_key) {
+  std::vector<AuditAsk> out;
+  if (!has_key) return out;
+  if (!has_key("aws_access_key_id")) {
+    out.push_back({"key", "AWS access key id (an IAM user's, like AKIA...)", "[A-Z0-9]{16,128}", {}, {}, "aws_access_key_id"});
+  }
+  if (!has_key("aws_secret_access_key")) {
+    out.push_back({"key", "AWS secret access key (not shown as you type)", "[^\\s]{16,128}", {}, {}, "aws_secret_access_key"});
+  }
+  return out;
+}
+
 }  // namespace
 
 std::vector<AuditFinding> audit_operations(const config::HostConfig& config, const std::string& caddyfile,
-                                           const Resolver& resolve) {
+                                           const Resolver& resolve, const HasKey& has_key) {
   std::vector<AuditFinding> out;
   auto quiet = [&](const std::string& id) {
     return std::find(config.audit_quiet.begin(), config.audit_quiet.end(), id) != config.audit_quiet.end();
@@ -165,12 +180,13 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
       f.level = "quiet";
       f.title = "not suggested (audit.quiet in host.json): " + f.title;
       f.steps.clear();
+      f.asks.clear();
     }
     out.push_back(std::move(f));
   };
   for (const auto& id : config.audit_quiet) {
     if (std::find(kAuditChecks.begin(), kAuditChecks.end(), id) == kAuditChecks.end()) {
-      out.push_back({"audit", "warn", "audit.quiet names \"" + id + "\", which no check has", {}, {}});
+      out.push_back({"audit", "warn", "audit.quiet names \"" + id + "\", which no check has", {}, {}, {}});
     }
   }
 
@@ -191,7 +207,7 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     if (!config.operations_domain.empty() && !served(sites, config.operations_domain)) {
       missing.push_back(config.operations_domain);
     }
-    AuditFinding f{"caddy", "ok", "Caddy serves every domain in host.json", {}, {{"missing", strings(missing)}}};
+    AuditFinding f{"caddy", "ok", "Caddy serves every domain in host.json", {}, {{"missing", strings(missing)}}, {}};
     if (!missing.empty()) {
       f.level = "warn";
       f.title = "Caddy doesn't serve ";
@@ -202,25 +218,69 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     add(std::move(f));
   }
 
+  auto aws = aws_key_asks(has_key);
   if (config.identity.mailer == "dev") {
-    add({"mailer", "warn", "identity.mailer is \"dev\": sign-in codes and mail stay in storage/mail/, and nobody gets them",
-         {"Set identity.mailer to \"ses\" or \"smtp\" (design/machine/018.Mail.md)"}, {}});
+    AuditFinding f{"mailer", "warn", "identity.mailer is \"dev\": sign-in codes and mail stay in storage/mail/, and nobody gets them",
+                   {"Set identity.mailer to \"ses\" or \"smtp\" (design/machine/018.Mail.md)"}, {}, {}};
+    f.asks.push_back({"text", "The address mail comes from, verified in Amazon SES (like no-reply@" +
+                                  (site.empty() ? std::string("example.com") : site) + ")",
+                      kEmail, {"identity", "ses", "from"}, {{{"identity", "mailer"}, "ses"}}, ""});
+    f.asks.insert(f.asks.end(), aws.begin(), aws.end());
+    add(std::move(f));
+  } else if (config.identity.mailer == "ses" && !aws.empty()) {
+    AuditFinding f{"mailer", "warn", "mail goes through SES, but the host has no AWS keys: nothing can be sent",
+                   {"goober-host key set aws_access_key_id, then aws_secret_access_key (each value on stdin)"}, {}, aws};
+    add(std::move(f));
   } else {
-    add({"mailer", "ok", "mail goes out through " + config.identity.mailer + " as " + config.identity.from_address(), {}, {}});
+    add({"mailer", "ok", "mail goes out through " + config.identity.mailer + " as " + config.identity.from_address(), {}, {}, {}});
   }
 
   if (!config.backup.enabled()) {
-    add({"backup", "suggest", "backups stay on this machine: a lost disk loses everything",
-         {"Set \"backup\": {\"s3\": {\"bucket\": \"...\"}} and the AWS keys (design/machine/019.Backups.md)"}, {}});
+    AuditFinding f{"backup", "suggest", "backups stay on this machine: a lost disk loses everything",
+                   {"Set \"backup\": {\"s3\": {\"bucket\": \"...\"}} and the AWS keys (design/machine/019.Backups.md)"}, {}, {}};
+    f.asks.push_back({"text", "An S3 bucket for backups (made already, in aws.region)", "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]",
+                      {"backup", "s3", "bucket"}, {}, ""});
+    f.asks.insert(f.asks.end(), aws.begin(), aws.end());
+    add(std::move(f));
+  } else if (!aws.empty()) {
+    add({"backup", "warn", "backups go to s3://" + config.backup.bucket + ", but the host has no AWS keys: none are uploaded",
+         {"goober-host key set aws_access_key_id, then aws_secret_access_key (each value on stdin)"}, {}, aws});
   } else {
-    add({"backup", "ok", "backups go to s3://" + config.backup.bucket + "/" + config.backup.prefix, {}, {}});
+    add({"backup", "ok", "backups go to s3://" + config.backup.bucket + "/" + config.backup.prefix, {}, {}, {}});
   }
 
   if (config.identity.operators.empty()) {
-    add({"operators", "warn", "identity.operators is empty: nobody can sign in to the panel or connect an agent as operator",
-         {"Add \"identity\": {\"operators\": {\"you@example.com\": [\"host:owner\"]}} to host.json"}, {}});
+    AuditFinding f{"operators", "warn", "identity.operators is empty: nobody can sign in to the panel or connect an agent as operator",
+                   {"Add \"identity\": {\"operators\": {\"you@example.com\": [\"host:owner\"]}} to host.json"}, {}, {}};
+    f.asks.push_back({"operator", "Your email address, to operate this host as host:owner", kEmail, {}, {}, ""});
+    add(std::move(f));
   } else {
-    add({"operators", "ok", std::to_string(config.identity.operators.size()) + " host operator(s)", {}, {}});
+    add({"operators", "ok", std::to_string(config.identity.operators.size()) + " host operator(s)", {}, {}, {}});
+  }
+
+  // Each tenant a public domain serves needs a postal address before it can invite people or
+  // mail them anything but sign-in codes (029 § 8): the law puts it in every such mail's footer.
+  std::set<std::string> served;
+  for (const auto& [name, entry] : config.domains) {
+    if (is_public_name(name)) served.insert(entry.tenant);
+  }
+  std::vector<std::string> missing;
+  for (const auto& t : served) {
+    if (config.tenant(t).postal_address.empty()) missing.push_back(t);
+  }
+  if (!served.empty() && missing.empty()) {
+    add({"postal", "ok", "every tenant has a postal address", {}, {}, {}});
+  } else if (!missing.empty()) {
+    AuditFinding f{"postal", "warn", "", {}, {{"tenants", strings(missing)}}, {}};
+    f.title = "no postal address for ";
+    for (size_t i = 0; i < missing.size(); ++i) f.title += (i ? ", " : "") + missing[i];
+    f.title += ": invites, lists, and boxes' mail to people are refused until one is set";
+    for (const auto& t : missing) {
+      f.steps.push_back("Set \"tenants\": {\"" + t + "\": {\"postal-address\": \"...\"}} in host.json");
+      f.asks.push_back({"text", "The postal address for " + t + ", one line, as mail footers show it", "[^\\r\\n]{5,200}",
+                        {"tenants", t, "postal-address"}, {}, ""});
+    }
+    add(std::move(f));
   }
   return out;
 }
@@ -228,7 +288,20 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
 bj::object audit_json(const std::vector<AuditFinding>& findings) {
   bj::array list;
   for (const auto& f : findings) {
-    list.push_back(bj::object{{"id", f.id}, {"level", f.level}, {"title", f.title}, {"steps", strings(f.steps)}, {"data", f.data}});
+    bj::array asks;
+    for (const auto& a : f.asks) {
+      bj::object o{{"kind", a.kind}, {"prompt", a.prompt}, {"pattern", a.pattern}};
+      if (a.kind == "text") {
+        o["path"] = strings(a.path);
+        bj::array also;
+        for (const auto& [path, value] : a.also) also.push_back(bj::object{{"path", strings(path)}, {"value", value}});
+        o["also"] = std::move(also);
+      }
+      if (a.kind == "key") o["key"] = a.key;
+      asks.push_back(std::move(o));
+    }
+    list.push_back(bj::object{{"id", f.id}, {"level", f.level}, {"title", f.title}, {"steps", strings(f.steps)},
+                              {"data", f.data}, {"asks", std::move(asks)}});
   }
   return {{"findings", std::move(list)}};
 }
@@ -243,7 +316,12 @@ int run_audit(const std::string& config_path, const std::string& caddyfile_path,
     if (!text) return std::cerr << "goober-host: can't read " << caddyfile_path << "\n", 1;
     caddyfile = *text;
   }
-  auto findings = audit_operations(*config, caddyfile, resolve_addresses);
+  // Only whether a key is there: its value is never read.
+  auto has_key = [storage = config->storage](const std::string& name) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(storage / "keys" / "system" / name, ec);
+  };
+  auto findings = audit_operations(*config, caddyfile, resolve_addresses, has_key);
   if (json) {
     std::cout << json::dump(audit_json(findings)) << "\n";
     return 0;
@@ -252,6 +330,7 @@ int run_audit(const std::string& config_path, const std::string& caddyfile_path,
     const char* mark = f.level == "ok" ? "✓" : f.level == "warn" ? "!" : f.level == "suggest" ? "?" : "·";
     std::cout << "  " << mark << " " << f.id << ": " << f.title << "\n";
     for (const auto& s : f.steps) std::cout << "      - " << s << "\n";
+    if (!f.asks.empty()) std::cout << "      - a deploy from a terminal asks for it\n";
   }
   return 0;
 }

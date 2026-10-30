@@ -726,6 +726,148 @@ if [[ -n "$PANEL" ]]; then
   fi
 fi
 
+# Missing settings (028.Panel.md § 8.2): each finding about one (a tenant's postal address, the
+# mailer, backups, operators, the AWS keys) says what to ask for. From a terminal, the deploy
+# asks; Enter skips one, and "never" quiets its check in host.json. The answers are applied as
+# the host's user, checked by goober-host, and proved by a restart, or put back.
+echo "── settings"
+AUDIT_JSON="$(sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" --json 2>/dev/null || true)"
+# Root only talks to the terminal here: the audit's JSON is the host user's output, so its
+# prompts are stripped of control characters and its key names and paths are checked before use.
+ASK_PY=$(cat <<'PY'
+import getpass, json, re, sys
+try:
+    findings = json.load(sys.stdin)["findings"]
+except Exception:
+    findings = []
+def clean(s):
+    return "".join(c for c in str(s) if c.isprintable())[:300]
+pending = [f for f in findings if f.get("asks") and f.get("level") in ("warn", "suggest")]
+mode = sys.argv[1]
+if mode == "list":
+    print(" ".join(clean(f["id"]) for f in pending))
+    sys.exit(0)
+tin, tout = open("/dev/tty"), open("/dev/tty", "w")
+def ask(prompt, secret=False):
+    if secret:
+        return getpass.getpass("     " + prompt + ": ", stream=tout).strip()
+    tout.write("     " + prompt + ": "); tout.flush()
+    return tin.readline().strip()
+out = {"config": [], "operators": [], "keys": {}, "quiet": []}
+for f in pending:
+    fid = clean(f["id"])
+    if not re.fullmatch(r"[a-z-]{1,40}", fid):
+        continue
+    tout.write("   ! " + clean(f.get("title", "")) + "\n")
+    tout.write("     Set it now? [y]es, [n]ot now, ne[v]er: "); tout.flush()
+    choice = tin.readline().strip().lower()
+    if choice in ("v", "never"):
+        out["quiet"].append(fid)
+        continue
+    if choice not in ("y", "yes"):
+        continue
+    tout.write("     (Enter skips a value)\n"); tout.flush()
+    for a in f["asks"]:
+        kind, pattern = a.get("kind"), a.get("pattern", ".+")
+        if kind == "key" and (not re.fullmatch(r"[a-z0-9_]{1,64}", str(a.get("key", ""))) or a["key"] in out["keys"]):
+            continue
+        value = ""
+        for _ in range(3):
+            value = ask(clean(a.get("prompt", "")), secret=(kind == "key"))
+            if not value or re.fullmatch(pattern, value):
+                break
+            tout.write("     that doesn't look right; again, or Enter to skip\n"); tout.flush()
+            value = ""
+        if not value:
+            continue
+        if kind == "text" and all(isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", p) for p in a.get("path", [])):
+            out["config"].append({"path": a["path"], "value": value})
+            for extra in a.get("also", []):
+                out["config"].append({"path": extra["path"], "value": extra["value"]})
+        elif kind == "operator":
+            out["operators"].append(value.lower())
+        elif kind == "key":
+            out["keys"][a["key"]] = value
+print(json.dumps(out))
+PY
+)
+SETTINGS="$(python3 -I -c "$ASK_PY" list <<<"$AUDIT_JSON" 2>/dev/null || true)"
+if [[ -z "$SETTINGS" ]]; then
+  echo "   nothing missing"
+elif [[ ! -t 0 ]]; then
+  echo "   (deploy from a terminal to be asked for what's missing: $SETTINGS)"
+else
+  ANSWERS="$(python3 -I -c "$ASK_PY" ask <<<"$AUDIT_JSON" || echo '{}')"
+  # host.json: values set, operators added, checks quieted, all by the host's user. Keys aren't
+  # passed to this step.
+  CONFIG_EDITS="$(python3 -I -c 'import json,sys; a=json.load(sys.stdin); a.pop("keys",None); print(json.dumps(a))' <<<"$ANSWERS" 2>/dev/null || echo '{}')"
+  CHANGED="$(python3 -I -c 'import json,sys; a=json.load(sys.stdin); print(1 if a.get("config") or a.get("operators") or a.get("quiet") else "")' <<<"$CONFIG_EDITS" 2>/dev/null || true)"
+  if [[ -n "$CHANGED" ]]; then
+    put_back() {
+      if sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-settings" "$DIR/host.json"; then
+        echo "   $1; host.json is as it was"
+      else
+        echo "   $1, and putting host.json back failed: restore $DIR/host.json.before-settings by hand"
+      fi
+      FAILED+=("the settings (host.json was put back)")
+    }
+    if ! sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-settings"; then
+      echo "   couldn't copy host.json aside; nothing changed"
+      FAILED+=("the settings (nothing changed)")
+    elif ! sudo -u "$RUN_AS" python3 -I -c '
+import json, os, sys
+path = sys.argv[1]
+edits = json.load(sys.stdin)
+cfg = json.load(open(path))
+for e in edits.get("config", []):
+    node = cfg
+    for key in e["path"][:-1]:
+        node = node.setdefault(key, {})
+    node[e["path"][-1]] = e["value"]
+for email in edits.get("operators", []):
+    cfg.setdefault("identity", {}).setdefault("operators", {}).setdefault(email, ["host:owner"])
+quiet = cfg.setdefault("audit", {}).setdefault("quiet", []) if edits.get("quiet") else []
+for q in edits.get("quiet", []):
+    if q not in quiet:
+        quiet.append(q)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode & 0o777)
+os.replace(tmp, path)
+' "$DIR/host.json" <<<"$CONFIG_EDITS"; then
+      put_back "couldn't edit host.json"
+    elif ! CHECK_OUT="$(sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" 2>&1)"; then
+      put_back "the host refused it: $(tail -n 1 <<<"$CHECK_OUT")"
+    else
+      systemctl restart goober-host || true
+      up=""
+      for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
+      if [[ -n "$up" ]]; then
+        echo "   ✓ host.json updated, and the host is ready with it"
+      else
+        put_back "the host wasn't ready with the new settings"
+        systemctl restart goober-host || true
+      fi
+    fi
+  fi
+  # Keys, by the host's user, each value on stdin: never on a command line or in a file.
+  while IFS= read -r name; do
+    [[ "$name" =~ ^[a-z0-9_]{1,64}$ ]] || continue
+    value="$(python3 -I -c 'import json,sys; print(json.load(sys.stdin)["keys"][sys.argv[1]])' "$name" <<<"$ANSWERS")" || continue
+    if printf '%s\n' "$value" | sudo -u "$RUN_AS" "$BIN" key set "$name" --config "$DIR/host.json" >/dev/null; then
+      echo "   ✓ key $name set"
+    else
+      FAILED+=("setting the key $name")
+    fi
+    value=""
+  done < <(python3 -I -c 'import json,sys; print("\n".join(json.load(sys.stdin).get("keys", {})))' <<<"$ANSWERS" 2>/dev/null || true)
+  ANSWERS=""
+  echo "   what's still missing:"
+  sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" 2>/dev/null | grep -E '^  [!?]' || echo "   nothing"
+fi
+
 if ((${#FAILED[@]})); then
   echo
   echo "✗ ${#FAILED[@]} check(s) failed: ${FAILED[*]}"

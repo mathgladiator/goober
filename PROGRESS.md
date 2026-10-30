@@ -472,8 +472,17 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       `audit.quiet` in host.json; tests.
 - [x] Every deploy runs it and offers to set up the panel at `ops.` once its DNS is ready
       (or never to ask again), checked and put back if refused.
+- [x] Missing settings asked for at deploy: the postal address per tenant, the SES from
+      address, the backup bucket, the AWS keys, an operator; applied, checked, put back.
 - [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
       vault key copied off the machine.
+
+### Phase 29: reads, caching, and performance reports (037)
+- [x] GETs and HEADs change nothing: writes and effectful calls refused, reads begin
+      deferred beside a writer; the leads box's mailed link confirms by a button; tests.
+- [ ] Per-call time split and per-statement statistics; `perf_report`, `perf_statements`.
+- [ ] Database versions; the route `cache` field with checks; 304s without the box;
+      `cache_status`, `cache_clear` (waiting on 037 § 9's decisions).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

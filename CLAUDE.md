@@ -142,7 +142,8 @@ Read these before doing design work:
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
     `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
     change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`;
-    the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel.
+    the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
+    and asks for missing settings (postal address, mailer, backups, AWS keys, operators).
   - `design/machine/029.Invites.md`: invites as a host feature (the record, the template, accept by
     code with roles, terms, and lists; decline as a block only a person lifts), mail categories with
     their rules, lists with double opt-in, the preferences page, and per-tenant postal addresses.
@@ -166,6 +167,9 @@ Read these before doing design work:
     as the agent) or denies; read tools never wait.
   - `design/machine/036.Bus.md`: the bus in-process: `publish` on strategies moved on commit,
     `routes.sse` subscriptions evaluated read-only, coalesced, and shared, over SSE.
+  - `design/machine/037.Caching.md`: reads and caching: GETs change nothing (built); per-database
+    versions, a route `cache` field (by data or by wake, fresh-ms, browser-ms, sampled checks),
+    304s without the box, and MCP performance reports; decisions open in § 9.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
