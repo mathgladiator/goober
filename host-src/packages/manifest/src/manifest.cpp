@@ -34,6 +34,16 @@ const std::vector<std::string>& reserved_prefixes() {
 
 namespace {
 
+// A key name a manifest may name for a service: keys/system/$name or keys/tenant/{!tenant}/$name,
+// and never the host's own (AWS, for SES and backups; the backup and vault keys).
+bool service_key_name(std::string_view c) {
+  std::string_view rest = c.starts_with("keys/system/")             ? c.substr(12)
+                          : c.starts_with("keys/tenant/{!tenant}/") ? c.substr(22)
+                                                                     : std::string_view();
+  if (!base::is_valid_name(rest)) return false;
+  return !(c.starts_with("keys/system/") && (rest.starts_with("aws_") || rest == "backup_key" || rest == "vault_key"));
+}
+
 // Fields from 150.DeepManifest.md that v1 accepts with a warning.
 const std::set<std::string> kLaterTopLevel = {"pins",    "policy",   "deployment",
                                               "keys", "static",   "headers",
@@ -679,6 +689,8 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
       // Each call carries a sealed secret the host made in a connection (034 § 4).
       svc.sealed = true;
       svc.credentials.clear();
+      // A sealed secret goes only to the origin it was made for, so never to a URL the box picks.
+      if (svc.any_public) return *error = where + ": \"credentials\": \"sealed\" can't go with base \"*\"", false;
     }
     if (!svc.credentials.empty()) {
       std::string_view c = svc.credentials;
@@ -766,9 +778,7 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         auto key_name = [&](const char* k, std::string* out) {
           auto v = get_string(o, k, &err);
           if (!v) return true;
-          std::string_view s = *v;
-          std::string_view rest = s.starts_with("keys/system/") ? s.substr(12) : s.starts_with("keys/tenant/{!tenant}/") ? s.substr(22) : std::string_view();
-          if (!base::is_valid_name(rest)) return false;
+          if (!service_key_name(*v)) return false;
           *out = *v;
           return true;
         };
@@ -825,6 +835,14 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
         svc.oauth1_token_secret = get_string(*auth, "token-secret", &err).value_or("");
         if (svc.oauth1_consumer_key.empty() || svc.oauth1_consumer_secret.empty()) {
           return *error = where + ".auth.oauth1 names consumer-key and consumer-secret keys", false;
+        }
+        for (const auto* k : {&svc.oauth1_consumer_key, &svc.oauth1_consumer_secret, &svc.oauth1_token, &svc.oauth1_token_secret}) {
+          if (!k->empty() && !service_key_name(*k)) {
+            return *error = where + ".auth.oauth1: " + *k + " isn't a key a service may use (keys/system/$name or keys/tenant/{!tenant}/$name, not the host's own)", false;
+          }
+        }
+        if (svc.oauth1_token.empty() != svc.oauth1_token_secret.empty()) {
+          return *error = where + ".auth.oauth1: token and token-secret go together", false;
         }
       } else {
         return *error = where + ".auth.kind is header, bearer, basic, query, or oauth1", false;

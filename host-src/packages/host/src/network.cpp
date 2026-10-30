@@ -106,6 +106,7 @@ std::optional<BuiltCall> build_call(const manifest::ExternalService& svc, const 
       continue;
     }
     size_t close = m.path.find('}', i);
+    if (close == std::string::npos) return *error = "the path " + m.path + " has an unclosed {", std::nullopt;
     std::string name = m.path.substr(i + 1, close - i - 1);
     auto* v = path_params.if_contains(name);
     if (!v || v->is_null()) return *error = "the call needs path." + name, std::nullopt;
@@ -267,7 +268,7 @@ constexpr int kMaxInternalDepth = 4;
 }  // namespace
 
 std::string Host::call_as_box(const std::string& box, const std::string& tenant, const std::string& service,
-                              const std::string& method, const std::string& request) {
+                              const std::string& method, const std::string& request, const std::string& user_id) {
   auto active = boxes_->active();
   auto it = active->boxes.find(box);
   if (it == active->boxes.end()) return R"({"error":"no such box"})";
@@ -277,6 +278,7 @@ std::string Host::call_as_box(const std::string& box, const std::string& tenant,
   ctx.domain = site_of(tenant);
   ctx.request_id = "test-" + std::to_string(base::now_unix_ms()) + "-" + std::to_string(base::os_random_u64() % 100000);
   ctx.deadline_us = base::monotonic_us() + 10'000'000;
+  if (!user_id.empty()) ctx.user = bj::object{{"user_id", user_id}};
   std::string out = external_call(ctx, service, method, request);
   if (!ctx.pending.empty()) {
     std::string err;

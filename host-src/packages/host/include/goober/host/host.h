@@ -86,7 +86,7 @@ class Host {
   // For tests: one goober_call as a box would make it, for a tenant, with nobody signed in; an
   // outbox call's element is enqueued at once (as a request that committed). Returns the answer.
   std::string call_as_box(const std::string& box, const std::string& tenant, const std::string& service,
-                          const std::string& method, const std::string& request);
+                          const std::string& method, const std::string& request, const std::string& user_id = "");
   // What the scheduler plans next, and firing a timer now for one tenant (operators):
   // returns how many fires ran, or nullopt with `error`.
   boost::json::array timers_due();
@@ -386,6 +386,7 @@ class Host {
   // Speaking HTTP (http_out.cpp, connect_routes.cpp; design/machine/034.SpeakingHttp.md).
   struct Secret {
     std::string kind, value, token, token_secret, owner;
+    std::string origin;  // a sealed secret's: the only origin it may be sent to (scheme://host[:port])
   };
   struct HttpxCall {
     std::string verb, url, body, content_type;

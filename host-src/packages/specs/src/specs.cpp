@@ -148,6 +148,13 @@ std::optional<Spec> parse(std::string_view text, std::string* error) {
   auto* paths = root.if_contains("paths");
   if (!paths || !paths->is_object()) return *error = "the spec has no paths", std::nullopt;
   for (const auto& [path, item_v] : paths->as_object()) {
+    // Every { closes before the next, so a path parameter always has a name.
+    int depth = 0;
+    for (char ch : std::string_view(path)) {
+      depth += ch == '{' ? 1 : ch == '}' ? -1 : 0;
+      if (depth < 0 || depth > 1) break;
+    }
+    if (depth != 0 || !path.starts_with("/")) return *error = "the path " + std::string(path) + " isn't a path with balanced {}", std::nullopt;
     const auto* item_p = resolve(root, item_v);
     if (!item_p || !item_p->is_object()) continue;
     const auto& item = item_p->as_object();
@@ -158,7 +165,9 @@ std::optional<Spec> parse(std::string_view text, std::string* error) {
       Operation op;
       op.id = str(o, "operationId");
       op.verb = verb;
-      op.path = base_path + std::string(path);
+      // As the spec spells it: Swagger's basePath (like a 3.x server's path) belongs in the
+      // manifest's base, as in https://www.strava.com/api/v3.
+      op.path = std::string(path);
       auto op_consumes = strings(o, "consumes");
       const auto& cons = op_consumes.empty() ? consumes : op_consumes;
       add_params(root, item.if_contains("parameters"), &op.params, &op.body_types, cons);
@@ -189,9 +198,16 @@ std::optional<std::string> Store::put(std::string_view name, std::string_view te
   fs::path file = dir_ / std::string(name) / (sha + ".json");
   std::error_code ec;
   fs::create_directories(file.parent_path(), ec);
-  if (!fs::exists(file, ec) && !base::write_file_durable(file, text)) return *error = "couldn't write " + file.string(), std::nullopt;
   std::string pin = std::string(name) + "@" + sha.substr(0, 12);
   std::lock_guard lock(mu_);
+  // Another document already holding this pin's 48 bits keeps it: a pin never changes meaning.
+  for (auto it = fs::directory_iterator(file.parent_path(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::string other = it->path().stem().string();
+    if (other != sha && other.starts_with(sha.substr(0, 12))) {
+      return *error = "another spec named " + std::string(name) + " already has pin " + pin + "; change a byte (a description) and put it again", std::nullopt;
+    }
+  }
+  if (!fs::exists(file, ec) && !base::write_file_durable(file, text)) return *error = "couldn't write " + file.string(), std::nullopt;
   cache_[pin] = std::make_shared<const Spec>(std::move(*spec));
   return pin;
 }
@@ -220,6 +236,8 @@ std::shared_ptr<const Spec> Store::get(std::string_view pin, std::string* error)
   if (!file) return *error = "no spec " + std::string(pin) + " is stored (spec_put it)", nullptr;
   auto text = base::read_file(*file);
   if (!text) return *error = "couldn't read " + file->string(), nullptr;
+  // The file is named by its whole hash: bytes that changed on disk aren't the pinned spec.
+  if (base::sha256_hex(*text) != file->stem().string()) return *error = file->string() + " doesn't match its hash", nullptr;
   auto spec = parse(*text, error);
   if (!spec) return nullptr;
   auto shared = std::make_shared<const Spec>(std::move(*spec));

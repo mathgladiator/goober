@@ -6,6 +6,7 @@
 // In the outbox, the same element runs a chunked upload and polls an async job.
 
 #include <algorithm>
+#include <charconv>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -22,6 +23,7 @@
 #include "goober/specs/specs.h"
 #include "goober/sqlite/sqlite.h"
 #include "goober/vault/vault.h"
+#include "goober/web/url.h"
 #include "keys.h"
 #include "network.h"
 
@@ -32,6 +34,35 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr size_t kMaxBody = 64u << 20;
+constexpr int64_t kMaxChunks = 1000;
+constexpr int64_t kMaxWaitMs = 24 * 3600 * 1000;  // Retry-After and resets past this are capped
+constexpr int64_t kMaxExpiresInS = 10LL * 365 * 24 * 3600;
+
+// A header's whole-number seconds, or nullopt: digits only, and small enough to mean something.
+std::optional<int64_t> header_seconds(std::string_view s) {
+  int64_t v = 0;
+  if (s.empty() || s.size() > 12) return std::nullopt;
+  auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+  if (ec != std::errc() || p != s.data() + s.size() || v < 0) return std::nullopt;
+  return v;
+}
+
+// An expires_in from a token endpoint, in ms from now; nullopt when absent or senseless.
+std::optional<int64_t> expires_in_ms(const bj::object& reply) {
+  auto* ei = reply.if_contains("expires_in");
+  double d = 0;
+  if (ei && ei->is_number()) {
+    d = ei->to_number<double>();
+  } else if (ei && ei->is_string()) {
+    auto s = header_seconds(std::string(ei->as_string()));
+    if (!s) return std::nullopt;
+    d = double(*s);
+  } else {
+    return std::nullopt;
+  }
+  if (!(d > 0) || d > double(kMaxExpiresInS)) return std::nullopt;
+  return int64_t(d * 1000);
+}
 
 std::string text_of(const bj::value& v) {
   if (v.is_string()) return std::string(v.as_string());
@@ -119,7 +150,15 @@ std::string multipart(const std::vector<Part>& parts, std::string* content_type)
   std::string out;
   for (const auto& p : parts) {
     out += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + p.name + "\"";
-    if (!p.filename.empty()) out += "; filename=\"" + p.filename + "\"";
+    if (!p.filename.empty()) {
+      // A file's name is a person's text: quotes, backslashes, and controls would reshape the header.
+      std::string safe;
+      for (char ch : p.filename) {
+        if (ch == '"' || ch == '\\' || static_cast<unsigned char>(ch) < 0x20 || ch == 0x7f) safe += '_';
+        else safe += ch;
+      }
+      out += "; filename=\"" + safe + "\"";
+    }
     out += "\r\n";
     if (!p.content_type.empty()) out += "Content-Type: " + p.content_type + "\r\n";
     out += "\r\n" + p.data + "\r\n";
@@ -197,6 +236,7 @@ std::optional<Host::Secret> Host::open_secret(const std::string& tenant, const m
   Secret s;
   s.owner = opened->owner;
   s.kind = o.contains("kind") && o.at("kind").is_string() ? std::string(o.at("kind").as_string()) : "";
+  s.origin = o.contains("origin") && o.at("origin").is_string() ? std::string(o.at("origin").as_string()) : "";
   auto field = [](const bj::object& x, const char* k) {
     auto* f = x.if_contains(k);
     return f && f->is_string() ? std::string(f->as_string()) : std::string();
@@ -269,11 +309,15 @@ std::optional<Host::Secret> Host::open_secret(const std::string& tenant, const m
         }
         return std::nullopt;
       }
+      // A 200 without a token (Slack answers ok: false) is a failed refresh, not an empty token.
+      if (field(*reply, "access_token").empty()) {
+        return *error = "the token endpoint gave no access token when refreshing", std::nullopt;
+      }
       o["access_token"] = field(*reply, "access_token");
       if (auto nr = field(*reply, "refresh_token"); !nr.empty()) o["refresh_token"] = nr;  // rotated
-      if (auto* ei = reply->if_contains("expires_in"); ei && ei->is_number()) {
-        o["expires_at"] = now + int64_t(ei->to_number<double>() * 1000);
-      }
+      // No expires_in: the token doesn't say it expires, so it isn't refreshed again until it does.
+      if (auto ms = expires_in_ms(*reply)) o["expires_at"] = now + *ms;
+      else o.erase("expires_at");
       o["gen"] = gen + 1;
       std::string next = vault::seal_for(*key, tenant, svc.name, s.owner, json::dump(o));
       {
@@ -401,6 +445,7 @@ std::optional<Host::HttpxCall> Host::build_httpx(const std::string& tenant, cons
         continue;
       }
       size_t close = path_template.find('}', i);
+      if (close == std::string::npos) return *error = "the path " + path_template + " has an unclosed {", std::nullopt;
       std::string name = path_template.substr(i + 1, close - i - 1);
       auto* v = path_params.if_contains(name);
       if (!v || v->is_null()) return *error = "the call needs path." + name, std::nullopt;
@@ -492,6 +537,7 @@ std::optional<Host::FileBytes> Host::attachment_bytes(const std::string& tenant,
   int64_t id = id_value.is_int64() ? id_value.as_int64() : id_value.is_string() ? std::atoll(std::string(id_value.as_string()).c_str()) : 0;
   auto meta = id > 0 ? attachments_->get(tenant, id) : std::nullopt;
   if (!meta || meta->state != "stored") return *error = "attachment " + text_of(id_value) + " isn't one of this tenant's", std::nullopt;
+  if (meta->size > int64_t(kMaxBody)) return *error = "attachment " + text_of(id_value) + " is past 64 MiB", std::nullopt;
   auto bytes = attachments_->read(tenant, id);
   if (!bytes) return *error = "attachment " + text_of(id_value) + " can't be read", std::nullopt;
   FileBytes f;
@@ -503,6 +549,16 @@ std::optional<Host::FileBytes> Host::attachment_bytes(const std::string& tenant,
 
 bool Host::apply_secret(const std::string& tenant, const manifest::ExternalService& svc, const Secret& secret, HttpxCall* call,
                         std::string* error) {
+  // A sealed secret goes only to the origin it was made for (the service's base when the person
+  // connected), whatever the box's call says or a later manifest's base becomes.
+  if (svc.sealed) {
+    auto u = web::parse_url(call->url);
+    if (secret.origin.empty() || !u || u->origin() != secret.origin) {
+      return *error = "the credential is for " + (secret.origin.empty() ? std::string("no recorded origin") : secret.origin) +
+                      ", not this URL's; the person must connect " + svc.name + " again",
+             false;
+    }
+  }
   const std::string& v = secret.value;
   const std::string& kind = svc.auth_kind;
   if (kind.empty() || kind == "header" || kind == "bearer") {
@@ -570,15 +626,15 @@ HttpOut Host::send_httpx(const std::string& tenant, const std::string& box, cons
              call.body.size(), out.body.size(), request_id, outbox_id);
   int64_t now = base::now_unix_ms();
   // Rate limits (034 § 9): Retry-After on 429 and 503, and an exhausted window's reset.
+  // Waits are capped at a day, so a hostile or broken header can't park an element for good.
   if (svc.retry_after && (out.status == 429 || out.status == 503)) {
-    std::string ra = out.header("retry-after");
-    if (!ra.empty() && std::all_of(ra.begin(), ra.end(), ::isdigit)) out.retry_at_ms = now + std::stoll(ra) * 1000;
+    if (auto s = header_seconds(out.header("retry-after"))) out.retry_at_ms = now + std::min(*s * 1000, kMaxWaitMs);
   }
   if (!svc.limit_remaining.empty() && out.header(svc.limit_remaining) == "0" && !svc.limit_reset.empty()) {
-    std::string reset = out.header(svc.limit_reset);
-    if (!reset.empty() && std::all_of(reset.begin(), reset.end(), ::isdigit)) {
-      int64_t r = std::stoll(reset);
-      out.retry_at_ms = std::max(out.retry_at_ms, r > 1'000'000'000 ? r * 1000 : now + r * 1000);
+    if (auto r = header_seconds(out.header(svc.limit_reset))) {
+      // An epoch time in seconds, or seconds from now.
+      int64_t at = *r > 1'000'000'000 ? *r * 1000 : now + *r * 1000;
+      out.retry_at_ms = std::max(out.retry_at_ms, std::min(at, now + kMaxWaitMs));
     }
   }
   if (!m.error_when.empty() && out.error.empty()) {
@@ -625,6 +681,14 @@ std::string Host::httpx_call(CallContext& ctx, const manifest::ExternalService& 
     return json::dump(e);
   }
   if (!resealed.empty()) r["credential"] = resealed;
+  // A person's own secret serves their own requests: another signed-in person's call can't use it.
+  // (Timers, results, and outbox deliveries carry no person, so the box decides there.)
+  if (const auto* u = ctx.user.if_object(); u && !secret->owner.empty()) {
+    const auto* uid = u->if_contains("user_id");
+    if (uid && uid->is_string() && uid->as_string() != secret->owner) {
+      return fail("the credential belongs to another person (user " + secret->owner + ")");
+    }
+  }
   if (effect == "outbox") {
     std::string why;
     if (!outbox_quota_take(ctx.tenant, svc.name, &why)) return fail(why);
@@ -759,6 +823,11 @@ HttpOut Host::deliver_outbox_httpx(const std::string& tenant, sqlite::Db& db, in
       if (!file) {
         fail.status = 400;
         fail.error = err;
+        return fail;
+      }
+      if (up.chunk_bytes > 0 && int64_t(file->bytes.size() / size_t(up.chunk_bytes)) >= kMaxChunks) {
+        fail.status = 400;
+        fail.error = "the file needs more than " + std::to_string(kMaxChunks) + " chunks; raise chunk-bytes";
         return fail;
       }
       std::string upload_id;

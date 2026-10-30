@@ -185,8 +185,8 @@ class HttpTest : public ::testing::Test {
     std::string err;
     ASSERT_TRUE(host->boxes().upload(manifest, kLoggingBox, &err)) << err;
   }
-  bj::object call(const std::string& service, const std::string& method, const std::string& request) {
-    return parse(host->call_as_box("app", "kc", service, method, request));
+  bj::object call(const std::string& service, const std::string& method, const std::string& request, const std::string& user = "") {
+    return parse(host->call_as_box("app", "kc", service, method, request, user));
   }
   std::string sign_in(const std::string& email) {
     fetch(port, bhttp::verb::post, "/identity/email/start",
@@ -291,6 +291,24 @@ TEST_F(HttpTest, APastedKeyIsCheckedSealedAndAppliedFromTheBoxsCall) {
   auto w = call("hevy", "log", R"({"body":{"title":"Leg day"},"credential":")" + sealed + R"("})");
   EXPECT_EQ(w.at("status").as_int64(), 200) << json::dump(w);
   EXPECT_EQ(api.seen("/v1/workouts").back().body, R"({"title":"Leg day"})");
+  // The owner's own requests may use it; another signed-in person's may not.
+  std::smatch owner_m;
+  ASSERT_TRUE(std::regex_search(sealed, owner_m, std::regex(R"(^gsv1\.([0-9]+)\.)")));
+  EXPECT_EQ(call("hevy", "workouts", R"({"credential":")" + sealed + R"("})", owner_m[1]).at("status").as_int64(), 200);
+  EXPECT_NE(json::dump(call("hevy", "workouts", R"({"credential":")" + sealed + R"("})", "999999")).find("another person"),
+            std::string::npos);
+  // When the check can't say yes (the service is down), nothing is sealed.
+  api.on("/v1/user", [](const server::http::Request&) { return json_reply(503, "{}"); });
+  auto down = post("good-key");
+  EXPECT_EQ(down.status, 400);
+  EXPECT_NE(down.body.find("couldn&#39;t be reached"), std::string::npos) << down.body;
+  // A later version moving the service to another origin can't take the sealed key with it.
+  std::string moved_base = "http://localhost:" + std::to_string(api.port());
+  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+    "external":{"hevy":{"base":")" + moved_base + R"(","spec":")" + p + R"(","credentials":"sealed",
+      "auth":{"kind":"header","name":"api-key"},"methods":{"workouts":{"op":"GET /v1/workouts"}}}}})");
+  EXPECT_NE(json::dump(call("hevy", "workouts", R"({"credential":")" + sealed + R"("})")).find("connect hevy again"),
+            std::string::npos);
   // The egress log never holds the key.
   auto log = base::read_file(root / "storage/logs/egress.log");
   ASSERT_TRUE(log);
@@ -318,7 +336,7 @@ TEST_F(HttpTest, OAuthConnectsRefreshesOnceAndRemembersRotation) {
     return json_reply(400, R"({"error":"invalid_grant"})");
   });
   upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
-    "external":{"strava":{"base":")" + api.base() + R"(","spec":")" + p + R"(","credentials":"sealed","auth":{"kind":"bearer"},
+    "external":{"strava":{"base":")" + api.base() + R"(/api/v3","spec":")" + p + R"(","credentials":"sealed","auth":{"kind":"bearer"},
       "connect":{"oauth2":{"authorize":")" + api.base() + R"(/oauth/authorize","token":")" + api.base() + R"(/oauth/token",
         "client-id":"keys/tenant/{!tenant}/strava_client_id","client-secret":"keys/tenant/{!tenant}/strava_client_secret",
         "scopes":["activity:write","read"],"scope-separator":",","pkce":true,"result-route":"connected","early-ms":21700000}},
@@ -388,7 +406,7 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
   upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{"x":{"base":")" + api.base() + R"(","spec":")" + p + R"(","credentials":"keys/tenant/{!tenant}/x_token",
       "auth":{"kind":"bearer"},
-      "methods":{"media":{"op":"init","result-route":"done",
+      "methods":{"ping":{"op":"status","effect":"outbox"},"media":{"op":"init","result-route":"done",
         "upload":{"attachment":"body.media",
           "init":{"op":"init","body":{"media_type":"{content_type}","total_bytes":"{bytes}","media_category":"tweet_image"},"id":"body.data.id"},
           "append":{"op":"append","path":{"id":"{id}"},"parts":{"media":"{chunk}","segment_index":"{index}"},"chunk-bytes":65536},
@@ -414,6 +432,12 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
   EXPECT_NE(appends[2].body.find("name=\"segment_index\"\r\n\r\n2\r\n"), std::string::npos);
   EXPECT_EQ(api.seen("/2/media/upload/m77/finalize").size(), 1u);
   EXPECT_EQ(polls, 0);  // waiting every-ms before the first look
+  // A polling job is out of the ordered lane: a later call to the same service goes now.
+  ASSERT_TRUE(call("x", "ping", R"({"query":{"media_id":"other"}})").contains("accepted"));
+  host->outbox_tick(base::now_unix_ms() + 10);  // the ping is due; the poll, every-ms away, isn't
+  EXPECT_EQ(api.seen("/2/media/upload").back().query, "media_id=other");
+  EXPECT_EQ(polls, 1);  // the ping answered through the same stand-in
+  polls = 0;
   host->outbox_tick(now + 1500);
   EXPECT_EQ(polls, 1);
   EXPECT_EQ(api.seen("/2/media/upload").back().query, "media_id=m77");
@@ -435,6 +459,8 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   ASSERT_TRUE(host->keys().set("tenant", "kc", "ts", "LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE", 1, &err, {"127.0.0.1"}));
   api.on("/slack", [](const server::http::Request&) { return json_reply(200, R"({"ok":false,"error":"channel_not_found"})"); });
   api.on("/busy", [](const server::http::Request&) { return json_reply(429, "{}", {{"retry-after", "120"}}); });
+  api.on("/huge", [](const server::http::Request&) { return json_reply(429, "{}", {{"retry-after", "9999999999999999999999999"}}); });
+  api.on("/forever", [](const server::http::Request&) { return json_reply(503, "{}", {{"retry-after", "999999999"}}); });
   upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{
       "forms":{"base":")" + api.base() + R"(","credentials":"keys/tenant/{!tenant}/tok","auth":{"kind":"basic","user":"api"},
@@ -443,7 +469,9 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
                    "file":{"verb":"post","path":"/media","body":"multipart","effect":"none"},
                    "blob":{"verb":"post","path":"/blob","body":"raw","effect":"none"},
                    "slack":{"verb":"post","path":"/slack","effect":"none","error-when":{"at":"body.ok","equals":false}},
-                   "busy":{"verb":"post","path":"/busy","result-route":"done"}}},
+                   "busy":{"verb":"post","path":"/busy","result-route":"done"},
+                   "huge":{"verb":"post","path":"/huge","effect":"none"},
+                   "forever":{"verb":"post","path":"/forever","effect":"none"}}},
       "q":{"base":")" + api.base() + R"(","credentials":"keys/tenant/{!tenant}/tok","auth":{"kind":"query","name":"key"},
         "methods":{"list":{"verb":"get","path":"/list"}}},
       "tw":{"base":")" + api.base() + R"(","auth":{"kind":"oauth1","consumer-key":"keys/tenant/{!tenant}/ck",
@@ -458,13 +486,13 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   EXPECT_EQ(s.auth, "Basic " + base::base64_encode("api:t0k"));
   call("forms", "repeat", R"({"body":{"to":["a","b"]}})");
   EXPECT_EQ(api.seen("/repeat").back().body, "to=a&to=b");
-  auto att = host->attachments().put("kc", std::string("\x89PNG\r\n\x1a\nxx", 10) + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12), "a.png",
+  auto att = host->attachments().put("kc", std::string("\x89PNG\r\n\x1a\nxx", 10) + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12), "a\".png",
                                      "", "public", 1, &err);
   ASSERT_TRUE(att) << err;
   std::string id = std::to_string(att->id);
   call("forms", "file", R"({"body":{"file":{"attachment":")" + id + R"("},"payload_json":{"json":{"content":"hi"}},"data_type":"png"}})");
   auto mp = api.seen("/media").back();
-  EXPECT_NE(mp.body.find("name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png"), std::string::npos) << mp.body;
+  EXPECT_NE(mp.body.find("name=\"file\"; filename=\"a_.png\"\r\nContent-Type: image/png"), std::string::npos) << mp.body;
   EXPECT_NE(mp.body.find("name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n{\"content\":\"hi\"}"), std::string::npos);
   EXPECT_NE(mp.body.find("name=\"data_type\"\r\n\r\npng"), std::string::npos);
   call("forms", "blob", R"({"body":{"attachment":")" + id + R"("}})");
@@ -498,6 +526,13 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
       signing::oauth1_base_string("POST", api.base() + "/1.1/statuses/update.json?include_entities=true",
                                   {{"status", "Hello Ladies + Gentlemen, a signed OAuth request!"}}, o), o);
   EXPECT_EQ(oa["oauth_signature"], signing::rfc3986(expect));
+  // A Retry-After too long to parse is ignored; one of decades is capped at a day.
+  auto huge = call("forms", "huge", R"({})");
+  EXPECT_EQ(huge.at("status").as_int64(), 429) << json::dump(huge);
+  EXPECT_FALSE(huge.contains("retry_at"));
+  auto forever = call("forms", "forever", R"({})");
+  ASSERT_TRUE(forever.contains("retry_at")) << json::dump(forever);
+  EXPECT_LE(std::string(forever.at("retry_at").as_string()), base::format_utc_ms(base::now_unix_ms() + 24 * 3600 * 1000 + 5000));
   // Retry-After: the outbox waits as long as the service said, not its own backoff.
   call("forms", "busy", R"({})");
   int64_t now = base::now_unix_ms();

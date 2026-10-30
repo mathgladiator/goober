@@ -23,3 +23,8 @@ TEST(OAuth1, MatchesXsPublishedSignature) {
   EXPECT_TRUE(h.starts_with("OAuth oauth_consumer_key=\"xvz1evFS4wEEPTGEFPHBog\""));
   EXPECT_EQ(rfc3986("a b+~*"), "a%20b%2B~%2A");
 }
+
+TEST(OAuth1, AStrayPercentInAUrlIsKeptNotThrown) {
+  goober::signing::OAuth1 o{"ck", "cs", "t", "ts", "nonce", "1"};
+  EXPECT_NO_THROW(goober::signing::oauth1_base_string("GET", "https://a.example/x?q=%zz&r=%4", {}, o));
+}

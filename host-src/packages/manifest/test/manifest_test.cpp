@@ -518,3 +518,18 @@ TEST(Manifest, ServicesSpokenFromSpecs) {
     EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
   }
 }
+
+TEST(Manifest, SealedSecretsAndHostKeysStayWhereTheyBelong) {
+  std::string err;
+  for (const char* bad : {
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"*","credentials":"sealed","methods":{"m":{"verb":"post","path":"/","any-public":true}}}}})",
+           R"({"box":"b","domains":["*"],"routes":{"result":{"r":{}}},"external":{"s":{"base":"https://a.example","credentials":"sealed",
+              "connect":{"oauth2":{"authorize":"https://a.example/a","token":"https://a.example/t","client-id":"keys/system/vault_key","result-route":"r"}},
+              "methods":{"m":{"verb":"get","path":"/"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","auth":{"kind":"oauth1","consumer-key":"keys/system/aws_access_key_id",
+              "consumer-secret":"keys/system/x"},"methods":{"m":{"verb":"get","path":"/"}}}}})",
+           R"({"box":"b","domains":["*"],"external":{"s":{"base":"https://a.example","auth":{"kind":"oauth1","consumer-key":"keys/system/k",
+              "consumer-secret":"keys/system/x","token":"keys/system/t"},"methods":{"m":{"verb":"get","path":"/"}}}}})"}) {
+    EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
+  }
+}

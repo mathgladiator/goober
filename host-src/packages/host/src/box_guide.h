@@ -231,7 +231,8 @@ Sealed secrets: a person connects at /goober/connect/<box>/<service>?return=/set
 for them (register https://<your domain>/goober/connect/callback as the redirect URI with the
 provider; put the app's id and secret with key_set, hosts set to the token endpoint's). Either way
 your result route gets {"service", "kind", "credential": "gsv1.<owner>....", "owner" (their
-user id), "ref", "scope"} as that person: store credential in your own table. You never see the
+user id), "ref" (yours from the link, but anyone can make such a link: check it belongs to
+the person), "scope"} as that person: store credential in your own table. You never see the
 key or tokens; the host unseals them only to make the call, and refreshes OAuth tokens itself.
 Call with it: goober_call("strava", "athlete", {"credential": "<stored value>"}). When an answer
 carries "credential", it was refreshed: store the new one (the host remembers it anyway). An
@@ -247,7 +248,10 @@ Chunked uploads (X media): "upload": {"attachment": "body.media", "init": {op, b
 {op, "path": {"id": "{id}"}}}. Uploads and polls are outbox calls with a result-route; the result
 route gets the last answer. "error-when": {"at": "body.ok", "equals": false} makes a 200 a failure
 (Slack). "limits": {"remaining": "x-rate-limit-remaining", "reset": "x-rate-limit-reset"} waits
-out a spent window; Retry-After is always honored. "base": "*" with "any-public": true on a method
+out a spent window; Retry-After is honored unless "limits": {"retry-after": false}; waits cap at a
+day. Paths are as the spec spells them: Swagger's basePath goes in base. A sealed credential goes
+only to the origin it was connected for, and only in its owner's requests (or no one's: timers,
+results); "sealed" can't use base "*". "base": "*" with "any-public": true on a method
 takes the whole https URL from the call's url (Webmention, Micropub, a person's Mastodon).
 Effects: an op that is a GET is sent now; others go through the outbox unless "effect" says.
 

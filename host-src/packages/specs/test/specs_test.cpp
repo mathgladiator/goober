@@ -2,6 +2,11 @@
 
 #include "goober/specs/specs.h"
 
+#include <filesystem>
+
+#include "goober/base/files.h"
+#include "goober/base/hash.h"
+
 using namespace goober;
 namespace fs = std::filesystem;
 
@@ -53,7 +58,7 @@ TEST(Specs, Swagger2ByOperationId) {
   EXPECT_EQ(s->server, "https://www.strava.com/api/v3");
   auto* up = s->find("createUpload");
   ASSERT_TRUE(up);
-  EXPECT_EQ(up->path, "/api/v3/uploads");  // the basePath prepended
+  EXPECT_EQ(up->path, "/uploads");  // as spelled: the basePath belongs in the manifest's base
   EXPECT_EQ(up->body_types.at(0), "multipart/form-data");
   EXPECT_EQ(s->find("getUploadById")->params.at(0).name, "uploadId");
   EXPECT_FALSE(specs::parse(R"({"openapi":"2.5"})", &err));
@@ -77,4 +82,31 @@ TEST(Specs, TheStorePinsByHash) {
   EXPECT_FALSE(fresh.get("hevy@000000000000", &err));
   EXPECT_FALSE(store.put("Bad Name", kHevy, &err));
   EXPECT_EQ(fresh.list().size(), 1u);
+}
+
+TEST(Specs, UnbalancedPathsAndPinCollisionsAreRefused) {
+  std::string err;
+  EXPECT_FALSE(specs::parse(R"({"openapi":"3.0.0","paths":{"/a/{x":{"get":{}}}})", &err));
+  EXPECT_FALSE(specs::parse(R"({"openapi":"3.0.0","paths":{"/a/{{x}}":{"get":{}}}})", &err));
+  auto dir = std::filesystem::path(GOOBER_TEST_TMP) / "specs_collide";
+  std::filesystem::remove_all(dir);
+  specs::Store store(dir);
+  std::string text = R"({"openapi":"3.0.0","paths":{"/a":{"get":{}}}})";
+  auto pin = store.put("s", text, &err);
+  ASSERT_TRUE(pin) << err;
+  // A different document planted under the same 12-digit prefix: the next put of it is refused.
+  std::string sha = base::sha256_hex(text);
+  std::string fake = sha.substr(0, 12) + std::string(52, '0');
+  ASSERT_TRUE(base::write_file_durable(dir / "s" / (fake + ".json"), text));
+  std::string text2 = R"({"openapi":"3.0.0","paths":{"/b":{"get":{}}}})";
+  // (text2 has its own prefix; the collision is checked for the pin being put.)
+  EXPECT_TRUE(store.put("s", text2, &err)) << err;
+  EXPECT_FALSE(store.put("s", text, &err));
+  EXPECT_NE(err.find("already has pin"), std::string::npos) << err;
+  // Bytes changed on disk don't pass as the pinned spec.
+  specs::Store fresh(dir);
+  std::filesystem::remove(dir / "s" / (fake + ".json"));
+  ASSERT_TRUE(base::write_file_durable(dir / "s" / (sha + ".json"), R"({"openapi":"3.0.0","paths":{"/evil":{"get":{}}}})"));
+  EXPECT_FALSE(fresh.get(*pin, &err));
+  EXPECT_NE(err.find("doesn't match its hash"), std::string::npos) << err;
 }

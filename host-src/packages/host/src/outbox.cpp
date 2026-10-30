@@ -337,7 +337,7 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
   };
   std::vector<std::string> services;
   {
-    sqlite::Stmt s(*db, "SELECT DISTINCT service FROM goober_outbox WHERE state = 'pending'");
+    sqlite::Stmt s(*db, "SELECT DISTINCT service FROM goober_outbox WHERE state IN ('pending', 'polling')");
     while (s.step()) services.push_back(s.text(0));
   }
   int delivered = 0;
@@ -349,14 +349,20 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
   for (const auto& service : services) {
     for (int n = 0; n < 50 && base::monotonic_us() < budget_end; ++n) {
       std::optional<Row> head;
-      {
+      // An element polling an async job (034 § 8) is out of the ordered lane, so one person's
+      // long upload doesn't hold every other call to the service: a due one goes first, then the
+      // lane's head.
+      for (const char* where : {"state = 'polling' AND service = ? AND next_ms <= ? ORDER BY next_ms LIMIT 1",
+                                "state = 'pending' AND service = ? AND ? = ? ORDER BY o.id LIMIT 1"}) {
+        if (head) break;
         sqlite::Stmt s(*db,
-                       "SELECT o.id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms, box, service, method, verb, "
-                       "url, headers, body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key, "
-                       "coalesce(m.result_route, ''), coalesce(m.timeout_ms, 10000) "
-                       "FROM goober_outbox o LEFT JOIN goober_outbox_more m ON m.id = o.id "
-                       "WHERE state = 'pending' AND service = ? ORDER BY o.id LIMIT 1");
-        s.bind(1, service);
+                       std::string("SELECT o.id, attempts, max_attempts, backoff_ms, deadline_ms, next_ms, box, service, method, verb, "
+                                   "url, headers, body, content_type, credentials, auth_header, auth_prefix, idem_header, idem_key, "
+                                   "coalesce(m.result_route, ''), coalesce(m.timeout_ms, 10000) "
+                                   "FROM goober_outbox o LEFT JOIN goober_outbox_more m ON m.id = o.id WHERE ") +
+                           where);
+        s.bind(1, service).bind(2, now_ms);
+        if (std::string_view(where).find("? = ?") != std::string_view::npos) s.bind(3, now_ms);
         if (s.step()) {
           head = Row{s.int64(0),  s.int64(1),  s.int64(2),  s.int64(3),  s.int64(4),  s.int64(5),  s.text(6),
                      s.text(7),   s.text(8),   s.text(9),   s.text(10),  s.text(11), s.text(12), s.text(13),
@@ -388,8 +394,15 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       } else if (r.verb == "INVITE") {
         reply = deliver_outbox_invite(tenant, r.body, r.idem_key, now_ms);
       } else if (r.verb == "HTTPX") {
-        reply = deliver_outbox_httpx(tenant, *db, r.id, r.box, r.service, r.method, r.body, r.idem_header, r.idem_key,
-                                     r.timeout_ms, now_ms);
+        // Whatever goes wrong, an outcome is recorded below: an exception here would leave the
+        // element pending, to be sent again every tick.
+        try {
+          reply = deliver_outbox_httpx(tenant, *db, r.id, r.box, r.service, r.method, r.body, r.idem_header, r.idem_key,
+                                       r.timeout_ms, now_ms);
+        } catch (const std::exception& e) {
+          reply = HttpOut{};
+          reply.error = std::string("delivery failed: ") + e.what();
+        }
       } else if (r.verb == "PUSH") {
         reply = deliver_outbox_push(tenant, r.body, r.idem_key, now_ms);
       } else if (reply.error.empty()) {
@@ -403,9 +416,9 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       }
       // Polling an async job (034 § 8) isn't an attempt: the element waits for its next look.
       if (reply.polling) {
-        sqlite::Stmt w(*db, "UPDATE goober_outbox SET next_ms = ? WHERE id = ?");
+        sqlite::Stmt w(*db, "UPDATE goober_outbox SET state = 'polling', next_ms = ? WHERE id = ?");
         w.bind(1, reply.retry_at_ms).bind(2, r.id).run();
-        break;
+        continue;
       }
       int64_t attempts = r.attempts + 1;
       bool ok = reply.error.empty() && reply.status >= 200 && reply.status < 300;

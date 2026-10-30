@@ -16,6 +16,7 @@
 #include "goober/signing/oauth1.h"
 #include "goober/specs/specs.h"
 #include "goober/sqlite/sqlite.h"
+#include "goober/web/url.h"
 #include "http_util.h"
 #include "keys.h"
 #include "network.h"
@@ -86,7 +87,17 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
                        const std::string& ret) {
     std::string err;
     std::string owner = std::to_string(who.user.user_id);
-    std::string sealed = seal_secret(tenant, svc.name, owner, plaintext, &err);
+    // The origin the secret may go to is sealed with it (the service's base now), so neither a
+    // box's call nor a later manifest can send it anywhere else.
+    std::string with_origin = plaintext;
+    if (auto u = web::parse_url(svc.base)) {
+      std::string perr;
+      if (auto pv = json::parse(plaintext, &perr); pv && pv->is_object()) {
+        pv->as_object()["origin"] = u->origin();
+        with_origin = json::dump(*pv);
+      }
+    }
+    std::string sealed = seal_secret(tenant, svc.name, owner, with_origin, &err);
     if (sealed.empty()) {
       return finish(page(500, "Not connected", "<h1>Not connected</h1><p>" + html_escape(err) + "</p>"), R"({"connect":"seal_failed"})");
     }
@@ -148,8 +159,16 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
     int64_t now = base::now_unix_ms();
     bj::object secret{{"kind", "oauth2"}, {"access_token", arg(*tokens, "access_token")}, {"refresh_token", arg(*tokens, "refresh_token")},
                       {"scope", arg(*tokens, "scope")}, {"id", random_hex(12)}, {"gen", 0}};
-    if (auto* ei = tokens->if_contains("expires_in"); ei && ei->is_number()) secret["expires_at"] = now + int64_t(ei->to_number<double>() * 1000);
-    if (auto* ea = tokens->if_contains("expires_at"); ea && ea->is_number()) secret["expires_at"] = int64_t(ea->to_number<double>() * 1000);
+    // expires_in (seconds), else an expires_at (epoch seconds, as Strava also sends); a value
+    // that makes no sense is left out, and the token is treated as not expiring.
+    constexpr double kTenYearsS = 10.0 * 365 * 24 * 3600;
+    if (auto* ei = tokens->if_contains("expires_in"); ei && ei->is_number() && ei->to_number<double>() > 0 &&
+                                                      ei->to_number<double>() <= kTenYearsS) {
+      secret["expires_at"] = now + int64_t(ei->to_number<double>() * 1000);
+    } else if (auto* ea = tokens->if_contains("expires_at"); ea && ea->is_number() && ea->to_number<double>() * 1000 > double(now) &&
+                                                             ea->to_number<double>() <= double(now) / 1000 + kTenYearsS) {
+      secret["expires_at"] = int64_t(ea->to_number<double>() * 1000);
+    }
     if (arg(secret, "access_token").empty()) {
       return finish(page(502, "Not connected", "<h1>Not connected</h1><p>The provider gave no access token.</p>"),
                     R"({"connect":"no_token"})");
@@ -215,11 +234,22 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
       Secret s;
       s.kind = "key";
       s.value = key;
-      if (call && apply_secret(tenant, *svc, s, &*call, &err)) {
-        auto out = send_httpx(tenant, box, *svc, *m, *call, 10000, request_id, 0);
-        if (out.status == 401 || out.status == 403) {
-          return finish(form_page("That key didn't work: " + svc->name + " refused it."), R"({"connect":"paste_refused"})");
-        }
+      // The check must say yes: a key that can't be checked isn't sealed.
+      if (call) {
+        if (auto u = web::parse_url(svc->base)) s.origin = u->origin();
+      }
+      if (!call || !apply_secret(tenant, *svc, s, &*call, &err)) {
+        std::cerr << "goober-host: connect " << box << "/" << service << ": the check can't be built: " << err << "\n";
+        return finish(form_page("The key couldn't be checked (the site's check is misconfigured). Nothing was saved."),
+                      R"({"connect":"paste_check_broken"})");
+      }
+      auto out = send_httpx(tenant, box, *svc, *m, *call, 10000, request_id, 0);
+      if (out.status == 401 || out.status == 403) {
+        return finish(form_page("That key didn't work: " + svc->name + " refused it."), R"({"connect":"paste_refused"})");
+      }
+      if (out.status < 200 || out.status >= 300) {
+        return finish(form_page(svc->name + " couldn't be reached to check the key. Nothing was saved; try again soon."),
+                      R"({"connect":"paste_check_failed"})");
       }
     }
     return hand_over(box, *svc, *who, json::dump(bj::object{{"kind", "key"}, {"value", key}}), "key", ref, "", ret);
@@ -239,6 +269,10 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
     sqlite::Db& db = connections_db();
     std::lock_guard lock(vault_mu_);
     db.exec("DELETE FROM states WHERE expires_ms < " + std::to_string(base::now_unix_ms()));
+    // At most 20 flows open per person: older ones are dropped.
+    sqlite::Stmt cap(db, "DELETE FROM states WHERE user_id = ? AND state NOT IN (SELECT state FROM states WHERE user_id = ? "
+                         "ORDER BY expires_ms DESC LIMIT 19)");
+    cap.bind(1, std::to_string(who->user.user_id)).bind(2, std::to_string(who->user.user_id)).run();
     sqlite::Stmt s(db, "INSERT INTO states (state, tenant, box, service, user_id, return_path, ref, verifier, domain, expires_ms) "
                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     s.bind(1, state).bind(2, tenant).bind(3, box).bind(4, svc->name).bind(5, std::to_string(who->user.user_id)).bind(6, ret);

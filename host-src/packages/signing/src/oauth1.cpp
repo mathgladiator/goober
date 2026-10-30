@@ -4,6 +4,7 @@
 #include <openssl/hmac.h>
 
 #include <algorithm>
+#include <cctype>
 
 #include "goober/base/encoding.h"
 
@@ -31,10 +32,12 @@ std::string decode(std::string_view s) {
   for (size_t i = 0; i < s.size(); ++i) {
     if (s[i] == '+') {
       out += ' ';
-    } else if (s[i] == '%' && i + 2 < s.size()) {
-      out += char(std::stoi(std::string(s.substr(i + 1, 2)), nullptr, 16));
+    } else if (s[i] == '%' && i + 2 < s.size() && std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+               std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+      auto hex = [](char h) { return h <= '9' ? h - '0' : (h | 0x20) - 'a' + 10; };
+      out += char(hex(s[i + 1]) * 16 + hex(s[i + 2]));
       i += 2;
-    } else {
+    } else {  // a stray % is kept as written, never an exception
       out += s[i];
     }
   }
