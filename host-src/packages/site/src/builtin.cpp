@@ -28,6 +28,7 @@ const std::map<std::string, std::string>& builtin_templates() {
 <meta name="twitter:card" content="{{#image_url}}summary_large_image{{/image_url}}{{^image_url}}summary{{/image_url}}">
 {{#author}}<meta name="author" content="{{author}}">{{/author}}
 {{{json_ld}}}
+{{{head}}}
 <!--#include pwa-->
 <style>
 :root{color-scheme:light dark;--fg:#1d1d1f;--bg:#fbfbf8;--muted:#6b6b6b;--line:#e3e1da;--accent:#2457d6;--card:#fff}

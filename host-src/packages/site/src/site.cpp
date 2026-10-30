@@ -40,7 +40,8 @@ namespace {
 // Keys the host sets in template data, which front matter can't shadow.
 bool reserved_key(std::string_view k) {
   return k == "body" || k == "page" || k == "site" || k == "data" || k == "user" || k == "pages" ||
-         k == "pagination" || k == "request" || k == "now" || k == "tag" || k == "title_in_body" || k == "document";
+         k == "pagination" || k == "request" || k == "now" || k == "tag" || k == "title_in_body" || k == "document" ||
+         k == "head" || k == "json";  // the host fills these, and they print unescaped
 }
 
 std::string etag_of(std::string_view body) { return "\"" + base::sha256_hex(body).substr(0, 16) + "\""; }
@@ -357,8 +358,12 @@ std::optional<std::string> Site::render_template(std::string_view tenant, std::s
                                                  const std::map<std::string, std::string>* inline_templates,
                                                  std::string* error, bool json_ld) const {
   render::TemplateOptions options;
-  options.trusted_html = {"body"};
+  options.trusted_html = {"body", "head"};
   if (json_ld) options.trusted_html.insert("json_ld");
+  // {{{json.title}}}: a value as JSON, safe inside a <script> (031 § 2).
+  if (auto* j = data.if_contains("json"); j && j->is_object()) {
+    for (const auto& kv : j->as_object()) options.trusted_html.insert("json." + std::string(kv.key()));
+  }
   options.partial = [&](std::string_view partial) -> std::optional<std::string> {
     if (inline_templates) {
       if (auto it = inline_templates->find(std::string(partial)); it != inline_templates->end()) return it->second;
@@ -368,6 +373,9 @@ std::optional<std::string> Site::render_template(std::string_view tenant, std::s
     return render::split_front_matter(*text).body;
   };
   std::string current(name);
+  // Only templates fill {{{head}}}: whatever the data said is dropped.
+  std::string head;
+  data["head"] = "";
   for (int depth = 0; depth <= kMaxLayouts; ++depth) {
     std::optional<std::string> text;
     if (inline_templates) {
@@ -387,6 +395,15 @@ std::optional<std::string> Site::render_template(std::string_view tenant, std::s
     }
     std::string layout = str(doc.fields, "layout");
     if (layout.empty()) return out;
+    // A child template's <!--head-->...<!--/head--> blocks go to the layout's {{{head}}}, so a
+    // template can add to <head> without replacing base (031 § 2).
+    for (size_t at = out->find("<!--head-->"); at != std::string::npos; at = out->find("<!--head-->", at)) {
+      size_t end = out->find("<!--/head-->", at);
+      if (end == std::string::npos) break;
+      head += out->substr(at + 11, end - at - 11);
+      out->erase(at, end + 12 - at);
+    }
+    data["head"] = head;
     data["body"] = std::move(*out);
     current = layout;
   }
@@ -397,6 +414,9 @@ std::optional<std::string> Site::render_template(std::string_view tenant, std::s
 std::optional<std::string> Site::render_named(std::string_view tenant, std::string_view name, bj::object data,
                                               const std::map<std::string, std::string>* inline_templates,
                                               std::string* error) const {
+  // A box's data never names the host's trusted slots ({{{head}}}, {{{json.*}}}).
+  data.erase("head");
+  data.erase("json");
   bj::object base = base_data(tenant);
   for (auto& [k, v] : base) {
     if (!data.contains(k)) data[k] = std::move(v);
@@ -608,7 +628,7 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
       };
       std::string link = base + page.url;
       std::string out = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\" "
-                        "xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n<channel>\n";
+                        "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:media=\"http://search.yahoo.com/mrss/\">\n<channel>\n";
       out += "<title>" + xml_escape(title) + "</title>\n<link>" + xml_escape(link) + "</link>\n";
       out += "<description>" + xml_escape(summary_of(page).empty() ? title : summary_of(page)) + "</description>\n";
       out += "<atom:link href=\"" + xml_escape(base + (page.url == "/" ? "" : page.url) + "/rss.xml") +
@@ -626,6 +646,9 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
         std::string a = str(e, "author");
         if (a.empty()) a = site_author;
         if (!a.empty()) out += "<dc:creator>" + xml_escape(a) + "</dc:creator>\n";
+        if (auto img = str(e, "image"); !img.empty()) {
+          out += "<media:content url=\"" + xml_escape(img.starts_with("http") ? img : base + img) + "\" medium=\"image\"/>\n";
+        }
         for (const auto& t : e.at("tags").as_array()) {
           if (t.is_string()) out += "<category>" + xml_escape(std::string(t.get_string())) + "</category>\n";
         }
@@ -665,6 +688,9 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
           if (auto* st = data.if_contains("site"); st && st->is_object()) a = str(st->as_object(), "author");
         }
         if (!a.empty()) out += "<author><name>" + xml_escape(a) + "</name></author>\n";
+        if (auto img = str(e, "image"); !img.empty()) {
+          out += "<link rel=\"enclosure\" href=\"" + xml_escape(img.starts_with("http") ? img : base + img) + "\"/>\n";
+        }
         for (const auto& t : e.at("tags").as_array()) {
           if (t.is_string()) out += "<category term=\"" + xml_escape(std::string(t.get_string())) + "\"/>\n";
         }
@@ -751,6 +777,35 @@ Result Site::render_page(const Visit& v, const Page& page, bool feed) const {
       if (!site_title.empty()) ld["publisher"] = bj::object{{"@type", "Organization"}, {"name", site_title}};
       data["json_ld"] = std::move(ld);
     }
+  }
+  {
+    // Every plain value again as JSON text escaped for a <script> ({{{json.title}}}).
+    bj::object js;
+    auto script_safe = [](std::string s) {
+      std::string out;
+      for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(s[i]);
+        if (ch == '<') out += "\\u003c";
+        else if (ch == '>') out += "\\u003e";
+        else if (ch == '&') out += "\\u0026";
+        else if (ch == 0xE2 && i + 2 < s.size() && static_cast<unsigned char>(s[i + 1]) == 0x80 &&
+                 (static_cast<unsigned char>(s[i + 2]) == 0xA8 || static_cast<unsigned char>(s[i + 2]) == 0xA9)) {
+          out += static_cast<unsigned char>(s[i + 2]) == 0xA8 ? "\\u2028" : "\\u2029";
+          i += 2;
+        } else {
+          out += s[i];
+        }
+      }
+      return out;
+    };
+    for (const auto& [k, v] : data) {
+      if (k == "body" || k == "json_ld" || k == "page" || k == "site" || k == "data" || k == "user" || k == "pages" ||
+          k == "request" || k == "json") {
+        continue;
+      }
+      js[k] = script_safe(json::dump(v));
+    }
+    data["json"] = std::move(js);
   }
   data["page"] = std::move(page_obj);
   data["body"] = std::move(body_html);

@@ -670,3 +670,36 @@ TEST_F(SiteRoutesTest, ContentDeployChecksBeforeAndAfter) {
   ASSERT_EQ(lint.at("pages").as_array().size(), 1u);
   EXPECT_NE(json::dump(lint).find("title is"), std::string::npos);
 }
+
+// Engineer B's case: a child template adds to <head>, JSON-LD built in a template survives
+// quotes, feeds carry each entry's image, and a template can be deleted.
+TEST_F(SiteRoutesTest, ChildTemplatesFillTheHeadAndJsonIsSafeInScripts) {
+  auto t = tool("template_put", {{"tenant", "playground"}, {"name", "story"},
+                                 {"template", "---\nlayout: base\n---\n<!--head--><meta property=\"x:test\" content=\"{{title}}\">"
+                                              "<script type=\"application/ld+json\">{\"headline\": {{{json.title}}}}</script><!--/head-->"
+                                              "<article>{{{body}}}</article>"}});
+  ASSERT_FALSE(t.as_object().contains("error")) << json::dump(t);
+  tool("page_put", {{"path", "/s"}, {"format", "markdown"}, {"template", "story"}, {"title", "Meat \"the\" Team </script>"},
+                    {"body", "Hi."}, {"fields", bj::object{{"image", "/hero.jpg"}, {"date", "2026-10-29"}}}});
+  auto page = fetch(port, bhttp::verb::get, "/s", {{"accept", "text/html"}});
+  ASSERT_EQ(page.status, 200) << page.body;
+  size_t head_end = page.body.find("</head>");
+  size_t meta = page.body.find("property=\"x:test\"");
+  ASSERT_NE(meta, std::string::npos);
+  EXPECT_LT(meta, head_end);  // in <head>, not after <main>
+  EXPECT_NE(page.body.find("{\"headline\": \"Meat \\\"the\\\" Team \\u003c/script\\u003e\"}"), std::string::npos) << page.body;
+  EXPECT_EQ(page.body.find("<!--head-->"), std::string::npos);
+  // A page's front matter can't set the trusted slots.
+  tool("page_put", {{"path", "/evil"}, {"format", "markdown"}, {"body", "x"},
+                    {"fields", bj::object{{"head", "<script>alert(1)</script>"}, {"json", bj::object{{"title", "<b>"}}}}}});
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/evil", {{"accept", "text/html"}}).body.find("<script>alert(1)"), std::string::npos);
+  // Feeds carry the image.
+  tool("page_put", {{"path", "/stories"}, {"format", "markdown"}, {"body", "x"}, {"fields", bj::object{{"list", ""}, {"list-template", "story"}}}});
+  auto atom = fetch(port, bhttp::verb::get, "/stories/feed.xml");
+  EXPECT_NE(atom.body.find(R"(<link rel="enclosure" href="http://localhost/hero.jpg"/>)"), std::string::npos) << atom.body;
+  auto rss = fetch(port, bhttp::verb::get, "/stories/rss.xml");
+  EXPECT_NE(rss.body.find(R"(<media:content url="http://localhost/hero.jpg" medium="image"/>)"), std::string::npos) << rss.body;
+  // template_delete.
+  EXPECT_EQ(tool("template_delete", {{"name", "story"}}).at("deleted"), "_templates/story.html");
+  EXPECT_TRUE(tool("template_delete", {{"name", "story"}}).as_object().contains("error"));
+}

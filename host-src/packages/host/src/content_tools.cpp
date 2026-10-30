@@ -99,6 +99,10 @@ template's source, the built-ins too, to copy from.
   {{#pagination}}{{#has_prev}}<a href="{{prev_url}}">Newer</a>{{/has_prev}} {{page}}/{{pages}}{{/pagination}}
   {{> nav}}                      includes _templates/nav.html
 A template may begin with front matter "layout: base"; its output becomes {{{body}}} in base.
+What it puts between <!--head--> and <!--/head--> goes to base's <head> instead ({{{head}}}).
+Inside a <script>, {{{json.title}}} is the value as JSON, safe there; {{title}} is HTML-escaped.
+template_delete removes one. A template is live at once for every page naming it: try changes
+with page_render's templates (unsaved), or under a new name on a draft page.
 So a typical site has base (the <html>, header, nav, footer), page, and list.
 
 ## Listings
@@ -807,7 +811,12 @@ void Host::register_content_tools() {
   mcp_->add_tool(
       {"template_put",
        "Writes a Mustache template, _templates/$name.html, after checking it parses. Start it with front matter "
-       "\"---\\nlayout: base\\n---\\n\" to wrap it in another template. Use tenant _host to restyle every tenant.",
+       "\"---\\nlayout: base\\n---\\n\" to wrap it in another template. Use tenant _host to restyle every tenant. "
+       "A template is live for every page naming it at once: to try one, preview it with page_render's templates "
+       "(nothing stored), or put it under a new name (post-v2) and point a draft page at it. To add tags to <head> "
+       "from a template wrapped in a layout, put them between <!--head--> and <!--/head-->; the built-in base prints "
+       "them in its <head> ({{{head}}} in your own base). In a <script>, use {{{json.title}}}: each value as JSON. "
+       "Remove one with template_delete.",
        object_schema({{"tenant", string_property("A tenant name, or _host for every tenant.")},
                       {"name", string_property("The template's name, like base, page, list, post, or directory.")},
                       {"template", string_property("The Mustache text.")}},
@@ -826,6 +835,22 @@ void Host::register_content_tools() {
          if (!content_->put(*tenant, path, *text, &err)) return ToolResult::fail(err);
          return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", path}});
        }});
+
+  mcp_->add_tool({"template_delete",
+                  "Removes a tenant's template; pages naming it then use the built-in one of that name, if any, or fail "
+                  "to render (page_lint finds them).",
+                  object_schema({{"tenant", string_property("A tenant name, or _host.")},
+                                 {"name", string_property("The template's name.")}},
+                                {"tenant", "name"}),
+                  [this](const bj::object& args) {
+                    auto tenant = arg(args, "tenant");
+                    auto name = arg(args, "name");
+                    if (!tenant || !name || !valid_template_name(*name)) return ToolResult::fail("tenant and a template name are required");
+                    std::string path = "_templates/" + *name + ".html", err;
+                    if (!content_->get(*tenant, path)) return ToolResult::fail("no template " + *name + " for " + *tenant);
+                    if (!content_->remove(*tenant, path, &err)) return ToolResult::fail(err);
+                    return ToolResult::ok(bj::object{{"tenant", *tenant}, {"deleted", path}});
+                  }});
 
   mcp_->add_tool({"template_get",
                   "Reads a template's Mustache source as this tenant's pages get it: the tenant's own, else _host's, "

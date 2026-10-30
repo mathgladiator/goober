@@ -37,7 +37,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "page_get", "page_list", "page_put", "page_render", "partial_delete", "partial_get", "partial_list",
           "partial_put", "push_send", "pwa_delete", "pwa_get", "pwa_list", "pwa_put", "pwa_subscriptions",
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
-          "template_put", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
+          "template_put", "template_delete", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
           "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
           "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow"}) {
       m[t] = Rule::kTenant;
