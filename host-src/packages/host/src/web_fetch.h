@@ -68,6 +68,9 @@ class WebFetcher {
   WebFetcher(std::filesystem::path storage, std::function<std::shared_ptr<const config::HostConfig>()> config, Log log);
 
   Page fetch(const std::string& url, const FetchOptions& options);
+  // The robot's store (its opt-outs) wouldn't open: every fetch is refused with this reason,
+  // since a site that asked not to be crawled can't be told from one that didn't.
+  void refuse_all(std::string why) { refusing_ = std::move(why); }
   // The User-Agent: goober/<version> (+contact).
   std::string user_agent() const;
 
@@ -111,6 +114,7 @@ class WebFetcher {
   std::mutex mu_;
   std::map<std::string, Origin> origins_;
   std::mutex db_mu_;
+  std::string refusing_;
   std::unique_ptr<sqlite::Db> db_;
 };
 

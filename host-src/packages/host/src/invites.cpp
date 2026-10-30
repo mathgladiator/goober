@@ -252,6 +252,7 @@ std::optional<std::string> Host::accept_invite_for(const std::string& tenant, co
 }
 
 void Host::remind_invites(int64_t now_ms) {
+  if (consent_off_) return;  // a reminder is marked as it goes: held, not spent, until consent is back
   std::set<std::string> tenants;
   for (const auto& [d, e] : config_.get()->domains) tenants.insert(e.tenant);
   for (const auto& tenant : tenants) {

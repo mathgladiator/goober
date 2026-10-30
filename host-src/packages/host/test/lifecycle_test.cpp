@@ -107,12 +107,12 @@ TEST(Lifecycle, CorruptStoresAreSetAsideOrHeldNotFatal) {
   auto off = boost::json::serialize(ready.at("checks").at("stores"));
   for (const char* s : {"consent", "web", "source"}) EXPECT_NE(off.find(s), std::string::npos) << off;
   // Set aside, not deleted: the bytes are kept for recovery; consent.db is left where it is.
-  bool web_kept = false, source_kept = false;
-  for (const auto& e : fs::directory_iterator(root / "storage/web")) web_kept |= e.path().filename().string().starts_with("web.db.unreadable-");
+  bool source_kept = false;
   for (const auto& e : fs::directory_iterator(root / "storage/source")) source_kept |= e.path().filename().string().starts_with("source.db.unreadable-");
-  EXPECT_TRUE(web_kept);
   EXPECT_TRUE(source_kept);
+  // consent.db and web.db hold who opted out of mail and of the robot: left where they are.
   EXPECT_EQ(fs::file_size(root / "storage/mail/consent.db"), junk.size());
+  EXPECT_EQ(fs::file_size(root / "storage/web/web.db"), junk.size());
   // The preferences page refuses rather than lose a choice.
   EXPECT_EQ(get(port, "/goober/mail/playground/abc/def"), 503);
   h.stop();

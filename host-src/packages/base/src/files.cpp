@@ -116,6 +116,17 @@ bool remove_file_durable(const fs::path& path) {
 std::vector<std::string> list_files(const fs::path& root, std::string_view under) {
   std::vector<std::string> out;
   std::error_code ec;
+  // A prefix is a path below root: never absolute, never a "." or ".." step, no backslash.
+  if (!under.empty()) {
+    if (under.front() == '/' || under.find('\\') != std::string_view::npos) return out;
+    for (size_t at = 0; at <= under.size();) {
+      size_t slash = under.find('/', at);
+      std::string_view seg = under.substr(at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
+      if (seg == "." || seg == "..") return out;
+      if (slash == std::string_view::npos) break;
+      at = slash + 1;
+    }
+  }
   // Only the directory the prefix names is walked, not the whole tree.
   std::string sub(under.substr(0, under.rfind('/') == std::string_view::npos ? 0 : under.rfind('/') + 1));
   fs::path start = sub.empty() ? root : root / sub;

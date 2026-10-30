@@ -160,6 +160,14 @@ TEST(Files, DurableWriteReadListRemove) {
   ASSERT_TRUE(write_file_durable(root / "a.txt", "a"));
   EXPECT_EQ(*read_file(root / "x/y.txt"), "hello");
   EXPECT_EQ(list_files(root), (std::vector<std::string>{"a.txt", "x/y.txt"}));
+  // A prefix walks only its own directory, and never leaves root.
+  EXPECT_EQ(list_files(root, "x/"), (std::vector<std::string>{"x/y.txt"}));
+  EXPECT_EQ(list_files(root, "x/y"), (std::vector<std::string>{"x/y.txt"}));
+  EXPECT_EQ(list_files(root, "a"), (std::vector<std::string>{"a.txt"}));
+  ASSERT_TRUE(write_file_durable(root.parent_path() / "base_files_sibling" / "secret.txt", "s"));
+  for (const char* escape : {"../", "../base_files_sibling/", "x/../../", "./x/", "/etc/", "x\\..\\"}) {
+    EXPECT_TRUE(list_files(root, escape).empty()) << escape;
+  }
   ASSERT_TRUE(remove_file_durable(root / "a.txt"));
   ASSERT_TRUE(remove_file_durable(root / "a.txt"));
   EXPECT_FALSE(read_file(root / "a.txt").has_value());

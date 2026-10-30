@@ -422,6 +422,12 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
         else headers.emplace_back(r.auth_header, r.auth_prefix + *value);
       }
       int64_t started = base::monotonic_us();
+      // Consent unreadable: mail and invites wait, without spending an attempt, until it's back.
+      if (consent_off_ && (r.verb == "MAIL" || r.verb == "INVITE")) {
+        sqlite::Stmt w(*db, "UPDATE goober_outbox SET next_ms = ? WHERE id = ?");
+        w.bind(1, now_ms + 300000).bind(2, r.id).run();
+        continue;
+      }
       if (r.verb == "MAIL") {
         reply = deliver_outbox_mail(tenant, r.body, now_ms);
       } else if (r.verb == "INVITE") {

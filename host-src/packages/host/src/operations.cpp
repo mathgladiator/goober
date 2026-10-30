@@ -226,8 +226,9 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
     check("identity", good, bj::object{{"realms", int64_t(realms.size())}});
     if (!good) checks["identity"].as_object()["why"] = std::move(failing);
   }
-  // Every box with a version set active is served: one that isn't (a load failure, a route
-  // conflict at startup) fails the check by name.
+  // Every box with a version set active should be served; one that isn't (a load failure, a
+  // route conflict at startup) is named. It doesn't fail the check: readiness is the deploy's
+  // gate, and one box a new host can't load would otherwise roll back every deploy.
   auto active = boxes_->active();
   auto unloaded = boxes_->unloaded();
   {
@@ -235,7 +236,7 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
     for (const auto& b : unloaded) names.push_back(bj::value(b));
     bj::object detail{{"loaded", active->boxes.size()}};
     if (!names.empty()) detail["not_loaded"] = std::move(names);
-    check("boxes", unloaded.empty(), std::move(detail));
+    check("boxes", true, std::move(detail));
   }
   // Stores that wouldn't open at startup (their features are off until fixed and restarted).
   {

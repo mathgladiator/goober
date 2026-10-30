@@ -14,6 +14,15 @@ namespace beast = boost::beast;
 namespace bhttp = beast::http;
 namespace fs = std::filesystem;
 
+TEST(RateLimiter, KeysAreIPv4AddressesOrIPv6Slash64s) {
+  EXPECT_EQ(host::rate_key("203.0.113.7"), "203.0.113.7");
+  // On a dual-stack listener IPv4 clients arrive mapped; each is still its own key.
+  EXPECT_EQ(host::rate_key("::ffff:203.0.113.7"), "203.0.113.7");
+  EXPECT_NE(host::rate_key("::ffff:203.0.113.7"), host::rate_key("::ffff:203.0.113.8"));
+  EXPECT_EQ(host::rate_key("2001:db8:1:2::1"), host::rate_key("2001:db8:1:2:ffff::9"));
+  EXPECT_NE(host::rate_key("2001:db8:1:2::1"), host::rate_key("2001:db8:1:3::1"));
+}
+
 TEST(RateLimiter, BurstThenSteadyRate) {
   host::RateLimiter l;
   host::RateRule rule{60, 3};  // one a second, three at once

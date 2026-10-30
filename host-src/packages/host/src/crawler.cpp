@@ -123,14 +123,29 @@ std::string type_of(const bj::value& item) {
 }  // namespace
 
 void Host::init_web() {
-  web_ = std::make_unique<WebFetcher>(
-      config_.get()->storage, [this] { return config_.get(); },
-      [this](const FetchOptions& o, const std::string& url, int status, const std::string& error, int64_t us, size_t bytes) {
-        egress_log(o.tenant.empty() ? "_host" : o.tenant, o.box.empty() ? "operator" : o.box, "web", "fetch", "get", url,
-                   status, error, us, 0, bytes, o.request_id, 0);
-      });
-  std::lock_guard lock(web_->db_mu());
-  web_->db().exec(kCrawlSchema);
+  auto log = [this](const FetchOptions& o, const std::string& url, int status, const std::string& error, int64_t us, size_t bytes) {
+    egress_log(o.tenant.empty() ? "_host" : o.tenant, o.box.empty() ? "operator" : o.box, "web", "fetch", "get", url, status,
+               error, us, 0, bytes, o.request_id, 0);
+  };
+  auto storage = config_.get()->storage;
+  try {
+    web_ = std::make_unique<WebFetcher>(storage, [this] { return config_.get(); }, log);
+    std::lock_guard lock(web_->db_mu());
+    web_->db().exec(kCrawlSchema);
+  } catch (const std::exception& e) {
+    // Not set aside: web.db holds the sites that asked not to be crawled. The robot gets an
+    // empty stand-in for its cache and refuses every fetch until web.db is repaired and the
+    // host restarts.
+    stores_off_.push_back("web");
+    startup_notes_.push_back(std::string("the robot is off: storage/web/web.db won't open (") + e.what() + ")");
+    auto standin = storage / "web" / "standin";
+    std::error_code ec;
+    std::filesystem::remove_all(standin, ec);
+    web_ = std::make_unique<WebFetcher>(standin, [this] { return config_.get(); }, log);
+    web_->refuse_all("the robot is off: its store (web.db, with sites' opt-outs) won't open");
+    std::lock_guard lock(web_->db_mu());
+    web_->db().exec(kCrawlSchema);
+  }
 }
 
 std::string Host::web_call(CallContext& ctx, const manifest::ExternalService& svc, const bj::value& request) {

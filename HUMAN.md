@@ -140,7 +140,9 @@ silence any check, add its id to host.json: `"audit": {"quiet": ["backup"]}`. Th
 audit any time: `sudo -u goober goober-host audit --config /srv/goober/host/host.json
 --caddyfile /etc/caddy/Caddyfile`.
 
-A new build that isn't ready within a minute is rolled back on its own: the deploy prints the
+If any step fails partway, the deploy says which line, starts Stalwart again if it had
+stopped it, and puts the previous build back unless the new one is up and ready. A new build
+that isn't ready within a minute is rolled back on its own: the deploy prints the
 host's last 60 log lines (the reason), puts the previous build back, and fails. Then the
 server checks itself through its public name, as people and agents reach it
 (`host-src/tools/readiness.d/kcmeatup.com` lists the pages), and publishes the result at

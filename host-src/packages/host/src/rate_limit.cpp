@@ -12,6 +12,12 @@ namespace goober::host {
 std::string rate_key(const std::string& address) {
   in6_addr a6{};
   if (address.find(':') != std::string::npos && inet_pton(AF_INET6, address.c_str(), &a6) == 1) {
+    // An IPv4 client on a dual-stack listener arrives as ::ffff:a.b.c.d: it is its IPv4
+    // address, not the /64 every IPv4 client shares.
+    if (IN6_IS_ADDR_V4MAPPED(&a6)) {
+      char v4[INET_ADDRSTRLEN] = {};
+      if (inet_ntop(AF_INET, a6.s6_addr + 12, v4, sizeof v4)) return v4;
+    }
     return "v6:" + base::hex_encode(std::string_view(reinterpret_cast<const char*>(a6.s6_addr), 8));
   }
   return address;

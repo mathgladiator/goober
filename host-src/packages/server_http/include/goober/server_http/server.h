@@ -72,6 +72,16 @@ struct ServerOptions {
   // Connections open at once; past it, new ones are closed at accept, so a flood of idle
   // sockets can't hold the host's memory and descriptors.
   int max_connections = 4096;
+  // Who a request is from, for the limits below: given the peer's address and the request's
+  // X-Forwarded-For, a key (the host's rate key). Unset: the peer's address.
+  std::function<std::string(std::string_view peer, std::string_view forwarded_for)> client_key_for;
+  // Request bodies one client may be sending at once; past it, 429. A slow body holds a
+  // connection, so this is what keeps one client from holding them all.
+  int max_bodies_per_client = 32;
+  // A body must keep coming: at least this many bytes every body_window_seconds, or the
+  // connection is closed. A slow, steady upload finishes; a trickle doesn't hold a connection.
+  uint64_t body_window_bytes = 64 * 1024;
+  int body_window_seconds = 20;
 };
 
 // An HTTP/1.1 server on Boost.Beast with keep-alive, a body limit, and an idle timeout.

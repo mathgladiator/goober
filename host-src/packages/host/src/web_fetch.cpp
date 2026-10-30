@@ -419,6 +419,10 @@ Page WebFetcher::fetch(const std::string& url, const FetchOptions& o) {
     return page;
   }
   page.url = u->str();
+  if (!refusing_.empty()) {
+    page.error = refusing_;
+    return page;
+  }
   // The caller's own rules come before the cache: a box can't read, from the cache, a page
   // its manifest wouldn't let it fetch, nor an opted-out site's.
   std::string why;

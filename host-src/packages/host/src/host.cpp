@@ -180,16 +180,13 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       std::cerr << "goober-host: mail: " << n << " unsubscribed address(es) became blocks in consent.db\n";
     }
   } catch (const std::exception& e) {
-    // Not set aside: the opt-outs in it matter. A stand-in keeps the code paths whole, and
-    // consent_off_ holds every mail.
+    // Not set aside: the opt-outs in it matter. The store answers every read and write with an
+    // error (no page pretends a choice was kept), and the outbox holds mail and invites.
     consent_off_ = true;
     stores_off_.push_back("consent");
     startup_notes_.push_back(std::string("mail held: storage/mail/consent.db won't open (") + e.what() +
                              "); no mail goes out until it is repaired and the host restarts");
-    auto standin = config->storage / "mail" / "consent.standin.db";
-    std::error_code ec;
-    std::filesystem::remove(standin, ec);
-    consent_ = std::make_unique<mail::consent::Store>(standin);
+    consent_ = mail::consent::Store::unavailable();
   }
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
@@ -205,13 +202,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status). "
       "See traffic, heat, and data flow (traffic, hot_boxes, box_graph), and what changed and who changed it "
       "(changes, change_get, operator_actions).");
-  try {
-    init_web();
-  } catch (const std::exception& e) {
-    stores_off_.push_back("web");
-    set_aside(config->storage / "web" / "web.db", e.what());
-    init_web();
-  }
+  init_web();
   register_tools();
   register_content_tools();
   register_data_tools();
@@ -298,6 +289,14 @@ uint16_t Host::start() {
   opts.body_max_bytes = uint64_t(cfg->body_max_bytes);
   // Operators push sites and boxes as base64 JSON: their bodies may be larger, once their
   // token checks out, before a byte of the body is read.
+  // Bodies in flight are counted per client as the rate limits count them (the proxy's last
+  // X-Forwarded-For when behind one), so one client's slow uploads can't hold every connection.
+  opts.client_key_for = [this](std::string_view peer, std::string_view forwarded_for) {
+    server::http::Request r;
+    r.remote = std::string(peer);
+    if (!forwarded_for.empty()) r.headers.emplace_back("x-forwarded-for", std::string(forwarded_for));
+    return rate_key(client_address(r));
+  };
   opts.body_limit_for = [this](std::string_view target, std::string_view authorization) -> uint64_t {
     // A whole message from Stalwart, as JSON: up to the largest a route takes, plus room for
     // JSON's escapes. The token is checked again, fully, by the handler.
@@ -344,9 +343,20 @@ uint16_t Host::start() {
     panel_opts.threads = 1;
     panel_opts.body_max_bytes = uint64_t(cfg->body_max_bytes);
     panel_opts.body_limit_for = opts.body_limit_for;
+    panel_opts.client_key_for = opts.client_key_for;
     panel_server_ = std::make_unique<server::http::Server>(
         panel_opts, [this](Request req, Responder respond) { handle(std::move(req), std::move(respond), true); });
     panel_server_->start();
+  }
+  // Each loop counts from now: one that never comes round shows as stale, and a first round
+  // that fails isn't "failing" until it has kept failing (operations.cpp, readiness).
+  {
+    std::lock_guard lock(loops_mu_);
+    int64_t now = base::now_unix_ms();
+    std::vector<std::string> names{"timers", "identity", "outbox", "crawler"};
+    if (traffic_) names.push_back("traffic");
+    if (!backups_manual_) names.push_back("backups");
+    for (const auto& n : names) loops_[n] = LoopState{now, now, 0, "", ""};
   }
   timer_thread_ = std::thread([this] { run_timers(); });
   if (traffic_) traffic_thread_ = std::thread([this] { run_traffic(); });

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <deque>
+#include <map>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -33,13 +34,23 @@ std::string lower(std::string_view s) {
   return out;
 }
 
+// Request bodies being read, per client (ServerOptions::max_bodies_per_client).
+struct BodyCounts {
+  std::mutex mu;
+  std::map<std::string, int> by_client;
+};
+
 class Session : public std::enable_shared_from_this<Session> {
  public:
-  Session(tcp::socket socket, const ServerOptions& options, const Handler& handler, std::atomic<int>& open)
-      : stream_(std::move(socket)), options_(options), handler_(handler), open_(open) {
+  Session(tcp::socket socket, const ServerOptions& options, const Handler& handler, std::atomic<int>& open,
+          BodyCounts& bodies)
+      : stream_(std::move(socket)), options_(options), handler_(handler), open_(open), bodies_(bodies) {
     ++open_;
   }
-  ~Session() { --open_; }
+  ~Session() {
+    release_body();
+    --open_;
+  }
 
   void run() {
     asio::dispatch(stream_.get_executor(), [self = shared_from_this()] { self->read(); });
@@ -78,9 +89,43 @@ class Session : public std::enable_shared_from_this<Session> {
         return self->on_read(bhttp::error::body_limit);
       }
       self->parser_->body_limit(limit);
+      // A transfer coding other than chunked last is no framing anyone agrees on (RFC 9112
+      // § 6.1), and two Hosts are two answers to which site: both refused.
+      if (h.count(bhttp::field::host) > 1) return self->reply_error(400, "Bad Request");
+      if (auto te = h[bhttp::field::transfer_encoding]; !te.empty() && !self->parser_->chunked()) {
+        return self->reply_error(400, "Bad Request");
+      }
+      if (!self->parser_->is_done()) {
+        // One client's bodies in flight are counted, so slow ones can't hold every connection.
+        beast::error_code pe;
+        auto peer = self->stream_.socket().remote_endpoint(pe);
+        std::string peer_text = pe ? std::string() : peer.address().to_string();
+        std::string key = peer_text;
+        try {
+          if (self->options_.client_key_for) {
+            auto xff = h["x-forwarded-for"];
+            key = self->options_.client_key_for(peer_text, std::string_view(xff.data(), xff.size()));
+          }
+        } catch (...) {
+        }
+        {
+          std::lock_guard lock(self->bodies_.mu);
+          int& n = self->bodies_.by_client[key];
+          if (n >= self->options_.max_bodies_per_client) {
+            if (n == 0) self->bodies_.by_client.erase(key);
+            self->keep_alive_ = false;
+            return self->reply_error(429, "Too Many Requests");
+          }
+          ++n;
+          self->counted_ = key;
+          self->counting_ = true;
+        }
+      }
       auto read_body = [self] {
-        bhttp::async_read(self->stream_, self->buffer_, *self->parser_,
-                          [self](beast::error_code ec2, size_t) { self->on_read(ec2); });
+        self->body_seen_ = 0;
+        self->window_mark_ = 0;
+        self->stream_.expires_after(std::chrono::seconds(self->options_.body_window_seconds));
+        self->read_body_some();
       };
       // A client that asked first (curl does above 1 MiB, and so do agents built on it) is told
       // to go on now, rather than waiting a second before sending anyway.
@@ -95,7 +140,33 @@ class Session : public std::enable_shared_from_this<Session> {
     });
   }
 
+  // The body, piece by piece: each window that brings enough bytes earns another window.
+  void read_body_some() {
+    if (parser_->is_done()) {  // no body, or all of it already in the buffer
+      return asio::post(stream_.get_executor(), [self = shared_from_this()] { self->on_read({}); });
+    }
+    bhttp::async_read_some(stream_, buffer_, *parser_, [self = shared_from_this()](beast::error_code ec, size_t n) {
+      if (ec) return self->on_read(ec);
+      if (self->parser_->is_done()) return self->on_read({});
+      self->body_seen_ += n;
+      if (self->body_seen_ - self->window_mark_ >= self->options_.body_window_bytes) {
+        self->window_mark_ = self->body_seen_;
+        self->stream_.expires_after(std::chrono::seconds(self->options_.body_window_seconds));
+      }
+      self->read_body_some();
+    });
+  }
+
+  void release_body() {
+    if (!counting_) return;
+    counting_ = false;
+    std::lock_guard lock(bodies_.mu);
+    auto it = bodies_.by_client.find(counted_);
+    if (it != bodies_.by_client.end() && --it->second <= 0) bodies_.by_client.erase(it);
+  }
+
   void on_read(beast::error_code ec) {
+    release_body();
     if (ec == bhttp::error::end_of_stream || ec == beast::error::timeout || ec == asio::error::operation_aborted) {
       return close();
     }
@@ -328,6 +399,10 @@ class Session : public std::enable_shared_from_this<Session> {
   const ServerOptions& options_;
   const Handler& handler_;
   std::atomic<int>& open_;
+  BodyCounts& bodies_;
+  std::string counted_;
+  bool counting_ = false;
+  uint64_t body_seen_ = 0, window_mark_ = 0;
   bool keep_alive_ = false;
 };
 
@@ -351,7 +426,7 @@ struct Server::Impl {
           // the body) would otherwise wait out the client's delayed ACK, about 40 ms.
           beast::error_code nd;
           socket.set_option(tcp::no_delay(true), nd);
-          std::make_shared<Session>(std::move(socket), options, handler, open)->run();
+          std::make_shared<Session>(std::move(socket), options, handler, open, bodies)->run();
         }
       }
       accept();
@@ -360,6 +435,7 @@ struct Server::Impl {
 
   ServerOptions options;
   std::atomic<int> open{0};
+  BodyCounts bodies;
   Handler handler;
   asio::io_context io;
   tcp::acceptor acceptor;

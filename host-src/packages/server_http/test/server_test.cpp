@@ -159,3 +159,89 @@ TEST(Server, AnswersExpectContinue) {
   EXPECT_EQ(res.result_int(), 200u);
   EXPECT_EQ(res.body(), "got 5");
 }
+
+namespace {
+// A raw request on a fresh connection, and whatever comes back before the server closes it
+// or `wait_ms` passes.
+std::string raw(uint16_t port, const std::string& text, int wait_ms = 2000) {
+  asio::io_context io;
+  tcp::socket sock(io);
+  sock.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+  asio::write(sock, asio::buffer(text));
+  sock.non_blocking(true);
+  std::string got;
+  auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  char buf[4096];
+  while (std::chrono::steady_clock::now() < until) {
+    boost::system::error_code ec;
+    size_t n = sock.read_some(asio::buffer(buf), ec);
+    if (ec == asio::error::would_block) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+    if (ec) break;
+    got.append(buf, n);
+  }
+  return got;
+}
+}  // namespace
+
+// Framing nobody agrees on is refused: a transfer coding that isn't chunked last, two Hosts.
+TEST(Server, RefusesAmbiguousFraming) {
+  ServerOptions o{"127.0.0.1", 0, 1, 1024};
+  o.body_limit_for = [](std::string_view, std::string_view) -> uint64_t { return 0; };
+  Server server(o, [](Request, Responder respond) { respond(Response{}); });
+  server.start();
+  EXPECT_TRUE(raw(server.port(), "POST /x HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: xchunked\r\n\r\n0\r\n\r\n")
+                  .starts_with("HTTP/1.1 400"));
+  EXPECT_TRUE(raw(server.port(), "GET /x HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n").starts_with("HTTP/1.1 400"));
+  auto plain = raw(server.port(), "GET /x HTTP/1.1\r\nHost: a\r\n\r\n");
+  EXPECT_TRUE(plain.starts_with("HTTP/1.1 200")) << plain;
+}
+
+// A body must keep coming; one client may send only so many at once.
+TEST(Server, SlowBodiesAreBoundedPerClientAndByProgress) {
+  ServerOptions o{"127.0.0.1", 0, 2, 1 << 20};
+  o.body_limit_for = [](std::string_view, std::string_view) -> uint64_t { return 0; };
+  o.client_key_for = [](std::string_view, std::string_view xff) { return std::string(xff); };
+  o.max_bodies_per_client = 2;
+  o.body_window_bytes = 100;
+  o.body_window_seconds = 1;
+  Server server(o, [](Request req, Responder respond) {
+    Response r;
+    r.body = std::to_string(req.body.size());
+    respond(std::move(r));
+  });
+  server.start();
+  // Two slow bodies from one client: the third is refused at once; another client isn't.
+  asio::io_context io;
+  std::vector<std::unique_ptr<tcp::socket>> held;
+  for (int i = 0; i < 2; ++i) {
+    held.push_back(std::make_unique<tcp::socket>(io));
+    held.back()->connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), server.port()));
+    asio::write(*held.back(), asio::buffer(std::string("POST /u HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1\r\nContent-Length: 1000\r\n\r\n")));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_TRUE(raw(server.port(), "POST /u HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1\r\nContent-Length: 5\r\n\r\nhello")
+                  .starts_with("HTTP/1.1 429"));
+  EXPECT_TRUE(raw(server.port(), "POST /u HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 2.2.2.2\r\nContent-Length: 5\r\n\r\nhello")
+                  .starts_with("HTTP/1.1 200"));
+  // The held ones send nothing more: past the window they're closed, and their places come back.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  EXPECT_TRUE(raw(server.port(), "POST /u HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.1.1.1\r\nContent-Length: 5\r\n\r\nhello")
+                  .starts_with("HTTP/1.1 200"));
+  // A slow but steady body (100 bytes every half second, over 2.5 s) is read to the end.
+  {
+    tcp::socket sock(io);
+    sock.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), server.port()));
+    asio::write(sock, asio::buffer(std::string("POST /u HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 3.3.3.3\r\nContent-Length: 500\r\n\r\n")));
+    for (int i = 0; i < 5; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      asio::write(sock, asio::buffer(std::string(100, 'x')));
+    }
+    beast::flat_buffer fb;
+    bhttp::response<bhttp::string_body> res;
+    bhttp::read(sock, fb, res);
+    EXPECT_EQ(res.body(), "500");
+  }
+}

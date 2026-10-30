@@ -56,6 +56,9 @@ struct ListState {
 class Store {
  public:
   explicit Store(std::filesystem::path db_file);
+  // A store whose file wouldn't open: every read and write throws, so no caller mails anyone
+  // or tells a person their choice was kept.
+  static std::unique_ptr<Store> unavailable();
   ~Store();
   Store(const Store&) = delete;
   Store& operator=(const Store&) = delete;
@@ -115,6 +118,8 @@ class Store {
   void log(const std::string& tenant, const std::string& hash, const std::string& what, const std::string& list,
            const std::string& how, const bj::object& evidence, int64_t now_ms);
   std::mutex mu_;
+  Store();
+  sqlite::Db& db();
   std::unique_ptr<sqlite::Db> db_;
 };
 

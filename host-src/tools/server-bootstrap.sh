@@ -110,6 +110,34 @@ rollback() {
   cp -p "$BIN.prev" "$BIN"
   systemctl restart goober-host || true
 }
+# Root's own scratch space: no predictable name in /tmp another user could claim first.
+ROOT_TMP="$(mktemp -d)"
+trap 'rm -rf "$ROOT_TMP"' EXIT
+# A step that fails from here on never leaves the server half done: Stalwart is started again
+# if it was stopped, and the host is put back on the previous build unless the new one, once
+# restarted, says it's ready. (errtrace: the trap fires inside functions too.)
+RESTARTED="" STALWART_STOPPED=""
+on_error() {
+  trap - ERR
+  echo "✗ the deploy stopped at server-bootstrap.sh line $1 (the output above says why)"
+  [[ -n "$STALWART_STOPPED" ]] && { systemctl start stalwart || true; }
+  if [[ -z "$RESTARTED" ]]; then
+    [[ -f "$BIN.prev" ]] && cp -p "$BIN.prev" "$BIN" && echo "   the running host is untouched; its binary is back"
+  else
+    local port up=""
+    port="$(host_json 2>/dev/null | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["listen"].get("port", 8080)))' 2>/dev/null || echo 8080)"
+    for _ in $(seq 1 60); do curl -fsS -m 5 "http://127.0.0.1:$port/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
+    if [[ -n "$up" ]]; then echo "   the new build is up and ready; fix the step above and deploy again"; else rollback || true; fi
+  fi
+  exit 1
+}
+set -E
+trap 'on_error $LINENO' ERR
+# Deploys before 2026-10-30 made tools/ as root: it becomes the host's user's (the directory
+# itself, never followed), so the user can replace what's in it.
+if [[ -d "$HOME_DIR/tools" && ! -L "$HOME_DIR/tools" && "$(stat -c %u "$HOME_DIR/tools")" == 0 ]]; then
+  chown -h "$RUN_AS:$RUN_AS" "$HOME_DIR/tools"
+fi
 as_user mkdir -p "$HOME_DIR/tools"
 as_user_install 0755 "$SRC/setup.sh" "$HOME_DIR/tools/setup.sh"
 
@@ -127,18 +155,32 @@ if [[ "$WITH_RUST" == --with-rust ]]; then
   # then copied by root into a root-owned directory the builds read but can't change. A failure
   # (no network) keeps the crates from the last deploy.
   as_user_install 0755 "$SRC/vendor.sh" "$HOME_DIR/tools/vendor.sh"
-  USER_STAGE="$(sudo -u "$RUN_AS" mktemp -d -p "$HOME_DIR" vendor-stage.XXXXXXXX)"
-  if sudo -u "$RUN_AS" -H env PATH="$CARGO_BIN:$PATH" bash "$HOME_DIR/tools/vendor.sh" "$USER_STAGE/vendor"; then
-    STAGE_VENDOR="$(mktemp -d)"
-    cp -R --no-dereference --preserve=mode,timestamps "$USER_STAGE/vendor/." "$STAGE_VENDOR/"
-    chown -hR root:root "$STAGE_VENDOR"  # -h: a symlink in the crates is changed, never followed
-    chmod -R a+rX,go-w "$STAGE_VENDOR"
-    rm -rf "$HOME_DIR/vendor"
-    mv -T "$STAGE_VENDOR" "$HOME_DIR/vendor"
+  # Root never reads through the user's paths (its cargo could link vendor/ to /etc): the user
+  # streams the crates out as a tar, and root unpacks only plain files and directories (no
+  # links, devices, or set-id bits) into a directory of its own beside the home, then swaps it in.
+  USER_STAGE="$(as_user mktemp -d -p "$HOME_DIR" vendor-stage.XXXXXXXX)"
+  if as_user env PATH="$CARGO_BIN:$PATH" bash "$HOME_DIR/tools/vendor.sh" "$USER_STAGE/vendor"; then
+    STAGE_VENDOR="$(mktemp -d -p /srv ".goober-vendor.XXXXXXXX")"
+    if as_user tar -C "$USER_STAGE/vendor" -cf - . | python3 -I -c '
+import sys, tarfile
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
+    for m in t:
+        if not (m.isfile() or m.isdir()):
+            continue
+        t.extract(m, sys.argv[1], filter="data")
+' "$STAGE_VENDOR"; then
+      chown -hR root:root "$STAGE_VENDOR"
+      chmod -R a+rX,go-w "$STAGE_VENDOR"
+      rm -rf "$HOME_DIR/vendor"
+      mv -T "$STAGE_VENDOR" "$HOME_DIR/vendor" || { echo "   couldn't put the crates in place; keeping what was there"; rm -rf "$STAGE_VENDOR"; }
+    else
+      echo "   couldn't unpack the vendored crates; keeping what was there"
+      rm -rf "$STAGE_VENDOR"
+    fi
   else
     echo "   couldn't vendor the crates; keeping what was there"
   fi
-  rm -rf "$USER_STAGE"
+  as_user rm -rf "$USER_STAGE"
 fi
 
 if [[ -f "$DIR/host.json" ]]; then
@@ -148,6 +190,7 @@ if [[ -f "$DIR/host.json" ]]; then
     cp -p "$BIN.prev" "$BIN" 2>/dev/null || true
     exit 1
   fi
+  RESTARTED=1
   systemctl restart goober-host
 else
   echo "── first install: setup (answer Production)"
@@ -166,18 +209,25 @@ path, user = sys.argv[1:3]
 allowed = {"Description", "After", "Wants", "User", "WorkingDirectory", "ExecStart", "ExecReload", "Restart",
            "RestartSec", "NoNewPrivileges", "PrivateTmp", "ProtectSystem", "ReadWritePaths", "LimitNOFILE",
            "WantedBy", "Type", "OnCalendar", "Persistent"}
-users = 0
-for line in open(path):
-    line = line.strip()
-    if not line or line.startswith("#") or re.fullmatch(r"\[(Unit|Service|Install|Timer)\]", line):
+users, section = 0, ""
+for raw in open(path):
+    line = raw.strip()
+    if line.endswith("\\"):
+        sys.exit("a continued line")  # systemd joins it with the next: what's checked isn't what runs
+    m = re.fullmatch(r"\[(Unit|Service|Install|Timer)\]", line)
+    if m:
+        section = m.group(1)
+        continue
+    if not line or line[0] in "#;":
         continue
     key, _, value = line.partition("=")
+    key, value = key.strip(), value.strip()
     if key not in allowed:
         sys.exit("key " + key)
     if key == "User":
+        if section != "Service" or value != user:
+            sys.exit("User=" + value + " in [" + section + "]")
         users += 1
-        if value != user:
-            sys.exit("User=" + value)
     if key.startswith("Exec") and value[:1] in "+!@-:":
         sys.exit("prefixed " + key)
 sys.exit(0 if users == 1 or path.endswith(".timer") else "User")
@@ -237,7 +287,11 @@ if src.get("vendor") == home + "/vendor" and "cargo" in src:
     sys.exit(1)
 src["vendor"] = home + "/vendor"
 src.setdefault("cargo", home + "/.cargo/bin/cargo")
-open(p, "w").write(json.dumps(c, indent=2) + "\n")
+import os
+with open(p + ".tmp", "w") as f:
+    f.write(json.dumps(c, indent=2) + "\n")
+os.chmod(p + ".tmp", os.stat(p).st_mode & 0o777)
+os.replace(p + ".tmp", p)
 ' "$DIR/host.json" "$HOME_DIR"; then
     echo "set source.vendor and source.cargo in host.json"
     systemctl restart goober-host
@@ -313,6 +367,7 @@ print(",".join(d for d in sorted(c.get("domains", {})) if re.fullmatch(r"[a-z0-9
 ')"
   # configure runs with Stalwart stopped, in a private network namespace root makes: its
   # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
+  STALWART_STOPPED=1
   systemctl stop stalwart 2>/dev/null || true
   unshare --net -- sh -c 'ip link set lo up && exec runuser -u stalwart -- env STALWART_PRIVATE_NETNS=1 "$@"' sh \
     bash "$SW" configure "$MAIL_HOME" --smtp 0.0.0.0:25 --admin 127.0.0.1:8025 \
@@ -340,6 +395,7 @@ UNIT
   systemctl daemon-reload
   systemctl enable --now stalwart goober-stalwart-tls.timer >/dev/null 2>&1
   systemctl restart stalwart
+  STALWART_STOPPED=""
   # goober takes the hook once its config names the token.
   if sudo -u "$RUN_AS" python3 -c '
 import json, sys
@@ -349,7 +405,11 @@ inbound = c.setdefault("mail", {}).setdefault("inbound", {})
 if inbound.get("token-file") == token:
     sys.exit(1)
 inbound["token-file"] = token
-open(p, "w").write(json.dumps(c, indent=2) + "\n")
+import os
+with open(p + ".tmp", "w") as f:
+    f.write(json.dumps(c, indent=2) + "\n")
+os.chmod(p + ".tmp", os.stat(p).st_mode & 0o777)
+os.replace(p + ".tmp", p)
 ' "$DIR/host.json" "$HOST_TOKEN"; then
     echo "   set mail.inbound.token-file in host.json"
     systemctl restart goober-host
@@ -400,36 +460,36 @@ while i < len(lines):
     i += 1
 open(sys.argv[2], "w").write("\n".join(out))
 PY
-  if caddy validate --config "$NEW_CADDY" --adapter caddyfile >/tmp/goober-caddy.$$ 2>&1; then
+  if caddy validate --config "$NEW_CADDY" --adapter caddyfile >"$ROOT_TMP/caddy" 2>&1; then
     cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-retry"
     install -m 0644 "$NEW_CADDY" /etc/caddy/Caddyfile
     systemctl reload caddy || systemctl restart caddy
     echo "   added (the old one is /etc/caddy/Caddyfile.before-retry)"
   else
-    echo "   Caddy refused the change, so the Caddyfile is as it was:"; sed 's/^/     /' /tmp/goober-caddy.$$ | tail -n 8
+    echo "   Caddy refused the change, so the Caddyfile is as it was:"; sed 's/^/     /' "$ROOT_TMP/caddy" | tail -n 8
   fi
-  rm -f "$NEW_CADDY" /tmp/goober-caddy.$$
+  rm -f "$NEW_CADDY" "$ROOT_TMP/caddy"
 fi
 
 echo "── ready"
 # The gate: the new build must say it's ready (/goober/ready: storage, identity, boxes, the
 # queue) within a minute. If it doesn't, its log says why, and the previous build comes back.
-ready() { curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/tmp/goober-ready.$$ 2>&1; }
+ready() { curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >"$ROOT_TMP/ready" 2>&1; }
 up=""
 for _ in $(seq 1 120); do if ready; then up=1; break; fi; sleep 0.5; done
 if [[ -z "$up" ]]; then
   echo "✗ the new build isn't ready after 60 s. Its status and last log lines:"
-  cat /tmp/goober-ready.$$ 2>/dev/null | sed 's/^/   /'; echo
+  cat "$ROOT_TMP/ready" 2>/dev/null | sed 's/^/   /'; echo
   systemctl --no-pager --lines=0 status goober-host | sed 's/^/   /' | head -8 || true
   journalctl -u goober-host -n 60 --no-pager | sed 's/^/   /'
-  rm -f /tmp/goober-ready.$$
+  rm -f "$ROOT_TMP/ready"
   if rollback; then
     for _ in $(seq 1 60); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/health" >/dev/null 2>&1 && break; sleep 0.5; done
     if curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/health"; then echo; echo "   the previous build is serving again"; else echo "   ✗ the previous build isn't answering either"; fi
   fi
   exit 1
 fi
-cat /tmp/goober-ready.$$; echo; rm -f /tmp/goober-ready.$$
+cat "$ROOT_TMP/ready"; echo; rm -f "$ROOT_TMP/ready"
 systemctl --no-pager --lines=0 status goober-host | head -3 || true
 
 echo "── versions"
@@ -448,14 +508,14 @@ echo "── checking everything this host needs"
 FAILED=()
 check() {
   local what="$1"; shift
-  if "$@" >/tmp/goober-check.$$ 2>&1; then
+  if "$@" >"$ROOT_TMP/check" 2>&1; then
     echo "  ✓ $what"
   else
     echo "  ✗ $what"
-    sed 's/^/      /' /tmp/goober-check.$$ | tail -n 15
+    sed 's/^/      /' "$ROOT_TMP/check" | tail -n 15
     FAILED+=("$what")
   fi
-  rm -f /tmp/goober-check.$$
+  rm -f "$ROOT_TMP/check"
 }
 check "goober-host is running" systemctl is-active --quiet goober-host
 check "goober-host answers its health check" curl -fsS "http://127.0.0.1:$PORT/goober/health"
@@ -520,7 +580,11 @@ if [[ -n "$PUBLIC" && -f "$SRC/readiness.py" ]]; then
   as_user_install 0755 "$SRC/readiness.py" "$HOME_DIR/tools/readiness.py"
   EXTRA=()
   if [[ -f "$SRC/readiness.args" ]]; then
-    while IFS= read -r line; do [[ -z "$line" || "$line" == \#* ]] || EXTRA+=($line); done <"$SRC/readiness.args"
+    while IFS= read -r line; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      read -ra words <<<"$line"  # split on spaces, never globbed
+      EXTRA+=("${words[@]}")
+    done <"$SRC/readiness.args"
   fi
   as_user mkdir -p -m 0750 "$DIR/storage/operations"
   if ! sudo -u "$RUN_AS" python3 -I "$HOME_DIR/tools/readiness.py" "https://$PUBLIC" ${BUILD:+--build "$BUILD"} "${EXTRA[@]}" \
@@ -573,9 +637,14 @@ panel_setup() {
     { echo "   couldn't copy host.json aside; nothing changed"; return 1; }
   cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel || { echo "   couldn't copy the Caddyfile aside; nothing changed"; return 1; }
   undo() {
-    sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-panel" "$DIR/host.json"
-    cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile
-    echo "   $1; host.json and the Caddyfile are as they were"
+    if sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-panel" "$DIR/host.json" &&
+       cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile; then
+      echo "   $1; host.json and the Caddyfile are as they were"
+    else
+      echo "   $1, and putting the files back failed: restore $DIR/host.json.before-panel and"
+      echo "   /etc/caddy/Caddyfile.before-panel by hand"
+      FAILED+=("putting host.json and the Caddyfile back after the panel's setup")
+    fi
   }
   edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
   sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" >/dev/null || { undo "the host refused the new host.json"; return 1; }
@@ -635,6 +704,9 @@ PY
 
 if [[ -n "$PANEL" ]]; then
   read -r PANEL_DOMAIN PANEL_DNS <<<"$PANEL"
+  [[ "$PANEL_DOMAIN" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || PANEL=""
+fi
+if [[ -n "$PANEL" ]]; then
   if [[ ! -t 0 ]]; then
     echo "   (deploy from a terminal to be offered the panel at https://$PANEL_DOMAIN/)"
   elif [[ "$PANEL_DNS" == ready ]]; then
