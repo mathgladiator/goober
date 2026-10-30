@@ -9,6 +9,7 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
+#include "goober/sqlite/sqlite.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
 #include "../src/keys.h"
@@ -296,6 +297,32 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":false,"confirm":true})").status, 200);
   EXPECT_FALSE(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"four"})").at("isError").as_bool());
   EXPECT_EQ(*base::read_file(root / "storage/content/kc/a.txt"), "four");
+}
+
+// 035: once a request is decided or expired, only the copy shown is kept: no secret in the store.
+TEST_F(ScopeTest, ExpiredAndRefusedRequestsKeepNoSecrets) {
+  auto boss = sign_in("boss@example.com");
+  call("content_list", R"({"tenant":"kc"})");  // the agent is seen
+  ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 200);
+  call("key_set", R"({"scope":"tenant","tenant":"kc","name":"k1","value":"sekrit-value-1","hosts":["api.example.com"]})");
+  call("connection_put", R"({"tenant":"kc","box":"b","service":"s","client_secret":"sekrit-value-2"})");
+  auto db_text = [&] {
+    auto dir = root / "storage/operations";
+    return base::read_file(dir / "approvals.db").value_or("") + base::read_file(dir / "approvals.db-wal").value_or("");
+  };
+  ASSERT_NE(db_text().find("sekrit-value-1"), std::string::npos);  // held: the real arguments, to run them
+  {
+    sqlite::Db db(root / "storage/operations/approvals.db");
+    db.exec("UPDATE requests SET at_ms = 0");  // a day and more ago
+  }
+  auto listed = api(boss, "approvals");  // reading the store expires them
+  EXPECT_NE(listed.body.find("expired"), std::string::npos) << listed.body;
+  {
+    sqlite::Db db(root / "storage/operations/approvals.db");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");  // old frames (the WAL) are SQLite's to reuse
+  }
+  EXPECT_EQ(db_text().find("sekrit-value-1"), std::string::npos);
+  EXPECT_EQ(db_text().find("sekrit-value-2"), std::string::npos);
 }
 
 // From the operator-surfaces review: holes a focused agent could reach through.

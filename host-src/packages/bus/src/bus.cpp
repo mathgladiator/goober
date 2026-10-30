@@ -13,18 +13,22 @@ int64_t Bus::publish(const std::string& topic, int64_t now_ms) {
   {
     std::lock_guard lock(mu_);
     seq = ++next_;
-    auto& s = topics_[topic];
+    auto [at, added] = topics_.try_emplace(topic);
+    auto& s = at->second;
+    if (added) {
+      order_.push_front(topic);
+    } else {
+      order_.splice(order_.begin(), order_, s.order);
+    }
+    s.order = order_.begin();
     s.seq = seq;
     s.at_ms = now_ms;
     ++s.publishes;
     if (topics_.size() > max_topics_) {
-      // Forget the topic published longest ago (never this one): it reads as 0 again, which
-      // only means a subscriber that hears of it later evaluates once more.
-      auto oldest = topics_.end();
-      for (auto it = topics_.begin(); it != topics_.end(); ++it) {
-        if (it->first != topic && (oldest == topics_.end() || it->second.at_ms < oldest->second.at_ms)) oldest = it;
-      }
-      if (oldest != topics_.end()) topics_.erase(oldest);
+      // Forget the topic published longest ago (never this one, which is at the front): it reads
+      // as 0 again, which only means a subscriber that hears of it later evaluates once more.
+      topics_.erase(order_.back());
+      order_.pop_back();
     }
     auto [b, e] = by_topic_.equal_range(topic);
     for (auto it = b; it != e; ++it) {

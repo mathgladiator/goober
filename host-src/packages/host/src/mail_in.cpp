@@ -131,7 +131,14 @@ bool param_value_ok(const std::string& v) {
 }  // namespace
 
 // The host's key for reply tokens: 32 random bytes, made on first use, readable only by the host.
+// Read once and kept: it is asked for on every box call and log line.
 std::string Host::reply_key() {
+  std::lock_guard lock(reply_key_mu_);
+  if (reply_key_.empty()) reply_key_ = load_reply_key();
+  return reply_key_;
+}
+
+std::string Host::load_reply_key() {
   auto file = config_.get()->storage / "mail" / "reply.key";
   if (auto k = base::read_file(file); k && k->size() == 32) return *k;
   fs::create_directories(file.parent_path());

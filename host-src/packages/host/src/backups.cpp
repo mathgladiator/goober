@@ -5,6 +5,7 @@
 #include <iostream>
 #include <set>
 
+#include "goober/logs/logs.h"
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
@@ -345,6 +346,7 @@ int BackupService::run_logs(int64_t now_ms, std::string* error) {
   fs::path queue = cfg->storage / "logs" / "archive";
   std::error_code ec;
   if (!fs::exists(queue, ec)) return 0;
+  logs::finish_pending(queue);  // rotations since the last housekeeping
   std::vector<fs::path> files;
   for (auto it = fs::directory_iterator(queue, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
     if (it->path().extension() == ".log") files.push_back(it->path());

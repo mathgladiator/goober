@@ -94,11 +94,22 @@ TEST(Logs, RotationByDayAndSizeKeepsTheChainAndQueuesAManifest) {
   EXPECT_TRUE(fs::exists(dir / "access.log.1"));
   EXPECT_TRUE(fs::exists(r->queued));
   EXPECT_EQ(fs::hard_link_count(r->queued), 2u);
-  EXPECT_EQ(r->manifest_json.at("first_seq").as_int64(), 1);
-  EXPECT_EQ(r->manifest_json.at("last_seq").as_int64(), 2);
-  EXPECT_EQ(r->manifest_json.at("lines").as_int64(), 2);
+  EXPECT_EQ(r->queued.parent_path(), dir / "archive" / "pending");  // not uploaded until finished
   EXPECT_EQ(r->manifest_json.at("chain_before"), "genesis");
-  EXPECT_TRUE(fs::exists(r->manifest));
+  EXPECT_FALSE(r->manifest_json.contains("sha256"));
+  // Finishing (housekeeping, off the request path) hashes it and moves it up for upload.
+  auto done = logs::finish_pending(dir / "archive");
+  ASSERT_EQ(done.size(), 1u);
+  EXPECT_EQ(done[0].manifest_json.at("first_seq").as_int64(), 1);
+  EXPECT_EQ(done[0].manifest_json.at("last_seq").as_int64(), 2);
+  EXPECT_EQ(done[0].manifest_json.at("lines").as_int64(), 2);
+  EXPECT_EQ(done[0].manifest_json.at("chain_before"), "genesis");
+  EXPECT_EQ(done[0].manifest_json.at("sha256").as_string().size(), 64u);
+  EXPECT_TRUE(fs::exists(done[0].manifest));
+  EXPECT_TRUE(fs::exists(done[0].queued));
+  EXPECT_FALSE(fs::exists(r->queued));
+  EXPECT_FALSE(fs::exists(r->manifest));
+  EXPECT_TRUE(logs::finish_pending(dir / "archive").empty());
   // seq and chain go on across the rotation.
   auto now = lines_of(dir / "access.log");
   ASSERT_EQ(now.size(), 1u);

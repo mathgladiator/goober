@@ -186,17 +186,18 @@ class Session : public std::enable_shared_from_this<Session> {
   class Open : public Stream, public std::enable_shared_from_this<Open> {
    public:
     Open(std::shared_ptr<Session> s, size_t max_behind) : session_(std::move(s)), max_behind_(max_behind) {}
-    bool send(std::string bytes) override {
+    using Stream::send;
+    bool send(std::shared_ptr<const std::string> bytes) override {
       std::shared_ptr<Session> s;
       bool start = false, over = false;
       {
         std::lock_guard lock(mu_);
         if (closed_) return false;
-        if (queued_ + bytes.size() > max_behind_) {
+        if (queued_ + bytes->size() > max_behind_) {
           // Falling behind: a reader this slow is let go rather than let it grow the queue.
           over = true;
         } else {
-          queued_ += bytes.size();
+          queued_ += bytes->size();
           queue_.push_back(std::move(bytes));
           start = !writing_;
           writing_ = writing_ || start;
@@ -271,7 +272,7 @@ class Session : public std::enable_shared_from_this<Session> {
         s = session_;
       }
       if (!s) return;
-      asio::async_write(s->stream_.socket(), asio::buffer(current_), [self = shared_from_this()](beast::error_code ec, size_t n) {
+      asio::async_write(s->stream_.socket(), asio::buffer(*current_), [self = shared_from_this()](beast::error_code ec, size_t n) {
         {
           std::lock_guard lock(self->mu_);
           self->queued_ -= std::min(self->queued_, n);
@@ -284,8 +285,8 @@ class Session : public std::enable_shared_from_this<Session> {
     mutable std::mutex mu_;
     std::shared_ptr<Session> session_;
     size_t max_behind_, queued_ = 0;
-    std::deque<std::string> queue_;
-    std::string current_;
+    std::deque<std::shared_ptr<const std::string>> queue_;
+    std::shared_ptr<const std::string> current_;
     bool writing_ = false, closed_ = false;
     std::vector<std::function<void()>> on_close_;
     char sink_[512];

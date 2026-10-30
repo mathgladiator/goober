@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "goober/base/hash.h"
+#include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
@@ -22,9 +23,15 @@ namespace {
 
 constexpr int64_t kKeepaliveMs = 15000;
 constexpr int64_t kLifetimeMs = 15 * 60 * 1000;
-constexpr size_t kMaxStreams = 4000;
-constexpr size_t kMaxStreamsPerTenant = 1000;
+// Each stream holds a connection from the proxy for its life: the host's total stays well under
+// the server's 4096 connections, so ordinary requests always have room.
+constexpr size_t kMaxStreams = 2000;
+constexpr size_t kMaxStreamsPerTenant = 500;
 constexpr size_t kMaxStreamsPerClient = 32;
+
+// Scheduling runs on the monotonic clock: a wall clock stepped back by NTP must not stall
+// keepalives, refreshes, or lifetimes.
+int64_t mono_ms() { return base::monotonic_us() / 1000; }
 
 // The answer as one SSE event: each line of the body a data: line.
 std::string event(const std::string& name, int64_t id, const std::string& body) {
@@ -45,6 +52,13 @@ std::string event(const std::string& name, int64_t id, const std::string& body) 
 }  // namespace
 
 int64_t Host::base_seed() { return base::now_unix_ms() * 1000; }
+
+Host::SseSlot::~SseSlot() {
+  std::lock_guard lock(host->sse_count_mu_);
+  --host->sse_total_;
+  if (--host->sse_per_tenant_[tenant] == 0) host->sse_per_tenant_.erase(tenant);
+  if (--host->sse_per_client_[client] == 0) host->sse_per_client_.erase(client);
+}
 
 std::optional<std::string> Host::resolve_topic(const std::string& tmpl, const std::string& tenant, const bj::object& doc,
                                                const std::optional<SignedIn>& who) {
@@ -97,7 +111,9 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
   if (who && who->agent && !route.agents) {
     return finish(error_page(tenant, 403, request_id), R"({"why":"agent tokens can't call this route"})");
   }
-  // What the route sees: its declared query, typed, or all of it; declared headers only.
+  // What the route sees: its declared query, typed, or all of it; and only its declared headers
+  // (never those hidden from boxes). Every header shown is part of the signature, so passing all
+  // of them would give each browser (its user-agent, its languages) a group of its own.
   bj::object query;
   auto raw_query = router::parse_query(req.query);
   if (route.query_declared) {
@@ -117,7 +133,9 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
   }
   bj::object headers;
   for (const auto& [k, v] : req.headers) {
-    if (std::find(route.request_headers.begin(), route.request_headers.end(), k) != route.request_headers.end()) headers[k] = v;
+    if (hidden_from_box(k)) continue;
+    if (std::find(route.request_headers.begin(), route.request_headers.end(), k) == route.request_headers.end()) continue;
+    headers[k] = v;
   }
   bj::object params_json;
   for (const auto& [k, v] : params) params_json[k] = v;
@@ -141,7 +159,16 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
     if (call.result.outcome != runtime::wasm::CallResult::Outcome::kOk) {
       return finish(error_page(tenant, 500, request_id), json::dump(call.extra));
     }
-    res.status = call.result.status >= 500 ? 500 : call.result.status;
+    // The status vocabulary, exactly as for an HTTP route (037).
+    if (std::string why = box_status_refusal(call.result.status, call.result.headers); !why.empty()) {
+      log_line("boxes/" + m.box, bj::object{{"request_id", request_id}, {"version", ref.box->version}, {"level", "host"}, {"text", why}});
+      return finish(error_page(tenant, 500, request_id), json::dump(call.extra));
+    }
+    res.status = call.result.status;
+    if (route.response == "empty" && res.status >= 200 && res.status < 300) {
+      res.status = 204;
+      call.result.body.clear();
+    }
     res.headers = std::move(call.result.headers);
     res.headers.emplace_back("content-type", call.result.content_type.empty() ? "application/octet-stream" : call.result.content_type);
     res.headers.emplace_back("x-content-type-options", "nosniff");
@@ -151,31 +178,42 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
     return finish(std::move(res), json::dump(call.extra));
   }
 
-  // Limits (036 § 6): the host, the tenant, and one client address.
-  std::string client = rate_key(client_address(req));
   {
     std::lock_guard lock(sse_mu_);
-    size_t total = 0, in_tenant = 0, from_client = 0;
-    for (const auto& [_, g] : sse_groups_) {
-      for (const auto& s : g->subs) {
-        ++total;
-        in_tenant += g->tenant == tenant;
-        from_client += s->client == client;
-      }
+    if (sse_stopping_) {
+      auto res = error_page(tenant, 503, request_id);
+      res.headers.emplace_back("retry-after", "5");
+      return finish(std::move(res), R"({"why":"the host is stopping"})");
     }
-    if (total >= kMaxStreams || in_tenant >= kMaxStreamsPerTenant || from_client >= kMaxStreamsPerClient) {
+  }
+  // Limits (036 § 6): the host, the tenant, and one client address. The slot is taken here, so
+  // a burst of requests can't all pass before any of them is counted.
+  std::string client = rate_key(client_address(req));
+  std::shared_ptr<SseSlot> slot;
+  {
+    std::lock_guard lock(sse_count_mu_);
+    if (sse_total_ >= kMaxStreams || sse_per_tenant_[tenant] >= kMaxStreamsPerTenant ||
+        sse_per_client_[client] >= kMaxStreamsPerClient) {
+      if (sse_per_tenant_[tenant] == 0) sse_per_tenant_.erase(tenant);
+      if (sse_per_client_[client] == 0) sse_per_client_.erase(client);
       auto res = error_page(tenant, 429, request_id);
       res.headers.emplace_back("retry-after", "30");
       return finish(std::move(res), R"({"why":"too many open subscriptions"})");
     }
+    ++sse_total_, ++sse_per_tenant_[tenant], ++sse_per_client_[client];
+    slot = std::shared_ptr<SseSlot>(new SseSlot{this, tenant, client});
   }
-  // The signature (036 § 5): who asks what, so the same question is answered once.
+  // The signature (036 § 5): everything the box is shown, so the same question is answered
+  // once: the domain, the route and its inputs, and who asks (a person's agent apart from them).
   std::string roles;
   if (who) {
     for (const auto& r : who->roles) roles += r + ",";
   }
-  std::string signature = tenant + "\n" + m.box + "\n" + route.name + "\n" + json::dump(params_json) + "\n" + json::dump(query) +
-                          "\n" + json::dump(headers) + "\n" + (who ? std::to_string(who->user.user_id) + "\n" + roles : "-");
+  std::string signature = tenant + "\n" + domain + "\n" + m.box + "\n" + route.name + "\n" + json::dump(params_json) + "\n" +
+                          json::dump(query) + "\n" + json::dump(headers) + "\n" +
+                          (who ? std::to_string(who->user.user_id) + "\n" + roles + "\n" + (who->agent ? "agent:" : "person:") +
+                                     who->client_id + "\n" + (who->host ? "host" : "")
+                               : "-");
   std::string key = base::sha256_hex(signature);
   int64_t last_seen = -1;
   if (auto lei = req.header("last-event-id"); !lei.empty() && lei.size() < 20 &&
@@ -190,15 +228,23 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
                  {"x-content-type-options", "nosniff"}};
   std::string box = m.box, route_name = route.name;
   int64_t coalesce = route.coalesce_ms, refresh = route.refresh_ms;
-  res.stream = [this, key, tenant, domain, path = req.path, box, route_name, who, doc, topics, coalesce, refresh, client,
+  res.stream = [this, key, tenant, domain, path = req.path, box, route_name, who, doc, topics, coalesce, refresh, slot,
                 last_seen](std::shared_ptr<server::http::Stream> s) {
     auto sub = std::make_shared<SseSub>();
     sub->stream = s;
-    sub->client = client;
-    sub->opened_ms = base::now_unix_ms();
+    sub->slot = slot;
+    // Lifetimes spread over the last tenth, so streams opened together don't reconnect together.
+    sub->expires_ms = mono_ms() + kLifetimeMs - int64_t(base::os_random_u64() % uint64_t(kLifetimeMs / 10));
     sub->last_sent = last_seen;
     std::shared_ptr<SseGroup> g;
     std::string first;
+    {
+      std::lock_guard lock(sse_mu_);
+      if (sse_stopping_) {
+        sub.reset();
+      }
+    }
+    if (!sub) return s->close();  // the host began stopping after this request was admitted
     {
       std::lock_guard lock(sse_mu_);
       auto& slot = sse_groups_[key];
@@ -219,7 +265,7 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
         slot->watch_id = bus_.watch(topics, [this, weak](const std::string&, int64_t) {
           std::lock_guard l2(sse_mu_);
           if (auto grp = weak.lock()) {
-            int64_t at = std::max(base::now_unix_ms(), grp->last_eval_ms + grp->coalesce_ms);
+            int64_t at = std::max(mono_ms(), grp->last_eval_ms + grp->coalesce_ms);
             if (!grp->due_ms || at < grp->due_ms) grp->due_ms = at;
           }
           sse_cv_.notify_all();
@@ -234,18 +280,24 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
         if (sub->last_sent != g->last_id) first = event("update", g->last_id, g->last_body);
         sub->last_sent = g->last_id;
         sub->has_answer = true;
-      } else if (!g->due_ms || g->due_ms > base::now_unix_ms()) {
-        g->due_ms = base::now_unix_ms();
+      } else if (!g->due_ms || g->due_ms > mono_ms()) {
+        g->due_ms = mono_ms();
       }
     }
     if (!first.empty()) s->send(first);
     std::weak_ptr<SseSub> weak_sub = sub;
     s->on_close([this, key, weak_sub] {
+      std::shared_ptr<SseSub> gone;  // let go after the lock: its slot takes the count lock
       std::lock_guard lock(sse_mu_);
       auto it = sse_groups_.find(key);
       if (it == sse_groups_.end()) return;
       auto& subs = it->second->subs;
-      std::erase_if(subs, [&](const auto& x) { return x == weak_sub.lock() || x->stream->closed(); });
+      auto me = weak_sub.lock();
+      if (auto at = std::find(subs.begin(), subs.end(), me); at != subs.end()) {
+        gone = std::move(*at);
+        *at = std::move(subs.back());
+        subs.pop_back();
+      }
       if (subs.empty()) {
         bus_.unwatch(it->second->watch_id);
         sse_groups_.erase(it);
@@ -257,46 +309,49 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
 }
 
 void Host::sse_evaluate(std::shared_ptr<SseGroup> g) {
-  int64_t started = base::now_unix_ms();
-  int64_t id = bus_.max_seq(g->topics);
-  // The route as served now: a redeploy that dropped it ends the streams.
-  auto active = boxes_->active();
-  const auto& table = active->table_for(g->domain);
-  auto path = router::normalize_path(g->path);
-  std::optional<boxes::RouteRef> ref;
-  if (path) {
-    auto match = table.match(path->segments, "subscribe");
-    if (match.value && match.value->box->manifest.box == g->box && match.value->route->name == g->route) ref = *match.value;
-  }
+  int64_t started = mono_ms();
   std::string message;
-  bool end = false, changed = false;
+  bool end = false, changed = false, send_body = false;
   std::string body;
-  bool send_body = false;
-  if (!ref) {
-    message = event("error", -1, R"({"status":404,"error":"the subscription is no longer served"})");
-    end = true;
-  } else {
-    bj::object doc = g->doc;
-    std::string request_id = "sse-" + g->key.substr(0, 12) + "-" + std::to_string(started);
-    doc["request_id"] = request_id;
-    CallOptions o;
-    o.read_only = true;
-    BoxCall call;
-    try {
-      call = call_box(*ref, doc, g->tenant, request_id, g->who, o);
-    } catch (const std::exception& e) {
-      call.result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+  int64_t id = -1;
+  // Whatever throws, the group is let go (running cleared) and its subscribers told, so one
+  // bad evaluation never freezes a group.
+  try {
+    id = bus_.max_seq(g->topics);
+    // The route as served now: a redeploy that dropped it ends the streams.
+    auto active = boxes_->active();
+    const auto& table = active->table_for(g->domain);
+    auto path = router::normalize_path(g->path);
+    std::optional<boxes::RouteRef> ref;
+    if (path) {
+      auto match = table.match(path->segments, "subscribe");
+      if (match.value && match.value->box->manifest.box == g->box && match.value->route->name == g->route) ref = *match.value;
     }
-    const auto& r = call.result;
-    if (r.outcome != runtime::wasm::CallResult::Outcome::kOk || r.status >= 500) {
-      message = event("error", -1, R"({"status":500})");
-    } else if (r.status < 200 || r.status >= 300) {
-      message = event("error", -1, json::dump(bj::object{{"status", r.status}}));
-      end = r.status == 401 || r.status == 403;
+    if (!ref) {
+      message = event("error", -1, R"({"status":404,"error":"the subscription is no longer served"})");
+      end = true;
     } else {
-      body = r.body;
-      send_body = true;
+      bj::object doc = g->doc;
+      std::string request_id = "sse-" + g->key.substr(0, 12) + "-" + std::to_string(base::now_unix_ms());
+      doc["request_id"] = request_id;
+      CallOptions o;
+      o.read_only = true;
+      auto call = call_box(*ref, doc, g->tenant, request_id, g->who, o);
+      const auto& r = call.result;
+      if (r.outcome != runtime::wasm::CallResult::Outcome::kOk || r.status >= 500) {
+        message = event("error", -1, R"({"status":500})");
+      } else if (r.status < 200 || r.status >= 300) {
+        message = event("error", -1, json::dump(bj::object{{"status", r.status}}));
+        end = r.status == 401 || r.status == 403;
+      } else {
+        body = r.body;
+        send_body = true;
+      }
     }
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: subscription " << g->box << "." << g->route << ": " << e.what() << "\n";
+    message = event("error", -1, R"({"status":500})");
+    send_body = false;
   }
   // Who gets what is decided under the lock; sending and closing happen outside it, since a
   // stream that closes calls back into the hub.
@@ -304,14 +359,15 @@ void Host::sse_evaluate(std::shared_ptr<SseGroup> g) {
   {
     std::lock_guard lock(sse_mu_);
     ++g->evaluations;
-    g->last_eval_ms = base::now_unix_ms();
+    g->last_eval_ms = mono_ms();
+    g->last_eval_at = base::now_unix_ms();
     g->running = false;
     if (send_body) {
       // Identical to the last: nothing is sent (040), but to a subscriber who has no answer yet.
       changed = body != g->last_body || g->last_id < 0;
-      g->last_body = body;
+      g->last_body = std::move(body);
       g->last_id = id;
-      message = event("update", id, body);
+      message = event("update", id, g->last_body);
     }
     // A wake during the evaluation leaves it due again; one before it was served by it.
     if (g->due_ms && g->due_ms <= started) g->due_ms = 0;
@@ -326,21 +382,25 @@ void Host::sse_evaluate(std::shared_ptr<SseGroup> g) {
       }
     }
   }
-  for (const auto& s : send_to) s->send(message);
+  // One string for every subscriber.
+  auto shared = std::make_shared<const std::string>(std::move(message));
+  for (const auto& s : send_to) s->send(shared);
   if (end) {
     for (const auto& s : all) s->close();
   }
 }
 
 void Host::sse_loop() {
-  int64_t last_ping = base::now_unix_ms();
+  int64_t last_ping = mono_ms();
+  auto ping = std::make_shared<const std::string>(": ping\n\n");
   std::unique_lock lock(sse_mu_);
   while (!sse_stopping_) {
     sse_cv_.wait_for(lock, std::chrono::milliseconds(100));
     if (sse_stopping_) break;
-    int64_t now = base::now_unix_ms();
+    int64_t now = mono_ms();
+    bool ping_now = now - last_ping >= kKeepaliveMs;
     std::vector<std::shared_ptr<SseGroup>> due;
-    std::vector<std::shared_ptr<server::http::Stream>> ping, expire;
+    std::vector<std::shared_ptr<server::http::Stream>> pings, expire;
     for (auto& [_, g] : sse_groups_) {
       bool wake = g->due_ms && g->due_ms <= now;
       bool refresh = g->last_eval_ms && now - g->last_eval_ms >= g->refresh_ms;
@@ -349,21 +409,25 @@ void Host::sse_loop() {
         due.push_back(g);
       }
       for (const auto& s : g->subs) {
-        if (now - s->opened_ms >= kLifetimeMs) expire.push_back(s->stream);
-        else if (now - last_ping >= kKeepaliveMs) ping.push_back(s->stream);
+        if (now >= s->expires_ms) expire.push_back(s->stream);
+        else if (ping_now) pings.push_back(s->stream);
       }
     }
-    if (now - last_ping >= kKeepaliveMs) last_ping = now;
+    if (ping_now) last_ping = now;
     lock.unlock();
     for (auto& g : due) {
-      bool queued = pool_->post([this, g] { sse_evaluate(g); }, max_queued_);
+      bool queued = false;
+      try {
+        queued = pool_->post([this, g] { sse_evaluate(g); }, max_queued_);
+      } catch (const std::exception&) {
+      }
       if (!queued) {
         std::lock_guard l2(sse_mu_);
         g->running = false;  // the pool is full: tried again next round
       }
     }
-    for (auto& s : ping) s->send(": ping\n\n");
-    // A stream's life is 15 minutes: the browser reconnects, and the request is checked again.
+    for (auto& s : pings) s->send(ping);
+    // A stream's life is about 15 minutes: the browser reconnects, and the request is checked again.
     for (auto& s : expire) s->close();
     lock.lock();
   }
@@ -380,6 +444,21 @@ void Host::sse_stop() {
   }
   sse_cv_.notify_all();
   if (sse_thread_.joinable()) sse_thread_.join();
+  for (auto& s : all) s->close();
+}
+
+void Host::sse_clear() {
+  // After the server stopped: whatever is left goes before the server it belongs to.
+  std::vector<std::shared_ptr<server::http::Stream>> all;
+  std::map<std::string, std::shared_ptr<SseGroup>> groups;
+  {
+    std::lock_guard lock(sse_mu_);
+    for (auto& [_, g] : sse_groups_) {
+      bus_.unwatch(g->watch_id);
+      for (auto& s : g->subs) all.push_back(s->stream);
+    }
+    groups.swap(sse_groups_);
+  }
   for (auto& s : all) s->close();
 }
 
@@ -401,7 +480,7 @@ bj::object Host::bus_status(const std::string& tenant) {
                                 {"path", g->path},
                                 {"subscribers", int64_t(g->subs.size())},
                                 {"evaluations", g->evaluations},
-                                {"last_evaluation", g->last_eval_ms ? bj::value(base::format_utc_ms(g->last_eval_ms)) : bj::value(nullptr)},
+                                {"last_evaluation", g->last_eval_at ? bj::value(base::format_utc_ms(g->last_eval_at)) : bj::value(nullptr)},
                                 {"last_bytes", int64_t(g->last_body.size())},
                                 {"signed_in", g->who.has_value()}});
   }

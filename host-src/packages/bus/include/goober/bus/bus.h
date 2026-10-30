@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -43,11 +44,14 @@ class Bus {
  private:
   struct State {
     int64_t seq = 0, at_ms = 0, publishes = 0;
+    std::list<std::string>::iterator order;  // its place in order_
   };
   mutable std::mutex mu_;
   int64_t next_;
   size_t max_topics_;
   std::map<std::string, State> topics_;
+  // Topics by last publish, newest first: the oldest is forgotten in O(1) past max_topics.
+  std::list<std::string> order_;
   uint64_t next_watch_ = 1;
   std::map<uint64_t, std::pair<std::vector<std::string>, std::shared_ptr<Wake>>> watches_;
   std::multimap<std::string, uint64_t> by_topic_;

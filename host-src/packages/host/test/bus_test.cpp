@@ -28,7 +28,10 @@ const char* kWat = R"wat((module
   (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
   (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_header_set" (func $header (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
+  (data (i32.const 256) "location")
+  (data (i32.const 272) "https://evil.example/")
   (data (i32.const 0) "w")
   (data (i32.const 16) "INSERT INTO items (name) VALUES ('x')")
   (data (i32.const 128) "SELECT count(*) AS n FROM items")
@@ -47,6 +50,13 @@ const char* kWat = R"wat((module
   (func (export "goober_route_live") (result i32)
     (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 128) (i32.const 31) (i32.const 0) (i32.const 0)))
     (i32.const 0))
+  (func (export "goober_route_staff") (result i32)
+    (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 128) (i32.const 31) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+  (func (export "goober_route_away") (result i32)
+    (drop (call $header (i32.const 256) (i32.const 8) (i32.const 272) (i32.const 21)))
+    (drop (call $respond (i32.const 302) (i32.const 192) (i32.const 16) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
   (func (export "goober_route_sneaky") (result i32)
     (call $answer (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 37) (i32.const 0) (i32.const 0)))
     (i32.const 0))
@@ -61,7 +71,9 @@ const char* kManifest = R"({"box":"shop","domains":["*"],
     "http":{"/items":{"post":{"name":"add","public":true}},"/fail":{"post":{"name":"add_fail","public":true}}},
     "sse":{"/items/live":{"subscribe":{"name":"live","public":true,"response":"json","wake":["items"],
                                        "coalesce-ms":50,"refresh-ms":60000}},
-           "/sneaky":{"subscribe":{"name":"sneaky","public":true,"wake":["items"]}}}}})";
+           "/sneaky":{"subscribe":{"name":"sneaky","public":true,"wake":["items"]}},
+           "/away":{"subscribe":{"name":"away","public":true,"wake":["items"]}},
+           "/staff":{"subscribe":{"name":"staff","requirements":[["staff"]],"response":"json","wake":["items"]}}}}})";
 
 int post(uint16_t port, const std::string& target) {
   asio::io_context io;
@@ -81,9 +93,11 @@ int post(uint16_t port, const std::string& target) {
 // One open subscription, read as text.
 class Subscriber {
  public:
-  Subscriber(uint16_t port, const std::string& target, const std::string& last_event_id = "") : sock_(io_) {
+  Subscriber(uint16_t port, const std::string& target, const std::string& last_event_id = "",
+             const std::string& host = "localhost")
+      : sock_(io_) {
     sock_.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
-    std::string req = "GET " + target + " HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n" +
+    std::string req = "GET " + target + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: text/event-stream\r\n" +
                       (last_event_id.empty() ? "" : "Last-Event-ID: " + last_event_id + "\r\n") + "\r\n";
     asio::write(sock_, asio::buffer(req));
     sock_.non_blocking(true);
@@ -132,7 +146,8 @@ class BusTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"localhost": {"tenant": "playground"}}, "threads": {"network": 2, "boxes": 2}})",
+        "domains": {"localhost": {"tenant": "playground"}, "second.localhost": {"tenant": "playground"}},
+        "threads": {"network": 2, "boxes": 2}})",
                                     root, &err);
     ASSERT_TRUE(cfg) << err;
     host = std::make_unique<host::Host>(config::local_mode(cfg));
@@ -219,5 +234,64 @@ TEST(Manifest, SubscriptionsAndPublishAreChecked) {
            R"({"box":"b","domains":["*"],"routes":{"sse":{"/x":{"subscribe":{"name":"x","public":true,"wake":["a"],"coalesce-ms":1}}}}})",
            R"({"box":"b","domains":["*"],"routes":{"sse":{"/x":{"subscribe":{"name":"x","public":true,"wake":["a"],"body":"text"}}}}})"}) {
     EXPECT_FALSE(manifest::parse_manifest(bad, &err)) << bad;
+  }
+}
+
+TEST_F(BusTest, DomainsKeepTheirOwnGroupsAndAccessIsChecked) {
+  // One tenant, two domains: the box is shown the domain, so they never share an answer.
+  Subscriber a(port, "/items/live");
+  Subscriber b(port, "/items/live", "", "second.localhost");
+  ASSERT_TRUE(a.wait_for("event: update", 1, 3000)) << a.text();
+  ASSERT_TRUE(b.wait_for("event: update", 1, 3000)) << b.text();
+  EXPECT_EQ(host->bus_status("playground").at("subscriptions").as_array().size(), 2u);
+  // A route with requirements: signed out, the stream is never opened.
+  Subscriber staff(port, "/staff");
+  ASSERT_TRUE(staff.wait_for("HTTP/1.1 ", 1, 3000));
+  EXPECT_NE(staff.text().find("HTTP/1.1 401"), std::string::npos) << staff.text();
+  EXPECT_EQ(staff.text().find("text/event-stream"), std::string::npos);
+}
+
+TEST_F(BusTest, APlainGetKeepsTheStatusRules) {
+  // A subscribe route's plain GET is held to 037 like any route: no redirect off the site.
+  asio::io_context io;
+  beast::tcp_stream stream(io);
+  stream.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+  bhttp::request<bhttp::string_body> req(bhttp::verb::get, "/away", 11);
+  req.set(bhttp::field::host, "localhost");
+  bhttp::write(stream, req);
+  beast::flat_buffer buf;
+  bhttp::response<bhttp::string_body> res;
+  bhttp::read(stream, buf, res);
+  EXPECT_EQ(res.result_int(), 500u);
+  EXPECT_EQ(res[bhttp::field::location], "");
+}
+
+TEST_F(BusTest, OneClientMayHoldOnly32Streams) {
+  std::vector<std::unique_ptr<Subscriber>> open;
+  for (int i = 0; i < 32; ++i) {
+    open.push_back(std::make_unique<Subscriber>(port, "/items/live"));
+    ASSERT_TRUE(open.back()->wait_for("HTTP/1.1 200", 1, 3000)) << i;
+  }
+  Subscriber over(port, "/items/live");
+  ASSERT_TRUE(over.wait_for("HTTP/1.1 ", 1, 3000));
+  EXPECT_NE(over.text().find("HTTP/1.1 429"), std::string::npos) << over.text();
+  // Closing one gives its slot back.
+  open.pop_back();
+  bool reopened = false;
+  for (int i = 0; i < 100 && !reopened; ++i) {
+    Subscriber again(port, "/items/live");
+    if (!again.wait_for("HTTP/1.1 ", 1, 3000)) break;
+    reopened = again.text().find("HTTP/1.1 200") != std::string::npos;
+    if (!reopened) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_TRUE(reopened);
+}
+
+TEST(Manifest, SubscriptionsRefuseWhatTheyWouldIgnore) {
+  std::string err;
+  for (const char* key : {R"("includes":true)", R"("cors":{"origins":["https://a.example"]})", R"("template":"t")"}) {
+    std::string m = std::string(R"({"box":"b","domains":["*"],"routes":{"sse":{"/x":{"subscribe":{"name":"x","public":true,"wake":["a"],)") +
+                    key + "}}}}}";
+    EXPECT_FALSE(manifest::parse_manifest(m, &err)) << m;
   }
 }

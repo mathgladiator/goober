@@ -3,6 +3,9 @@
 // requests until a person approves (the call then runs as the agent) or denies them.
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
+#include <tuple>
 #include <iostream>
 #include <set>
 
@@ -33,12 +36,36 @@ bj::object redacted(const std::string& tool, bj::object args) {
   return args;
 }
 
+// Moves the requests `select_ids` finds to a final state, keeping their arguments only as shown
+// (035: once decided or expired, secrets are gone). Callers hold approvals_mu_.
+void finish_requests(sqlite::Db& db, const std::string& select_ids, const std::vector<int64_t>& binds,
+                     const std::string& state, const std::string& decided_by, int64_t now) {
+  std::vector<std::tuple<int64_t, std::string, std::string>> rows;
+  {
+    sqlite::Stmt s(db, "SELECT id, tool, args FROM requests WHERE id IN (" + select_ids + ")");
+    for (size_t i = 0; i < binds.size(); ++i) s.bind(int(i + 1), binds[i]);
+    while (s.step()) rows.emplace_back(s.int64(0), s.text(1), s.text(2));
+  }
+  for (const auto& [id, tool, args] : rows) {
+    std::string err;
+    auto parsed = json::parse(args, &err);
+    sqlite::Stmt u(db, "UPDATE requests SET state = ?, decided_by = COALESCE(?, decided_by), decided_ms = ?, args = ? WHERE id = ?");
+    u.bind(1, state);
+    if (decided_by.empty()) {
+      u.bind_null(2);
+    } else {
+      u.bind(2, decided_by);
+    }
+    u.bind(3, now).bind(4, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{}))).bind(5, id).run();
+  }
+}
+
 bool has_role(const SignedIn& who, const char* role) {
   return std::find(who.roles.begin(), who.roles.end(), role) != who.roles.end();
 }
 
-// The person an agent acts as: "oauth:ann@x:client" and "panel:ann@x" are ann@x; tokens and the
-// config's token are no one's.
+// The person an agent acts as: "oauth:ann@x:client" is ann@x; tokens and the config's token are
+// no one's.
 std::string person_of(const std::string& agent) {
   if (agent.starts_with("oauth:")) {
     std::string rest = agent.substr(6);
@@ -69,6 +96,8 @@ sqlite::Db& Host::approvals_db() {
     auto dir = config_.get()->storage / "operations";
     fs::create_directories(dir);
     approvals_db_ = std::make_unique<sqlite::Db>(dir / "approvals.db");
+    // Held calls carry secrets until decided: what's overwritten or deleted is zeroed on disk.
+    approvals_db_->exec("PRAGMA secure_delete = ON");
     approvals_db_->exec(
         "CREATE TABLE IF NOT EXISTS switches (agent TEXT PRIMARY KEY, set_by TEXT NOT NULL, at_ms INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS agents (agent TEXT PRIMARY KEY, first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL);"
@@ -78,14 +107,13 @@ sqlite::Db& Host::approvals_db() {
         "CREATE INDEX IF NOT EXISTS requests_state ON requests (state, id);"
         "CREATE INDEX IF NOT EXISTS requests_agent ON requests (agent, state);");
     // A request running when the host stopped may or may not have run: say so, never leave it running.
-    approvals_db_->exec("UPDATE requests SET state = 'interrupted' WHERE state = 'running'");
+    finish_requests(*approvals_db_, "SELECT id FROM requests WHERE state = 'running'", {}, "interrupted", "",
+                    base::now_unix_ms());
   }
   // Waiting past a day is a no: the agent asks again if it still wants it.
-  sqlite::Stmt e(*approvals_db_, "UPDATE requests SET state = 'expired', decided_ms = ?, args = CASE WHEN tool = 'key_set' "
-                                 "THEN json_set(args, '$.value', '(hidden: a key''s value)') ELSE args END "
-                                 "WHERE state = 'pending' AND at_ms < ?");
   int64_t now = base::now_unix_ms();
-  e.bind(1, now).bind(2, now - kPendingTtlMs).run();
+  finish_requests(*approvals_db_, "SELECT id FROM requests WHERE state = 'pending' AND at_ms < ?", {now - kPendingTtlMs},
+                  "expired", "", now);
   return *approvals_db_;
 }
 
@@ -312,8 +340,8 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
     // An agent that can no longer sign in (its token revoked, the config's token removed) has its
     // requests denied, never run with the roles it used to have.
     if (decision == "approve" && !agent_still_signs_in(agent)) {
-      sqlite::Stmt d(db, "UPDATE requests SET state = 'denied', decided_by = ?, decided_ms = ? WHERE id = ? AND state = 'pending'");
-      d.bind(1, "host: the agent can no longer sign in").bind(2, base::now_unix_ms()).bind(3, id).run();
+      finish_requests(db, "SELECT id FROM requests WHERE id = ? AND state = 'pending'", {id}, "denied",
+                      "host: the agent can no longer sign in", base::now_unix_ms());
       return {409, bj::object{{"error", agent + " can no longer sign in, so its request was denied"}}};
     }
     // Claimed before it runs, so two people clicking at once can't run it twice.
@@ -353,10 +381,13 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
     if (const auto* res = o.if_contains("result"); res && res->is_object()) {
       is_error = res->as_object().contains("isError") && res->as_object().at("isError").as_bool();
       const auto* content = res->as_object().if_contains("content");
-      if (content && content->is_array() && !content->as_array().empty()) {
-        std::string text(content->as_array()[0].as_object().at("text").as_string());
-        auto t = json::parse(text, &err);
-        result = t ? *t : bj::value(text);
+      const bj::value* first = content && content->is_array() && !content->as_array().empty() ? &content->as_array()[0] : nullptr;
+      const bj::value* text = first && first->is_object() ? first->as_object().if_contains("text") : nullptr;
+      if (text && text->is_string()) {
+        auto t = json::parse(text->as_string(), &err);
+        result = t ? *t : *text;
+      } else if (first) {
+        result = *first;
       }
     } else if (const auto* e = o.if_contains("error")) {
       result = *e;
@@ -364,12 +395,22 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
   }
   std::string stored = json::dump(result);
   if (stored.size() > kMaxResultBytes) stored = json::dump(bj::value(stored.substr(0, kMaxResultBytes) + "…"));
-  {
-    std::lock_guard lock(approvals_mu_);
-    // Decided: the result is kept, and the arguments only as shown (secrets hidden).
-    sqlite::Stmt u(approvals_db(), "UPDATE requests SET state = 'done', result = ?, is_error = ?, args = ? WHERE id = ?");
-    u.bind(1, stored).bind(2, int64_t(is_error)).bind(3, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{})));
-    u.bind(4, id).run();
+  // Decided: the result is kept, and the arguments only as shown (secrets hidden). The call has
+  // run, so a busy database gets a few tries rather than leaving it "running".
+  for (int attempt = 0;; ++attempt) {
+    try {
+      std::lock_guard lock(approvals_mu_);
+      sqlite::Stmt u(approvals_db(), "UPDATE requests SET state = 'done', result = ?, is_error = ?, args = ? WHERE id = ?");
+      u.bind(1, stored).bind(2, int64_t(is_error)).bind(3, json::dump(redacted(tool, parsed && parsed->is_object() ? parsed->as_object() : bj::object{})));
+      u.bind(4, id).run();
+      break;
+    } catch (const std::exception& e) {
+      if (attempt == 4) {
+        std::cerr << "goober-host: approvals: request " << id << " ran but couldn't be marked done: " << e.what() << "\n";
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50 << attempt));
+    }
   }
   // The call itself, in the audit log as any operator call is, naming who approved it.
   audit("operator.tool", agent, tool, is_error ? "failed" : "ok",

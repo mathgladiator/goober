@@ -921,9 +921,21 @@ HttpOut Host::deliver_outbox_httpx(const std::string& tenant, sqlite::Db& db, in
   for (const auto& [k, val] : m->poll.query) qry[k] = fill(val, from_first);
   bj::object preq{{"path", pth}, {"query", qry}};
   auto out = secret_and_send(m->poll.op, preq, "json", {}, nullptr, nullptr);
-  if (!out.error.empty() && out.status == 0) return out;  // transport: the outbox retries
-  bj::object answer = answer_of(out);
   int64_t since = state.contains("since_ms") && state.at("since_ms").is_int64() ? state.at("since_ms").as_int64() : now_ms;
+  if (!out.error.empty() && out.status == 0) {
+    // A poll that didn't get through is asked again, still polling: an error here would move the
+    // job into the service's ordered lane (holding up everything behind it) and spend its attempts.
+    if (now_ms - since > m->poll.within_ms) {
+      out.status = 504;
+      out.error = "the job didn't finish within " + std::to_string(m->poll.within_ms / 1000) + " s (last poll: " + out.error + ")";
+      return out;
+    }
+    HttpOut wait;
+    wait.polling = true;
+    wait.retry_at_ms = now_ms + std::max<int64_t>(m->poll.every_ms, 30000);
+    return wait;
+  }
+  bj::object answer = answer_of(out);
   if (ok(out) && holds(m->poll.done, answer)) return out;
   if (holds(m->poll.failed, answer)) {
     out.status = 422;

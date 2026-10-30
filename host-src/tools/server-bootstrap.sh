@@ -173,15 +173,16 @@ fi
 echo "── multipath TCP off"
 if [[ -e /proc/sys/net/mptcp/enabled ]]; then
   echo "net.mptcp.enabled = 0" > /etc/sysctl.d/90-goober-no-mptcp.conf
-  sysctl -q -w net.mptcp.enabled=0
+  # A container may not let us write the kernel setting: say so, and carry on to the checks.
+  sysctl -q -w net.mptcp.enabled=0 || echo "!! couldn't set net.mptcp.enabled=0 (a container?); Caddy's own setting still applies"
 fi
 mkdir -p /etc/systemd/system/caddy.service.d
 DROPIN=/etc/systemd/system/caddy.service.d/goober-no-mptcp.conf
 WANT=$'[Service]\nEnvironment=GODEBUG=multipathtcp=0\n'
 if [[ "$(cat "$DROPIN" 2>/dev/null)"$'\n' != "$WANT" ]]; then
   printf '%s' "$WANT" > "$DROPIN"
-  systemctl daemon-reload
-  systemctl restart caddy
+  systemctl daemon-reload || echo "!! systemctl daemon-reload failed"
+  systemctl restart caddy || echo "!! Caddy didn't restart with GODEBUG=multipathtcp=0; the checks below will say more"
 fi
 
 if [[ -d "$HOME_DIR/vendor" && -f "$DIR/host.json" ]]; then
@@ -221,13 +222,16 @@ if [[ -z "$WITHOUT_MAIL" && -f "$DIR/host.json" ]]; then
   bash "$SW" install "$MAIL_HOME"
   chown -R root:root "$MAIL_HOME/bin"
   # One token, two copies: Stalwart sends it, goober checks it. Made once.
+  # DIR is the host user's: root never writes, chowns, or reads through a path in it (a symlink
+  # there would aim root at any file). The host's user makes its copy; root reads it as that user.
   HOST_TOKEN="$DIR/mail-hook.token"
-  if [[ ! -s "$HOST_TOKEN" ]]; then
-    (umask 077 && head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$HOST_TOKEN")
-  fi
-  chown "$RUN_AS:$RUN_AS" "$HOST_TOKEN"
-  chmod 0600 "$HOST_TOKEN"
-  install -o stalwart -g stalwart -m 0600 "$HOST_TOKEN" "$MAIL_HOME/hook.token"
+  sudo -u "$RUN_AS" sh -c 'f="$1"; [ -s "$f" ] && [ ! -L "$f" ] || { rm -f "$f"; umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > "$f"; }; chmod 0600 "$f"' sh "$HOST_TOKEN"
+  TOKEN_VALUE="$(sudo -u "$RUN_AS" cat "$HOST_TOKEN")"
+  [[ "$TOKEN_VALUE" =~ ^[0-9a-f]{64}$ ]] || die "$HOST_TOKEN isn't the 64 hex digits the deploy wrote; remove it and deploy again"
+  TOKEN_TMP="$(mktemp)"  # root's own, so no other user can aim the write elsewhere
+  printf '%s' "$TOKEN_VALUE" > "$TOKEN_TMP"
+  install -o stalwart -g stalwart -m 0600 "$TOKEN_TMP" "$MAIL_HOME/hook.token"
+  rm -f "$TOKEN_TMP"
   # STARTTLS with Caddy's certificate for the platform domain, once Caddy has one; until then
   # a short-lived self-signed one. The daily timer below copies renewals and reloads.
   PLATFORM="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("platform-domain", ""))' "$DIR/host.json")"
@@ -428,7 +432,7 @@ if [[ -z "$WITHOUT_MAIL" ]]; then
   check "the certificate timer is on" systemctl is-active --quiet goober-stalwart-tls.timer
   hook_answers() {
     local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(cat "$HOST_TOKEN")" \
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN_VALUE" \
       -H 'content-type: application/json' -d '{"context":{"stage":"ehlo"}}' \
       "http://127.0.0.1:$PORT/internal/routes/mta/stalwart")"
     echo "HTTP $code"
@@ -521,22 +525,31 @@ PY
 # both put back if either is refused.
 panel_setup() {
   local d="$1"
-  cp -p "$DIR/host.json" "$DIR/host.json.before-panel"
+  # host.json's copy is made and put back by the host's user: DIR is theirs (no root writes in it).
+  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-panel"
   cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-panel
   undo() {
-    cp -p "$DIR/host.json.before-panel" "$DIR/host.json"
+    sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-panel" "$DIR/host.json"
     cp -p /etc/caddy/Caddyfile.before-panel /etc/caddy/Caddyfile
     echo "   $1; host.json and the Caddyfile are as they were"
   }
   edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
   sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" >/dev/null || { undo "the host refused the new host.json"; return 1; }
-  python3 -I - /etc/caddy/Caddyfile "$d" <<'PY' || { undo "couldn't find the Caddyfile's site line"; return 1; }
+  # The site block that serves the site itself (ops.example.com joins example.com's), read the
+  # way goober-host audit reads site lines: addresses without scheme or port.
+  python3 -I - /etc/caddy/Caddyfile "$d" "${d#ops.}" <<'PY' || { undo "no site block in the Caddyfile serves ${d#ops.}"; return 1; }
 import sys
-path, d = sys.argv[1:3]
+path, d, site = sys.argv[1:4]
 lines = open(path).read().split("\n")
 for i, line in enumerate(lines):
     s = line.rstrip()
-    if s.endswith("{") and len(s) > 1 and s[0] not in " \t#{(":
+    if not (s.endswith("{") and len(s) > 1 and s[0] not in " \t#{("):
+        continue
+    names = []
+    for a in s[:-1].replace(",", " ").split():
+        a = a.split("://", 1)[-1]
+        names.append(a.split(":", 1)[0].split("/", 1)[0].lower())
+    if site in names:
         lines[i] = s[:-1].rstrip() + ", " + d + " {"
         break
 else:
@@ -544,9 +557,24 @@ else:
 open(path, "w").write("\n".join(lines))
 PY
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || { undo "Caddy refused the new site line"; return 1; }
-  systemctl restart goober-host
-  for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && break; sleep 0.5; done
-  systemctl reload caddy
+  # The checks above have run, so this restart must prove itself: ready within a minute, or
+  # everything goes back and the deploy fails.
+  systemctl restart goober-host || true
+  local up=""
+  for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
+  if [[ -z "$up" ]]; then
+    undo "the host wasn't ready with the panel set"
+    systemctl restart goober-host || true
+    FAILED+=("the panel's setup (host.json and the Caddyfile were put back)")
+    return 1
+  fi
+  if ! systemctl reload caddy; then
+    undo "Caddy wouldn't reload with the panel's site"
+    systemctl restart goober-host || true
+    systemctl reload caddy || true
+    FAILED+=("the panel's setup (host.json and the Caddyfile were put back)")
+    return 1
+  fi
   # Caddy gets the certificate on the first request; a minute is plenty.
   local code=""
   for _ in $(seq 1 30); do

@@ -4,6 +4,8 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "goober/base/encoding.h"
 #include "goober/server_http/server.h"
@@ -52,6 +54,31 @@ inline bool user_submitted(const server::http::Request& req, const std::string& 
   if (!user.empty()) return false;
   std::string agent = req.header("user-agent");
   return agent.find("Chrome/") == std::string::npos && agent.find("Firefox/") == std::string::npos;
+}
+
+// Request headers a box never sees: credentials belong to the host, and the client's address
+// (from the proxy in front) stays with the host too, which gives boxes client_key instead.
+inline bool hidden_from_box(std::string_view name) {
+  return name == "authorization" || name == "cookie" || name.starts_with("x-forwarded-") || name == "forwarded" ||
+         name == "x-real-ip" || name == "via" || name == "cf-connecting-ip" || name == "true-client-ip" ||
+         name.starts_with("goober-");
+}
+
+// The status vocabulary (037) for a box's answer: 5xx belongs to the host, and a redirect may
+// only go to a path on this site. Why the answer is refused, or "" when it stands.
+inline std::string box_status_refusal(int status, const std::vector<std::pair<std::string, std::string>>& headers) {
+  if (status >= 500) return "the box answered " + std::to_string(status) + "; 5xx belongs to the host";
+  if (status >= 300 && status < 400) {
+    std::string location;
+    for (const auto& [k, v] : headers) {
+      if (k == "location") location = v;
+    }
+    bool code_ok = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+    if (!code_ok || location.empty() || safe_return(location) != location) {
+      return "the box redirected to \"" + location.substr(0, 200) + "\"; a box may only redirect to a path on this site";
+    }
+  }
+  return "";
 }
 
 }  // namespace goober::host

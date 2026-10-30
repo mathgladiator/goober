@@ -265,46 +265,49 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     }
   }
   // The limits (config mail): per tenant a day, and per address a day, counted by a hash of
-  // the address so the ledger holds no addresses.
-  std::lock_guard lock(sent_mu_);  // the sent ledger, shared with invites
-  fs::create_directories(cfg->storage / "mail");
-  sqlite::Db ledger(cfg->storage / "mail" / "sent.db");
-  ledger.exec("CREATE TABLE IF NOT EXISTS sent (tenant TEXT NOT NULL, address TEXT NOT NULL, at_ms INTEGER NOT NULL)");
-  ledger.exec("CREATE INDEX IF NOT EXISTS sent_by_tenant ON sent (tenant, at_ms)");
-  ledger.exec("DELETE FROM sent WHERE at_ms < " + std::to_string(now_ms - 2LL * 86400000));
+  // the address so the ledger holds no addresses. The send is counted (reserved) under the
+  // ledger's lock and the lock let go before the provider is called, so one slow send never
+  // holds up every tenant's mail and invites; a send that fails gives its place back.
   std::string address = base::sha256_hex("goober-mail-address\n" + base::to_lower(mail.to)).substr(0, 32);
-  int64_t day_ago = now_ms - 86400000;
-  sqlite::Stmt by_tenant(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND at_ms > ?");
-  by_tenant.bind(1, tenant).bind(2, day_ago);
-  by_tenant.step();
-  if (by_tenant.int64(0) >= cfg->mail.daily_max) {
-    out.status = 429;
-    out.error = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)";
-    return out;
-  }
   // An answer in a thread the person started (they wrote to this tenant, from this address,
   // the message this one is in reply to, in the last 30 days) is a conversation, not
   // outreach: it gets mail.reply-per-address-daily instead.
-  bool reply = false;
-  if (!mail.in_reply_to.empty()) {
-    auto inbound = open_mail_db();
-    reply = thread_verified(tenant, mail.to, mail.in_reply_to);
-  }
+  bool reply = !mail.in_reply_to.empty() && thread_verified(tenant, mail.to, mail.in_reply_to);
   int64_t per_address = reply ? cfg->mail.reply_per_address_daily : cfg->mail.per_address_daily;
-  sqlite::Stmt by_address(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND address = ? AND at_ms > ?");
-  by_address.bind(1, tenant).bind(2, address).bind(3, day_ago);
-  by_address.step();
-  if (by_address.int64(0) >= per_address) {
-    // Asking again today won't change it, and tomorrow the moment has passed: refused for good.
-    out.status = 403;
-    out.error = "this address has had " + std::to_string(per_address) + " mails today (config mail." +
-                (reply ? "reply-per-address-daily" : "per-address-daily") + ")";
-    return out;
-  }
-  auto outcome = mail_->deliver(mail);
-  if (outcome.sent) {
+  int64_t reserved = 0;
+  {
+    std::lock_guard lock(sent_mu_);  // the sent ledger, shared with invites
+    auto& ledger = sent_ledger();
+    int64_t day_ago = now_ms - 86400000;
+    sqlite::Stmt by_tenant(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND at_ms > ?");
+    by_tenant.bind(1, tenant).bind(2, day_ago);
+    by_tenant.step();
+    if (by_tenant.int64(0) >= cfg->mail.daily_max) {
+      out.status = 429;
+      out.error = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)";
+      return out;
+    }
+    sqlite::Stmt by_address(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND address = ? AND at_ms > ?");
+    by_address.bind(1, tenant).bind(2, address).bind(3, day_ago);
+    by_address.step();
+    if (by_address.int64(0) >= per_address) {
+      // Asking again today won't change it, and tomorrow the moment has passed: refused for good.
+      out.status = 403;
+      out.error = "this address has had " + std::to_string(per_address) + " mails today (config mail." +
+                  (reply ? "reply-per-address-daily" : "per-address-daily") + ")";
+      return out;
+    }
     sqlite::Stmt add(ledger, "INSERT INTO sent (tenant, address, at_ms) VALUES (?, ?, ?)");
     add.bind(1, tenant).bind(2, address).bind(3, now_ms).run();
+    reserved = ledger.last_insert_rowid();
+  }
+  auto outcome = mail_->deliver(mail);
+  if (!outcome.sent) {
+    std::lock_guard lock(sent_mu_);
+    sqlite::Stmt undo(sent_ledger(), "DELETE FROM sent WHERE rowid = ?");
+    undo.bind(1, reserved).run();
+  }
+  if (outcome.sent) {
     std::string hash = mail::consent::address_hash(mail.to);
     if (category == "outreach") consent_->outreach_sent(tenant, hash, now_ms);
     if (category == "confirm") consent_->asked(tenant, hash, "confirm", now_ms);
@@ -319,6 +322,23 @@ HttpOut Host::deliver_outbox_mail(const std::string& tenant, const std::string& 
     out.error = outcome.error;
   }
   return out;
+}
+
+sqlite::Db& Host::sent_ledger() {
+  if (!sent_db_) {
+    auto dir = config_.get()->storage / "mail";
+    fs::create_directories(dir);
+    sent_db_ = std::make_unique<sqlite::Db>(dir / "sent.db");
+    sent_db_->exec("CREATE TABLE IF NOT EXISTS sent (tenant TEXT NOT NULL, address TEXT NOT NULL, at_ms INTEGER NOT NULL)");
+    sent_db_->exec("CREATE INDEX IF NOT EXISTS sent_by_tenant ON sent (tenant, at_ms)");
+  }
+  int64_t now = base::now_unix_ms();
+  if (now - sent_pruned_ms_ > 3600000) {
+    sqlite::Stmt prune(*sent_db_, "DELETE FROM sent WHERE at_ms < ?");
+    prune.bind(1, now - 2LL * 86400000).run();
+    sent_pruned_ms_ = now;
+  }
+  return *sent_db_;
 }
 
 int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms) {

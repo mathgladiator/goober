@@ -373,6 +373,9 @@ class Host {
  private:
   void handle_mail_hook(const server::http::Request& req, const Finish& finish);
   std::string reply_key();
+  std::string load_reply_key();
+  std::mutex reply_key_mu_;
+  std::string reply_key_;
   std::unique_ptr<sqlite::Db> open_mail_db();
   std::optional<std::string> mint_reply_address(const struct CallContext& ctx, const boost::json::object& reply,
                                                 const std::string& recipient, std::string* error);
@@ -461,10 +464,17 @@ class Host {
                                                    const std::string& request_id);
   void register_approval_tools();
   // The bus and subscriptions (040; design/machine/036.Bus.md; sse.cpp).
+  // One open stream's place in the limits (036 § 6), taken when the request is admitted and
+  // given back when the last holder lets go: the subscriber, or the response that never opened.
+  struct SseSlot {
+    Host* host;
+    std::string tenant, client;
+    ~SseSlot();
+  };
   struct SseSub {
     std::shared_ptr<server::http::Stream> stream;
-    std::string client;
-    int64_t opened_ms = 0, last_sent = -1;
+    std::shared_ptr<SseSlot> slot;
+    int64_t expires_ms = 0, last_sent = -1;  // expires_ms on the monotonic clock
     bool has_answer = false;
   };
   struct SseGroup {
@@ -475,7 +485,8 @@ class Host {
     int64_t coalesce_ms = 250, refresh_ms = 30000;
     std::vector<std::shared_ptr<SseSub>> subs;
     uint64_t watch_id = 0;
-    int64_t last_eval_ms = 0, due_ms = 0, last_id = -1, evaluations = 0;
+    // Monotonic times (ms) for scheduling; last_eval_at is the wall clock, for bus_status.
+    int64_t last_eval_ms = 0, due_ms = 0, last_id = -1, evaluations = 0, last_eval_at = 0;
     std::string last_body;
     bool running = false;
   };
@@ -487,12 +498,17 @@ class Host {
   void sse_evaluate(std::shared_ptr<SseGroup> g);
   void sse_loop();
   void sse_stop();
+  void sse_clear();
   boost::json::object bus_status(const std::string& tenant);
   bus::Bus bus_{base_seed()};
   static int64_t base_seed();
   std::mutex sse_mu_;
   std::condition_variable sse_cv_;
   std::map<std::string, std::shared_ptr<SseGroup>> sse_groups_;
+  // Open streams counted for the limits; its own lock, since a slot can be let go under sse_mu_.
+  std::mutex sse_count_mu_;
+  size_t sse_total_ = 0;
+  std::map<std::string, size_t> sse_per_tenant_, sse_per_client_;
   std::thread sse_thread_;
   bool sse_stopping_ = false;
   std::mutex approvals_mu_;
@@ -545,6 +561,10 @@ class Host {
  private:
   std::unique_ptr<mail::consent::Store> consent_;
   std::mutex sent_mu_;  // storage/mail/sent.db, the daily mail ledger
+  // The ledger, open for the host's life (callers hold sent_mu_); pruned at most hourly.
+  sqlite::Db& sent_ledger();
+  std::unique_ptr<sqlite::Db> sent_db_;
+  int64_t sent_pruned_ms_ = 0;
   // The site a tenant's links name: its first domain that isn't localhost or an address.
   std::string site_of(const std::string& tenant) const;
   // The preferences link for an address: /goober/mail/$tenant/$hash/$mac[/$scope], where scope

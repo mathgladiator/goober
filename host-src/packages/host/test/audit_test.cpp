@@ -99,6 +99,9 @@ TEST(Audit, AConfiguredPanelIsCheckedForDnsAndCaddy) {
   caddy.replace(caddy.find("shop.example, "), 14, "shop.example, ops.shop.example, ");
   all = host::audit_operations(*cfg, caddy, here);
   EXPECT_EQ(find(all, "caddy").level, "ok");
+  // A wildcard site covers it too.
+  all = host::audit_operations(*cfg, std::string(kCaddy) + "*.shop.example {\n  tls internal\n}\n", here);
+  EXPECT_EQ(find(all, "caddy").level, "ok");
   all = host::audit_operations(*cfg, caddy, dns({{"shop.example", {"203.0.113.7"}}}));
   EXPECT_EQ(find(all, "panel").level, "warn");
 }

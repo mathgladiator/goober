@@ -104,19 +104,29 @@ std::optional<std::pair<std::string, std::string>> Host::terms_now(const std::st
 bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& inv, bool reminder, std::string* why) {
   auto cfg = config_.get();
   if (consent_->block_of(tenant, inv.email)) return *why = "blocked", false;
-  // Invites count against the tenant's mail for the day, in the same ledger as box mail.
-  std::lock_guard lock(sent_mu_);
-  fs::create_directories(cfg->storage / "mail");
-  sqlite::Db ledger(cfg->storage / "mail" / "sent.db");
-  ledger.exec("CREATE TABLE IF NOT EXISTS sent (tenant TEXT NOT NULL, address TEXT NOT NULL, at_ms INTEGER NOT NULL)");
+  // Invites count against the tenant's mail for the day, in the same ledger as box mail:
+  // counted under the lock, which is let go before rendering and sending.
   int64_t now = base::now_unix_ms();
-  sqlite::Stmt count(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND at_ms > ?");
-  count.bind(1, tenant).bind(2, now - kDay);
-  count.step();
-  if (count.int64(0) >= cfg->mail.daily_max) {
-    return *why = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)",
-           false;
+  int64_t reserved = 0;
+  {
+    std::lock_guard lock(sent_mu_);
+    auto& ledger = sent_ledger();
+    sqlite::Stmt count(ledger, "SELECT count(*) FROM sent WHERE tenant = ? AND at_ms > ?");
+    count.bind(1, tenant).bind(2, now - kDay);
+    count.step();
+    if (count.int64(0) >= cfg->mail.daily_max) {
+      return *why = "the tenant has sent its " + std::to_string(cfg->mail.daily_max) + " mails for the day (config mail.daily-max)",
+             false;
+    }
+    sqlite::Stmt add(ledger, "INSERT INTO sent (tenant, address, at_ms) VALUES (?, ?, ?)");
+    add.bind(1, tenant).bind(2, address_hash(inv.email)).bind(3, now).run();
+    reserved = ledger.last_insert_rowid();
   }
+  auto give_back = [&] {
+    std::lock_guard lock(sent_mu_);
+    sqlite::Stmt undo(sent_ledger(), "DELETE FROM sent WHERE rowid = ?");
+    undo.bind(1, reserved).run();
+  };
   const auto& tc = cfg->tenant(tenant);
   std::string site = site_of(tenant);
   std::string accept = invite_url(tenant, inv, false), decline = invite_url(tenant, inv, true);
@@ -159,7 +169,10 @@ bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& i
     if (rendered) std::cerr << "goober-host: " << tenant << "'s invite template drops a link; the default went instead\n";
     auto layout = mail_templates_->get(tenant, "layout");
     rendered = mail::templates::render_with(mail::templates::builtin("invite")->defaults, *layout, vars, &err);
-    if (!rendered) return *why = "the invite template: " + err, false;
+    if (!rendered) {
+      give_back();
+      return *why = "the invite template: " + err, false;
+    }
   }
   std::string text = rendered->text, html = rendered->html;
   add_footer(&text, &html,
@@ -172,8 +185,6 @@ bool Host::send_invite_mail(const std::string& tenant, const identity::Invite& i
   m.list_unsubscribe = "<" + decline + ">";
   m.tenant = tenant;
   mail_->send(std::move(m));
-  sqlite::Stmt add(ledger, "INSERT INTO sent (tenant, address, at_ms) VALUES (?, ?, ?)");
-  add.bind(1, tenant).bind(2, address_hash(inv.email)).bind(3, now).run();
   return true;
 }
 

@@ -730,7 +730,8 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   // A strategy that may write takes the write lock with its first statement, read or not: a
   // read transaction that later writes fails at once (SQLITE_BUSY_SNAPSHOT) if anyone else
   // committed in between, and no busy timeout helps.
-  bool immediate = st->may_write() || expect_writes_.count(st->name);
+  // A read-only session (a subscription's evaluation) never writes, so it never takes the lock.
+  bool immediate = !read_only_ && (st->may_write() || expect_writes_.count(st->name));
   bool wrote = false;
   auto result = run_statement(raw, sql, params, auth, st->row_limit, st->step_budget, [&](bool readonly) {
     if (!readonly && read_only_) return std::string("a subscription changes nothing: this statement writes");

@@ -67,6 +67,19 @@ std::vector<std::string> caddy_sites(const std::string& caddyfile) {
 
 namespace {
 
+// Whether Caddy's sites cover a name: listed, or under a wildcard (*.example.com covers one
+// label in front of example.com).
+bool served(const std::vector<std::string>& sites, const std::string& name) {
+  for (const auto& s : sites) {
+    if (s == name) return true;
+    if (s.starts_with("*.")) {
+      auto dot = name.find('.');
+      if (dot != std::string::npos && dot > 0 && name.substr(dot + 1) == s.substr(2)) return true;
+    }
+  }
+  return false;
+}
+
 bool is_public_name(const std::string& d) { return d.find('.') != std::string::npos && !d.ends_with("localhost"); }
 
 // Whether every address of `name` is one of `ours`: "ready", "missing" (no address),
@@ -173,10 +186,9 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     auto sites = caddy_sites(caddyfile);
     std::vector<std::string> missing;
     for (const auto& [name, entry] : config.domains) {
-      if (is_public_name(name) && std::find(sites.begin(), sites.end(), name) == sites.end()) missing.push_back(name);
+      if (is_public_name(name) && !served(sites, name)) missing.push_back(name);
     }
-    if (!config.operations_domain.empty() &&
-        std::find(sites.begin(), sites.end(), config.operations_domain) == sites.end()) {
+    if (!config.operations_domain.empty() && !served(sites, config.operations_domain)) {
       missing.push_back(config.operations_domain);
     }
     AuditFinding f{"caddy", "ok", "Caddy serves every domain in host.json", {}, {{"missing", strings(missing)}}};

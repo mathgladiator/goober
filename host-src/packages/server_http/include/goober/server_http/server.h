@@ -29,8 +29,10 @@ class Stream {
  public:
   virtual ~Stream() = default;
   // Queues bytes to send; false once the stream is closed (by either side, or for falling more
-  // than the response's stream_max_behind bytes behind).
-  virtual bool send(std::string bytes) = 0;
+  // than the response's stream_max_behind bytes behind). Shared, so one message fanned out to
+  // many streams is one string, not a copy per stream.
+  virtual bool send(std::shared_ptr<const std::string> bytes) = 0;
+  bool send(std::string bytes) { return send(std::make_shared<const std::string>(std::move(bytes))); }
   virtual void close() = 0;
   virtual bool closed() const = 0;
   // Called once when the stream closes, for whatever reason; at once if it already has.

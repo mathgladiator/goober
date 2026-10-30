@@ -189,34 +189,16 @@ bool valid_name(std::string_view name) {
 Writer::Writer(fs::path file, std::string name, std::string host, uint64_t max_bytes)
     : file_(std::move(file)), name_(std::move(name)), host_(std::move(host)), max_bytes_(max_bytes) {}
 
+Writer::~Writer() {
+  if (fd_ >= 0) ::close(fd_);
+}
+
+// Under the writer's lock only what must be: the renames, the archive link, and the chain
+// sidecar (the next file's chain_before). Hashing a file of up to 256 MiB for its manifest is
+// left to finish_pending, off the request path; until then the link waits in archive/pending/,
+// where the uploader doesn't look.
 std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
-  // The manifest: what this file holds, so its archive can be checked on its own.
-  std::ifstream in(file_, std::ios::binary);
-  base::Sha256 sha;
-  std::string line, first_prev, last_chain, first_seq_text;
-  int64_t lines = 0, first_seq = 0, last_seq = 0;
-  std::string pending;
-  char buf[65536];
-  while (in.read(buf, sizeof buf) || in.gcount() > 0) {
-    std::string_view piece(buf, size_t(in.gcount()));
-    sha.update(piece);
-    pending.append(piece);
-    size_t start = 0;
-    for (size_t nl = pending.find('\n'); nl != std::string::npos; nl = pending.find('\n', start)) {
-      std::string_view l(pending.data() + start, nl - start);
-      start = nl + 1;
-      if (l.empty()) continue;
-      ++lines;
-      int64_t s = seq_of(l);
-      if (lines == 1) first_seq = s;
-      last_seq = s;
-      if (auto sc = split_chain(l)) last_chain = sc->second;
-    }
-    pending.erase(0, start);
-  }
-  auto digest = sha.finish();
   (void)fd;
-  // Shift the numbered files up, dropping what's past kKeepFiles.
   std::error_code ec;
   fs::remove(file_.string() + "." + std::to_string(kKeepFiles), ec);
   for (int i = kKeepFiles - 1; i >= 1; --i) {
@@ -226,10 +208,10 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
   fs::path rotated = file_.string() + ".1";
   fs::rename(file_, rotated, ec);
   if (ec) return std::nullopt;
-  // Queued for upload: a hard link (no copy), and the manifest beside it.
   fs::path archive = file_.parent_path() / "archive";
   if (name_.starts_with("boxes/")) archive = file_.parent_path().parent_path() / "archive";
-  fs::create_directories(archive, ec);
+  fs::path pending = archive / "pending";
+  fs::create_directories(pending, ec);
   std::string stamp = base::format_utc_ms(now_ms);
   for (char& c : stamp) {
     if (c == ':') c = '-';
@@ -237,8 +219,8 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
   std::string base_name = file_safe(name_) + "-" + stamp;
   Rotated r;
   r.log = name_;
-  r.queued = archive / (base_name + ".log");
-  r.manifest = archive / (base_name + ".manifest.json");
+  r.queued = pending / (base_name + ".log");
+  r.manifest = pending / (base_name + ".manifest.json");
   fs::create_hard_link(rotated, r.queued, ec);
   if (ec) fs::copy_file(rotated, r.queued, fs::copy_options::overwrite_existing, ec);
   // The chain before this file: the line before its first, which is the previous file's last.
@@ -246,45 +228,124 @@ std::optional<Rotated> Writer::rotate_locked(int fd, int64_t now_ms) {
   // held it are deleted after 7 days; a log's first line ever chains from genesis.
   fs::path older = file_.string() + ".2", sidecar = file_.string() + ".chain";
   std::string prev = kGenesis.data();
-  if (first_seq > 1) {
+  if (seq_of(first_line(rotated)) > 1) {
     if (auto kept = base::read_file(sidecar); kept && kept->size() == 32) {
       prev = *kept;
     } else if (fs::exists(older, ec)) {
       if (auto sc = split_chain(last_line(older))) prev = sc->second;
     }
   }
+  bool torn = false;
+  std::string last_chain;
+  if (auto sc = split_chain(last_chained_line(rotated, &torn))) last_chain = sc->second;
   r.manifest_json = bj::object{{"log", name_},
                                {"file", base_name + ".log"},
                                {"host", host_},
                                {"rotated_at", base::format_utc_ms(now_ms)},
-                               {"first_seq", first_seq},
-                               {"last_seq", last_seq},
                                {"chain_before", prev},
-                               {"chain_after", last_chain},
-                               {"lines", lines},
-                               {"sha256", base::hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()))}};
-  std::ofstream(r.manifest) << json::pretty(r.manifest_json);
+                               {"chain_after", last_chain}};
+  base::write_file_durable(r.manifest, json::pretty(r.manifest_json));
   if (!last_chain.empty()) base::write_file_durable(sidecar, last_chain);
   return r;
+}
+
+std::vector<Rotated> finish_pending(const fs::path& archive) {
+  std::vector<Rotated> out;
+  std::error_code ec;
+  fs::path pending = archive / "pending";
+  std::vector<fs::path> logs;
+  for (auto it = fs::directory_iterator(pending, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    if (it->path().extension() == ".log") logs.push_back(it->path());
+  }
+  std::sort(logs.begin(), logs.end());
+  for (const auto& f : logs) {
+    fs::path stub = f;
+    stub.replace_extension(".manifest.json");
+    bj::object m;
+    if (auto text = base::read_file(stub)) {
+      std::string err;
+      if (auto v = json::parse(*text, &err); v && v->is_object()) m = v->as_object();
+    }
+    // What the file holds, so its archive can be checked on its own.
+    std::ifstream in(f, std::ios::binary);
+    base::Sha256 sha;
+    std::string pending_text;
+    int64_t lines = 0, first_seq = 0, last_seq = 0;
+    char buf[65536];
+    while (in.read(buf, sizeof buf) || in.gcount() > 0) {
+      std::string_view piece(buf, size_t(in.gcount()));
+      sha.update(piece);
+      pending_text.append(piece);
+      size_t start = 0;
+      for (size_t nl = pending_text.find('\n'); nl != std::string::npos; nl = pending_text.find('\n', start)) {
+        std::string_view l(pending_text.data() + start, nl - start);
+        start = nl + 1;
+        if (l.empty()) continue;
+        ++lines;
+        int64_t sq = seq_of(l);
+        if (lines == 1) first_seq = sq;
+        last_seq = sq;
+      }
+      pending_text.erase(0, start);
+    }
+    auto digest = sha.finish();
+    m["first_seq"] = first_seq;
+    m["last_seq"] = last_seq;
+    m["lines"] = lines;
+    m["sha256"] = base::hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+    // The manifest first, then the log: the uploader takes a .log only with its manifest there.
+    Rotated r;
+    r.log = m.contains("log") && m.at("log").is_string() ? std::string(m.at("log").as_string()) : "unknown";
+    r.queued = archive / f.filename();
+    r.manifest = archive / stub.filename();
+    r.manifest_json = m;
+    if (!base::write_file_durable(r.manifest, json::pretty(m))) continue;
+    fs::rename(f, r.queued, ec);
+    if (ec) continue;
+    fs::remove(stub, ec);
+    out.push_back(std::move(r));
+  }
+  return out;
 }
 
 std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, bool* ok) {
   std::lock_guard lock(mu_);
   if (ok) *ok = false;
-  std::error_code ec;
-  fs::create_directories(file_.parent_path(), ec);
   std::optional<Rotated> rotated;
+  // The lock comes off when this returns or goes round again, the file stays open.
+  // (Not after a close: the number may already be another file's.)
+  struct Unlock {
+    int fd;
+    ~Unlock() {
+      if (fd >= 0) ::flock(fd, LOCK_UN);
+    }
+  };
+  auto reopen = [&] {
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = ::open(file_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd_ < 0 && errno == ENOENT) {
+      std::error_code ec;
+      fs::create_directories(file_.parent_path(), ec);
+      fd_ = ::open(file_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    }
+    return fd_ >= 0;
+  };
+  bool rotation_failed = false;
   for (int attempt = 0; attempt < 5; ++attempt) {
-    int fd = ::open(file_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return rotated;
+    if (fd_ < 0 && !reopen()) return rotated;
+    int fd = fd_;
     if (::flock(fd, LOCK_EX) != 0) {
-      ::close(fd);
+      ::close(fd_);
+      fd_ = -1;
       return rotated;
     }
+    Unlock unlock{fd};
     struct stat mine {}, now {};
-    // Rotated by someone else between our open and our lock: write to the new file instead.
+    // Rotated (by us or another process) since this file was opened: write to the new one.
     if (::fstat(fd, &mine) != 0 || ::stat(file_.c_str(), &now) != 0 || mine.st_ino != now.st_ino) {
-      ::close(fd);
+      unlock.fd = -1;
+      ::close(fd_);
+      fd_ = -1;
       continue;
     }
     // The tail and the file's day: cached, and read again from the file when another process
@@ -312,11 +373,13 @@ std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, b
       }
     }
     // A file from an earlier UTC day, or one this line would push past the size, rotates first.
-    if (mine.st_size > 0 && ((!seen_day_.empty() && seen_day_ < day_of(now_ms)) || uint64_t(mine.st_size) + 512 > max_bytes_)) {
+    // If the rotation fails (the rename refused), the line still goes into this file.
+    if (!rotation_failed && mine.st_size > 0 &&
+        ((!seen_day_.empty() && seen_day_ < day_of(now_ms)) || uint64_t(mine.st_size) + 512 > max_bytes_)) {
       rotated = rotate_locked(fd, now_ms);
-      seen_size_ = -1;
-      ::close(fd);
-      continue;  // write into the new file
+      rotation_failed = !rotated;
+      if (rotated) seen_size_ = -1;
+      continue;  // write into the new file (the inode check reopens it)
     }
     std::string prev_chain = seen_chain_;
     int64_t seq = seen_seq_ + 1;
@@ -339,7 +402,6 @@ std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, b
     } else {
       seen_size_ = -1;
     }
-    ::close(fd);
     if (ok) *ok = good;
     return rotated;
   }

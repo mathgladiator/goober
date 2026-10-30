@@ -1523,7 +1523,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
                 key == "response" || key == "cors" || key == "includes") {
-              if (sse && (key == "body" || key == "max-body-bytes" || key == "template")) {
+              // A subscription answers its own page's EventSource: no body, no template or
+              // partials (the events are the box's bytes), and no cross-origin readers.
+              if (sse && (key == "body" || key == "max-body-bytes" || key == "template" || key == "includes" ||
+                          key == "cors")) {
                 return *error = where + "." + key + " doesn't apply to a subscription", std::nullopt;
               }
               continue;

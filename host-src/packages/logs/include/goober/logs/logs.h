@@ -36,7 +36,8 @@ std::string chained_line(std::string_view body, std::string_view chain);
 // Splits a written line into its body and chain; nullopt for a line that has none.
 std::optional<std::pair<std::string, std::string>> split_chain(std::string_view line);
 
-// A rotated file, queued for upload: its hard link under archive/, and its manifest.
+// A rotated file, queued for upload: its hard link under archive/pending/ and the manifest's
+// first part (chains, times), completed by finish_pending.
 struct Rotated {
   std::string log;
   std::filesystem::path queued;    // archive/$name-$stamp.log
@@ -44,10 +45,18 @@ struct Rotated {
   bj::object manifest_json;
 };
 
+// Completes rotations waiting in archive/pending/: each file's lines, seqs, and SHA-256 into its
+// manifest, then the pair moved up into archive/ for upload. Housekeeping and the uploader call
+// it; it reads whole files, so never under a writer's lock.
+std::vector<Rotated> finish_pending(const std::filesystem::path& archive);
+
 // One log file and its rotations. Thread-safe; other processes may write it too.
 class Writer {
  public:
   Writer(std::filesystem::path file, std::string name, std::string host, uint64_t max_bytes = kMaxBytes);
+  ~Writer();
+  Writer(const Writer&) = delete;
+  Writer& operator=(const Writer&) = delete;
   // Appends one line: at, log, seq, and host first, then `fields` (theirs never overwrite the
   // envelope), then the chain. Rotates first when the file is from an earlier UTC day or the
   // line would pass max_bytes. Returns what it rotated, if anything.
@@ -64,6 +73,8 @@ class Writer {
   std::string name_, host_;
   uint64_t max_bytes_;
   std::mutex mu_;
+  // The file, kept open between lines; reopened when its inode changes (a rotation).
+  int fd_ = -1;
   // What this writer last saw of the file: unchanged inode and size mean nobody else wrote.
   uint64_t seen_ino_ = 0;
   int64_t seen_size_ = -1;

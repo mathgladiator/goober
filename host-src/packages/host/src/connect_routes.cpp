@@ -134,6 +134,14 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
       return finish(page(400, "Not connected", "<h1>That took too long</h1><p>Start connecting again from the site.</p>"),
                     R"({"connect":"state_expired"})");
     }
+    // The provider sends the person back to the redirect_uri the start gave it, on the domain it
+    // started on; the token exchange must name that same redirect_uri, so finishing anywhere
+    // else would only fail at the provider with a confusing answer.
+    if (!state_domain.empty() && state_domain != domain) {
+      return finish(page(400, "Not connected", "<h1>Finish where you started</h1><p>Start connecting again from " +
+                                                   html_escape(state_domain) + ".</p>"),
+                    R"({"connect":"other_domain"})");
+    }
     // The person who started is the one finishing.
     auto who = browser_session(req, tenant);
     if (!who || who->host || std::to_string(who->user.user_id) != user_id) {
@@ -173,7 +181,6 @@ void Host::handle_connect(const Request& req, const Finish& finish, const std::s
       return finish(page(502, "Not connected", "<h1>Not connected</h1><p>The provider gave no access token.</p>"),
                     R"({"connect":"no_token"})");
     }
-    (void)state_domain;
     return hand_over(box, *svc, *who, json::dump(secret), "oauth2", ref, arg(secret, "scope"), ret);
   }
 

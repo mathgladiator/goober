@@ -116,14 +116,6 @@ bool valid_host_header(std::string_view h) {
   return true;
 }
 
-// Request headers a box never sees: credentials belong to the host, and the client's address
-// (from the proxy in front) stays with the host too, which gives boxes client_key instead.
-bool hidden_from_box(std::string_view name) {
-  return name == "authorization" || name == "cookie" || name.starts_with("x-forwarded-") || name == "forwarded" ||
-         name == "x-real-ip" || name == "via" || name == "cf-connecting-ip" || name == "true-client-ip" ||
-         name.starts_with("goober-");
-}
-
 }  // namespace
 
 Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::path config_file)
@@ -378,6 +370,9 @@ void Host::stop() {
   // running finishes while the server can still answer it.
   pool_->shutdown();
   server_->stop();
+  // Streams that opened after sse_stop (a keep-alive connection's last request) hold sessions
+  // of this server: closed and dropped before it goes.
+  sse_clear();
   server_.reset();
   if (panel_server_) {
     panel_server_->stop();
@@ -1363,20 +1358,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // The status vocabulary (037): 5xx belongs to the host, a redirect may only go to a path
   // on this site, and an "empty" response is a 204.
   if (result.outcome == runtime::wasm::CallResult::Outcome::kOk) {
-    std::string why;
-    if (result.status >= 500) {
-      why = "the box answered " + std::to_string(result.status) + "; 5xx belongs to the host";
-    } else if (result.status >= 300 && result.status < 400) {
-      std::string location;
-      for (const auto& [k, v] : result.headers) {
-        if (k == "location") location = v;
-      }
-      bool code_ok = result.status == 301 || result.status == 302 || result.status == 303 || result.status == 307 ||
-                     result.status == 308;
-      if (!code_ok || location.empty() || safe_return(location) != location) {
-        why = "the box redirected to \"" + location.substr(0, 200) + "\"; a box may only redirect to a path on this site";
-      }
-    }
+    std::string why = box_status_refusal(result.status, result.headers);
     if (!why.empty()) {
       log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
                                                        {"request_id", request_id},

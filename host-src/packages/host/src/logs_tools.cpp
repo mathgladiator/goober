@@ -137,6 +137,7 @@ void Host::logs_housekeeping(int64_t now_ms) {
   if (!logs_) return;
   logs_->rotate_stale(now_ms);
   auto cfg = config_.get();
+  logs::finish_pending(cfg->storage / "logs" / "archive");
   std::error_code ec;
   fs::path dir = cfg->storage / "logs";
   // Numbered files past 7 days go; their archive links (if not yet uploaded) keep the bytes.
