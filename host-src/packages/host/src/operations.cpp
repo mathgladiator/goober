@@ -450,8 +450,10 @@ void Host::register_tools() {
        "the manifest, the module's imports (only goober-abi@1), and one export goober_route_$name per route, then "
        "stores the version and makes it active (the v1 dev policy: no approval step). When the manifest names a "
        "types document (\"types\": \"x.openapi.json\"), pass that document as types: the OpenAPI components.schemas "
-       "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset.",
+       "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset. With "
+       "dry_run, every check runs (conflicts with the active boxes included) and nothing is stored or changed.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
+                      {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
                       {"wat", string_property("The module as WebAssembly text.")},
                       {"wasm_base64", string_property("The module as base64 binary WASM.")},
                       {"types", mcp::any_property("The types document (OpenAPI 3.x), as a JSON object or text.")}},
@@ -477,6 +479,10 @@ void Host::register_tools() {
            types = t->value().is_string() ? std::string(t->value().get_string()) : json::pretty(t->value());
          }
          std::string err;
+         if (auto d = args.find("dry_run"); d != args.end() && d->value().is_bool() && d->value().get_bool()) {
+           if (!boxes_->check(manifest, module, types, &err)) return ToolResult::fail(err);
+           return ToolResult::ok(bj::object{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}});
+         }
          auto result = boxes_->upload(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
          bj::array warnings;

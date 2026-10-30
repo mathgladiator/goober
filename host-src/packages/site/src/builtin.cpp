@@ -27,6 +27,7 @@ const std::map<std::string, std::string>& builtin_templates() {
 {{#image_url}}<meta property="og:image" content="{{image_url}}">{{/image_url}}
 <meta name="twitter:card" content="{{#image_url}}summary_large_image{{/image_url}}{{^image_url}}summary{{/image_url}}">
 {{#author}}<meta name="author" content="{{author}}">{{/author}}
+{{#noindex}}<meta name="robots" content="noindex">{{/noindex}}
 {{{json_ld}}}
 {{{head}}}
 <!--#include pwa-->

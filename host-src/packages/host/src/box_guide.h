@@ -99,6 +99,15 @@ Templates escape every value, {{x}} and {{{x}}} alike, except two the host makes
 and {{{json_ld}}}. Put structured data in the JSON as "json_ld" (an object, or a string of
 JSON), and write {{{json_ld}}} in <head>, with no <script> tag of your own: the host writes the
 whole <script type="application/ld+json"> tag, escaped so no value can break out of it.
+In the site's chrome: a template that starts with front matter naming a layout,
+"---\nlayout: base\n---\n<h1>{{title}}</h1>...", renders into the tenant's
+_templates/base.html (the box's own templates are looked in first, then the site's, then the
+built-in base): one head, header, nav, and footer with every page. The layout sees the box's
+JSON, so "title", "summary", and "noindex": true fill its <title>, description, and robots
+tag. Tags between <!--head--> and <!--/head--> in the template go to the layout's <head>.
+The gate runs first: a refused request gets its 401 or sign-in redirect, never the page.
+Preview without deploying: box_render {path or box+template, data: sample JSON, templates:
+unsaved ones, base included}; check a manifest without storing it: version_upload {dry_run}.
 Query parameters are OpenAPI schemas (036), one value each: {"type": "string"} (maxLength,
 minLength, enum, format date or date-time), {"type": "integer", "format": "int32"|"int64"}
 (minimum, maximum; int64 reaches the box as a string), {"type": "number", "format":

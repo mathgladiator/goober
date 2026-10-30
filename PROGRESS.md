@@ -428,6 +428,8 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       page_lint; etags on page_get and if_etag on page_put.
 - [x] Compact page_render, build logs, and diffs (verbose for the rest); aliases,
       ignored_arguments, schema hashes, tool_schemas; the tenant filled in when only one fits.
+- [x] Box pages in the site's layout (front matter `layout: base` in a box template, now
+      documented and tested); box_render previews; version_upload dry_run; noindex in base.
 - [ ] Pinned partials and parameters (031 § 7); an approvals ledger (031 § 7): waiting on the human.
 
 ### Phase 24: logs, performance, and auditing agents (032)

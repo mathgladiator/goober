@@ -708,3 +708,78 @@ TEST_F(SiteRoutesTest, ChildTemplatesFillTheHeadAndJsonIsSafeInScripts) {
   EXPECT_EQ(tool("template_delete", {{"name", "story"}}).at("deleted"), "_templates/story.html");
   EXPECT_TRUE(tool("template_delete", {{"name", "story"}}).as_object().contains("error"));
 }
+
+// A box page in the site's chrome (a site's engineers, 2026-10-30): a box template whose front
+// matter names a layout renders into the tenant's base, with the box's title, a head block of
+// its own, and the box's values escaped; a signed-out request to a route with requirements is
+// refused as before, never wrapped.
+TEST_F(SiteRoutesTest, BoxTemplatesRenderIntoTheTenantsLayout) {
+  auto put = tool("template_put", {{"tenant", "playground"}, {"name", "base"},
+                                   {"template", "<!doctype html><title>{{title}}</title>{{{head}}}<header class=\"site\">Brand</header>"
+                                            "<main>{{{body}}}</main><footer class=\"site\">Foot</footer>"}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"acct","domains":["*"],
+      "templates": {"account": "---\nlayout: base\n---\n<!--head--><meta name=\"robots\" content=\"noindex\"><!--/head--><h1>{{title}}</h1><p>{{note}}</p>"},
+      "routes":{"http":{"/account":{"get":{"name":"account","template":"account","public":true}},
+                        "/account/private":{"get":{"name":"account_private","template":"account","requirements":[["owner"]]}}}}})",
+                                   R"((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 64) "{\"title\":\"Your account\",\"note\":\"<b>hi</b>\",\"body\":\"<script>x</script>\",\"head\":\"<script>y</script>\"}")
+  (func (export "goober_route_account") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 64) (i32.const 99))) (i32.const 0))
+  (func (export "goober_route_account_private") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 64) (i32.const 99))) (i32.const 0))
+))", &err))
+      << err;
+  auto page = fetch(port, bhttp::verb::get, "/account", {{"accept", "text/html"}});
+  EXPECT_EQ(page.status, 200);
+  EXPECT_EQ(page.body,
+            "<!doctype html><title>Your account</title><meta name=\"robots\" content=\"noindex\">"
+            "<header class=\"site\">Brand</header><main><h1>Your account</h1><p>&lt;b&gt;hi&lt;/b&gt;</p></main>"
+            "<footer class=\"site\">Foot</footer>")
+      << page.body;
+  // API callers still get the JSON.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/account", {{"accept", "application/json"}}).headers["content-type"],
+            "application/json");
+  // Signed out, the gate answers first: a redirect to sign in, or a 401, with none of the page.
+  auto gated = fetch(port, bhttp::verb::get, "/account/private");
+  EXPECT_EQ(gated.status, 401);
+  EXPECT_EQ(gated.body.find("Brand"), std::string::npos);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/account/private", {{"accept", "text/html"}}).status, 303);
+
+  // Previewed without running the box: by path, with an unsaved base layout tried first.
+  auto r = tool("box_render", {{"tenant", "playground"}, {"path", "/account/private"},
+                               {"data", bj::object{{"title", "Preview"}, {"note", "n"}}},
+                               {"templates", bj::object{{"base", "<html><title>{{title}}</title>{{{head}}}<header>New</header>{{{body}}}</html>"}}},
+                               {"verbose", true}});
+  ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+  EXPECT_EQ(r.at("status"), 200);
+  EXPECT_EQ(r.at("route").at("route"), "account_private");
+  EXPECT_EQ(r.at("stored"), false);
+  EXPECT_EQ(std::string(r.at("body").as_string()),
+            "<html><title>Preview</title><meta name=\"robots\" content=\"noindex\"><header>New</header><h1>Preview</h1><p>n</p></html>");
+  // By box and template, against the saved base.
+  r = tool("box_render", {{"tenant", "playground"}, {"box", "acct"}, {"template", "account"},
+                          {"data", bj::object{{"title", "T"}}}, {"verbose", true}});
+  EXPECT_NE(std::string(r.at("body").as_string()).find("<header class=\"site\">Brand</header>"), std::string::npos) << json::dump(r);
+  EXPECT_TRUE(tool("box_render", {{"tenant", "playground"}, {"path", "/nowhere"}, {"data", bj::object{}}}).as_object().contains("error"));
+  // page_render names the box route instead of a bare 404.
+  r = tool("page_render", {{"tenant", "playground"}, {"path", "/account"}});
+  EXPECT_EQ(r.at("status"), 404);
+  EXPECT_EQ(r.at("box_route").at("box"), "acct");
+
+  // version_upload's dry run checks everything and stores nothing.
+  auto before = tool("version_list", {{"box", "acct"}});
+  auto dry = tool("version_upload", {{"manifest", R"({"box":"acct","domains":["*"],"routes":{"http":{"/account":{"get":{"name":"account","public":true}}}}})"},
+                                     {"wat", "(module (memory (export \"memory\") 1) (func (export \"goober_route_account\") (result i32) (i32.const 0)))"},
+                                     {"dry_run", true}});
+  EXPECT_EQ(dry.at("dry_run"), true) << json::dump(dry);
+  EXPECT_EQ(json::dump(tool("version_list", {{"box", "acct"}})), json::dump(before));
+  auto bad = tool("version_upload", {{"manifest", R"({"box":"acct","domains":["*"],"routes":{"http":{"/account":{"get":{"name":"account","public":true,"layout":"base"}}}}})"},
+                                     {"wat", "(module (memory (export \"memory\") 1) (func (export \"goober_route_account\") (result i32) (i32.const 0)))"},
+                                     {"dry_run", true}});
+  EXPECT_TRUE(bad.as_object().contains("error")) << json::dump(bad);
+}

@@ -162,9 +162,16 @@ in pieces: attachment_upload_part {ticket: the upload_url, base64: the next 1000
 then done: true with the last piece. If a call fails, nothing is stored:
 fix the call; never paste its arguments into a page.
 
-## Boxes with templates
+## Boxes with templates [box_render]
 A box route may name a template; browsers then get the box's JSON rendered through it, while
-API callers get the JSON.
+API callers get the JSON. A box template takes front matter like any template here:
+"---\nlayout: base\n---\n<h1>{{title}}</h1>" puts the box's page in this site's base, header,
+nav, and footer included. The box's JSON fills the layout too ("title", "summary", "noindex":
+true), and <!--head-->...<!--/head--> adds to <head>. A request the route's requirements refuse
+gets its 401 or sign-in redirect before anything renders. page_render renders pages, not box
+routes: for a box route it names the route. box_render previews one with sample JSON and
+unsaved templates (a new base too), without running the box; version_upload {dry_run: true}
+checks a manifest without storing it.
 )guide";
 
 std::optional<std::string> arg(const bj::object& args, const char* key) {
@@ -792,6 +799,20 @@ void Host::register_content_tools() {
          }
          if (!r.location.empty()) out["location"] = r.location;
          if (!r.error.empty()) out["error"] = r.error;
+         // Pages are what page_render renders; a box route answering the path is named, with
+         // box_render to preview it (a site's engineers, 2026-10-30).
+         if (r.status == 404) {
+           auto active = boxes_->active();
+           for (const auto& [d, e] : config_.get()->domains) {
+             if (e.tenant != *tenant) continue;
+             auto m = active->table_for(d).match(normal->segments, "get");
+             if (!m.value) continue;
+             out["box_route"] = bj::object{{"box", m.value->box->manifest.box}, {"route", m.value->route->name},
+                                           {"template", m.value->route->template_name}};
+             out["note"] = "a box route answers this path, not a page: preview it with box_render";
+             break;
+           }
+         }
          constexpr size_t kMax = 200 * 1024;
          out["bytes"] = r.body.size();
          out["sha256"] = base::sha256_hex(r.body);
@@ -806,6 +827,125 @@ void Host::register_content_tools() {
          if (bool_arg(args, "verbose") && !(r.kind == site::Kind::kStatic && r.content_type.find("text") == std::string::npos)) {
            out["body"] = r.body.size() > kMax ? r.body.substr(0, kMax) + "\n[truncated]" : r.body;
          }
+         return ToolResult::ok(std::move(out));
+       }});
+
+  // A box page through its template and the tenant's layout, without running the box or
+  // storing anything (a site's engineers, 2026-10-30): the data stands in for the box's JSON.
+  mcp_->add_tool(
+      {"box_render",
+       "Previews a box route's page: its template, the layout the template's front matter names (layout: base), "
+       "and shared partials, over JSON you give in place of the box's answer. The box doesn't run and nothing is "
+       "stored. Name the route by path (a GET route with a template, on the tenant's domain) or by box and template. "
+       "Unsaved templates, the box's or the site's (like base), are used first, so a template change or a new "
+       "layout can be tried before version_upload or template_put.",
+       object_schema({{"tenant", tenant_prop},
+                      {"path", string_property("A URL a box route with a template answers, like /account.")},
+                      {"domain", string_property("The domain for path; default the tenant's first public domain.")},
+                      {"box", string_property("The box, with template, instead of path.")},
+                      {"template", string_property("The template's name, with box.")},
+                      {"data", object_property("The JSON object the box would answer. \"user\" is the signed-in person "
+                                               "(omit for signed out), as the host would set it.")},
+                      {"templates", object_property("Unsaved templates by name, found before the box's and the site's.")},
+                      {"partials", object_property("Unsaved partials by name, like {\"nav\": \"<nav>...</nav>\"}.")},
+                      {"verbose", boolean_property("Include the HTML.")}},
+                     {"tenant", "data"}),
+       [this](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto* data = args.if_contains("data");
+         if (!tenant || !data || !data->is_object()) return ToolResult::fail("tenant and data (an object) are required");
+         auto cfg = config_.get();
+         auto active = boxes_->active();
+         std::string box_name = arg(args, "box").value_or(""), template_name = arg(args, "template").value_or("");
+         std::string url_path = "/";
+         std::shared_ptr<const boxes::ActiveBox> box;
+         bj::object route_out;
+         if (auto path = arg(args, "path")) {
+           std::string domain = arg(args, "domain").value_or("");
+           for (const auto& [d, e] : cfg->domains) {
+             if (domain.empty() && e.tenant == *tenant && d.find('.') != std::string::npos) domain = d;
+           }
+           for (const auto& [d, e] : cfg->domains) {
+             if (domain.empty() && e.tenant == *tenant) domain = d;
+           }
+           auto entry = cfg->domains.find(domain);
+           if (entry == cfg->domains.end() || entry->second.tenant != *tenant) {
+             return ToolResult::fail("no domain " + domain + " of tenant " + *tenant);
+           }
+           auto normal = router::normalize_path(path->substr(0, path->find_first_of("?#")));
+           if (!normal) return ToolResult::fail("not a valid URL path");
+           auto m = active->table_for(domain).match(normal->segments, "get");
+           if (!m.value) return ToolResult::fail("no box route answers GET " + normal->path + " on " + domain);
+           if (m.value->route->template_name.empty()) {
+             return ToolResult::fail("route " + m.value->route->name + " of box " + m.value->box->manifest.box +
+                                     " has no template: its box answers the HTML itself");
+           }
+           box = m.value->box;
+           template_name = m.value->route->template_name;
+           url_path = normal->path;
+           route_out = bj::object{{"box", box->manifest.box}, {"version", box->version}, {"route", m.value->route->name},
+                                  {"template", template_name}, {"public", m.value->route->is_public}};
+         } else {
+           if (box_name.empty() || template_name.empty()) return ToolResult::fail("give path, or box and template");
+           auto it = active->boxes.find(box_name);
+           if (it == active->boxes.end()) return ToolResult::fail("no active box named " + box_name);
+           box = it->second;
+           route_out = bj::object{{"box", box_name}, {"version", box->version}, {"template", template_name}};
+         }
+         // The box's templates, then the unsaved ones over them; the site's are found after both.
+         std::map<std::string, std::string> inline_templates = box->manifest.templates;
+         bj::array previewed;
+         if (auto* t = args.if_contains("templates")) {
+           if (!t->is_object()) return ToolResult::fail("templates must be an object of names to text");
+           for (const auto& [name, text] : t->as_object()) {
+             if (!text.is_string()) return ToolResult::fail("templates." + std::string(name) + " must be text");
+             if (!valid_template_name(std::string(name))) return ToolResult::fail("a template name is lowercase letters, digits, _ and -");
+             std::string err;
+             auto doc = render::split_front_matter(std::string(text.as_string()), &err);
+             if (!err.empty() || !render::check_mustache(doc.body, &err)) {
+               return ToolResult::fail("templates." + std::string(name) + ": " + err);
+             }
+             inline_templates[std::string(name)] = std::string(text.as_string());
+             previewed.push_back(bj::value("template " + std::string(name)));
+           }
+         }
+         content::Overlay overlay{*tenant, {}};
+         if (auto* pm = args.if_contains("partials")) {
+           if (!pm->is_object()) return ToolResult::fail("partials must be an object of names to text");
+           for (const auto& [name, text] : pm->as_object()) {
+             if (!text.is_string() || !site::is_partial_name(std::string(name))) {
+               return ToolResult::fail("partials: each is a name ([a-z0-9_-]) and its text");
+             }
+             overlay.files["_partials/" + std::string(name) + ".html"] = std::string(text.as_string());
+             previewed.push_back(bj::value("partial " + std::string(name)));
+           }
+         }
+         content::ContentStore::Preview preview(overlay.files.empty() ? nullptr : &overlay);
+         bj::object d = data->as_object();
+         bool signed_in = d.contains("user") && !d.at("user").is_null();
+         if (!d.contains("user")) d["user"] = nullptr;
+         bj::object query_obj;
+         d["request"] = bj::object{{"path", url_path}, {"query", std::move(query_obj)}};
+         std::string err;
+         auto html = site_->render_named(*tenant, template_name, std::move(d), &inline_templates, &err);
+         bj::object out{{"route", std::move(route_out)}, {"stored", false}};
+         if (!previewed.empty()) out["previewed"] = std::move(previewed);
+         if (!html) {
+           out["status"] = 500;
+           out["error"] = err;
+           return ToolResult::ok(std::move(out));
+         }
+         auto e = site::expand_includes(*content_, *tenant, *html, url_path, signed_in);
+         out["status"] = 200;
+         out["bytes"] = e.html.size();
+         out["sha256"] = base::sha256_hex(e.html);
+         if (!e.missing.empty()) out["partials_missing"] = bj::value_from(e.missing);
+         if (!e.errors.empty()) out["partial_errors"] = bj::value_from(e.errors);
+         auto in = inspect_html(e.html);
+         out["checks"] = in.to_json();
+         out["problems"] = problems_of(in, true, false);
+         constexpr size_t kMax = 200 * 1024;
+         if (bool_arg(args, "verbose")) out["body"] = e.html.size() > kMax ? e.html.substr(0, kMax) + "\n[truncated]" : e.html;
          return ToolResult::ok(std::move(out));
        }});
 
