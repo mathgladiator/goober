@@ -378,7 +378,8 @@ void Host::register_web_tools() {
        "public addresses only, cached) and returns views that simplify it: html (the full page), text, markdown, links, "
        "meta (title, description, Open Graph, feeds, and the shop platform, like shopify), jsonld (schema.org data such "
        "as Product, Offer, LocalBusiness), tables, json, plus select (a CSS selector) and extract (records). Use it to "
-       "look at a site before writing a crawl or a box.",
+       "look at a site before writing a crawl or a box. For this host's own sites, url_check reads them as visitors "
+       "do. A read tool; the fetched page is cached for the robot.",
        object_schema({{"url", string_property("An http or https URL.")},
                       {"views", views_prop},
                       {"select", string_property("A CSS selector: tag, #id, .class, [attr=v], :first-child, "
@@ -413,7 +414,9 @@ void Host::register_web_tools() {
       {"crawl_start",
        "Starts a background crawl from seed URLs, following links within a scope, politely, and recording every page, "
        "the schema.org JSON-LD on each, and records from an extract spec. Read results with crawl_pages and "
-       "crawl_records. Good for building an inventory of a site's products.",
+       "crawl_records. Good for building an inventory of a site's products. Runs in the background on the host's "
+       "robot (host-wide, not a tenant's); answers the crawl's id (a number, for crawl_pages, crawl_records, and "
+       "crawl_stop) and name. A changing tool.",
        object_schema(
            {{"name", string_property("A label, like hill-ranch.")},
             {"seeds", bj::value(bj::object{{"type", "array"}, {"items", bj::object{{"type", "string"}}},
@@ -486,7 +489,7 @@ void Host::register_web_tools() {
                     }
                     return ToolResult::ok(std::move(out));
                   }});
-  mcp_->add_tool({"crawl_stop", "Stops a running crawl; what it found stays. crawl_rerun starts it over.",
+  mcp_->add_tool({"crawl_stop", "Stops a running crawl; what it found stays. crawl_rerun starts it over. A changing tool.",
                   object_schema({{"crawl", crawl_prop}}, {"crawl"}), [this](const bj::object& args) {
                     std::lock_guard lock(web_->db_mu());
                     sqlite::Stmt s(web_->db(), "UPDATE crawls SET state = 'stopped', updated_ms = ? WHERE id = ? AND state = 'running'");
@@ -496,7 +499,7 @@ void Host::register_web_tools() {
                   }});
   mcp_->add_tool({"crawl_rerun",
                   "Runs a crawl again from its seeds, to see what changed: pages are fetched again (conditionally, so "
-                  "unchanged ones cost the site almost nothing) and records are replaced.",
+                  "unchanged ones cost the site almost nothing) and records are replaced. A changing tool.",
                   object_schema({{"crawl", crawl_prop}}, {"crawl"}), [this](const bj::object& args) {
                     int64_t id = int_arg(args, "crawl", 0);
                     std::lock_guard lock(web_->db_mu());
@@ -595,7 +598,7 @@ void Host::register_web_tools() {
        }});
   mcp_->add_tool({"web_optout",
                   "Adds (or with remove, takes away) a host on the list the robot never fetches, for a site owner who "
-                  "asked. Subdomains are included. Lists the whole list either way.",
+                  "asked. Subdomains are included. Lists the whole list either way. Host-wide; a changing tool.",
                   object_schema({{"host", string_property("A host name, like ranch.example.")},
                                  {"remove", mcp::boolean_property("Take it off the list instead.")}},
                                 {}),

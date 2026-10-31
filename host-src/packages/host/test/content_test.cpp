@@ -188,7 +188,10 @@ TEST_F(SiteRoutesTest, AttachmentsUploadServeAndReportUse) {
   tool("page_put", {{"tenant", "playground"}, {"path", "/pets"}, {"format", "markdown"}, {"body", "![dog](/attachment/4294967298.png)"}});
   auto unused = tool("attachment_list", {{"tenant", "playground"}, {"unused", true}});
   EXPECT_EQ(unused.as_array().size(), 2u);
-  auto refused = tool("attachment_delete", {{"tenant", "playground"}, {"id", 4294967298}});
+  // An id given as a string of digits, as ids are elsewhere in JSON, works too.
+  EXPECT_EQ(tool("attachment_get", {{"tenant", "playground"}, {"id", "4294967298"}}).at("url"), "/attachment/4294967298.png");
+  EXPECT_TRUE(tool("attachment_get", {{"tenant", "playground"}, {"id", "12x"}}).as_object().contains("error"));
+  auto refused = tool("attachment_delete", {{"tenant", "playground"}, {"id", "4294967298"}});
   EXPECT_NE(std::string(refused.at("error").as_string()).find("pets.md"), std::string::npos);
   EXPECT_EQ(tool("attachment_delete", {{"tenant", "playground"}, {"id", 4294967298}, {"force", true}}).at("deleted"), 4294967298);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967298.png").status, 404);

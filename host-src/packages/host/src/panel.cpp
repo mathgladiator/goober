@@ -418,8 +418,11 @@ void Host::register_panel_tools() {
   mcp_->add_tool(
       {"box_graph",
        "The data flow over a window as nodes and edges. Without box: tenants, then their pages and boxes, then the "
-       "databases, services, and boxes those call. With box: that box's routes, the box, and what it reaches. Edge n "
-       "is requests or calls; us is CPU time (heat).",
+       "databases, services, and boxes those call, then each database's tables. With box: that box's routes (http, "
+       "mcp, timer, mail, internal, identity, result, job), the box, and what it reaches. Edge n is requests or "
+       "calls over the window, except database-to-table edges, which count calls since the host started and carry "
+       "ops (the granted r, i, u, d), unused, and each box's grant; us is CPU time (heat). grant_usage has the "
+       "detail per grant.",
        object_schema({{"window", window_prop}, {"box", string_property("One box's graph.")}}, {}),
        [this, window_of](const bj::object& args) {
          if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
@@ -656,10 +659,12 @@ void Host::register_panel_tools() {
 
   mcp_->add_tool(
       {"changes",
-       "The change log, newest first: every deploy, version upload, content, partial, template, schema, and attachment "
-       "write, with who made it (the operator, or host) and the request that caused it. Texts are in change_get.",
+       "The change log, newest first: every deploy (activate or disable), version upload, content, partial, "
+       "template, schema, flag, and attachment write, with who made it (the operator, or host) and the request that "
+       "caused it. Each row's id is the change_id a write answered with. Texts are in change_get. Operator calls "
+       "that change things outside the log (panel drops, snapshots, source commits) are in operator_actions.",
        object_schema({{"kind", enum_property("Only this kind.", {"deploy", "upload", "content", "partial", "template",
-                                                                 "schema", "attachment", "other"})},
+                                                                 "schema", "flag", "attachment", "other"})},
                       {"tenant", string_property("Only this tenant (_host for host-wide content).")},
                       {"before_id", integer_property("Rows older than this id, for the next page.")},
                       {"limit", integer_property("At most this many: default 50, at most 500.")}},
@@ -672,9 +677,10 @@ void Host::register_panel_tools() {
        }});
 
   mcp_->add_tool({"change_get",
-                  "One change with its text before and after (content and schemas of at most 64 KiB, for 90 days), or "
-                  "for a deploy, both versions' manifests.",
-                  object_schema({{"id", integer_property("The change's id, from changes.")}}, {"id"}),
+                  "One change, by the id changes lists (a write's change_id): its text before and after (content, "
+                  "templates, partials, schemas, and flags of at most 64 KiB, kept 90 days), or for a deploy or upload, "
+                  "both versions' manifests.",
+                  object_schema({{"id", integer_property("The change's id: a number, from changes or a write's change_id.")}}, {"id"}),
                   [this](const bj::object& args) {
                     if (!changes_) return ToolResult::fail("the change log is off: see host_health's startup notes");
                     auto row = changes_->get(arg_int(args, "id", 0));

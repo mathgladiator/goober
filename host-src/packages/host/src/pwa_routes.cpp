@@ -547,7 +547,9 @@ void Host::register_pwa_tools() {
        "theme_color, background_color, display, start_url, shortcuts, ...}, worker: \"host\" (default: offline and push "
        "built in) | \"none\" | {src}, offline: {fallback: \"/shop/offline\", precache: [paths]}, push: true | false | "
        "{anonymous: true}}. The host serves the manifest and worker under /goober/pwa/$name/, and <!--#include pwa--> "
-       "(already in the built-in base template) places the tags on every page in scope. The longest scope wins.",
+       "(already in the built-in base template) places the tags on every page in scope. The longest scope wins. "
+       "Goes live at once; two apps can't share a scope. Answers the manifest's and worker's URLs, the head tags, "
+       "and warnings (like icons browsers need to offer install). A changing tool.",
        object_schema({{"tenant", tenant_prop}, {"name", name_prop}, {"app", object_property("The app's definition.")}},
                      {"tenant", "name", "app"}),
        [this](const bj::object& args) {
@@ -576,7 +578,8 @@ void Host::register_pwa_tools() {
                                           {"warnings", std::move(w)}});
        }});
 
-  mcp_->add_tool({"pwa_get", "One app: its definition, the manifest the host serves, and the tags pages in scope get.",
+  mcp_->add_tool({"pwa_get", "One app: its definition (as pwa_put took it), the manifest the host serves, the tags pages in "
+                             "scope get, and warnings.",
                   object_schema({{"tenant", tenant_prop}, {"name", name_prop}}, {"tenant", "name"}),
                   [this](const bj::object& args) {
                     std::string tenant = text_of(args, "tenant"), name = text_of(args, "name");
@@ -614,8 +617,9 @@ void Host::register_pwa_tools() {
                   }});
 
   mcp_->add_tool({"pwa_delete",
-                  "Removes an app: its pages stop naming a manifest. Installed copies keep their cached files until "
-                  "the worker next updates; its subscriptions are kept until push services drop them.",
+                  "Removes an app, at once: its pages stop naming a manifest. Installed copies keep their cached files "
+                  "until the worker next updates; its subscriptions are kept until push services drop them. A "
+                  "changing tool.",
                   object_schema({{"tenant", tenant_prop}, {"name", name_prop}}, {"tenant", "name"}),
                   [this](const bj::object& args) {
                     std::string tenant = text_of(args, "tenant"), name = text_of(args, "name");
@@ -670,11 +674,14 @@ void Host::register_pwa_tools() {
   mcp_->add_tool(
       {"push_send",
        "Sends a push now, to try an app's notifications: to is {user_id}, {topic}, {everyone: true}, or {subscription: "
-       "id}; title, body, and url (a path on the site) are what the notification shows. Boxes send through a push service "
-       "instead, after their request commits.",
+       "id}; title, body, and url (a path on the site) are what the notification shows. user_id and subscription are "
+       "ids, as strings or numbers. It goes out at once, to real devices: it's a changing tool, so it waits for approval "
+       "when your approvals are on. Answers who it reached and what failed. Boxes send through a push service instead, "
+       "after their request commits.",
        object_schema({{"tenant", tenant_prop},
                       {"app", string_property("Only this app's subscribers.")},
-                      {"to", object_property("{user_id}, {topic}, {everyone: true}, or {subscription}.")},
+                      {"to", object_property("Exactly one of {\"user_id\": \"4294967300\"}, {\"topic\": \"orders\"}, "
+                                                 "{\"everyone\": true}, or {\"subscription\": \"...\"}.")},
                       {"title", string_property("The notification's title.")},
                       {"body", string_property("Its text.")},
                       {"url", string_property("Where a tap goes, like /shop/orders/7.")}},

@@ -34,12 +34,16 @@ namespace {
 constexpr const char* kGuide = R"guide(# Building a site on goober
 
 Each tenant has a content tree. Everything below is written with the tools named in brackets,
-persisted to disk through the host WAL, and live at once. tenant may be left out of any tool
-when the host serves one tenant (or you're focused on one).
+persisted to disk through the host WAL, and goes live at once: there is no staging for pages,
+templates, partials, or files. To try something first, use a dry run: page_render and box_render
+take unsaved pages, templates, and partials and store nothing. tenant may be left out of a tool
+that requires it when the host serves one tenant (or you're focused on one). Writing tools are
+changing tools: when your approvals are on, each waits for a person to approve it, and a write
+answers with the change_id (a number) it made in the change log. Reading tools never wait.
 
 ## A blog in three calls (posts, an index, a feed, the sitemap)
 1. _data/site.json once: content_put {path: "_data/site.json", text: "{\"title\": \"Example Co\",
-   \"description\": \"...\", \"author\": \"Jeffrey M. Barber\"}"}.
+   \"description\": \"...\", \"author\": \"Ada Example\"}"}.
 2. The index once: page_put {path: "/updates", format: "markdown", title: "Updates", body: "News.",
    fields: {list: "updates", "list-template": "post", "per-page": 10}}.
 3. Each post: page_put {path: "/updates/<slug>", format: "markdown", template: "post", title,
@@ -67,7 +71,7 @@ Three formats:
   - document: a whole HTML page, served exactly as written, with no template.
 page_put takes path (the URL), format, body, and optional title, template, and fields. Fields
 become front matter. Useful fields:
-  title, date (YYYY-MM-DD), summary, image (/attachment/1.png), tags (["news"]), order (number),
+  title, date (YYYY-MM-DD), summary, image (/attachment/ID.png), tags (["news"]), order (number),
   draft (true hides the page), requirements ([["owner"]] to restrict it; public otherwise),
   redirect (/new) with redirect-status (301, 302, 307, 308, or 410).
 Preview anything, drafts included, with page_render before telling a person it is done: it
@@ -78,7 +82,8 @@ refused if someone changed the page since. list_etags gives many at once, templa
 take if_etag the same way (template_get's file_etag). Two etags, never mixed up: file_etag is the
 stored file's, the one if_etag compares; body_etag is the served body's, after templates and
 partials, the one HTTP clients see (page_render and url_check give both). A write answers with
-the change_id (or change_ids) it made in the change log, to pin in a review.
+the change_id (or change_ids) it made in the change log, to pin in a review. A refused if_etag
+means someone wrote it since you read it: read it again, merge, and write with the new file_etag.
 Try before writing: page_render also takes unsaved pages (each shaped like page_put's
 arguments), templates {name: text}, partials {name: html}, and files {path: text}, and renders
 as if they were written; nothing is stored. Add feed: true to get a listing's Atom too:
@@ -106,7 +111,7 @@ template's source, the built-ins too, to copy from.
 A template may begin with front matter "layout: base"; its output becomes {{{body}}} in base.
 What it puts between <!--head--> and <!--/head--> goes to base's <head> instead ({{{head}}}).
 Inside a <script>, {{{json.title}}} is the value as JSON, safe there; {{title}} is HTML-escaped.
-template_delete removes one. A template is live at once for every page naming it: try changes
+template_delete removes one. A template goes live at once for every page naming it: try changes
 with page_render's templates (unsaved), or under a new name on a draft page.
 So a typical site has base (the <html>, header, nav, footer), page, and list.
 
@@ -158,8 +163,9 @@ box_guide's "Installable apps" section has push.
 ## Images and files [attachment_put, attachment_list, attachment_get, attachment_delete]
 attachment_put takes base64 bytes, a file already on the site (file: "/hero.jpg"), or an https
 url to fetch, plus name, alt, and visibility (public, or members). A URL on this host's own
-domain is read from its files. It answers with /attachment/$id.$ext; use that URL in pages:
-  ![A red truck](/attachment/3.jpg)      or   image: /attachment/3.jpg
+domain is read from its files. It answers with id (a host-minted number) and url,
+/attachment/$id.$ext; use that URL in pages, as the answer's markdown shows:
+  ![A red truck](/attachment/4294967301.jpg)      or   image: /attachment/4294967301.jpg
 PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, and PDF, detected from the bytes. People can also upload
 at /attachment/ in a browser, as an owner of the tenant. base64 suits small files: for anything
 over about 100 KB, give url or file, or call attachment_upload_url and PUT the bytes to the URL
@@ -174,16 +180,31 @@ API callers get the JSON. A box template takes front matter like any template he
 "---\nlayout: base\n---\n<h1>{{title}}</h1>" puts the box's page in this site's base, header,
 nav, and footer included. The box's JSON fills the layout too ("title", "summary", "noindex":
 true), and <!--head-->...<!--/head--> adds to <head>. A request the route's requirements refuse
-gets its 401 or sign-in redirect before anything renders. page_render renders pages, not box
-routes: for a box route it names the route. box_render previews one with sample JSON and
-unsaved templates (a new base too), without running the box; version_upload {dry_run: true}
-checks a manifest without storing it.
+gets its 401 or sign-in redirect before anything renders. Such a route negotiates on Accept, so
+the host sends Vary: Accept on its every answer. page_render renders pages, not box routes: on a
+path a box route answers it says 404 with box_route naming the route. box_render previews that
+route's page over sample JSON and unsaved templates (a new base too): a dry run that runs neither
+the box nor the route's gate, so a people-only route renders whatever data you pass. To check a
+manifest without storing it, version_upload {dry_run: true} (box_guide has the rest).
 )guide";
 
 std::optional<std::string> arg(const bj::object& args, const char* key) {
   auto it = args.find(key);
   if (it == args.end() || !it->value().is_string()) return std::nullopt;
   return std::string(it->value().get_string());
+}
+
+// An id argument: a JSON integer, or a string of digits (ids are strings elsewhere in JSON).
+std::optional<int64_t> id_arg(const bj::object& args, const char* key) {
+  auto it = args.find(key);
+  if (it == args.end()) return std::nullopt;
+  if (it->value().is_int64()) return it->value().get_int64();
+  if (it->value().is_string()) {
+    std::string_view s = it->value().get_string();
+    if (s.empty() || s.size() > 18 || s.find_first_not_of("0123456789") != std::string_view::npos) return std::nullopt;
+    return std::stoll(std::string(s));
+  }
+  return std::nullopt;
 }
 
 bool bool_arg(const bj::object& args, const char* key) {
@@ -478,7 +499,9 @@ void Host::register_content_tools() {
        "tags, draft, requirements, list, sort, per-page, feed); a document takes title, summary, date, tags, draft, "
        "and requirements, and is still served as written. A path ending in / writes that directory's index "
        "(/about/ is about/index.*). Replaces every file that answers the URL, whatever its format. The body is stored "
-       "byte for byte: entities like &amp; are kept as written.",
+       "byte for byte: entities like &amp; are kept as written. Goes live at once (preview first with page_render, "
+       "which stores nothing). Answers the file, url, and file_etag (for your next if_etag), the files it replaced, "
+       "and change_id. A changing tool: waits for approval when your approvals are on.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("The page's URL, like /about, /blog/hello, or / for the home page.")},
                       {"format", enum_property("How body is written.", {"markdown", "fragment", "document"})},
@@ -488,7 +511,8 @@ void Host::register_content_tools() {
                       {"fields", object_property("More front matter, like {\"date\": \"2026-10-26\", \"tags\": "
                                                  "[\"news\"]} or {\"list\": \"blog\"} for a listing.")},
                       {"if_etag", string_property("Write only if the page's current file_etag (page_get, list_etags) "
-                                                  "is this; \"none\" writes only a new page.")}},
+                                                  "is this; \"none\" writes only a new page. Refused means someone "
+                                                  "wrote it since you read it: page_get it again.")}},
                      {"tenant", "path", "format", "body"}),
        [this, known_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -589,11 +613,13 @@ void Host::register_content_tools() {
   };
   mcp_->add_tool(
       {"partial_put",
-       "Writes a shared partial (a nav, a footer): every page and box page with <!--#include name--> gets it at "
-       "once, with no page re-put, and their ETags change. Links may carry data-match=\"/places\" (that path and "
+       "Writes a shared partial (a nav, a footer): it goes live at once on every page and box page with "
+       "<!--#include name-->, with no page re-put, and their body_etags change (their file_etags don't). Links may carry data-match=\"/places\" (that path and "
        "below), data-match-exact=\"/\", or data-key=\"x\" (a page's <meta name=\"nav-key\" content=\"x\">): the "
        "best fit for each request gets aria-current=\"page\" and class active. The previous version is kept "
-       "(ten in all).",
+       "(ten in all). Answers file_etag and previous_etag. There is no if_etag: read partial_get's file_etag first, "
+       "and compare previous_etag with it after. Try a change first with page_render's partials (stores nothing). "
+       "A changing tool.",
        object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}, {"html", string_property("The HTML, as served.")}},
                      {"tenant", "name", "html"}),
        [this, partial_file, versions_of, check_name](const bj::object& args) {
@@ -622,7 +648,8 @@ void Host::register_content_tools() {
                                           {"previous_etag", old ? bj::value(old->etag) : bj::value(nullptr)}});
        }});
   mcp_->add_tool(
-      {"partial_get", "Reads a shared partial, or one of its kept versions (from partial_list).",
+      {"partial_get", "Reads a shared partial, or one of its kept versions (from partial_list): its html and file_etag "
+                      "(the stored file's; etag is the same value).",
        object_schema({{"tenant", tenant_prop},
                       {"name", partial_name_prop},
                       {"version", string_property("A kept version's id, from partial_list; omit for the current one.")}},
@@ -643,7 +670,8 @@ void Host::register_content_tools() {
        }});
   mcp_->add_tool(
       {"partial_list",
-       "A tenant's shared partials: name, etag, bytes, the kept versions to roll back to, and the pages whose bodies "
+       "A tenant's shared partials: name, file_etag (etag is the same value), bytes, the kept versions to roll back "
+       "to (partial_get {version}, then partial_put), and the pages whose bodies "
        "include each (box pages aren't listed: route_check says whether a route takes includes).",
        object_schema({{"tenant", tenant_prop}}, {"tenant"}),
        [this, versions_of](const bj::object& args) {
@@ -680,8 +708,8 @@ void Host::register_content_tools() {
          return ToolResult::ok(bj::object{{"partials", std::move(out)}, {"missing", std::move(missing)}});
        }});
   mcp_->add_tool(
-      {"partial_delete", "Removes a shared partial; its markers then render empty. Its kept versions stay, so partial_get "
-                         "and partial_put can bring it back.",
+      {"partial_delete", "Removes a shared partial, live at once: its markers then render empty. Its kept versions "
+                         "stay, so partial_get {version} and partial_put can bring it back. A changing tool.",
        object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}}, {"tenant", "name"}),
        [this, partial_file, check_name](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -722,12 +750,14 @@ void Host::register_content_tools() {
 
   mcp_->add_tool(
       {"page_render",
-       "Renders a URL exactly as a visitor gets it (status, kind, and HTML), as a host operator, so pages with "
-       "requirements render too. With drafts, drafts render; use it to preview before telling someone it's done. "
-       "To try something without writing it, pass unsaved pages (each shaped like page_put's arguments), templates, "
-       "partials, or files: the render sees them as if written, and nothing is stored. With feed, a listing's "
-       "/feed.xml is rendered too. body_etag (also etag) is the served body's, after templates and partials, as "
-       "HTTP clients see it; file_etag is the stored file's, the one if_etag on writes compares against.",
+       "Renders a page URL as a visitor gets it (status, kind, and the HTML with verbose), except that a page's "
+       "requirements pass as for a host operator, so restricted pages render too. With drafts, drafts render; "
+       "use it to preview before telling someone it's done. A dry run when given unsaved pages (each shaped like "
+       "page_put's arguments), templates, partials, or files: the render sees them as if written, and nothing is "
+       "stored. With feed, a listing's /feed.xml is rendered too. body_etag (also etag) is the served body's, after "
+       "templates and partials, as HTTP clients see it; file_etag is the stored file's, the one if_etag on writes "
+       "compares against. Pages only: a path a box route answers comes back 404 with box_route naming it; preview "
+       "that with box_render. A read tool.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("The URL, like /blog or /blog/hello.")},
                       {"query", object_property("Query parameters, like {\"page\": \"2\"}.")},
@@ -873,7 +903,8 @@ void Host::register_content_tools() {
        "renders whatever data you pass, user or not; the real route answers 401 or the sign-in redirect before any "
        "template. Name the route by path (a GET route with a template, on the tenant's domain) or by box and template. "
        "Unsaved templates, the box's or the site's (like base), are used first, so a template change or a new "
-       "layout can be tried before version_upload or template_put.",
+       "layout can be tried before version_upload or template_put. A dry run and a read tool: answers status, "
+       "bytes, sha256, the checks page_render makes, and the HTML with verbose.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("A URL a box route with a template answers, like /account.")},
                       {"domain", string_property("The domain for path; default the tenant's first public domain.")},
@@ -993,7 +1024,8 @@ void Host::register_content_tools() {
        "from a template wrapped in a layout, put them between <!--head--> and <!--/head-->; the built-in base prints "
        "them in its <head> ({{{head}}} in your own base). In a <script>, use {{{json.title}}}: each value as JSON. "
        "Remove one with template_delete. Pass if_etag (template_get's file_etag, or \"none\" for a new one) so you "
-       "never overwrite a teammate's change made since you read it.",
+       "never overwrite a teammate's change made since you read it. Answers the new file_etag and change_id. A "
+       "changing tool.",
        object_schema({{"tenant", string_property("A tenant name, or _host for every tenant.")},
                       {"name", string_property("The template's name, like base, page, list, post, or directory.")},
                       {"template", string_property("The Mustache text.")},
@@ -1021,8 +1053,9 @@ void Host::register_content_tools() {
        }});
 
   mcp_->add_tool({"template_delete",
-                  "Removes a tenant's template; pages naming it then use the built-in one of that name, if any, or fail "
-                  "to render (page_lint finds them). With if_etag, only if it hasn't changed since you read it.",
+                  "Removes a tenant's template, live at once; pages naming it then use _host's or the built-in one of that "
+                  "name, if any, or fail to render (page_lint finds them). With if_etag, only if it hasn't changed since "
+                  "you read it. A changing tool.",
                   object_schema({{"tenant", string_property("A tenant name, or _host.")},
                                  {"name", string_property("The template's name.")},
                                  {"if_etag", string_property("Delete only if the stored template's file_etag is this.")}},
@@ -1091,7 +1124,8 @@ void Host::register_content_tools() {
        "comes from the bytes: PNG, JPEG, GIF, WebP, AVIF, ICO, SVG, or PDF. base64 suits small files (under about "
        "100 KB): larger ones can be cut off on their way into a tool call, so give url or file, or upload with "
        "attachment_upload_url. A file that arrives cut off is refused, saying how many bytes arrived. On failure, "
-       "nothing is stored: don't put this call's arguments in a page.",
+       "nothing is stored: don't put this call's arguments in a page. Answers id (a host-minted number), url, "
+       "markdown (a ready ![alt](url) snippet), content_type, size, and change_id. A changing tool.",
        object_schema({{"tenant", tenant_prop},
                       {"base64", string_property("The file's bytes as base64.")},
                       {"url", string_property("An https URL to fetch the file from.")},
@@ -1285,7 +1319,8 @@ void Host::register_content_tools() {
        }});
 
   mcp_->add_tool({"attachment_list",
-                  "Lists a tenant's attachments, newest first, with the content files that use each one.",
+                  "Lists a tenant's attachments, newest first, each as attachment_put answers it (id, url, markdown, "
+                  "content_type, size), with the content files that use it (used_by). unused: only those nothing uses.",
                   object_schema({{"tenant", tenant_prop}, {"unused", boolean_property("Only those nothing uses.")}},
                                 {"tenant"}),
                   [this](const bj::object& args) {
@@ -1302,14 +1337,18 @@ void Host::register_content_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"attachment_get", "Describes one attachment, with the content files that use it.",
-                  object_schema({{"tenant", tenant_prop}, {"id", mcp::integer_property("The attachment's id.")}},
+  mcp_->add_tool({"attachment_get", "Describes one attachment (as attachment_put answers it), with the content files that "
+                                     "use it.",
+                  object_schema({{"tenant", tenant_prop},
+                                 {"id", mcp::integer_property("The attachment's id: the number in its URL "
+                                                              "/attachment/ID.ext, from attachment_list. A string of "
+                                                              "digits is accepted too.")}},
                                 {"tenant", "id"}),
                   [this](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
-                    auto it = args.find("id");
-                    if (!tenant || it == args.end() || !it->value().is_int64()) return ToolResult::fail("tenant and id are required");
-                    auto a = attachments_->get(*tenant, it->value().get_int64());
+                    auto id = id_arg(args, "id");
+                    if (!tenant || !id) return ToolResult::fail("tenant and id (the number in /attachment/ID.ext) are required");
+                    auto a = attachments_->get(*tenant, *id);
                     if (!a) return ToolResult::fail("no such attachment");
                     auto refs = attachments::references(*content_, *tenant);
                     auto used = refs.find(a->id);
@@ -1317,17 +1356,18 @@ void Host::register_content_tools() {
                   }});
 
   mcp_->add_tool({"attachment_delete",
-                  "Deletes an attachment. One that content still uses needs force, and those pages will show a "
-                  "broken image. Its id is never reused.",
+                  "Deletes an attachment, at once. One that content still uses is refused, naming the files; force "
+                  "deletes it anyway, and those pages show a broken image. Its id is never reused. A changing tool.",
                   object_schema({{"tenant", tenant_prop},
-                                 {"id", mcp::integer_property("The attachment's id.")},
+                                 {"id", mcp::integer_property("The attachment's id (the number in /attachment/ID.ext); "
+                                                              "a string of digits is accepted too.")},
                                  {"force", boolean_property("Delete even though content uses it.")}},
                                 {"tenant", "id"}),
                   [this](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
-                    auto it = args.find("id");
-                    if (!tenant || it == args.end() || !it->value().is_int64()) return ToolResult::fail("tenant and id are required");
-                    int64_t id = it->value().get_int64();
+                    auto parsed = id_arg(args, "id");
+                    if (!tenant || !parsed) return ToolResult::fail("tenant and id (the number in /attachment/ID.ext) are required");
+                    int64_t id = *parsed;
                     auto refs = attachments::references(*content_, *tenant);
                     if (auto used = refs.find(id); used != refs.end() && !bool_arg(args, "force")) {
                       std::string list;
@@ -1411,7 +1451,7 @@ void Host::register_content_kit_tools() {
        "like css/site.css, a template as _templates/base.html, or a partial as _partials/nav.html. Use them as if_etag "
        "in page_put, content_deploy, template_put, or template_delete so a write never clobbers a newer one. These are "
        "the stored files' etags; the served body's etag (body_etag, in page_render and url_check) differs once "
-       "templates and partials apply.",
+       "templates and partials apply. A path nothing answers maps to null (write it with if_etag \"none\").",
        object_schema({{"tenant", tenant_prop}, {"paths", list_of("Up to 200 URLs or file paths.")}}, {"tenant", "paths"}),
        [this, known_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -1437,7 +1477,10 @@ void Host::register_content_kit_tools() {
        "and each URL is fetched signed out, as a visitor gets it: status, content type, and for HTML no unrendered "
        "{{, at most one parseable ld+json, no empty <p>, no http: links, no raw markdown links (strict adds title and "
        "description lengths and exactly one ld+json). Answers one line per item, ok, and items: each URL's file, "
-       "file_etag (the stored file's, for the next if_etag), and body_etag (the served body's).",
+       "file_etag (the stored file's, for the next if_etag), and body_etag (the served body's), plus change_ids. "
+       "Goes live at once. ok: false with \"nothing was written\" means a check before failed; ok: false after "
+       "writing means a written URL serves a problem (its line says which), and the files stay written. A "
+       "changing tool: waits for approval when your approvals are on.",
        object_schema({{"tenant", tenant_prop},
                       {"pages", bj::object{{"type", "array"},
                                            {"items", bj::object{{"type", "object"}}},
@@ -1586,7 +1629,9 @@ void Host::register_content_kit_tools() {
        "Fetches URLs on this host's sites, signed out, as a visitor gets them, and answers for each: status, content "
        "type, bytes, sha256, body_etag (the served body's) and file_etag (the stored file answering it, for if_etag), "
        "and for HTML the counts a deploy checks (ld+json, unrendered {{, empty <p>, http: links, "
-       "raw markdown links, title, description length) with the problems found. Replaces hand-written curl checks.",
+       "raw markdown links, title, description length) with the problems found. Replaces hand-written curl checks. "
+       "Only this host's sites (web_fetch reads others); a focused operator's URLs on other tenants come back with an "
+       "error. A read tool: it changes nothing.",
        object_schema({{"urls", list_of("Up to 50: https://example.com/updates, or a path with tenant.")},
                       {"tenant", string_property("For paths without a host.")},
                       {"strict", boolean_property("Also title 50-60, description 120-160, exactly one ld+json.")}},
@@ -1635,7 +1680,8 @@ void Host::register_content_kit_tools() {
       {"page_lint",
        "Lints a tenant's pages as served (signed out): no unrendered {{, at most one parseable ld+json, no empty "
        "<p>, no http: links, no raw markdown links; strict adds a title of 50 to 60 characters, a description of 120 "
-       "to 160, and exactly one ld+json. Every listed page by default (sitemap's set), or the paths given.",
+       "to 160, and exactly one ld+json. Every listed page by default (sitemap's set), or the paths given; at most "
+       "300 are checked. Answers checked, clean, and only the pages with problems. A read tool.",
        object_schema({{"tenant", tenant_prop}, {"paths", list_of("URLs to lint; default every listed page.")},
                       {"strict", boolean_property("The search checks too.")}},
                      {"tenant"}),
