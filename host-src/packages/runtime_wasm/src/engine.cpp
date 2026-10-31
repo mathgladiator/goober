@@ -103,7 +103,7 @@ const std::vector<std::string>& abi_imports() {
   static const std::vector<std::string> kImports = {
       "goober_request_size", "goober_request_read", "goober_respond", "goober_header_set",
       "goober_now_ms",       "goober_random_fill",  "goober_log",        "goober_sql",
-      "goober_result_read",  "goober_call",          "goober_lib"};
+      "goober_result_read",  "goober_call",          "goober_lib",       "goober_flag"};
   return kImports;
 }
 
@@ -319,6 +319,25 @@ struct Engine::Impl {
                             return int32_t(std::min<size_t>(st.result.size(), kMaxResponseBytes));
                           }),
          "goober_lib");
+    // A flag's value into the result buffer (read with goober_result_read): its length, or -1
+    // when the manifest declares no such flag (or a pointer is bad). 039.Flags.md.
+    must(linker.func_wrap("goober", "goober_flag",
+                          [](wasmtime::Caller caller, int32_t name_ptr, int32_t name_len) -> int32_t {
+                            auto& st = state_of(caller);
+                            auto mem = memory_of(caller);
+                            auto name = view(mem, name_ptr, name_len);
+                            if (!name || name_len > kMaxName || !st.input->flag) return -1;
+                            std::optional<std::string> value;
+                            try {
+                              value = st.input->flag(std::string(*name));
+                            } catch (...) {
+                              return -1;
+                            }
+                            if (!value) return -1;
+                            st.result = std::move(*value);
+                            return int32_t(st.result.size());
+                          }),
+         "goober_flag");
     must(linker.func_wrap("goober", "goober_result_read",
                           [](wasmtime::Caller caller, int32_t ptr, int32_t len) -> int32_t {
                             auto& st = state_of(caller);

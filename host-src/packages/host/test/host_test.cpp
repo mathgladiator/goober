@@ -501,3 +501,105 @@ TEST(HostIds, NewIdsStartPastStoredOnesAndUsersTakeThem) {
   EXPECT_EQ(from, past + ids::kRangeLength);
   EXPECT_EQ(to, past + ids::kRangeLength + ids::kMargin);
 }
+
+// Box flags (design/machine/039.Flags.md): a box reads a declared flag's default, an operator
+// flips it with flag_set and the very next call sees it (no new version), an undeclared name
+// reads -1, values outside the declared set are refused, the change log and audit log keep the
+// flip, and a restart keeps the value.
+TEST(HostFlags, OperatorsFlipFlagsBoxesReadThem) {
+  const char* kFlagWat = R"((module
+  (import "goober" "goober_flag" (func $flag (param i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "text/plain")
+  (data (i32.const 16) "frozen")
+  (data (i32.const 32) "nope")
+  (data (i32.const 48) "undeclared")
+  (func (export "goober_route_read_flag") (result i32)
+    (local $n i32)
+    (local.set $n (call $flag (i32.const 16) (i32.const 6)))
+    (if (i32.lt_s (local.get $n) (i32.const 0))
+      (then (drop (call $respond (i32.const 404) (i32.const 0) (i32.const 10) (i32.const 48) (i32.const 10))))
+      (else (drop (call $result (i32.const 1024) (local.get $n)))
+            (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 10) (i32.const 1024) (local.get $n)))))
+    (i32.const 0))
+  (func (export "goober_route_read_missing") (result i32)
+    (drop (call $respond (select (i32.const 204) (i32.const 500) (i32.eq (call $flag (i32.const 32) (i32.const 4)) (i32.const -1)))
+                         (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+))";
+  const char* kFlagManifest = R"({"box":"switches","domains":["*"],
+    "flags":{"frozen":{"default":"false","values":["false","true"],"about":"No new orders while true."}},
+    "routes":{"http":{"/frozen":{"get":{"name":"read_flag","public":true}},
+                      "/missing":{"get":{"name":"read_missing","public":true}}}}})";
+  auto root = fs::path(GOOBER_TEST_TMP) / "host_flags";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(
+      R"({"listen":{"port":0},"storage":"storage","threads":{"network":1,"boxes":1},
+          "operations":{"token":")" + std::string(kToken) + R"("},"domains":{"localhost":{"tenant":"shop"}}})",
+      root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto call = [&](uint16_t port, const std::string& name, bj::object args) {
+    bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                   {"params", bj::object{{"name", name}, {"arguments", std::move(args)}}}};
+    auto r = fetch(port, bhttp::verb::post, "/goober-operations-mcp", "localhost", json::dump(req),
+                   std::string("Bearer ") + kToken);
+    std::string e;
+    auto doc = json::parse(r.body, &e);
+    EXPECT_TRUE(doc) << r.status << " " << r.body;
+    if (!doc) return bj::value(bj::object{{"error", r.body}});
+    const auto& result = doc->at("result").as_object();
+    std::string text(result.at("content").at(0).at("text").as_string());
+    if (result.at("isError").as_bool()) return bj::value(bj::object{{"error", text}});
+    return *json::parse(text, &e);
+  };
+  {
+    host::Host h(cfg);
+    auto port = h.start();
+    ASSERT_TRUE(h.boxes().upload(kFlagManifest, kFlagWat, &err)) << err;
+    auto first = fetch(port, bhttp::verb::get, "/frozen");
+    EXPECT_EQ(first.status, 200);
+    EXPECT_EQ(first.body, "false");  // the default
+    EXPECT_EQ(fetch(port, bhttp::verb::get, "/missing").status, 204);  // an undeclared name reads -1
+
+    auto refused = call(port, "flag_set", {{"tenant", "shop"}, {"box", "switches"}, {"flag", "frozen"}, {"value", "maybe"},
+                                           {"reason", "testing"}});
+    EXPECT_NE(json::dump(refused).find("takes one of: false, true"), std::string::npos) << json::dump(refused);
+    auto undeclared = call(port, "flag_set", {{"tenant", "shop"}, {"box", "switches"}, {"flag", "paused"}, {"value", "true"},
+                                              {"reason", "testing"}});
+    EXPECT_NE(json::dump(undeclared).find("declares no flag paused"), std::string::npos) << json::dump(undeclared);
+    auto no_reason = call(port, "flag_set", {{"tenant", "shop"}, {"box", "switches"}, {"flag", "frozen"}, {"value", "true"}});
+    EXPECT_TRUE(no_reason.as_object().contains("error"));
+
+    auto set = call(port, "flag_set", {{"tenant", "shop"}, {"box", "switches"}, {"flag", "frozen"}, {"value", "true"},
+                                       {"reason", "inventory count tonight"}});
+    ASSERT_FALSE(set.as_object().contains("error")) << json::dump(set);
+    EXPECT_EQ(set.at("before"), "false");
+    EXPECT_EQ(fetch(port, bhttp::verb::get, "/frozen").body, "true");  // the next call, same version
+
+    auto list = call(port, "flag_list", {{"tenant", "shop"}});
+    const auto& f = list.at("boxes").at(0).at("flags").at(0);
+    EXPECT_EQ(f.at("value"), "true");
+    EXPECT_EQ(f.at("default"), "false");
+    EXPECT_EQ(f.at("set_why"), "inventory count tonight");
+
+    // The change log keeps the flip, before and after.
+    auto changes = call(port, "changes", {{"kind", "flag"}});
+    EXPECT_NE(json::dump(changes).find("switches"), std::string::npos) << json::dump(changes);
+    // The audit log names it with the reason.
+    auto audit = base::read_file(root / "storage" / "logs" / "audit.log");
+    ASSERT_TRUE(audit);
+    EXPECT_NE(audit->find("\"flag.set\""), std::string::npos);
+    EXPECT_NE(audit->find("inventory count tonight"), std::string::npos);
+    // The access log records what the box read, for a replay.
+    auto access = base::read_file(root / "storage" / "logs" / "access.log");
+    ASSERT_TRUE(access);
+    EXPECT_NE(access->find("\"flags\":{\"frozen\":\"true\"}"), std::string::npos);
+  }
+  // A restart keeps the value.
+  host::Host again(cfg);
+  auto port = again.start();
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/frozen").body, "true");
+}

@@ -595,6 +595,12 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Box SQL's date functions accept 'now', which reads the machine's clock: impure, and
       unseen by replays and 037's caching. Refusing it would break boxes that use it.
 
+### Box flags (039)
+- [x] `"flags"` in the manifest (a closed set with defaults and optional values), the
+      `goober_flag` import (and `goober::flag` in Rust), values per tenant and box kept through
+      the host WAL; `flag_set` (audited, change log, approvals) and `flag_list`; what each call
+      read in the access log; the panel's Flags card; `box_guide`; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

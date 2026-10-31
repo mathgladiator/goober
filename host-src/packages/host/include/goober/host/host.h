@@ -717,6 +717,11 @@ class Host {
   // One-time jobs (design/machine/038.Ids.md § 7; jobs.cpp): runs kept in operations/jobs.db,
   // stepped one batch at a time by their own thread.
   std::unique_ptr<class JobRuns> job_runs_;
+  // Box flags (design/machine/039.Flags.md; flags.cpp): set by operators, read through goober_flag.
+  std::unique_ptr<class FlagStore> flags_;
+  void register_flag_tools();
+  // A declared flag's value for a tenant (set, or the default), or nullopt when undeclared.
+  std::optional<std::string> flag_for(const manifest::Manifest& m, const std::string& tenant, std::string_view name);
   std::thread job_thread_;
   std::condition_variable job_cv_;  // with timer_thread_mu_
   bool job_nudged_ = false;

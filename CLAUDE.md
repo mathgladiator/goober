@@ -181,6 +181,9 @@ Read these before doing design work:
     service (ranges, a first id of 2^32, restores jump past), users, invites, uploads, and `id` keys
     the host stamps (a box never names one), ids as strings, schema warnings; and `routes.job`,
     operator-started one-time boxes that move data, dry run first, in batches with a kept cursor.
+  - `design/machine/039.Flags.md`: box flags: a closed set the manifest declares (`"flags"`, defaults,
+    optional values), read through `goober_flag`, set per tenant by operators with `flag_set`
+    (audited, in the change log), so a freeze or kill switch needs no new version.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

@@ -57,6 +57,8 @@ Import only from module "goober":
 | goober_sql | (strategy_ptr, strategy_len, sql_ptr, sql_len, params_ptr, params_len) -> i32 | Runs one SQL statement through a data strategy; returns the result's length. |
 | goober_result_read | (ptr, len) -> i32 | Copies the last SQL or call result into memory. |
 | goober_call | (service_ptr, service_len, method_ptr, method_len, request_ptr, request_len) -> i32 | Calls a declared external service; returns the result's length. |
+| goober_lib | (library_ptr, library_len, function_ptr, function_len, argument_ptr, argument_len) -> i32 | Calls a host library the manifest imports; returns the result's length. |
+| goober_flag | (name_ptr, name_len) -> i32 | A declared flag's value for this tenant into the result (length), or -1 when undeclared. |
 
 Export `memory`, and one function per route, tool, and timer: `goober_route_$name`, taking
 nothing and returning i32 (0 means it ran; anything else is a 500 and rolls back). A bad
@@ -304,6 +306,21 @@ place by hand.
   the copies. Three failed batches in a row stop a run: a dry run fails, a real run pauses,
   and job_start goes on from its cursor once fixed. job_status {run} and job_list {tenant}
   say where it stands.
+
+## Flags: switches an operator flips without a new version
+
+Declare each switch the box reads, with its default (and, if you like, the values it may take):
+   "flags": {"frozen": {"default": "false", "values": ["false", "true"],
+                        "about": "No new orders while true."}}
+At most 32 flags; a value is one line of at most 200 bytes. Read one in the box with
+goober_flag(name_ptr, name_len) -> i32: the value's length (read it with goober_result_read),
+or -1 when the manifest declares no such flag. In Rust: goober::flag("frozen") ->
+Option<String>. An operator sets it per tenant with flag_set {tenant, box, flag, value,
+reason}; the box's next call sees it, with no new version and no deploy. flag_list shows
+every flag, its value, and who set it, when, and why; the change log and the audit log keep
+each flip, and the access log records what each call read.
+Use flags for freezes, kill switches, and modes the whole box follows. Not for per-person or
+per-row state: that belongs in the box's database. A box can't set its own flags.
 
 ## Calling other services
 

@@ -557,3 +557,35 @@ TEST(Manifest, JobRoutes) {
   refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"timeout-ms":10}}}})", "name is required");
   refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"x"}},"timer":{"t":{"name":"x","every-ms":1000}}}})", "used twice");
 }
+
+// "flags" (design/machine/039.Flags.md): a closed set of switches with defaults, and optionally
+// the values each may take.
+TEST(Manifest, Flags) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"b","domains":["*"],"flags":{
+      "frozen":{"default":"false","values":["false","true"],"about":"No new orders while true."},
+      "banner":{"default":""}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->flags.size(), 2u);
+  ASSERT_TRUE(m->flag("frozen"));
+  EXPECT_EQ(m->flag("frozen")->default_value, "false");
+  EXPECT_EQ(m->flag("frozen")->values.size(), 2u);
+  EXPECT_EQ(m->flag("banner")->default_value, "");
+  EXPECT_FALSE(m->flag("nope"));
+  auto refused = [&](const std::string& flags, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(R"({"box":"b","domains":["*"],"flags":)" + flags + "}", &e)) << flags;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refused(R"({"Frozen":{"default":"x"}})", "matches [a-z]");
+  refused(R"({"f":{}})", "default is a string");
+  refused(R"({"f":{"default":5}})", "default is a string");
+  refused(R"({"f":{"default":"a\nb"}})", "default is a string");
+  refused(R"({"f":{"default":"x","kind":"bool"}})", "unknown field");
+  refused(R"({"f":{"default":"maybe","values":["yes","no"]}})", "one of its values");
+  refused(R"({"f":{"default":"x","values":[]}})", "1 to 20 strings");
+  refused(R"(["frozen"])", "flags must be an object");
+  std::string many = "{";
+  for (int i = 0; i < 33; ++i) many += std::string(i ? "," : "") + "\"f" + std::to_string(i) + "\":{\"default\":\"\"}";
+  refused(many + "}", "at most 32");
+}

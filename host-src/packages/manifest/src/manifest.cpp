@@ -200,6 +200,52 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
   return true;
 }
 
+// "flags": {"frozen": {"default": "false", "values": ["false", "true"], "about": "..."}}
+// (design/machine/039.Flags.md): switches an operator flips with flag_set, read by the box
+// through goober_flag. A closed set, so a review sees every switch a box has.
+bool parse_flags(const bj::value& flags, Manifest* m, std::string* error) {
+  if (!flags.is_object()) return *error = "flags must be an object: {\"frozen\": {\"default\": \"false\"}}", false;
+  if (flags.as_object().size() > Manifest::kMaxFlags) return *error = "flags: at most 32", false;
+  auto short_string = [](const bj::value& v) {
+    return v.is_string() && v.as_string().size() <= Manifest::kFlagValueMax &&
+           v.as_string().find_first_of("\r\n") == bj::string::npos;
+  };
+  for (const auto& kv : flags.as_object()) {
+    std::string where = "flags." + std::string(kv.key());
+    if (!base::is_valid_name(kv.key())) return *error = where + ": a flag's name matches [a-z][a-z0-9_]*", false;
+    if (!kv.value().is_object()) return *error = where + " must be an object with a default", false;
+    const auto& def = kv.value().as_object();
+    for (const auto& f : def) {
+      if (f.key() != "default" && f.key() != "values" && f.key() != "about") {
+        return *error = where + ": unknown field \"" + std::string(f.key()) + "\" (default, values, about)", false;
+      }
+    }
+    Manifest::Flag flag;
+    flag.name = std::string(kv.key());
+    const auto* d = def.if_contains("default");
+    if (!d || !short_string(*d)) return *error = where + ".default is a string of at most 200 bytes, on one line", false;
+    flag.default_value = std::string(d->as_string());
+    if (const auto* a = def.if_contains("about")) {
+      if (!a->is_string() || a->as_string().size() > 300) return *error = where + ".about is a string of at most 300 bytes", false;
+      flag.about = std::string(a->as_string());
+    }
+    if (const auto* vs = def.if_contains("values")) {
+      if (!vs->is_array() || vs->as_array().empty() || vs->as_array().size() > 20) {
+        return *error = where + ".values is a list of 1 to 20 strings", false;
+      }
+      for (const auto& v : vs->as_array()) {
+        if (!short_string(v)) return *error = where + ".values holds strings of at most 200 bytes, on one line", false;
+        flag.values.emplace_back(v.as_string());
+      }
+      if (std::find(flag.values.begin(), flag.values.end(), flag.default_value) == flag.values.end()) {
+        return *error = where + ".default must be one of its values", false;
+      }
+    }
+    m->flags.push_back(std::move(flag));
+  }
+  return true;
+}
+
 // routes.job.$key (design/machine/038.Ids.md § 7): one-time work, like moving data between
 // databases, that only an operator starts, in batches. No address: only the host calls it.
 bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m, std::string* error) {
@@ -1400,6 +1446,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     std::string key(kv.key());
     if (key == "box" || key == "mission" || key == "domains" || key == "behavior" || key == "routes" ||
         key == "templates" || key == "data" || key == "types" || key == "external" || key == "libraries") {
+      continue;
+    }
+    if (key == "flags") {
+      if (!parse_flags(kv.value(), &m, error)) return std::nullopt;
       continue;
     }
     if (key == "config") return *error = "configs (manifests without a box) are not supported in v1", std::nullopt;
