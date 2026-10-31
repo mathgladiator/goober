@@ -26,6 +26,7 @@
 #include "builder.h"
 #include "flags.h"
 #include "jobs.h"
+#include "route_cache.h"
 #include "grant_usage.h"
 #include "mailer.h"
 #include "network.h"
@@ -292,6 +293,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_web_tools();
   register_source_tools();
   register_job_tools();
+  register_cache_tools();
   register_flag_tools();
   register_perf_tools();
   register_db_admin_tools();
@@ -1450,7 +1452,9 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     perf_->record_call(perf, input.now_ms);
     extra["perf"] = perf.to_json();
   }
-  return BoxCall{std::move(result), std::move(extra), std::move(perf)};
+  int64_t calls_out = 0;
+  for (const auto& [k, n] : net.calls) calls_out += n;
+  return BoxCall{std::move(result), std::move(extra), std::move(perf), calls_out};
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
@@ -1576,7 +1580,24 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   CallOptions options;
   options.read_only = req.method == "get" || req.method == "head";
   options.perf_by_caller = true;
-  auto call = call_box(ref, doc, tenant, request_id, who, options);
+  // A route that declares "cache" (037 § 4) answers from its entry when it is still good; a
+  // miss runs the box and stores what it may.
+  auto cached = cache_lookup(ref, doc, tenant, who, req.method);
+  BoxCall call = cached.hit ? std::move(*cached.hit) : call_box(ref, doc, tenant, request_id, who, options);
+  if (cached.on) {
+    cache_store(cached, route, call);
+    call.extra["cache"] = cached.outcome;
+  }
+  if (cached.hit) {
+    // A hit ran no box: its numbers are this request's alone, not the stored call's.
+    CallPerf fresh;
+    fresh.tenant = tenant;
+    fresh.box = m.box;
+    fresh.route = route.name;
+    fresh.verb = route.verb;
+    call.perf = std::move(fresh);
+  }
+  call.perf.cache = cached.on ? cached.outcome : "";
   int64_t render_us = 0;  // templates and partials, timed where they run below
   auto& result = call.result;
   auto& extra = call.extra;
@@ -1716,6 +1737,14 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // never hand one caller's representation to another. One Vary header, the box's own names
   // kept (case-insensitive, no repeats).
   merge_vary(res.headers, !ref.route->template_name.empty() ? std::vector<std::string>{"accept"} : std::vector<std::string>{});
+  if (cached.on && !res.host_error && (res.status == 200 || res.status == 204 || res.status == 304)) {
+    cache_headers(route, who, res);
+    if (res.status == 304 && cached.outcome == "hit") {
+      route_cache_->count(tenant, m.box, route.name, "304");
+      extra["cache"] = "304";
+      extra_text = json::dump(extra);
+    }
+  }
   // The call's numbers, completed with what only the route knows (037 § 7.1).
   {
     auto& p = call.perf;
@@ -1725,6 +1754,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     p.status = res.status;
     p.failed = p.failed || res.status >= 500;
     p.total_us = base::monotonic_us() - served_us;
+    if (auto c = extra.if_contains("cache"); c && c->is_string()) p.cache = std::string(c->as_string());
     perf_->record_call(p, base::now_unix_ms());
     extra["perf"] = p.to_json();
     extra_text = json::dump(extra);

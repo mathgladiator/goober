@@ -503,6 +503,13 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Database versions; the route `cache` field with checks; 304s without the box;
       `cache_status`, `cache_clear` (waiting on 037 § 9's decisions).
 
+- [ ] Per-call time split and per-statement statistics; `perf_report`, `perf_statements`.
+- [x] Database versions (moved by the host's commits; PRAGMA data_version for outside
+      writes); the route `cache` field (by data or wake, fresh-ms, browser-ms, sampled checks),
+      validated at upload; entries keyed by the signature under the host's budget; 304s
+      without the box; `cache_status`, `cache_clear`; tests (037 § 3 to § 5, 2026-10-31).
+- [ ] A subscribe route's GET served from its group's answer (037 § 6).
+
 ### Phase 30: source in the panel, and its history in the bucket (020 § 9 to § 12)
 - [x] Builds and deploys kept with their logs; deploys and the box versions each uploaded;
       `source_tree`, `source_box_history`, `source_job` by project; `version_list` names a

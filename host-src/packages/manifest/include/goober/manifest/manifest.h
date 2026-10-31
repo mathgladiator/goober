@@ -72,6 +72,16 @@ struct HttpRoute {
   bool mail_automatic = false;
   // An internal route (039) is reachable only from the boxes it names.
   std::vector<std::string> callers;
+  // A GET route's cache (design/machine/037.Caching.md § 4): off unless the route declares it,
+  // the engineer's promise that the answer depends only on the signature and the data.
+  struct Cache {
+    bool on = false;
+    std::string by = "data";        // "data": stale when a database it read changes; "wake": when a topic moves
+    std::vector<std::string> wake;  // with by "wake": 1 to 8 topic templates (036 § 2)
+    int64_t fresh_ms = 60000;       // the longest an entry is used, whatever happens
+    int64_t browser_ms = 0;         // what browsers and proxies may keep: 0 is no-cache with the ETag
+    int64_t check_percent = 1;      // the share of hits that also run the box and compare the bytes
+  } cache;
   std::string export_name() const { return "goober_route_" + name; }
 };
 

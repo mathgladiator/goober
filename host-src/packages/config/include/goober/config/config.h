@@ -114,6 +114,9 @@ struct HostConfig {
   // The operations audit's checks the human asked not to be suggested again (audit.quiet),
   // like "panel": `goober-host audit` notes them as quiet instead.
   std::vector<std::string> audit_quiet;
+  // Route caching (design/machine/037.Caching.md § 4.2): the host's memory for cached answers,
+  // at most a quarter of it per tenant. "cache": {"bytes": 268435456}; 0 turns caching off.
+  int64_t cache_bytes = int64_t(256) << 20;
   IdentityConfig identity;
   // Set by --local, never by the file: see local_mode().
   bool local = false;

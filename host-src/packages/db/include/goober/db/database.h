@@ -21,6 +21,20 @@ namespace goober::db {
 class Databases {
  public:
   explicit Databases(std::filesystem::path storage_root) : root_(std::move(storage_root)) {}
+  ~Databases();
+  Databases(const Databases&) = delete;
+  Databases& operator=(const Databases&) = delete;
+
+  // Versions (design/machine/037.Caching.md § 3), by database file. A number in memory,
+  // seeded with the time in microseconds the first time it is asked for (so it never goes
+  // backwards across a restart), and moved on every commit the host makes to the file: a
+  // request that wrote, an operator's db_exec, a schema applied, a drop.
+  int64_t version(const std::filesystem::path& file) const;
+  void bump(const std::filesystem::path& file) const;
+  // PRAGMA data_version on a connection the host keeps open on the file: it moves when any
+  // connection, the host's or a shell's, commits a change. nullopt when the file doesn't exist
+  // (or can't be opened). At most 512 files are watched; the least recently asked closes first.
+  std::optional<int64_t> data_version(const std::filesystem::path& file) const;
   // Where stamped keys come from: the host's id service (038 § 2). Set before the first open;
   // without it, an insert into a table keyed by id fails.
   void set_id_source(std::function<int64_t()> ids) { ids_ = std::move(ids); }
@@ -68,6 +82,14 @@ class Databases {
  private:
   std::filesystem::path root_;
   std::function<int64_t()> ids_;
+  struct Watcher {
+    sqlite3* db = nullptr;  // closed by the destructor, or when it is dropped from watchers_
+    int64_t used = 0;
+  };
+  mutable std::mutex versions_mu_;
+  mutable std::map<std::string, int64_t> versions_;
+  mutable std::map<std::string, Watcher> watchers_;
+  mutable int64_t watcher_clock_ = 0;
   mutable std::mutex mu_;
   std::set<std::string> applied_;  // "$file|$schema", applied in this process
 };

@@ -508,7 +508,7 @@ void Host::register_perf_tools() {
        "render_us templates, bytes_out), refused writes (a GET that tried to write), the cache's answers, subscription "
        "evaluations, and its three costliest statements. Then findings, each with its evidence: cacheable (a GET whose "
        "databases rarely change), missing_index (a statement that scans, with the index to add), lock_wait, get_writes, "
-       "subscription_churn, cache_mismatch. Counted since the host started, an hour at most. perf_statements lists "
+       "subscription_churn, cache_mismatch, browser_cache (a route whose answers browsers may keep). Counted since the host started, an hour at most. perf_statements lists "
        "every statement.",
        mcp::object_schema({{"tenant", tenant_prop},
                            {"box", box_prop},
@@ -519,7 +519,22 @@ void Host::register_perf_tools() {
            const auto* v = args.if_contains(k);
            return v && v->is_string() ? std::string(v->as_string()) : std::string();
          };
-         return ToolResult::ok(perf_->report(text("tenant"), text("box"), window_ms(text("window")), base::now_unix_ms()));
+         auto out = perf_->report(text("tenant"), text("box"), window_ms(text("window")), base::now_unix_ms());
+         // Routes that let browsers keep answers (037 § 9.4): the one staleness the host can't
+         // take back once sent, so every such route is listed, whatever its numbers.
+         auto& findings = out["findings"].as_array();
+         for (const auto& [name, box] : boxes_->active()->boxes) {
+           if (!text("box").empty() && name != text("box")) continue;
+           for (const auto& r : box->manifest.routes) {
+             if (!r.cache.on || r.cache.browser_ms <= 0) continue;
+             findings.push_back(bj::object{
+                 {"kind", "browser_cache"}, {"box", name}, {"route", r.name}, {"browser_ms", r.cache.browser_ms},
+                 {"text", "browsers and proxies may keep this route's answers for " + std::to_string(r.cache.browser_ms / 1000) +
+                              " s after any change; the host can't take them back. Use browser-ms 0 (they always ask, "
+                              "and a 304 is cheap) unless being stale that long is fine"}});
+           }
+         }
+         return ToolResult::ok(std::move(out));
        }});
   mcp_->add_tool(
       {"perf_statements",
