@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,9 @@ struct Column {
   std::string sql() const;
   // A stable description, for comparing what a schema declared with what is there.
   std::string signature() const;
+  // What an older box reads once the column is dropped (041 § 5), as a SQL literal: its
+  // default, or NULL when nullable, or else 0, '' or false.
+  std::string dropped_value_sql() const;
 };
 
 struct Index {
@@ -44,6 +48,9 @@ struct Table {
 
 struct Schema {
   std::string name;
+  // The version this one replaces (design/machine/041.SchemaEvolution.md § 2): its tables replace
+  // that schema's tables, so what they leave out is dropped. Empty: partial and expand only (008 § 3).
+  std::string follows;
   std::vector<Table> tables;
   std::string text;  // the JSON it was parsed from
   // What a person should change, though the schema is accepted: keys and references that
@@ -53,6 +60,29 @@ struct Schema {
   // The table's primary key when the host stamps it (type id), or nullptr.
   static const Column* stamped_key(const Table& t);
 };
+
+// One change between a schema and the one it follows (041 § 3).
+struct Change {
+  std::string kind;  // expansion, contraction, indexing, emulated, forced, or refused
+  std::string table, column, index;  // column and index empty when the change is the table's
+  std::string says;  // the sentence a person reads
+};
+
+// What a schema's step from the version it follows does (041 § 3).
+struct Step {
+  std::string from, to;
+  std::vector<Change> changes;
+  std::vector<std::string> consequences;  // 420's warnings that apply, in its words
+  std::set<std::string> forced_tables;    // tables only an upgrade box can carry over
+  bool contracts() const;
+  bool refused() const;
+  // A contraction or a forced change: a person approves the schema in the panel first (041 § 6).
+  bool needs_person() const { return contracts() || !forced_tables.empty(); }
+  bj::object to_json() const;
+};
+
+// Compares `to` with `from`, the schema it follows, table by table.
+Step plan_step(const Schema& from, const Schema& to);
 
 // Names of tables, columns, indexes, and schemas: [a-z][a-z0-9_]*, at most 63, and not
 // goober_ or sqlite_.
@@ -77,6 +107,16 @@ class SchemaStore {
   bool retire(std::string_view name, const std::string& record, std::string* error);
   // The retirement record, or nullopt while the schema is in service.
   std::optional<std::string> retired(std::string_view name) const;
+  // The step from the schema `s` follows to `s`, or nullopt when it follows none (or what it
+  // follows isn't stored).
+  std::optional<Step> step(const Schema& s) const;
+  // The stored schema that follows `name`, if any.
+  std::optional<std::string> follower(std::string_view name) const;
+  // A person's approval of a held schema (041 § 6), kept as $name.approved: JSON saying who and why.
+  bool approve(std::string_view name, const std::string& record, std::string* error);
+  std::optional<std::string> approval(std::string_view name) const;
+  // Stored, its step drops or rewrites data, and no person has approved it yet.
+  bool held(std::string_view name) const;
 
  private:
   wal::HostWal& wal_;

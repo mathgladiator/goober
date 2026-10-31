@@ -589,3 +589,390 @@ TEST_F(DbTest, BoxSqlHasNoClock) {
   ASSERT_TRUE(op) << err;
   EXPECT_EQ(op->at("rows").at(0).at(0), 1);
 }
+
+// Schema evolution (design/machine/041.SchemaEvolution.md): a schema that follows another.
+
+namespace {
+
+// Runs one statement through its own session and commits it; the result's JSON.
+boost::json::value run_one(db::Databases& dbs, const db::SchemaStore& schemas,
+                           const std::vector<manifest::DataStrategy>& strategies, const std::string& sql,
+                           const std::string& params = "") {
+  db::Session s(dbs, "playground", strategies, schemas);
+  auto r = J(s.run("book", sql, params));
+  std::string err;
+  if (!r.as_object().contains("error")) {
+    EXPECT_TRUE(s.commit(&err)) << err;
+  }
+  return r;
+}
+
+manifest::TableGrant all_grant() {
+  manifest::TableGrant g;
+  g.read_all = g.insert = g.update_all = g.remove = true;
+  return g;
+}
+
+std::string kinds(const db::Step& step) {
+  std::string out;
+  for (const auto& c : step.changes) {
+    out += (out.empty() ? "" : " ") + c.kind + ":" + c.table + (c.column.empty() ? "" : "." + c.column) +
+           (c.index.empty() ? "" : "#" + c.index);
+  }
+  return out;
+}
+
+bool has(const boost::json::value& r, const char* words) {
+  const auto* e = r.as_object().if_contains("error");
+  return e && std::string(e->as_string()).find(words) != std::string::npos;
+}
+
+}  // namespace
+
+TEST(Schema, StepsClassifyEveryChange) {
+  std::string err;
+  auto from = db::parse_schema(R"({"schema": "core1", "tables": {
+      "users": {"columns": {"id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 20},
+                            "age": {"type": "int32"}, "score": {"type": "float"}, "bio": {"type": "string", "nullable": true},
+                            "flag": {"type": "boolean", "default": false}},
+                "indexes": {"users_by_age": {"columns": ["age"]}, "users_by_score": {"columns": ["score"]}}},
+      "logs": {"columns": {"text": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(from) << err;
+  auto to = db::parse_schema(R"({"schema": "core2", "follows": "core1", "tables": {
+      "users": {"columns": {"id": {"type": "id", "primary-key": true}, "name": {"type": "string"},
+                            "age": {"type": "int64"}, "score": {"type": "double", "nullable": true},
+                            "flag": {"type": "boolean", "default": true}, "nick": {"type": "string", "nullable": true},
+                            "born": {"type": "int64"}},
+                "indexes": {"users_by_age": {"columns": ["age", "name"]}, "users_by_name": {"columns": ["name"], "unique": true}}},
+      "events": {"columns": {"kind": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(to) << err;
+  EXPECT_EQ(to->follows, "core1");
+  auto step = db::plan_step(*from, *to);
+  EXPECT_EQ(kinds(step),
+            "contraction:logs "
+            "emulated:users.name emulated:users.age emulated:users.score emulated:users.score contraction:users.bio "
+            "forced:users.flag expansion:users.nick forced:users.born "
+            "indexing:users#users_by_score indexing:users#users_by_age forced:users#users_by_name expansion:events");
+  EXPECT_FALSE(step.refused());
+  EXPECT_TRUE(step.contracts());
+  EXPECT_TRUE(step.needs_person());
+  EXPECT_EQ(step.forced_tables, (std::set<std::string>{"users"}));
+  std::string all;
+  for (const auto& c : step.consequences) all += c + "\n";
+  for (const char* words : {"Data will be dropped: every row of logs", "Data will be dropped: every value of users.bio",
+                            "Reads will be invented: older boxes reading users.bio see null", "Values will be invented",
+                            "Values may not fit", "Rows will be rewritten: every row of users", "If users.nick renames users.bio"}) {
+    EXPECT_NE(all.find(words), std::string::npos) << words << "\n" << all;
+  }
+  // A unique rule on an existing table is forced.
+  auto grow = db::parse_schema(R"({"schema": "core2", "follows": "core1", "tables": {
+      "users": {"columns": {"id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 20},
+                            "age": {"type": "int32"}, "score": {"type": "float"}, "bio": {"type": "string", "nullable": true},
+                            "flag": {"type": "boolean", "default": false}, "nick": {"type": "string", "default": "x"}},
+                "indexes": {"users_by_age": {"columns": ["age"]}}},
+      "logs": {"columns": {"text": {"type": "string"}}, "indexes": {"logs_by_text": {"columns": ["text"], "unique": true}}}}})", &err);
+  ASSERT_TRUE(grow) << err;
+  EXPECT_EQ(kinds(db::plan_step(*from, *grow)), "expansion:users.nick indexing:users#users_by_score forced:logs#logs_by_text");
+  // Without it, nothing needs a person.
+  auto plain = db::parse_schema(R"({"schema": "core2", "follows": "core1", "tables": {
+      "users": {"columns": {"id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 20},
+                            "age": {"type": "int32"}, "score": {"type": "float"}, "bio": {"type": "string", "nullable": true},
+                            "flag": {"type": "boolean", "default": false}}},
+      "logs": {"columns": {"text": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(plain) << err;
+  auto p = db::plan_step(*from, *plain);
+  EXPECT_FALSE(p.needs_person()) << kinds(p);
+  // Keys never change, not even forced.
+  auto rekey = db::parse_schema(R"({"schema": "core2", "follows": "core1", "tables": {
+      "users": {"columns": {"uid": {"type": "id", "primary-key": true}}}}})", &err);
+  ASSERT_TRUE(rekey) << err;
+  EXPECT_TRUE(db::plan_step(*from, *rekey).refused());
+  auto bad = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(db::parse_schema(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  bad(R"({"schema": "core2", "follows": "core2", "tables": {"t": {"columns": {"x": {"type": "string"}}}}})", "follows");
+  bad(R"({"schema": "core2", "follows": 3, "tables": {"t": {"columns": {"x": {"type": "string"}}}}})", "follows");
+}
+
+TEST_F(DbTest, FollowsIsALineOfStoredVersions) {
+  std::string err;
+  EXPECT_FALSE(schemas->put(R"({"schema": "guestbook2", "follows": "nope1", "tables": {"entries": {"columns": {
+      "name": {"type": "string"}}}}})", &err));
+  EXPECT_NE(err.find("isn't stored"), std::string::npos) << err;
+  // A key change is refused at the API.
+  EXPECT_FALSE(schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 20}}}}})", &err));
+  EXPECT_NE(err.find("refused"), std::string::npos) << err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "message": {"type": "string"}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}, "mood": {"type": "string", "nullable": true}}}}})", &err)) << err;
+  EXPECT_EQ(*schemas->follower("guestbook1"), "guestbook2");
+  EXPECT_FALSE(schemas->held("guestbook2"));  // an expansion and an index dropped: no person needed
+  // A second version after guestbook1 is refused: versions form one line.
+  EXPECT_FALSE(schemas->put(R"({"schema": "guestbook2b", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}}}}})", &err));
+  EXPECT_NE(err.find("already followed by guestbook2"), std::string::npos) << err;
+  EXPECT_FALSE(schemas->approve("guestbook2", "{}", &err));
+  EXPECT_NE(err.find("needs no approval"), std::string::npos) << err;
+}
+
+// Expansions and indexing apply as soon as a box binds the new version; the old box keeps working.
+TEST_F(DbTest, ExpansionsAndIndexingApplyAtOnce) {
+  dbs->set_schema_store(schemas.get());
+  std::vector<manifest::DataStrategy> v1{strategy(all_grant())};
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "INSERT INTO entries (name, message, created_ms) VALUES ('Ada', 'hi', 1)")
+                   .as_object().contains("error"));
+  std::string err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "message": {"type": "string"}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}, "mood": {"type": "string", "default": "calm"}},
+      "indexes": {"entries_by_mood": {"columns": ["mood"]}}}}})", &err)) << err;
+  int snapshots = 0;
+  dbs->set_before_change([&](const std::string&, const std::string&, const std::string&, std::string*) { return ++snapshots, true; });
+  std::vector<manifest::DataStrategy> v2{strategy(all_grant(), "guestbook2")};
+  auto r = run_one(*dbs, *schemas, v2, "SELECT name, mood FROM entries");
+  ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+  EXPECT_EQ(json::dump(r.at("rows")), R"([["Ada","calm"]])");
+  EXPECT_EQ(snapshots, 0);  // nothing dropped or rewritten
+  // The old box's insert fills the new column from its default.
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "INSERT INTO entries (name, message, created_ms) VALUES ('Bob', 'yo', 2)")
+                   .as_object().contains("error"));
+  EXPECT_EQ(json::dump(run_one(*dbs, *schemas, v2, "SELECT mood FROM entries WHERE name = 'Bob'").at("rows")), R"([["calm"]])");
+  std::string text = json::dump(dbs->describe("playground", "guestbook"));
+  EXPECT_NE(text.find("entries_by_mood"), std::string::npos);
+  EXPECT_EQ(text.find("entries_by_created"), std::string::npos) << text;  // dropped with guestbook2
+}
+
+// A contraction waits for a person; then the column's data goes, older boxes read its default,
+// their writes to it are dropped, and newer boxes insert without naming it. A snapshot comes first.
+TEST_F(DbTest, ContractionsWaitForAPersonThenKeepTombstones) {
+  dbs->set_schema_store(schemas.get());
+  std::vector<std::string> notes;
+  dbs->set_before_change([&](const std::string& t, const std::string& d, const std::string& note, std::string*) {
+    notes.push_back(t + "/" + d + ": " + note);
+    return true;
+  });
+  std::vector<manifest::DataStrategy> v1{strategy(all_grant())};
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "INSERT INTO entries (name, message, created_ms) VALUES ('Ada', 'secret', 1)")
+                   .as_object().contains("error"));
+  std::string err;
+  auto v2s = schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}}},
+      "replies": {"columns": {"text": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(v2s) << err;
+  EXPECT_TRUE(schemas->held("guestbook2"));
+  std::vector<manifest::DataStrategy> v2{strategy(all_grant(), "guestbook2")};
+  v2[0].tables["replies"] = all_grant();
+  auto waiting = run_one(*dbs, *schemas, v2, "SELECT name FROM entries");
+  EXPECT_TRUE(has(waiting, "waits for a person")) << json::dump(waiting);
+  EXPECT_FALSE(dbs->check("playground", "guestbook", *v2s, &err));
+  // What it would drop, before anyone approves.
+  auto impact = dbs->step_impact("playground", "guestbook", *schemas->step(*v2s), *schemas->get("guestbook1"));
+  EXPECT_EQ(json::dump(impact.at("drops")), R"([{"table":"entries","column":"message","rows":1}])");
+  ASSERT_TRUE(schemas->approve("guestbook2", R"({"by":"a person"})", &err)) << err;
+  EXPECT_FALSE(schemas->held("guestbook2"));
+  EXPECT_TRUE(dbs->check("playground", "guestbook", *v2s, &err)) << err;
+  auto r = run_one(*dbs, *schemas, v2, "SELECT name FROM entries");
+  ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+  ASSERT_EQ(notes.size(), 1u);
+  EXPECT_EQ(notes[0], "playground/guestbook: before schema guestbook2");
+  // The data is gone; the old box reads its default (none declared, so '').
+  EXPECT_EQ(json::dump(run_one(*dbs, *schemas, v1, "SELECT name, message FROM entries").at("rows")), R"([["Ada",""]])");
+  // The old box's writes to it are dropped, on insert and on update.
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "INSERT INTO entries (name, message, created_ms) VALUES ('Bob', 'kept?', 2)")
+                   .as_object().contains("error"));
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "UPDATE entries SET message = 'again'").as_object().contains("error"));
+  EXPECT_EQ(json::dump(run_one(*dbs, *schemas, v1, "SELECT message FROM entries ORDER BY id").at("rows")), R"([[""],[""]])");
+  // The new box inserts without naming it.
+  auto ins = run_one(*dbs, *schemas, v2, "INSERT INTO entries (name, created_ms) VALUES ('Cy', 3)");
+  ASSERT_FALSE(ins.as_object().contains("error")) << json::dump(ins);
+  EXPECT_EQ(run_one(*dbs, *schemas, v2, "INSERT INTO replies (text) VALUES ('hey')").at("changes"), 1);
+  auto d = json::dump(dbs->describe("playground", "guestbook"));
+  EXPECT_NE(d.find(R"({"table":"entries","schema":"guestbook2")"), std::string::npos) << d;
+  EXPECT_NE(d.find(R"("column":"message")"), std::string::npos) << d;
+
+  // guestbook3 drops the replies table: emptied, and later inserts vanish.
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook3", "follows": "guestbook2", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}}}}})", &err)) << err;
+  ASSERT_TRUE(schemas->approve("guestbook3", "{}", &err)) << err;
+  std::vector<manifest::DataStrategy> v3{strategy(all_grant(), "guestbook3")};
+  ASSERT_FALSE(run_one(*dbs, *schemas, v3, "SELECT 1").as_object().contains("error"));
+  EXPECT_EQ(notes.size(), 2u);
+  EXPECT_EQ(run_one(*dbs, *schemas, v2, "SELECT count(*) FROM replies").at("rows").at(0).at(0), 0);
+  ASSERT_FALSE(run_one(*dbs, *schemas, v2, "INSERT INTO replies (text) VALUES ('gone')").as_object().contains("error"));
+  EXPECT_EQ(run_one(*dbs, *schemas, v2, "SELECT count(*) FROM replies").at("rows").at(0).at(0), 0);
+
+  // A dropped name is never used again, in a later version or in a partial schema.
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook4", "follows": "guestbook3", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}, "message": {"type": "string", "nullable": true}}}}})", &err)) << err;
+  EXPECT_FALSE(dbs->check("playground", "guestbook", *schemas->get("guestbook4"), &err));
+  EXPECT_NE(err.find("never used again"), std::string::npos) << err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "other1", "tables": {"replies": {"columns": {"text": {"type": "string"}}}}})", &err));
+  EXPECT_FALSE(dbs->check("playground", "guestbook", *schemas->get("other1"), &err));
+  EXPECT_NE(err.find("never used again"), std::string::npos) << err;
+  // A person's drop of the tombstoned table frees its name.
+  ASSERT_TRUE(dbs->drop_table("playground", "guestbook", "replies", &err)) << err;
+  EXPECT_TRUE(dbs->check("playground", "guestbook", *schemas->get("other1"), &err)) << err;
+}
+
+// Emulated changes rebuild the table: wider ints, nulls allowed, a longer max-length; the host's
+// id triggers and the indexes survive the rebuild. No approval is needed; a snapshot comes first.
+TEST_F(DbTest, EmulatedChangesRebuildTheTable) {
+  int64_t next = (int64_t(1) << 32) + 1;
+  dbs->set_id_source([&] { return next++; });
+  dbs->set_schema_store(schemas.get());
+  int snapshots = 0;
+  dbs->set_before_change([&](const std::string&, const std::string&, const std::string&, std::string*) { return ++snapshots, true; });
+  std::string err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "items1", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 5},
+      "count": {"type": "int32"}, "price": {"type": "float"}},
+      "indexes": {"items_by_name": {"columns": ["name"], "unique": true}}}}})", &err)) << err;
+  auto items = [](const std::string& schema) {
+    auto s = strategy(all_grant(), schema);
+    s.tables.clear();
+    s.tables["items"] = all_grant();
+    s.database = "items";
+    return std::vector<manifest::DataStrategy>{s};
+  };
+  auto v1 = items("items1"), v2 = items("items2");
+  ASSERT_FALSE(run_one(*dbs, *schemas, v1, "INSERT INTO items (name, count, price) VALUES ('nut', 3, 1.5)").as_object().contains("error"));
+  ASSERT_TRUE(schemas->put(R"({"schema": "items2", "follows": "items1", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "name": {"type": "string", "max-length": 50, "nullable": true},
+      "count": {"type": "int64"}, "price": {"type": "double"}},
+      "indexes": {"items_by_name": {"columns": ["name"], "unique": true}}}}})", &err)) << err;
+  EXPECT_FALSE(schemas->held("items2"));
+  auto big = run_one(*dbs, *schemas, v2, "INSERT INTO items (name, count, price) VALUES (NULL, 9000000000, 2.25)");
+  ASSERT_FALSE(big.as_object().contains("error")) << json::dump(big);
+  EXPECT_EQ(snapshots, 1);
+  auto longer = run_one(*dbs, *schemas, v2, "INSERT INTO items (name, count, price) VALUES ('a longer name', 1, 1)");
+  ASSERT_FALSE(longer.as_object().contains("error")) << json::dump(longer);
+  // The rows survived, with their ids; the unique index and the id triggers too.
+  auto rows = run_one(*dbs, *schemas, v2, "SELECT id, name, count FROM items ORDER BY id");
+  EXPECT_EQ(json::dump(rows.at("rows")),
+            R"([["4294967297","nut",3],["4294967298",null,9000000000],["4294967299","a longer name",1]])");
+  EXPECT_TRUE(has(run_one(*dbs, *schemas, v2, "INSERT INTO items (name, count, price) VALUES ('nut', 1, 1)"), "UNIQUE"));
+  EXPECT_TRUE(has(run_one(*dbs, *schemas, v2, "INSERT INTO items (id, name, count, price) VALUES (7, 'x', 1, 1)"),
+                  "never chooses a primary key"));
+  // The old box keeps working against the new shape.
+  EXPECT_FALSE(run_one(*dbs, *schemas, v1, "SELECT name, count FROM items").as_object().contains("error"));
+}
+
+// A forced change waits for an upgrade: a database with rows refuses the new version until its
+// rows pass through a handler; failing rows are reported and nothing changes; a fresh database
+// applies the step with no rows to carry. Another schema declaring the table blocks a change.
+TEST_F(DbTest, ForcedStepsWaitForTheirUpgrade) {
+  dbs->set_schema_store(schemas.get());
+  int snapshots = 0;
+  dbs->set_before_change([&](const std::string&, const std::string&, const std::string&, std::string*) { return ++snapshots, true; });
+  std::vector<manifest::DataStrategy> v1{strategy(all_grant())};
+  for (const char* sql : {"INSERT INTO entries (name, message, created_ms) VALUES ('Ada Lovelace', 'hi', 1)",
+                          "INSERT INTO entries (name, message, created_ms) VALUES ('Grace Hopper', 'yo', 2)"}) {
+    ASSERT_FALSE(run_one(*dbs, *schemas, v1, sql).as_object().contains("error"));
+  }
+  std::string err;
+  // name splits into first and last: new columns with no default are forced, and name is dropped.
+  auto v2s = schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "first": {"type": "string"}, "last": {"type": "string"}, "message": {"type": "string"},
+      "created_ms": {"type": "int64"}, "approved": {"type": "boolean", "default": false}}}}})", &err);
+  ASSERT_TRUE(v2s) << err;
+  EXPECT_EQ(schemas->step(*v2s)->forced_tables, (std::set<std::string>{"entries"}));
+  ASSERT_TRUE(schemas->approve("guestbook2", "{}", &err)) << err;
+  std::vector<manifest::DataStrategy> v2{strategy(all_grant(), "guestbook2")};
+  auto waiting = run_one(*dbs, *schemas, v2, "SELECT first FROM entries");
+  EXPECT_TRUE(has(waiting, "waits for its upgrade")) << json::dump(waiting);
+  // An upload's check lets it through: the box is stored, and waits.
+  EXPECT_TRUE(dbs->check("playground", "guestbook", *v2s, &err)) << err;
+
+  auto split = [](bool spare_grace) {
+    return [spare_grace](const boost::json::object& row, std::string* why) -> std::optional<boost::json::object> {
+      std::string name(row.at("name").as_string());
+      if (spare_grace && name.starts_with("Grace")) return *why = "Grace stays as she is", std::nullopt;
+      auto space = name.find(' ');
+      return boost::json::object{{"id", row.at("id")}, {"first", name.substr(0, space)}, {"last", name.substr(space + 1)},
+                                 {"message", row.at("message")}, {"created_ms", row.at("created_ms")},
+                                 {"approved", row.at("approved")}};
+    };
+  };
+  db::UpgradeReport report;
+  EXPECT_FALSE(dbs->upgrade("playground", "guestbook", *v2s, {{"entries", split(true)}}, true, &report, &err));
+  EXPECT_NE(err.find("1 row of entries"), std::string::npos) << err;
+  EXPECT_EQ(report.rows, 2);
+  EXPECT_EQ(json::dump(report.failures), R"([{"table":"entries","key":"2","error":"Grace stays as she is"}])");
+  EXPECT_EQ(json::dump(run_one(*dbs, *schemas, v1, "SELECT name FROM entries ORDER BY id").at("rows")),
+            R"([["Ada Lovelace"],["Grace Hopper"]])");
+  // A handler that changes the key, or breaks the new shape, fails too.
+  auto rekey = [](const boost::json::object& row, std::string*) -> std::optional<boost::json::object> {
+    return boost::json::object{{"id", 99}, {"first", "x"}, {"last", "y"}, {"message", row.at("message")}, {"created_ms", 1}};
+  };
+  EXPECT_FALSE(dbs->upgrade("playground", "guestbook", *v2s, {{"entries", rekey}}, false, nullptr, &err));
+  EXPECT_NE(err.find("changed the primary key"), std::string::npos) << err;
+  auto unfilled = [](const boost::json::object& row, std::string*) -> std::optional<boost::json::object> {
+    return boost::json::object{{"id", row.at("id")}, {"first", "x"}};
+  };
+  EXPECT_FALSE(dbs->upgrade("playground", "guestbook", *v2s, {{"entries", unfilled}}, false, nullptr, &err));
+  EXPECT_NE(err.find("NOT NULL"), std::string::npos) << err;
+
+  int before = snapshots;
+  report = {};
+  ASSERT_TRUE(dbs->upgrade("playground", "guestbook", *v2s, {{"entries", split(false)}}, false, &report, &err)) << err;
+  EXPECT_EQ(report.rows, 2);
+  EXPECT_EQ(snapshots, before + 1);
+  EXPECT_EQ(json::dump(run_one(*dbs, *schemas, v2, "SELECT first, last FROM entries ORDER BY id").at("rows")),
+            R"([["Ada","Lovelace"],["Grace","Hopper"]])");
+  auto d = json::dump(dbs->describe("playground", "guestbook"));
+  EXPECT_NE(d.find(R"("column":"name")"), std::string::npos) << d;  // gone, and never used again
+
+  // A fresh database has no rows to carry: the step applies on open.
+  std::vector<manifest::DataStrategy> fresh{strategy(all_grant(), "guestbook2")};
+  fresh[0].database = "fresh";
+  auto r = run_one(*dbs, *schemas, fresh, "INSERT INTO entries (first, last, message, created_ms) VALUES ('a', 'b', 'c', 1)");
+  ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+
+  // A schema outside the line that declares a column blocks changing it.
+  ASSERT_TRUE(schemas->put(R"({"schema": "notes1", "tables": {"notes": {"columns": {"text": {"type": "string"}}}}})", &err));
+  ASSERT_TRUE(schemas->put(R"({"schema": "notes2", "follows": "notes1", "tables": {"notes": {"columns": {
+      "text": {"type": "string", "nullable": true}}}}})", &err)) << err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "side1", "tables": {"notes": {"columns": {"text": {"type": "string"}}}}})", &err));
+  auto notes = [](const std::string& schema) {
+    auto s = strategy(all_grant(), schema);
+    s.tables.clear();
+    s.tables["notes"] = all_grant();
+    s.database = "notes";
+    return std::vector<manifest::DataStrategy>{s};
+  };
+  ASSERT_FALSE(run_one(*dbs, *schemas, notes("notes1"), "SELECT 1").as_object().contains("error"));
+  ASSERT_FALSE(run_one(*dbs, *schemas, notes("side1"), "SELECT 1").as_object().contains("error"));
+  auto blocked = run_one(*dbs, *schemas, notes("notes2"), "SELECT 1");
+  EXPECT_TRUE(has(blocked, "also declared by schema side1")) << json::dump(blocked);
+}
+
+// A database that never held the old versions goes through every step in order, and the
+// schemas fit together when boxes on different versions share a database.
+TEST_F(DbTest, AFreshDatabaseTakesEveryStep) {
+  dbs->set_schema_store(schemas.get());
+  std::string err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook2", "follows": "guestbook1", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}}}}})", &err)) << err;
+  ASSERT_TRUE(schemas->approve("guestbook2", "{}", &err)) << err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "guestbook3", "follows": "guestbook2", "tables": {"entries": {"columns": {
+      "name": {"type": "string", "max-length": 20}, "created_ms": {"type": "int64"},
+      "approved": {"type": "boolean", "default": false}, "stars": {"type": "int32", "default": 0}}}}})", &err)) << err;
+  int snapshots = 0;
+  dbs->set_before_change([&](const std::string&, const std::string&, const std::string&, std::string*) { return ++snapshots, true; });
+  std::vector<manifest::DataStrategy> v3{strategy(all_grant(), "guestbook3")};
+  ASSERT_FALSE(run_one(*dbs, *schemas, v3, "INSERT INTO entries (name, created_ms) VALUES ('a', 1)").as_object().contains("error"));
+  EXPECT_EQ(snapshots, 0);  // a new database: nothing to keep
+  EXPECT_EQ(dbs->applied_schemas("playground", "guestbook"), (std::vector<std::string>{"guestbook1", "guestbook2", "guestbook3"}));
+  // Boxes on guestbook1 and guestbook3 share a database: their schemas fit, in either order.
+  auto g1 = schemas->get("guestbook1"), g3 = schemas->get("guestbook3");
+  EXPECT_TRUE(db::Databases::compatible({&*g3, &*g1}, &err, schemas.get())) << err;
+  EXPECT_TRUE(db::Databases::compatible({&*g1, &*g3}, &err, schemas.get())) << err;
+  EXPECT_FALSE(db::Databases::compatible({&*g3}, &err));  // no store: what it follows can't be found
+}

@@ -313,7 +313,7 @@ void Host::register_db_admin_tools() {
          std::vector<const db::Schema*> ptrs;
          for (const auto& s : found) ptrs.push_back(&s);
          std::string err;
-         if (!db::Databases::compatible(ptrs, &err)) return ToolResult::fail(err);
+         if (!db::Databases::compatible(ptrs, &err, schemas_.get())) return ToolResult::fail(err);
          for (const auto& s : found) {
            if (!databases_->ensure_schema(tenant, database, s, &err)) {
              std::error_code ec;
@@ -326,8 +326,10 @@ void Host::register_db_admin_tools() {
   mcp_->add_tool(
       {"db_unbound",
        "Read tool. A tenant's databases and tables that no box binds (active or disabled), and stored schemas no box names: what a "
-       "person might drop or retire in the panel. Dropping is a person's act, never a tool's: an agent can only point "
-       "at these.",
+       "person might drop or retire in the panel; and held_schemas: stored schemas whose step drops or rewrites data, "
+       "waiting for a person to approve them in the panel, each with its step and what it would do to each database "
+       "(design/machine/041.SchemaEvolution.md § 6). Dropping and approving are a person's acts, never a tool's: an "
+       "agent can only point at these.",
        object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this](const bj::object& args) {
          std::string tenant = text_arg(args, "tenant");
          bj::array dbs;
@@ -364,11 +366,21 @@ void Host::register_db_admin_tools() {
              if (!d.schema.empty()) named.insert(d.schema);
            }
          }
-         bj::array schemas;
+         bj::array schemas, held;
          for (const auto& s : schemas_->list()) {
            if (!named.count(s) && !schemas_->retired(s)) schemas.push_back(bj::value(s));
+           // Waiting for a person (041 § 6): the step they would approve.
+           if (schemas_->held(s)) {
+             if (auto schema = schemas_->get(s)) {
+               auto report = schema_step_report(*schema);
+               held.push_back(bj::object{{"schema", s}, {"step", report["step"]}, {"databases", report["databases"]}});
+             }
+           }
          }
-         return ToolResult::ok(bj::object{{"tenant", tenant}, {"databases", std::move(dbs)}, {"unnamed_schemas", std::move(schemas)}});
+         return ToolResult::ok(bj::object{{"tenant", tenant},
+                                          {"databases", std::move(dbs)},
+                                          {"unnamed_schemas", std::move(schemas)},
+                                          {"held_schemas", std::move(held)}});
        }});
 }
 
@@ -377,7 +389,7 @@ void Host::register_db_admin_tools() {
 // where it is.
 std::pair<int, bj::object> Host::panel_drop(const SignedIn& who, const bj::object& args, const std::string& request_id) {
   if (std::find(who.roles.begin(), who.roles.end(), "host:owner") == who.roles.end()) {
-    return {403, bj::object{{"error", "only host:owner may drop a database, a table, or a snapshot, or retire a schema"}}};
+    return {403, bj::object{{"error", "only host:owner may drop a database, a table, or a snapshot, retire a schema, or approve one"}}};
   }
   std::string kind = text_arg(args, "kind"), tenant = text_arg(args, "tenant"), database = text_arg(args, "database"),
               table = text_arg(args, "table"), schema = text_arg(args, "schema"), snapshot = text_arg(args, "snapshot"),
@@ -394,6 +406,16 @@ std::pair<int, bj::object> Host::panel_drop(const SignedIn& who, const bj::objec
     }
   };
   std::string err;
+  // Approving a schema whose step drops or rewrites data (041 § 6): host-wide, like retiring one.
+  if (kind == "schema_approve") {
+    if (!scope.all) return {403, bj::object{{"error", "schemas are host-wide: approving one needs a person focused on every tenant"}}};
+    if (!schemas_->get(schema)) return {400, bj::object{{"error", "no schema named " + schema}}};
+    if (confirm != schema) return {400, bj::object{{"error", "type the schema's name to approve it"}}};
+    bj::object rec{{"by", by}, {"at", base::format_utc_ms(base::now_unix_ms())}, {"why", why.substr(0, 500)}};
+    if (!schemas_->approve(schema, json::pretty(rec), &err)) return {400, bj::object{{"error", err}}};
+    record("schema_approve", bj::object{{"schema", schema}});
+    return {200, bj::object{{"approved", schema}}};
+  }
   if (kind == "schema") {
     if (!scope.all) return {403, bj::object{{"error", "schemas are host-wide: retiring one needs a person focused on every tenant"}}};
     if (!schemas_->get(schema)) return {400, bj::object{{"error", "no schema named " + schema}}};
@@ -436,7 +458,7 @@ std::pair<int, bj::object> Host::panel_drop(const SignedIn& who, const bj::objec
     return {200, bj::object{{"deleted", snapshot}}};
   }
   if (kind != "database" && kind != "table") {
-    return {400, bj::object{{"error", "kind is database, table, schema, or snapshot"}}};
+    return {400, bj::object{{"error", "kind is database, table, schema, snapshot, or schema_approve"}}};
   }
   if (!databases_->exists(tenant, database)) return {400, bj::object{{"error", "tenant " + tenant + " has no database " + database}}};
   std::string target = kind == "table" ? database + "." + table : database;

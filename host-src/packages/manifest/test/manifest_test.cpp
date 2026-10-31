@@ -558,6 +558,42 @@ TEST(Manifest, JobRoutes) {
   refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"x"}},"timer":{"t":{"name":"x","every-ms":1000}}}})", "used twice");
 }
 
+// routes.upgrade (420; design/machine/041.SchemaEvolution.md § 7): rows handlers keyed by table,
+// from one schema version to the next, in a box that is a pure function and nothing else.
+TEST(Manifest, UpgradeRoutes) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"core14_upgrade","domains":["*"],"mission":"Split users.name for core14.",
+    "routes":{"upgrade":{"users":{"from":"core13.schema","to":"core14","rows":{"name":"upgrade_users_row"},"timeout-ms":20},
+                         "teams":{"from":"core13","to":"core14.schema","rows":{"name":"upgrade_teams_row"}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->upgrades.size(), 2u);
+  EXPECT_EQ(m->upgrades[0].upgrade_table, "users");
+  EXPECT_EQ(m->upgrades[0].upgrade_from, "core13");
+  EXPECT_EQ(m->upgrades[0].upgrade_to, "core14");
+  EXPECT_EQ(m->upgrades[0].verb, "upgrade");
+  EXPECT_EQ(m->upgrades[0].export_name(), "goober_route_upgrade_users_row");
+  EXPECT_EQ(*m->upgrades[0].timeout_ms, 20);
+  auto refused = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"},
+    "writes":{"x.y.z":{"name":"w"}}}}}})", "no named writes");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"},
+    "reads":{"name":"d"}}}}})", "no named writes or reads");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a1","rows":{"name":"r"}}}}})", "from and to");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2"}}}})", "rows.name");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"}},
+    "u":{"from":"b1","to":"b2","rows":{"name":"s"}}}}})", "same from and to");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"}}},
+    "http":{"/x":{"get":{"name":"x","public":true}}}}})", "pure function");
+  refused(R"({"box":"b","domains":["*"],"routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"}}}},
+    "data":{"sqlite3":{"s":{"schema":"a1","database":"d","pattern":"sql","tables":{"t":{"read":true}}}}}})", "no data strategies");
+  refused(R"({"box":"b","domains":["*"],"flags":{"f":{"default":"x"}},
+    "routes":{"upgrade":{"t":{"from":"a1","to":"a2","rows":{"name":"r"}}}}})", "no flags");
+}
+
 // "flags" (design/machine/039.Flags.md): a closed set of switches with defaults, and optionally
 // the values each may take.
 TEST(Manifest, Flags) {

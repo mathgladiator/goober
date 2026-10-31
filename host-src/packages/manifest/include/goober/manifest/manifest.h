@@ -70,6 +70,9 @@ struct HttpRoute {
   std::string mail_address;
   int64_t mail_attachments = 0;
   bool mail_automatic = false;
+  // An upgrade route (420; design/machine/041.SchemaEvolution.md § 7), verb "upgrade", keyed by
+  // the table it carries from one schema version to the next; called only by the host, once per row.
+  std::string upgrade_table, upgrade_from, upgrade_to;
   // An internal route (039) is reachable only from the boxes it names.
   std::vector<std::string> callers;
   // A GET route's cache (design/machine/037.Caching.md § 4): off unless the route declares it,
@@ -286,6 +289,7 @@ struct Manifest {
   std::vector<HttpRoute> mail;      // routes.mail.$address.receive, with verb "receive"
   std::vector<HttpRoute> results;   // routes.result.$name, with verb "result": outbox outcomes (035)
   std::vector<HttpRoute> jobs;      // routes.job.$key, with verb "job": one-time work an operator starts (038 § 7)
+  std::vector<HttpRoute> upgrades;  // routes.upgrade.$table, with verb "upgrade": an upgrade box's rows handlers (041 § 7)
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

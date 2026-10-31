@@ -511,3 +511,109 @@ TEST_F(PanelTest, AnObserverTriesGetsOnly) {
   std::string boss = sign_in("boss@example.com");
   EXPECT_EQ(api(boss, "route_try", R"({"domain":"localhost","box":"tryme","path":"/poke","method":"post"})").status, 403);
 }
+
+// Schema evolution (design/machine/041.SchemaEvolution.md): a step that rewrites a table waits
+// for a person in the panel; an upgrade box carries the rows over, first on copies (a failing row
+// is named), then for real with a snapshot first, once no box pinned to the old version remains.
+TEST_F(PanelTest, AForcedStepWaitsForAPersonAndAnUpgradeBox) {
+  std::string token = "0123456789abcdef0123";
+  auto call = [&](const std::string& tool, const std::string& args) {
+    auto r = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":")" + tool +
+                            R"(","arguments":)" + args + "}}");
+    EXPECT_EQ(r.status, 200) << r.body;
+    auto result = parse(r.body)["result"].as_object();
+    std::string text(result.at("content").at(0).at("text").as_string());
+    if (result.at("isError").as_bool()) return bj::value(bj::object{{"error", text}});
+    std::string err;
+    auto v = json::parse(text, &err);
+    return v ? *v : bj::value(text);
+  };
+  auto error_of = [](const bj::value& v) {
+    return v.is_object() && v.as_object().contains("error") ? std::string(v.at("error").as_string()) : std::string();
+  };
+  ASSERT_EQ(error_of(call("schema_put", R"({"schema":{"schema":"people1","tables":{"people":{"columns":{
+      "name":{"type":"string"}}}}}})")), "");
+  ASSERT_EQ(error_of(call("db_create", R"({"tenant":"playground","database":"people","schemas":["people1"]})")), "");
+  ASSERT_EQ(error_of(call("db_exec", R"j({"tenant":"playground","database":"people",
+      "sql":"INSERT INTO people (id, name) VALUES (1, 'Ada Lovelace'), (2, 'Grace Hopper')"})j")), "");
+  const char* reader_wat = R"((module (memory (export "memory") 1) (func (export "goober_route_who") (result i32) (i32.const 0))))";
+  auto reader = [](const char* schema) {
+    return std::string(R"({"box":"reader","domains":["*"],"data":{"sqlite3":{"db":{"schema":")") + schema +
+           R"(","database":"people","pattern":"sql","tables":{"people":{"read":true}}}}},)"
+           R"("routes":{"http":{"/who":{"get":{"name":"who","public":true}}}}})";
+  };
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(reader("people1"), reader_wat, &err)) << err;
+
+  // name splits into first and last: forced, and it drops name, so it waits for a person.
+  const char* people2 = R"({"schema":{"schema":"people2","follows":"people1","tables":{"people":{"columns":{
+      "first":{"type":"string"},"last":{"type":"string"}}}}}})";
+  auto check = call("schema_check", people2);
+  ASSERT_EQ(error_of(check), "") << json::dump(check);
+  EXPECT_EQ(check.at("held"), true);
+  EXPECT_EQ(json::dump(check.at("step").at("forced_tables")), R"(["people"])");
+  EXPECT_EQ(json::dump(check.at("databases").at(0).at("forced")), R"([{"table":"people","rows":2}])");
+  EXPECT_EQ(json::dump(check.at("databases").at(0).at("drops")), R"([{"table":"people","column":"name","rows":2}])");
+  ASSERT_EQ(error_of(call("schema_put", people2)), "");
+  auto held = call("db_unbound", R"({"tenant":"playground"})").at("held_schemas");
+  ASSERT_EQ(held.as_array().size(), 1u) << json::dump(held);
+  EXPECT_EQ(held.at(0).at("schema"), "people2");
+  EXPECT_FALSE(host->boxes().upload(reader("people2"), reader_wat, &err));
+  EXPECT_NE(err.find("a person approves it"), std::string::npos) << err;
+
+  // The upgrade box: one row's answer, so the second row fails its dry run.
+  const char* upgrade_wat = R"wat((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "{\22id\22:1,\22first\22:\22Ada\22,\22last\22:\22Lovelace\22}")
+  (func (export "goober_route_split") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 40)))
+    (i32.const 0))
+))wat";
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"people_up","domains":["*"],
+      "routes":{"upgrade":{"people":{"from":"people1.schema","to":"people2.schema","rows":{"name":"split"}}}}})",
+                                   upgrade_wat, &err))
+      << err;
+  auto blocked = call("upgrade_dry_run", R"({"box":"people_up"})");
+  EXPECT_NE(error_of(blocked).find("reader.db (people1)"), std::string::npos) << json::dump(blocked);
+
+  // Only an owner approves, typing the name.
+  std::string watcher = sign_in("watcher@example.com");
+  EXPECT_EQ(api(watcher, "write/drop", R"({"kind":"schema_approve","schema":"people2","confirm":"people2"})").status, 403);
+  std::string boss = sign_in("boss@example.com");
+  EXPECT_EQ(api(boss, "write/drop", R"({"kind":"schema_approve","schema":"people2","confirm":"nope"})").status, 400);
+  auto approved = api(boss, "write/drop", R"({"kind":"schema_approve","schema":"people2","confirm":"people2","why":"split names"})");
+  ASSERT_EQ(approved.status, 200) << approved.body;
+  EXPECT_EQ(call("db_unbound", R"({"tenant":"playground"})").at("held_schemas").as_array().size(), 0u);
+  // The reader moves to people2: stored, and it waits for the upgrade.
+  ASSERT_TRUE(host->boxes().upload(reader("people2"), reader_wat, &err)) << err;
+
+  auto dry = call("upgrade_dry_run", R"({"box":"people_up"})");
+  ASSERT_EQ(error_of(dry), "") << json::dump(dry);
+  EXPECT_EQ(dry.at("passed"), false);
+  EXPECT_EQ(dry.at("databases").at(0).at("rows"), 2);
+  EXPECT_EQ(dry.at("databases").at(0).at("failures").at(0).at("key"), "2");
+  EXPECT_NE(json::dump(dry).find("changed the primary key"), std::string::npos) << json::dump(dry);
+  EXPECT_NE(error_of(call("upgrade_start", R"({"box":"people_up"})")).find("upgrade_dry_run first"), std::string::npos);
+  // Nothing changed for real.
+  EXPECT_EQ(call("db_query", R"({"tenant":"playground","database":"people","sql":"SELECT count(*) FROM people"})")
+                .at("rows").at(0).at(0), 2);
+
+  ASSERT_EQ(error_of(call("db_exec", R"({"tenant":"playground","database":"people","sql":"DELETE FROM people WHERE id = 2"})")), "");
+  ASSERT_EQ(call("upgrade_dry_run", R"({"box":"people_up"})").at("passed"), true);
+  auto start = call("upgrade_start", R"({"box":"people_up"})");
+  ASSERT_EQ(error_of(start), "") << json::dump(start);
+  EXPECT_EQ(start.at("databases").at(0).at("upgraded"), true) << json::dump(start);
+  EXPECT_EQ(json::dump(call("db_query", R"({"tenant":"playground","database":"people","sql":"SELECT id, first, last FROM people"})")
+                           .at("rows")),
+            R"([[1,"Ada","Lovelace"]])");
+  bool snapped = false;
+  auto snaps = call("db_snapshots", R"({"tenant":"playground","database":"people"})");
+  for (const auto& s : snaps.at("snapshots").as_array()) {
+    snapped |= s.at("note") == "before schema people2";
+  }
+  EXPECT_TRUE(snapped);
+  auto described = json::dump(call("db_describe", R"({"tenant":"playground","database":"people"})"));
+  EXPECT_NE(described.find(R"("column":"name")"), std::string::npos) << described;
+}

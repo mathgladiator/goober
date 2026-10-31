@@ -77,6 +77,7 @@ std::map<std::string, Named> routes_of(const Manifest& m) {
   for (const auto& r : m.mail) put("mail route", r.mail_address, r);
   for (const auto& r : m.results) put("result route", r.name, r);
   for (const auto& r : m.jobs) put("job", r.name, r);
+  for (const auto& r : m.upgrades) put("upgrade route", r.upgrade_table, r);
   return out;
 }
 

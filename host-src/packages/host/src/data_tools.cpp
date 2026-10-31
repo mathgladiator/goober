@@ -173,6 +173,37 @@ bool Host::check_calls(const manifest::Manifest& m, std::string* error) const {
 
 thread_local const std::map<std::string, db::Schema>* Host::pending_schemas_ = nullptr;
 
+bj::object Host::schema_step_report(const db::Schema& s) const {
+  bj::object out;
+  if (s.follows.empty()) return out;
+  auto from = schemas_->get(s.follows);
+  if (!from) return out;
+  auto step = db::plan_step(*from, s);
+  out["step"] = step.to_json();
+  bool stored = schemas_->get(s.name).has_value();
+  out["held"] = step.needs_person() && !schemas_->approval(s.name);
+  if (step.needs_person()) {
+    out["approval"] = schemas_->approval(s.name)
+                          ? "approved by a person in the panel"
+                          : "it drops or rewrites data, so it applies nowhere until a person approves it in the panel's "
+                            "Database view" + std::string(stored ? "" : ", once it is stored");
+  }
+  if (!step.forced_tables.empty()) {
+    out["upgrade"] = "forced tables are carried over by an upgrade box (routes.upgrade, from " + from->name + " to " +
+                     s.name + "): upgrade_dry_run, then upgrade_start";
+  }
+  bj::array dbs;
+  for (const auto& tenant : databases_->tenants()) {
+    for (const auto& database : databases_->databases(tenant)) {
+      auto applied = databases_->applied_schemas(tenant, database);
+      if (std::find(applied.begin(), applied.end(), from->name) == applied.end()) continue;
+      dbs.push_back(databases_->step_impact(tenant, database, step, *from));
+    }
+  }
+  out["databases"] = std::move(dbs);
+  return out;
+}
+
 std::optional<db::Schema> Host::schema_named(const std::string& name) const {
   if (pending_schemas_) {
     if (auto it = pending_schemas_->find(name); it != pending_schemas_->end()) return it->second;
@@ -198,6 +229,12 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
     if (schemas_->retired(st.schema)) {
       return *error = where + ": schema " + st.schema + " is retired (a person retired it in the panel, 008 § 11); "
                       "name a schema in service",
+             false;
+    }
+    if (schemas_->held(st.schema)) {
+      return *error = where + ": schema " + st.schema + " drops or rewrites data (schema_check shows its step), so a "
+                      "person approves it in the panel's Database view before any box may name it "
+                      "(design/machine/041.SchemaEvolution.md § 6)",
              false;
     }
     if (st.pattern == "by_timer") {
@@ -235,7 +272,7 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
     }
     if (!together.empty()) {
       together.push_back(&*schema);
-      if (!db::Databases::compatible(together, error)) {
+      if (!db::Databases::compatible(together, error, schemas_.get())) {
         *error = where + ": database " + st.database + " is shared with other boxes, and " + *error;
         return false;
       }
@@ -456,11 +493,19 @@ void Host::register_data_tools() {
        "names one. The primary key is never a natural key (a string like address|day): make that a unique index on "
        "its own columns, and insert with ON CONFLICT on it. A column that refers to a user or a row, in any "
        "database, is {\"type\": \"id\"}; never text, never an email. Ids read back as strings. A schema is a "
-       "version: its name is never reused with different content (the same content again is a no-op), and "
-       "databases only ever grow by the schemas applied to them. Try it with schema_check first, which stores "
-       "nothing. Answers {schema, tables, warnings?}: the warnings name keys and references that aren't ids "
+       "version: its name is never reused with different content (the same content again is a no-op). A schema "
+       "without \"follows\" only adds to the tables it names. The next version of a schema names the one it "
+       "replaces, \"follows\": \"name1\", and its tables replace that one's: what it leaves out is dropped, and "
+       "each change is classified (design/machine/041.SchemaEvolution.md): expansion, indexing, and emulated "
+       "(int32 to int64, float to double, allowing null, a longer max-length) apply when a box names the version; "
+       "contraction (a dropped column or table: older boxes then read its default and their writes to it are "
+       "dropped) and forced (anything else, carried over by an upgrade box's rows handler) wait for a person to "
+       "approve the schema in the panel; a primary key never changes. Try it with schema_check first, which "
+       "stores nothing and says what it would do to each database. Answers {schema, tables, warnings?, step?, "
+       "held?, approval?, upgrade?, databases?}: the warnings name keys and references that aren't ids "
        "(\"not-a-reference\": true silences one on a column that only looks like a reference, like a "
-       "message_id). A changing tool.",
+       "message_id); step lists each change with a sentence and 420's consequences. A changing tool: it stores "
+       "the schema, and nothing goes live until a box version names it.",
        object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
        [this](const bj::object& args) {
          auto it = args.find("schema");
@@ -474,14 +519,19 @@ void Host::register_data_tools() {
          for (const auto& w : s->warnings) warnings.push_back(bj::value(w));
          bj::object out{{"schema", s->name}, {"tables", std::move(tables)}};
          if (!warnings.empty()) out["warnings"] = std::move(warnings);
+         for (auto& kv : schema_step_report(*s)) out[kv.key()] = kv.value();
          return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool(
       {"schema_check",
        "A dry run of schema_put: checks a schema exactly as schema_put would (its shape, the types and keys, that its "
-       "name is free or holds the same content) and answers {schema, ok, stored, note, tables, warnings}, storing "
-       "nothing. A schema name is never reused, so try it here first. To check a manifest against schemas not "
+       "name is free or holds the same content, and that what it follows is stored and followed by nothing else) "
+       "and answers {schema, ok, stored, note, tables, warnings}, storing nothing; for a schema that follows "
+       "another, also step (each change, its kind, a sentence, and 420's consequences), held, approval, upgrade, "
+       "and databases: each database holding the version it follows, with the rows holding data a contraction "
+       "would drop (drops) and the rows a forced table would carry over (forced). A schema name is never "
+       "reused, so try it here first. To check a manifest against schemas not "
        "stored yet, pass them to version_upload {dry_run: true, schemas: [...]}; a source build checks a project's "
        "own schemas the same way when goober.project.json lists them under \"schemas\". A read tool.",
        object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
@@ -496,13 +546,15 @@ void Host::register_data_tools() {
          for (const auto& t : s->tables) tables.push_back(bj::value(t.name));
          for (const auto& w : s->warnings) warnings.push_back(bj::value(w));
          bool stored = schemas_->get(s->name).has_value();
-         return ToolResult::ok(bj::object{{"schema", s->name},
-                                          {"ok", true},
-                                          {"stored", stored},
-                                          {"note", stored ? "already stored with this same content: schema_put is a no-op"
-                                                          : "not stored: schema_put stores it, for good, under this name"},
-                                          {"tables", std::move(tables)},
-                                          {"warnings", std::move(warnings)}});
+         bj::object out{{"schema", s->name},
+                        {"ok", true},
+                        {"stored", stored},
+                        {"note", stored ? "already stored with this same content: schema_put is a no-op"
+                                        : "not stored: schema_put stores it, for good, under this name"},
+                        {"tables", std::move(tables)},
+                        {"warnings", std::move(warnings)}};
+         for (auto& kv : schema_step_report(*s)) out[kv.key()] = kv.value();
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool({"schema_get", "A stored schema's JSON, exactly as stored. A read tool.",

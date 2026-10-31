@@ -222,6 +222,7 @@ void Host::register_try_tools() {
          if (!read) {
            copies = std::make_unique<db::Databases>(copies_root);
            copies->set_id_source(next_id_);
+           copies->set_schema_store(schemas_.get());
            for (const auto& d : box->manifest.data) {
              if (!d.applies_schema()) continue;
              std::string t = d.tenant_for(tenant), database = d.database_for(tenant);

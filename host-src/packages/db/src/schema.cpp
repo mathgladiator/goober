@@ -120,6 +120,20 @@ std::string Column::signature() const {
          (max_length ? " max " + std::to_string(*max_length) : "");
 }
 
+std::string Column::dropped_value_sql() const {
+  if (default_value) {
+    const auto& d = *default_value;
+    if (d.is_string()) return quote_literal(std::string(d.get_string()));
+    if (d.is_bool()) return d.get_bool() ? "1" : "0";
+    if (d.is_null()) return "NULL";
+    return json::dump(d);
+  }
+  if (nullable) return "NULL";
+  if (type == "string") return "''";
+  if (type == "double" || type == "float") return "0.0";
+  return "0";
+}
+
 std::string Index::signature() const {
   std::string s = unique ? "unique" : "index";
   for (const auto& c : columns) s += " " + c;
@@ -154,12 +168,21 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
   if (!v->is_object()) return *error = "a schema is a JSON object", std::nullopt;
   const auto& root = v->get_object();
   for (const auto& f : root) {
-    if (f.key() != "schema" && f.key() != "tables") return *error = "unknown field \"" + std::string(f.key()) + "\"", std::nullopt;
+    if (f.key() != "schema" && f.key() != "tables" && f.key() != "follows") {
+      return *error = "unknown field \"" + std::string(f.key()) + "\"", std::nullopt;
+    }
   }
   Schema s;
   auto name = json::get_string(root, "schema", &err);
   if (!name || !is_valid_sql_name(*name)) return *error = "\"schema\" is the schema's name with its version, like guestbook1", std::nullopt;
   s.name = *name;
+  if (root.contains("follows")) {
+    auto follows = json::get_string(root, "follows", &err);
+    if (!follows || !is_valid_sql_name(*follows) || *follows == s.name) {
+      return *error = "\"follows\" names the stored schema this version replaces, like guestbook1", std::nullopt;
+    }
+    s.follows = *follows;
+  }
   const auto* tables = json::get_object(root, "tables", &err);
   if (!tables || tables->empty()) return *error = "\"tables\" is required", std::nullopt;
   std::set<std::string> index_names;
@@ -229,6 +252,181 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
   return s;
 }
 
+bool Step::contracts() const {
+  for (const auto& c : changes) {
+    if (c.kind == "contraction") return true;
+  }
+  return false;
+}
+
+bool Step::refused() const {
+  for (const auto& c : changes) {
+    if (c.kind == "refused") return true;
+  }
+  return false;
+}
+
+bj::object Step::to_json() const {
+  bj::array cs, cons, forced;
+  for (const auto& c : changes) {
+    bj::object o{{"kind", c.kind}, {"table", c.table}, {"says", c.says}};
+    if (!c.column.empty()) o["column"] = c.column;
+    if (!c.index.empty()) o["index"] = c.index;
+    cs.push_back(std::move(o));
+  }
+  for (const auto& s : consequences) cons.push_back(bj::value(s));
+  for (const auto& t : forced_tables) forced.push_back(bj::value(t));
+  return bj::object{{"from", from},
+                    {"to", to},
+                    {"changes", std::move(cs)},
+                    {"consequences", std::move(cons)},
+                    {"forced_tables", std::move(forced)},
+                    {"needs_person", needs_person()}};
+}
+
+Step plan_step(const Schema& from, const Schema& to) {
+  Step step;
+  step.from = from.name;
+  step.to = to.name;
+  auto add = [&](std::string kind, const std::string& table, std::string column, std::string says) {
+    if (kind == "forced") step.forced_tables.insert(table);
+    step.changes.push_back(Change{std::move(kind), table, std::move(column), "", std::move(says)});
+  };
+  auto add_index = [&](std::string kind, const std::string& table, const std::string& index, std::string says) {
+    if (kind == "forced") step.forced_tables.insert(table);
+    step.changes.push_back(Change{std::move(kind), table, "", index, std::move(says)});
+  };
+  auto warn = [&](std::string s) {
+    for (const auto& c : step.consequences) {
+      if (c == s) return;
+    }
+    step.consequences.push_back(std::move(s));
+  };
+  auto shown = [](const Column& c) {
+    std::string v = c.dropped_value_sql();
+    return v == "NULL" ? std::string("null") : v;
+  };
+  for (const auto& ft : from.tables) {
+    if (!to.table(ft.name)) {
+      add("contraction", ft.name, "", "drops table " + ft.name + ": its rows are deleted, it reads as empty, and writes to it are dropped");
+      warn("Data will be dropped: every row of " + ft.name + ", on every database, at once.");
+      warn("Writes will be discarded: any box still writing " + ft.name + " has its writes dropped.");
+      warn("Reads will be invented: older boxes reading " + ft.name + " see no rows.");
+    }
+  }
+  for (const auto& tt : to.tables) {
+    const Table* ft = from.table(tt.name);
+    if (!ft) {
+      add("expansion", tt.name, "", "adds table " + tt.name);
+      continue;
+    }
+    std::vector<const Column*> dropped, added;
+    for (const auto& fc : ft->columns) {
+      const Column* tc = tt.column(fc.name);
+      std::string where = tt.name + "." + fc.name;
+      if (!tc) {
+        if (fc.primary_key) {
+          add("refused", tt.name, fc.name, "drops the primary key " + where + "; a table's key never changes, not even with an upgrade box");
+          continue;
+        }
+        dropped.push_back(&fc);
+        add("contraction", tt.name, fc.name, "drops " + where + ": its values are cleared, older boxes read " + shown(fc) +
+                                                 ", and their writes to it are dropped");
+        warn("Data will be dropped: every value of " + where + ", on every database, at once.");
+        warn("Writes will be discarded: older boxes' writes to " + where + " are dropped.");
+        warn("Reads will be invented: older boxes reading " + where + " see " + shown(fc) + " instead of what was there.");
+        continue;
+      }
+      if (fc.primary_key != tc->primary_key || (fc.primary_key && fc.type != tc->type)) {
+        add("refused", tt.name, fc.name, "changes the primary key of " + tt.name + "; a table's key never changes, not even with an upgrade box");
+        continue;
+      }
+      if (fc.type != tc->type) {
+        if ((fc.type == "int32" && tc->type == "int64") || (fc.type == "float" && tc->type == "double")) {
+          add("emulated", tt.name, fc.name, "widens " + where + " from " + fc.type + " to " + tc->type);
+          warn(fc.type == "int32" ? "Values may not fit: older boxes may read values of " + where + " past the int32 range; watch it until no older box remains."
+                                  : "Values may not fit: older boxes see values of " + where + " their float would round.");
+        } else {
+          add("forced", tt.name, fc.name, "changes " + where + " from " + fc.type + " to " + tc->type + ", which older boxes' values may not fit");
+        }
+      }
+      if (fc.nullable != tc->nullable) {
+        if (tc->nullable) {
+          add("emulated", tt.name, fc.name, "lets " + where + " be null");
+          warn("Values may not fit: older boxes read a null in " + where + " as null, and may not expect one.");
+        } else {
+          add("forced", tt.name, fc.name, "stops " + where + " allowing null, which existing rows may break");
+        }
+      }
+      if (fc.max_length != tc->max_length) {
+        if (!tc->max_length || (fc.max_length && *tc->max_length > *fc.max_length)) {
+          add("emulated", tt.name, fc.name, "loosens " + where + "'s max-length");
+          warn("Values may not fit: older boxes may read values of " + where + " longer than their version allowed.");
+        } else {
+          add("forced", tt.name, fc.name, "adds or lowers " + where + "'s max-length, which existing values may break");
+        }
+      }
+      bool same_default = fc.default_value.has_value() == tc->default_value.has_value() &&
+                          (!fc.default_value || *fc.default_value == *tc->default_value);
+      if (!same_default) add("forced", tt.name, fc.name, "changes " + where + "'s default, which changes what older boxes' inserts store");
+    }
+    for (const auto& tc : tt.columns) {
+      if (ft->column(tc.name)) continue;
+      std::string where = tt.name + "." + tc.name;
+      if (tc.primary_key) {
+        add("refused", tt.name, tc.name, "adds the primary key " + where + "; a table's key never changes, not even with an upgrade box");
+        continue;
+      }
+      added.push_back(&tc);
+      if (tc.nullable || tc.default_value) {
+        add("expansion", tt.name, tc.name, "adds " + where);
+        warn("Values will be invented: every existing row of " + tt.name + " holds " + shown(tc) + " in " + tc.name + ".");
+      } else {
+        add("forced", tt.name, tc.name, "adds " + where + ", which existing rows can't fill: it isn't nullable and has no default");
+      }
+    }
+    for (const auto* d : dropped) {
+      for (const auto* a : added) {
+        if (d->type == a->type) {
+          warn("If " + tt.name + "." + a->name + " renames " + tt.name + "." + d->name +
+               ", the drop loses the data: add the new column, move the data with a job, and drop the old one later, "
+               "or carry it over with an upgrade box.");
+        }
+      }
+    }
+    for (const auto& fi : ft->indexes) {
+      bool kept = false;
+      for (const auto& ti : tt.indexes) kept |= ti.name == fi.name;
+      if (!kept) add_index("indexing", tt.name, fi.name, "drops index " + fi.name);
+    }
+    for (const auto& ti : tt.indexes) {
+      const Index* fi = nullptr;
+      for (const auto& i : ft->indexes) {
+        if (i.name == ti.name) fi = &i;
+      }
+      if (fi && fi->signature() == ti.signature()) continue;
+      bool tighter = ti.unique && (!fi || !fi->unique || fi->columns != ti.columns);
+      if (tighter) {
+        add_index("forced", tt.name, ti.name, (fi ? "changes" : "adds") + std::string(" the unique index ") + ti.name +
+                                                  ", a rule existing rows may break");
+      } else {
+        add_index("indexing", tt.name, ti.name, (fi ? "changes index " : "adds index ") + ti.name);
+      }
+    }
+  }
+  // Indexes that move to a table of their own: dropped from the old table, made on the new.
+  for (const auto& tt : to.tables) {
+    if (from.table(tt.name)) continue;
+    for (const auto& ti : tt.indexes) add_index("indexing", tt.name, ti.name, "adds index " + ti.name);
+  }
+  if (!step.forced_tables.empty()) {
+    for (const auto& t : step.forced_tables) {
+      warn("Rows will be rewritten: every row of " + t + " passes through an upgrade box, on every database.");
+    }
+  }
+  return step;
+}
+
 std::optional<Schema> SchemaStore::check(std::string_view text, std::string* error) const {
   auto s = parse_schema(text, error);
   if (!s) return std::nullopt;
@@ -238,30 +436,79 @@ std::optional<Schema> SchemaStore::check(std::string_view text, std::string* err
     auto b = json::parse(text, &err);
     if (a && b && *a == *b) return existing;
     return *error = "schema " + s->name + " is already stored with different content; a schema is a version, so "
-                    "give the new one a new name, like " + s->name + "_2",
+                    "give the new one a new name, like " + s->name + "_2, with \"follows\": \"" + s->name + "\"",
            std::nullopt;
+  }
+  if (!s->follows.empty()) {
+    auto from = get(s->follows);
+    if (!from) return *error = s->name + " follows " + s->follows + ", which isn't stored: schema_put it first", std::nullopt;
+    if (retired(s->follows)) return *error = s->name + " follows " + s->follows + ", which a person retired", std::nullopt;
+    if (auto next = follower(s->follows)) {
+      return *error = "schema " + s->follows + " is already followed by " + *next +
+                      "; a schema's versions form one line, so follow " + *next + " instead",
+             std::nullopt;
+    }
+    auto step = plan_step(*from, *s);
+    if (step.refused()) {
+      std::string why;
+      for (const auto& c : step.changes) {
+        if (c.kind == "refused") why += (why.empty() ? "" : "; ") + c.says;
+      }
+      return *error = "schema " + s->name + " is refused: " + why, std::nullopt;
+    }
   }
   return s;
 }
 
 std::optional<Schema> SchemaStore::put(std::string_view text, std::string* error) {
-  auto s = parse_schema(text, error);
+  auto s = check(text, error);
   if (!s) return std::nullopt;
-  if (auto existing = get(s->name)) {
-    std::string err;
-    auto a = json::parse(existing->text, &err);
-    auto b = json::parse(text, &err);
-    if (a && b && *a == *b) return existing;
-    return *error = "schema " + s->name + " is already stored with different content; a schema is a version, so "
-                    "give the new one a new name, like " + s->name + "_2",
-           std::nullopt;
-  }
+  if (get(s->name)) return s;  // the same content again: a no-op
   std::string err;
   auto parsed = json::parse(text, &err);
   if (!wal_.commit({{wal::FileChange::Kind::kWrite, "schemas/" + s->name + ".schema.json", json::pretty(*parsed)}}, error)) {
     return std::nullopt;
   }
   return s;
+}
+
+std::optional<Step> SchemaStore::step(const Schema& s) const {
+  if (s.follows.empty()) return std::nullopt;
+  auto from = get(s.follows);
+  if (!from) return std::nullopt;
+  return plan_step(*from, s);
+}
+
+std::optional<std::string> SchemaStore::follower(std::string_view name) const {
+  for (const auto& n : list()) {
+    if (n == name) continue;
+    auto s = get(n);
+    if (s && s->follows == name) return n;
+  }
+  return std::nullopt;
+}
+
+bool SchemaStore::approve(std::string_view name, const std::string& record, std::string* error) {
+  auto s = get(name);
+  if (!s) return *error = "no schema named " + std::string(name), false;
+  auto st = step(*s);
+  if (!st || !st->needs_person()) {
+    return *error = "schema " + std::string(name) + " drops and rewrites nothing, so it needs no approval", false;
+  }
+  if (approval(name)) return *error = "schema " + std::string(name) + " is already approved", false;
+  return wal_.commit({{wal::FileChange::Kind::kWrite, "schemas/" + std::string(name) + ".approved", record}}, error);
+}
+
+std::optional<std::string> SchemaStore::approval(std::string_view name) const {
+  if (!is_valid_sql_name(name)) return std::nullopt;
+  return base::read_file(wal_.root() / "schemas" / (std::string(name) + ".approved"));
+}
+
+bool SchemaStore::held(std::string_view name) const {
+  auto s = get(name);
+  if (!s) return false;
+  auto st = step(*s);
+  return st && st->needs_person() && !approval(name);
 }
 
 std::optional<Schema> SchemaStore::get(std::string_view name) const {

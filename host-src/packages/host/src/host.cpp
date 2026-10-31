@@ -229,6 +229,12 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   schemas_ = std::make_unique<db::SchemaStore>(*wal_);
   databases_ = std::make_unique<db::Databases>(config->storage);
   databases_->set_id_source(next_id_);
+  databases_->set_schema_store(schemas_.get());
+  // A schema step that drops, rebuilds, or rewrites data snapshots the database first (041 § 4).
+  databases_->set_before_change([this](const std::string& tenant, const std::string& database, const std::string& note,
+                                       std::string* error) {
+    return take_snapshot(tenant, database, note, "host", true, error).has_value();
+  });
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check(
@@ -295,6 +301,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_whats_new_tool();
   register_review_tools();
   register_job_tools();
+  register_upgrade_tools();
   register_try_tools();
   register_cache_tools();
   register_flag_tools();
@@ -1215,7 +1222,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   auto cfg = config_.get();
   const auto& m = ref.box->manifest;
   const auto& route = *ref.route;
-  runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64(), {}};
+  runtime::wasm::CallInput input{json::dump(doc), options.pure ? 0 : base::now_unix_ms(),
+                                 options.pure ? 0 : base::os_random_u64(), {}};
   // A box's random bytes come from the seed and a key the logs don't hold (the host's reply key),
   // so reading the access log's seed predicts nothing; a replay on this host repeats them.
   input.random_key = base::hmac_sha256(reply_key(), "goober-box-random");

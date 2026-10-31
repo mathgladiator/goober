@@ -261,6 +261,7 @@ void Host::job_step(JobRun& r) {
     auto root = job_copies(r.id);
     copies = std::make_unique<db::Databases>(root);
     copies->set_id_source(next_id_);
+    copies->set_schema_store(schemas_.get());
     if (r.calls == 0) {
       std::error_code ec;
       fs::remove_all(root, ec);
