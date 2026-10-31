@@ -261,6 +261,9 @@ class Host {
     // The call's now_ms, when it isn't the wall clock: a timer fire is given its tick's time, so
     // a simulated clock (tests, route_try's at_ms) reaches the box too.
     std::optional<int64_t> now_ms;
+    // An upgrade box's call (design/machine/041.SchemaEvolution.md § 7): no clock (now_ms 0) and a
+    // fixed seed, so the same row always gives the same answer.
+    bool pure = false;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -334,6 +337,11 @@ class Host {
   // boxes are checked against its new schemas before anything is stored (source_deploy).
   static thread_local const std::map<std::string, db::Schema>* pending_schemas_;
   std::optional<db::Schema> schema_named(const std::string& name) const;
+  // A schema's step from the version it follows (design/machine/041.SchemaEvolution.md § 3), whether
+  // it is held for a person, and what it would do to each database holding that version.
+  boost::json::object schema_step_report(const db::Schema& s) const;
+  // Upgrade boxes (041 § 7): upgrade_dry_run and upgrade_start (upgrade_tools.cpp).
+  void register_upgrade_tools();
   bool check_calls(const manifest::Manifest& m, std::string* error) const;
   // The operator behind the MCP call running on this thread ("config" or "token:$name").
   static std::string& current_operator();

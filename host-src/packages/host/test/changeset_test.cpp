@@ -270,3 +270,14 @@ TEST_F(ChangeSetTest, APreviewStoresNothing) {
   auto stale = tool("changeset_apply", {{"id", id}, {"version", 1}});
   EXPECT_NE(json::dump(stale).find("changed since"), std::string::npos) << json::dump(stale);
 }
+
+// A schema's next version (041) can drop data and wait for a person: it isn't a change set member.
+TEST_F(ChangeSetTest, ASchemasNextVersionIsNotAMember) {
+  ASSERT_EQ(ok(tool("schema_put", {{"schema", kNotesSchema}})), "");
+  std::string id = create("next version");
+  const char* next = R"({"schema":"shopnotes2","follows":"shopnotes1","tables":{"notes":{"columns":{
+    "id":{"type":"id","primary-key":true},"text":{"type":"string"}}}}})";
+  auto r = tool("changeset_add", {{"id", id}, {"schemas", bj::array{bj::value(next)}}});
+  EXPECT_TRUE(refused(r)) << json::dump(r);
+  EXPECT_NE(json::dump(r).find("goes through schema_put"), std::string::npos);
+}

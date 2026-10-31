@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS goober_columns (
   PRIMARY KEY (table_name, column_name));
 CREATE TABLE IF NOT EXISTS goober_indexes (
   index_name TEXT PRIMARY KEY, table_name TEXT NOT NULL, signature TEXT NOT NULL, schema TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS goober_dropped (
+  table_name TEXT NOT NULL, column_name TEXT NOT NULL, schema TEXT NOT NULL, dropped_ms INTEGER NOT NULL,
+  PRIMARY KEY (table_name, column_name));
 )sql";
 
 // The pure functions a box's SQL may call (008 §5).
@@ -272,6 +275,12 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
     if (auth.denied.empty()) auth.denied = std::move(why);
     return SQLITE_DENY;
   };
+  // The host's tombstone triggers (041 § 5) keep a dropped column at its old value and a dropped
+  // table empty, whatever the box may do: they are the host's writes, not the box's.
+  if (auth.strategy && inner && std::string_view(inner).starts_with("goober_dropped_") &&
+      (code == SQLITE_READ || code == SQLITE_UPDATE || code == SQLITE_DELETE)) {
+    return SQLITE_OK;
+  }
   const manifest::TableGrant* g = nullptr;
   if (auth.strategy) {
     auto it = auth.strategy->tables.find(t);
@@ -608,89 +617,555 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   return out;
 }
 
-// Plans (and, unless dry_run, applies) a schema to an open database, expand only.
-bool apply_schema(sqlite::Db& db, const Schema& schema, bool dry_run, std::string* error) {
-  db.exec(kHostTables);
+// How a schema is applied to an open database (008 § 3; design/machine/041.SchemaEvolution.md § 4).
+struct ApplyContext {
+  bool dry_run = false;
+  const SchemaStore* store = nullptr;  // where a `follows` is looked up, and approvals read
+  bool require_approval = true;        // a step that drops or rewrites data waits for a person (041 § 6)
+  std::function<bool(const std::string& note, std::string* error)> before_change;  // the snapshot
+  const std::map<std::string, RowTransform>* rows = nullptr;  // forced tables' handlers (041 § 7)
+  bool keep_going = false;
+  UpgradeReport* report = nullptr;
+  std::vector<std::string>* pending = nullptr;  // a dry run's forced tables that still hold rows
+};
+
+std::string ident(const std::string& name) { return "\"" + name + "\""; }
+
+bool is_applied(sqlite::Db& db, const std::string& name) {
+  sqlite::Stmt q(db, "SELECT 1 FROM goober_schemas WHERE name = ?");
+  q.bind(1, name);
+  return q.step();
+}
+
+bool table_exists(sqlite::Db& db, const std::string& table) {
+  sqlite::Stmt q(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+  q.bind(1, table);
+  return q.step();
+}
+
+std::set<std::string> columns_present(sqlite::Db& db, const std::string& table) {
+  std::set<std::string> out;
+  sqlite::Stmt q(db, "SELECT name FROM pragma_table_info(?)");
+  q.bind(1, table);
+  while (q.step()) out.insert(q.text(0));
+  return out;
+}
+
+int64_t count_rows(sqlite::Db& db, const std::string& table, const std::string& where = "") {
+  sqlite::Stmt q(db, "SELECT count(*) FROM " + ident(table) + (where.empty() ? "" : " WHERE " + where));
+  return q.step() ? q.int64(0) : 0;
+}
+
+// The schema that dropped a table (column "") or a column, if one did: its name is never used again.
+std::optional<std::string> dropped_by(sqlite::Db& db, const std::string& table, const std::string& column) {
+  sqlite::Stmt q(db, "SELECT schema FROM goober_dropped WHERE table_name = ? AND column_name = ?");
+  q.bind(1, table).bind(2, column);
+  if (q.step()) return q.text(0);
+  return std::nullopt;
+}
+
+void record_dropped(sqlite::Db& db, const std::string& table, const std::string& column, const std::string& schema) {
+  sqlite::Stmt ins(db, "INSERT OR IGNORE INTO goober_dropped (table_name, column_name, schema, dropped_ms) VALUES (?, ?, ?, ?)");
+  ins.bind(1, table).bind(2, column).bind(3, schema).bind(4, base::now_unix_ms()).run();
+}
+
+void record_column(sqlite::Db& db, const std::string& table, const Column& c, const std::string& schema) {
+  sqlite::Stmt ins(db, "INSERT OR REPLACE INTO goober_columns (table_name, column_name, signature, schema) VALUES (?, ?, ?, ?)");
+  ins.bind(1, table).bind(2, c.name).bind(3, c.signature()).bind(4, schema).run();
+}
+
+void create_index(sqlite::Db& db, const std::string& table, const Index& idx, const std::string& schema) {
   {
-    sqlite::Stmt q(db, "SELECT 1 FROM goober_schemas WHERE name = ?");
-    q.bind(1, schema.name);
-    if (q.step()) return true;
+    sqlite::Stmt q(db, "SELECT table_name FROM goober_indexes WHERE index_name = ?");
+    q.bind(1, idx.name);
+    if (q.step()) throw std::runtime_error("index " + idx.name + " is already on table " + q.text(0));
   }
-  db.exec("BEGIN IMMEDIATE");
+  std::string sql = std::string(idx.unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ") + ident(idx.name) + " ON " +
+                    ident(table) + " (";
+  for (size_t i = 0; i < idx.columns.size(); ++i) sql += (i ? ", " : "") + ident(idx.columns[i]);
   try {
-    for (const auto& table : schema.tables) {
-      bool exists = false;
-      {
-        sqlite::Stmt q(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
-        q.bind(1, table.name);
-        exists = q.step();
-      }
-      std::map<std::string, std::string> recorded;
-      {
-        sqlite::Stmt q(db, "SELECT column_name, signature FROM goober_columns WHERE table_name = ?");
-        q.bind(1, table.name);
-        while (q.step()) recorded[q.text(0)] = q.text(1);
-      }
-      if (!exists) {
-        std::string sql = "CREATE TABLE \"" + table.name + "\" (";
-        for (size_t i = 0; i < table.columns.size(); ++i) sql += (i ? ", " : "") + table.columns[i].sql();
-        db.exec(sql + ") STRICT");
-        if (const auto* key = Schema::stamped_key(table)) db.exec(id_triggers(table, *key));
-      }
-      std::set<std::string> present;
-      {
-        sqlite::Stmt q(db, "SELECT name FROM pragma_table_info(?)");
-        q.bind(1, table.name);
-        while (q.step()) present.insert(q.text(0));
-      }
-      for (const auto& col : table.columns) {
-        auto rec = recorded.find(col.name);
-        if (rec != recorded.end()) {
-          if (rec->second != col.signature()) {
-            throw std::runtime_error("schema " + schema.name + " changes " + table.name + "." + col.name + " from " +
-                                     rec->second + " to " + col.signature() +
-                                     "; a column only ever keeps its type, nullability, and length (420)");
-          }
-        } else if (exists && present.count(col.name)) {
-          throw std::runtime_error(table.name + "." + col.name + " exists but no schema declared it");
-        } else if (exists) {
-          if (col.primary_key) throw std::runtime_error("schema " + schema.name + " can't add a primary key to " + table.name);
-          if (!col.nullable && !col.default_value) {
-            throw std::runtime_error("schema " + schema.name + " adds " + table.name + "." + col.name +
-                                     ", which existing rows can't fill: make it nullable or give it a default");
-          }
-          db.exec("ALTER TABLE \"" + table.name + "\" ADD COLUMN " + col.sql());
-        }
-        if (rec == recorded.end()) {
-          sqlite::Stmt ins(db, "INSERT INTO goober_columns (table_name, column_name, signature, schema) VALUES (?, ?, ?, ?)");
-          ins.bind(1, table.name).bind(2, col.name).bind(3, col.signature()).bind(4, schema.name).run();
-        }
-      }
-      for (const auto& idx : table.indexes) {
-        sqlite::Stmt q(db, "SELECT table_name, signature FROM goober_indexes WHERE index_name = ?");
-        q.bind(1, idx.name);
-        if (q.step()) {
-          if (q.text(0) != table.name || q.text(1) != idx.signature()) {
-            throw std::runtime_error("schema " + schema.name + " changes index " + idx.name);
-          }
+    db.exec(sql + ")");
+  } catch (const std::exception& e) {
+    throw std::runtime_error("index " + idx.name + " on " + table + ": " + e.what());
+  }
+  sqlite::Stmt ins(db, "INSERT INTO goober_indexes (index_name, table_name, signature, schema) VALUES (?, ?, ?, ?)");
+  ins.bind(1, idx.name).bind(2, table).bind(3, idx.signature()).bind(4, schema).run();
+}
+
+void drop_index(sqlite::Db& db, const std::string& name) {
+  db.exec("DROP INDEX IF EXISTS " + ident(name));
+  sqlite::Stmt d(db, "DELETE FROM goober_indexes WHERE index_name = ?");
+  d.bind(1, name).run();
+}
+
+void create_table(sqlite::Db& db, const Table& table, const std::string& name) {
+  std::string sql = "CREATE TABLE " + ident(name) + " (";
+  for (size_t i = 0; i < table.columns.size(); ++i) sql += (i ? ", " : "") + table.columns[i].sql();
+  db.exec(sql + ") STRICT");
+}
+
+// The column definitions of a table, from the CREATE TABLE text SQLite keeps (ALTER TABLE ADD
+// COLUMN appends to it), split at the commas outside quotes and parentheses; and whether it is STRICT.
+std::vector<std::string> column_defs(sqlite::Db& db, const std::string& table, bool* strict) {
+  std::string sql;
+  {
+    sqlite::Stmt q(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?");
+    q.bind(1, table);
+    if (!q.step()) throw std::runtime_error("no table " + table);
+    sql = q.text(0);
+  }
+  size_t open = std::string::npos;
+  char quote = 0;
+  for (size_t i = 0; i < sql.size() && open == std::string::npos; ++i) {
+    char c = sql[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+    } else if (c == '"' || c == '\'' || c == '`') {
+      quote = c;
+    } else if (c == '(') {
+      open = i;
+    }
+  }
+  size_t close = sql.rfind(')');
+  if (open == std::string::npos || close == std::string::npos || close < open) throw std::runtime_error("can't read table " + table);
+  *strict = sql.substr(close).find("STRICT") != std::string::npos;
+  std::vector<std::string> defs;
+  std::string cur;
+  int depth = 0;
+  quote = 0;
+  for (size_t i = open + 1; i < close; ++i) {
+    char c = sql[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+    } else if (c == '"' || c == '\'' || c == '`') {
+      quote = c;
+    } else if (c == '(') {
+      ++depth;
+    } else if (c == ')') {
+      --depth;
+    } else if (c == ',' && depth == 0) {
+      defs.push_back(cur);
+      cur.clear();
+      continue;
+    }
+    cur += c;
+  }
+  defs.push_back(cur);
+  for (auto& d : defs) {
+    size_t a = d.find_first_not_of(" \t\n"), b = d.find_last_not_of(" \t\n");
+    d = a == std::string::npos ? "" : d.substr(a, b - a + 1);
+  }
+  return defs;
+}
+
+// A column definition's name: its first token, unquoted.
+std::string def_name(const std::string& def) {
+  if (!def.empty() && def[0] == '"') {
+    std::string out;
+    for (size_t i = 1; i < def.size(); ++i) {
+      if (def[i] == '"') {
+        if (i + 1 < def.size() && def[i + 1] == '"') {
+          out += '"';
+          ++i;
           continue;
         }
-        std::string sql = std::string(idx.unique ? "CREATE UNIQUE INDEX \"" : "CREATE INDEX \"") + idx.name + "\" ON \"" +
-                          table.name + "\" (";
-        for (size_t i = 0; i < idx.columns.size(); ++i) sql += (i ? ", \"" : "\"") + idx.columns[i] + "\"";
-        db.exec(sql + ")");
-        sqlite::Stmt ins(db, "INSERT INTO goober_indexes (index_name, table_name, signature, schema) VALUES (?, ?, ?, ?)");
-        ins.bind(1, idx.name).bind(2, table.name).bind(3, idx.signature()).bind(4, schema.name).run();
+        break;
+      }
+      out += def[i];
+    }
+    return out;
+  }
+  return def.substr(0, def.find_first_of(" \t"));
+}
+
+// Rebuilds a table with some columns' definitions replaced (041 § 4): a new table, every row
+// copied, the old one dropped, the new one renamed, and its indexes and triggers made again.
+void rebuild_table(sqlite::Db& db, const std::string& table, const std::map<std::string, std::string>& defs) {
+  bool strict = false;
+  auto cols = column_defs(db, table, &strict);
+  std::string body, list;
+  for (const auto& d : cols) {
+    std::string name = def_name(d);
+    auto it = defs.find(name);
+    body += (body.empty() ? "" : ", ") + (it == defs.end() ? d : it->second);
+    list += (list.empty() ? "" : ", ") + ident(name);
+  }
+  std::vector<std::string> again;
+  {
+    sqlite::Stmt q(db, "SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL");
+    q.bind(1, table);
+    while (q.step()) again.push_back(q.text(0));
+  }
+  db.exec("CREATE TABLE \"goober_rebuild\" (" + body + ")" + (strict ? " STRICT" : ""));
+  db.exec("INSERT INTO \"goober_rebuild\" (" + list + ") SELECT " + list + " FROM " + ident(table));
+  db.exec("DROP TABLE " + ident(table));
+  db.exec("ALTER TABLE \"goober_rebuild\" RENAME TO " + ident(table));
+  for (const auto& sql : again) db.exec(sql);
+}
+
+std::string trigger_base(const std::string& table) {
+  return "goober_dropped_" + std::to_string(table.size()) + "_" + table;
+}
+
+// A dropped column (041 § 5): cleared to what older boxes read, and kept there by two triggers.
+void tombstone_column(sqlite::Db& db, const std::string& table, const Column& c) {
+  std::string v = c.dropped_value_sql(), col = ident(c.name), t = ident(table), base = trigger_base(table) + "_" + c.name;
+  db.exec("UPDATE " + t + " SET " + col + " = " + v + " WHERE " + col + " IS NOT " + v);
+  db.exec("CREATE TRIGGER " + ident(base + "_insert") + " AFTER INSERT ON " + t + " WHEN NEW." + col + " IS NOT " + v +
+          " BEGIN UPDATE " + t + " SET " + col + " = " + v + " WHERE rowid = NEW.rowid; END");
+  db.exec("CREATE TRIGGER " + ident(base + "_update") + " AFTER UPDATE OF " + col + " ON " + t + " WHEN NEW." + col +
+          " IS NOT " + v + " BEGIN UPDATE " + t + " SET " + col + " = " + v + " WHERE rowid = NEW.rowid; END");
+}
+
+// A dropped table (041 § 5): emptied, and kept empty by a trigger; its indexes go.
+void tombstone_table(sqlite::Db& db, const std::string& table, const std::string& schema) {
+  if (!table_exists(db, table)) return;
+  db.exec("DELETE FROM " + ident(table));
+  db.exec("CREATE TRIGGER " + ident(trigger_base(table) + "_rows") + " AFTER INSERT ON " + ident(table) +
+          " BEGIN DELETE FROM " + ident(table) + " WHERE rowid = NEW.rowid; END");
+  std::vector<std::string> indexes;
+  {
+    sqlite::Stmt q(db, "SELECT index_name FROM goober_indexes WHERE table_name = ?");
+    q.bind(1, table);
+    while (q.step()) indexes.push_back(q.text(0));
+  }
+  for (const auto& i : indexes) drop_index(db, i);
+  sqlite::Stmt d(db, "DELETE FROM goober_columns WHERE table_name = ?");
+  d.bind(1, table).run();
+  record_dropped(db, table, "", schema);
+}
+
+std::string text_of(const bj::value& v) {
+  if (v.is_string()) return std::string(v.get_string());
+  return json::dump(v);
+}
+
+// A forced table (041 § 7): built in the new shape, every row through the upgrade box's handler,
+// checked by the new shape's constraints, then swapped in.
+void rebuild_forced(sqlite::Db& db, const Table& from_t, const Table& to_t, const std::string& schema, ApplyContext& ctx) {
+  const std::string& t = to_t.name;
+  const RowTransform* handler = nullptr;
+  if (ctx.rows) {
+    if (auto it = ctx.rows->find(t); it != ctx.rows->end()) handler = &it->second;
+  }
+  auto present = columns_present(db, t);
+  std::vector<std::string> from_cols;
+  for (const auto& c : from_t.columns) {
+    if (present.count(c.name)) from_cols.push_back(c.name);
+  }
+  std::string key;
+  for (const auto& c : from_t.columns) {
+    if (c.primary_key) key = c.name;
+  }
+  create_table(db, to_t, "goober_rebuild");
+  std::string list;
+  for (const auto& c : from_cols) list += (list.empty() ? "" : ", ") + ident(c);
+  sqlite3* raw = db.raw();
+  Stmt sel;
+  std::string sql = "SELECT " + list + " FROM " + ident(t) + " ORDER BY rowid";
+  if (sqlite3_prepare_v2(raw, sql.c_str(), -1, &sel.s, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(raw));
+  int64_t failed = 0;
+  std::string first;
+  while (sqlite3_step(sel.s) == SQLITE_ROW) {
+    bj::object row;
+    for (int i = 0; i < int(from_cols.size()); ++i) row[from_cols[size_t(i)]] = column_value(sel.s, i);
+    if (ctx.report) ++ctx.report->rows;
+    std::string why;
+    std::optional<bj::object> out;
+    if (!handler) {
+      why = "no upgrade handler for " + t;
+    } else {
+      out = (*handler)(row, &why);
+      if (!out && why.empty()) why = "the handler answered nothing";
+    }
+    if (out) {
+      const auto* k = out->if_contains(key);
+      if (!k || text_of(*k) != text_of(row.at(key))) why = "the handler changed the primary key " + key + "; it never changes";
+      for (const auto& kv : *out) {
+        if (why.empty() && !to_t.column(kv.key())) why = "the handler answered " + std::string(kv.key()) + ", which " + schema + "'s " + t + " doesn't have";
       }
     }
-    sqlite::Stmt mark(db, "INSERT INTO goober_schemas (name, applied_ms) VALUES (?, ?)");
-    mark.bind(1, schema.name).bind(2, base::now_unix_ms()).run();
+    if (out && why.empty()) {
+      std::string cols, marks;
+      for (const auto& kv : *out) {
+        cols += (cols.empty() ? "" : ", ") + ident(std::string(kv.key()));
+        marks += marks.empty() ? "?" : ", ?";
+      }
+      Stmt ins;
+      std::string isql = "INSERT INTO \"goober_rebuild\" (" + cols + ") VALUES (" + marks + ")";
+      if (sqlite3_prepare_v2(raw, isql.c_str(), -1, &ins.s, nullptr) != SQLITE_OK) {
+        why = sqlite3_errmsg(raw);
+      } else {
+        int i = 1;
+        for (const auto& kv : *out) {
+          if (!why.empty()) break;
+          bind_value(ins.s, i++, kv.value(), &why);
+        }
+        if (why.empty() && sqlite3_step(ins.s) != SQLITE_DONE) why = sqlite3_errmsg(raw);
+      }
+    }
+    if (why.empty()) continue;
+    ++failed;
+    std::string k = text_of(row.at(key));
+    if (first.empty()) first = "row " + k + ": " + why;
+    if (ctx.report && ctx.report->failures.size() < 20) {
+      ctx.report->failures.push_back(bj::object{{"table", t}, {"key", k}, {"error", why}});
+    }
+    if (!ctx.keep_going) break;
+  }
+  if (failed) {
+    throw std::runtime_error(std::to_string(failed) + (failed == 1 ? " row" : " rows") + " of " + t +
+                             " can't become " + schema + "'s shape, so nothing changed; the first: " + first);
+  }
+  db.exec("DROP TABLE " + ident(t));
+  db.exec("ALTER TABLE \"goober_rebuild\" RENAME TO " + ident(t));
+  for (const char* q : {"DELETE FROM goober_columns WHERE table_name = ?", "DELETE FROM goober_indexes WHERE table_name = ?"}) {
+    sqlite::Stmt d(db, q);
+    d.bind(1, t).run();
+  }
+  for (const auto& c : to_t.columns) record_column(db, t, c, schema);
+  for (const auto& idx : to_t.indexes) create_index(db, t, idx, schema);
+  if (const auto* stamped = Schema::stamped_key(to_t)) db.exec(id_triggers(to_t, *stamped));
+  for (const auto& c : from_t.columns) {
+    if (!to_t.column(c.name)) record_dropped(db, t, c.name, schema);
+  }
+}
+
+void apply_in(sqlite::Db& db, const Schema& schema, ApplyContext& ctx);
+
+// The step from `from` to `to`, on a database that holds `from` (041 § 4): expansions, then
+// emulated changes and contractions, then indexing; forced tables first, through their handlers.
+void apply_step(sqlite::Db& db, const Schema& from, const Schema& to, ApplyContext& ctx, bool existed) {
+  Step step = plan_step(from, to);
+  if (step.refused()) throw std::runtime_error("schema " + to.name + " changes a primary key, which never changes");
+  if (ctx.require_approval && step.needs_person() && (!ctx.store || !ctx.store->approval(to.name))) {
+    throw std::runtime_error("schema " + to.name + " drops or rewrites data, so it waits for a person to approve it in "
+                             "the panel's Database view (041 § 6)");
+  }
+  // A table or column another schema also declares, outside this line of versions, stays as it is.
+  if (ctx.store) {
+    std::set<std::string> line{to.name};
+    for (std::optional<Schema> s = from; s; s = s->follows.empty() ? std::nullopt : ctx.store->get(s->follows)) {
+      if (!line.insert(s->name).second) break;
+    }
+    std::vector<std::string> applied;
+    {
+      sqlite::Stmt q(db, "SELECT name FROM goober_schemas");
+      while (q.step()) applied.push_back(q.text(0));
+    }
+    for (const auto& name : applied) {
+      if (line.count(name)) continue;
+      auto other = ctx.store->get(name);
+      if (!other) continue;
+      for (const auto& c : step.changes) {
+        if (c.kind != "contraction" && c.kind != "emulated" && c.kind != "forced") continue;
+        const Table* ot = other->table(c.table);
+        if (!ot || (!c.column.empty() && !ot->column(c.column))) continue;
+        throw std::runtime_error(c.table + (c.column.empty() ? "" : "." + c.column) + " is also declared by schema " + name +
+                                 ", which isn't a version of " + to.name + ", so " + to.name + " can't change it here");
+      }
+    }
+  }
+  std::set<std::string> skip;
+  for (const auto& t : step.forced_tables) {
+    bool handled = ctx.rows && ctx.rows->count(t);
+    if (handled || !table_exists(db, t)) continue;
+    int64_t rows = count_rows(db, t);
+    if (rows == 0) continue;
+    if (ctx.dry_run && ctx.pending) {
+      ctx.pending->push_back(t);
+      skip.insert(t);
+      continue;
+    }
+    throw std::runtime_error("table " + t + " holds " + std::to_string(rows) + " rows that only an upgrade box can carry "
+                             "over to " + to.name + ", so this database waits for its upgrade (upgrade_dry_run, then "
+                             "upgrade_start; 041 § 7)");
+  }
+  bool rewrites = step.contracts() || !step.forced_tables.empty();
+  for (const auto& c : step.changes) rewrites |= c.kind == "emulated";
+  if (existed && rewrites && ctx.before_change) {
+    std::string err;
+    if (!ctx.before_change("before schema " + to.name, &err)) {
+      throw std::runtime_error("the snapshot before schema " + to.name + " failed, so nothing changed: " + err);
+    }
+  }
+  // Forced tables, through their handlers.
+  for (const auto& t : step.forced_tables) {
+    if (skip.count(t)) continue;
+    if (!table_exists(db, t)) {
+      create_table(db, *to.table(t), t);
+      for (const auto& c : to.table(t)->columns) record_column(db, t, c, to.name);
+      for (const auto& idx : to.table(t)->indexes) create_index(db, t, idx, to.name);
+      if (const auto* k = Schema::stamped_key(*to.table(t))) db.exec(id_triggers(*to.table(t), *k));
+      continue;
+    }
+    rebuild_forced(db, *from.table(t), *to.table(t), to.name, ctx);
+  }
+  // Indexes that go or change: dropped before any is made, so a name can move between tables.
+  for (const auto& c : step.changes) {
+    if (c.index.empty() || c.kind != "indexing" || step.forced_tables.count(c.table)) continue;
+    const Table* ft = from.table(c.table);
+    if (!ft) continue;
+    for (const auto& i : ft->indexes) {
+      if (i.name == c.index) drop_index(db, i.name);
+    }
+  }
+  // New tables.
+  for (const auto& tt : to.tables) {
+    if (from.table(tt.name)) continue;
+    if (auto by = dropped_by(db, tt.name, "")) {
+      throw std::runtime_error("table " + tt.name + " was dropped by schema " + *by + "; a dropped name is never used again");
+    }
+    if (table_exists(db, tt.name)) throw std::runtime_error("table " + tt.name + " already exists here, made by another schema");
+    create_table(db, tt, tt.name);
+    if (const auto* key = Schema::stamped_key(tt)) db.exec(id_triggers(tt, *key));
+    for (const auto& c : tt.columns) record_column(db, tt.name, c, to.name);
+    for (const auto& idx : tt.indexes) create_index(db, tt.name, idx, to.name);
+  }
+  // Tables both declare.
+  for (const auto& tt : to.tables) {
+    const Table* ft = from.table(tt.name);
+    if (!ft || step.forced_tables.count(tt.name)) continue;
+    auto present = columns_present(db, tt.name);
+    for (const auto& tc : tt.columns) {
+      if (ft->column(tc.name)) continue;
+      if (auto by = dropped_by(db, tt.name, tc.name)) {
+        throw std::runtime_error(tt.name + "." + tc.name + " was dropped by schema " + *by + "; a dropped name is never used again");
+      }
+      if (present.count(tc.name)) throw std::runtime_error(tt.name + "." + tc.name + " exists but no schema declared it");
+      db.exec("ALTER TABLE " + ident(tt.name) + " ADD COLUMN " + tc.sql());
+      record_column(db, tt.name, tc, to.name);
+    }
+    std::map<std::string, std::string> defs;
+    std::vector<const Column*> dropped;
+    for (const auto& c : step.changes) {
+      if (c.table != tt.name || c.column.empty()) continue;
+      if (c.kind == "emulated") defs[c.column] = tt.column(c.column)->sql();
+      if (c.kind == "contraction") {
+        const Column* fc = ft->column(c.column);
+        if (!present.count(fc->name)) continue;
+        dropped.push_back(fc);
+        if (!fc->default_value && !fc->nullable) {
+          // Newer boxes' inserts don't name it, so it needs a default: what older boxes read.
+          Column held = *fc;
+          if (fc->type == "string") held.default_value = bj::value("");
+          else if (fc->type == "boolean") held.default_value = bj::value(false);
+          else if (fc->type == "double" || fc->type == "float") held.default_value = bj::value(0.0);
+          else held.default_value = bj::value(int64_t(0));
+          defs[fc->name] = held.sql();
+        }
+      }
+    }
+    if (!defs.empty()) rebuild_table(db, tt.name, defs);
+    for (const auto* fc : dropped) {
+      tombstone_column(db, tt.name, *fc);
+      sqlite::Stmt d(db, "DELETE FROM goober_columns WHERE table_name = ? AND column_name = ?");
+      d.bind(1, tt.name).bind(2, fc->name).run();
+      record_dropped(db, tt.name, fc->name, to.name);
+    }
+    for (const auto& [name, def] : defs) {
+      if (const Column* tc = tt.column(name)) record_column(db, tt.name, *tc, to.name);
+    }
+  }
+  // Dropped tables.
+  for (const auto& ft : from.tables) {
+    if (!to.table(ft.name)) tombstone_table(db, ft.name, to.name);
+  }
+  // New and changed indexes on tables both declare.
+  for (const auto& c : step.changes) {
+    if (c.index.empty() || c.kind != "indexing" || !from.table(c.table) || step.forced_tables.count(c.table)) continue;
+    const Table* tt = to.table(c.table);
+    if (!tt) continue;
+    for (const auto& i : tt->indexes) {
+      if (i.name == c.index) create_index(db, tt->name, i, to.name);
+    }
+  }
+}
+
+// A schema with no `follows`: expand only, as v1 always did (008 § 3).
+void expand(sqlite::Db& db, const Schema& schema) {
+  for (const auto& table : schema.tables) {
+    if (auto by = dropped_by(db, table.name, "")) {
+      throw std::runtime_error("table " + table.name + " was dropped by schema " + *by + "; a dropped name is never used again");
+    }
+    bool exists = table_exists(db, table.name);
+    std::map<std::string, std::string> recorded;
+    {
+      sqlite::Stmt q(db, "SELECT column_name, signature FROM goober_columns WHERE table_name = ?");
+      q.bind(1, table.name);
+      while (q.step()) recorded[q.text(0)] = q.text(1);
+    }
+    if (!exists) {
+      create_table(db, table, table.name);
+      if (const auto* key = Schema::stamped_key(table)) db.exec(id_triggers(table, *key));
+    }
+    auto present = columns_present(db, table.name);
+    for (const auto& col : table.columns) {
+      auto rec = recorded.find(col.name);
+      if (rec != recorded.end()) {
+        if (rec->second != col.signature()) {
+          throw std::runtime_error("schema " + schema.name + " changes " + table.name + "." + col.name + " from " +
+                                   rec->second + " to " + col.signature() +
+                                   "; a column changes only in a schema that follows the one before it (\"follows\", 041)");
+        }
+      } else if (auto by = dropped_by(db, table.name, col.name)) {
+        throw std::runtime_error(table.name + "." + col.name + " was dropped by schema " + *by + "; a dropped name is never used again");
+      } else if (exists && present.count(col.name)) {
+        throw std::runtime_error(table.name + "." + col.name + " exists but no schema declared it");
+      } else if (exists) {
+        if (col.primary_key) throw std::runtime_error("schema " + schema.name + " can't add a primary key to " + table.name);
+        if (!col.nullable && !col.default_value) {
+          throw std::runtime_error("schema " + schema.name + " adds " + table.name + "." + col.name +
+                                   ", which existing rows can't fill: make it nullable or give it a default");
+        }
+        db.exec("ALTER TABLE " + ident(table.name) + " ADD COLUMN " + col.sql());
+      }
+      if (rec == recorded.end()) record_column(db, table.name, col, schema.name);
+    }
+    for (const auto& idx : table.indexes) {
+      sqlite::Stmt q(db, "SELECT table_name, signature FROM goober_indexes WHERE index_name = ?");
+      q.bind(1, idx.name);
+      if (q.step()) {
+        if (q.text(0) != table.name || q.text(1) != idx.signature()) {
+          throw std::runtime_error("schema " + schema.name + " changes index " + idx.name);
+        }
+        continue;
+      }
+      create_index(db, table.name, idx, schema.name);
+    }
+  }
+}
+
+void apply_in(sqlite::Db& db, const Schema& schema, ApplyContext& ctx) {
+  if (is_applied(db, schema.name)) return;
+  if (!schema.follows.empty()) {
+    if (!ctx.store) throw std::runtime_error("schema " + schema.name + " follows " + schema.follows + ", which can't be looked up here");
+    auto from = ctx.store->get(schema.follows);
+    if (!from) throw std::runtime_error("schema " + schema.name + " follows " + schema.follows + ", which isn't stored");
+    // Every database goes through the same steps in order: the one before first.
+    bool existed = is_applied(db, from->name);
+    if (!existed) apply_in(db, *from, ctx);
+    apply_step(db, *from, schema, ctx, existed);
+  } else {
+    expand(db, schema);
+  }
+  sqlite::Stmt mark(db, "INSERT INTO goober_schemas (name, applied_ms) VALUES (?, ?)");
+  mark.bind(1, schema.name).bind(2, base::now_unix_ms()).run();
+}
+
+// Plans (and, unless dry_run, applies) a schema to an open database, in one transaction.
+bool apply_schema(sqlite::Db& db, const Schema& schema, ApplyContext ctx, std::string* error) {
+  db.exec(kHostTables);
+  if (is_applied(db, schema.name)) return true;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    apply_in(db, schema, ctx);
   } catch (const std::exception& e) {
     db.exec("ROLLBACK");
     *error = e.what();
     return false;
   }
-  db.exec(dry_run ? "ROLLBACK" : "COMMIT");
+  db.exec(ctx.dry_run ? "ROLLBACK" : "COMMIT");
   return true;
 }
 
@@ -717,7 +1192,14 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
     std::string key = path.string() + "|" + schema->name;
     std::lock_guard lock(mu_);
     if (!applied_.count(key)) {
-      if (!apply_schema(*db, *schema, false, error)) return nullptr;
+      ApplyContext ctx;
+      ctx.store = store_;
+      if (before_change_) {
+        ctx.before_change = [this, t = std::string(tenant), d = std::string(database)](const std::string& note, std::string* err) {
+          return before_change_(t, d, note, err);
+        };
+      }
+      if (!apply_schema(*db, *schema, ctx, error)) return nullptr;
       bump(path);
       applied_.insert(key);
     }
@@ -742,21 +1224,95 @@ bool Databases::check(std::string_view tenant, std::string_view database, const 
   sqlite::Db db(file(tenant, database));
   install_id_functions(db.raw(), &ids_);
   std::string why;
-  if (apply_schema(db, schema, true, &why)) return true;
+  // A forced table still holding rows waits for its upgrade (041 § 7); the box may be stored.
+  std::vector<std::string> pending;
+  ApplyContext ctx;
+  ctx.dry_run = true;
+  ctx.store = store_;
+  ctx.pending = &pending;
+  if (apply_schema(db, schema, ctx, &why)) return true;
   *error = "tenant " + std::string(tenant) + ", database " + std::string(database) + ": " + why;
   return false;
 }
 
-bool Databases::compatible(const std::vector<const Schema*>& schemas, std::string* error) {
+bool Databases::compatible(const std::vector<const Schema*>& schemas, std::string* error, const SchemaStore* store) {
   sqlite::Db db(":memory:");
   install_id_functions(db.raw(), nullptr);
+  ApplyContext ctx;
+  ctx.store = store;
+  ctx.require_approval = false;  // an empty database: nothing to drop
   for (const auto* schema : schemas) {
     std::string why;
-    if (!apply_schema(db, *schema, false, &why)) {
+    if (!apply_schema(db, *schema, ctx, &why)) {
       *error = "schema " + schema->name + " doesn't fit with the others on the same database: " + why;
       return false;
     }
   }
+  return true;
+}
+
+std::vector<std::string> Databases::applied_schemas(std::string_view tenant, std::string_view database) const {
+  std::vector<std::string> out;
+  if (!exists(tenant, database)) return out;
+  sqlite::Db db(file(tenant, database));
+  db.exec(kHostTables);
+  sqlite::Stmt q(db, "SELECT name FROM goober_schemas ORDER BY applied_ms, name");
+  while (q.step()) out.push_back(q.text(0));
+  return out;
+}
+
+bj::object Databases::step_impact(std::string_view tenant, std::string_view database, const Step& step,
+                                  const Schema& from) const {
+  bj::object out{{"tenant", std::string(tenant)}, {"database", std::string(database)}};
+  sqlite::Db db(file(tenant, database));
+  db.exec(kHostTables);
+  out["applied"] = is_applied(db, step.to);
+  bj::array drops, forced;
+  for (const auto& c : step.changes) {
+    if (c.kind != "contraction" || !table_exists(db, c.table)) continue;
+    if (c.column.empty()) {
+      drops.push_back(bj::object{{"table", c.table}, {"rows", count_rows(db, c.table)}});
+      continue;
+    }
+    const Table* ft = from.table(c.table);
+    const Column* fc = ft ? ft->column(c.column) : nullptr;
+    if (!fc || !columns_present(db, c.table).count(c.column)) continue;
+    // Rows whose value differs from what older boxes will read: the data that goes.
+    drops.push_back(bj::object{{"table", c.table},
+                               {"column", c.column},
+                               {"rows", count_rows(db, c.table, ident(c.column) + " IS NOT " + fc->dropped_value_sql())}});
+  }
+  for (const auto& t : step.forced_tables) {
+    if (table_exists(db, t)) forced.push_back(bj::object{{"table", t}, {"rows", count_rows(db, t)}});
+  }
+  out["drops"] = std::move(drops);
+  out["forced"] = std::move(forced);
+  return out;
+}
+
+bool Databases::upgrade(std::string_view tenant, std::string_view database, const Schema& to,
+                        const std::map<std::string, RowTransform>& rows, bool keep_going, UpgradeReport* report,
+                        std::string* error, bool require_approval) {
+  if (!exists(tenant, database)) return *error = "tenant " + std::string(tenant) + " has no database " + std::string(database), false;
+  auto path = file(tenant, database);
+  install_clockless_vfs();
+  sqlite::Db db(path);
+  install_id_functions(db.raw(), &ids_);
+  ApplyContext ctx;
+  ctx.store = store_;
+  ctx.rows = &rows;
+  ctx.require_approval = require_approval;
+  ctx.keep_going = keep_going;
+  ctx.report = report;
+  if (before_change_) {
+    ctx.before_change = [this, t = std::string(tenant), d = std::string(database)](const std::string& note, std::string* err) {
+      return before_change_(t, d, note, err);
+    };
+  }
+  std::lock_guard lock(mu_);
+  if (!apply_schema(db, to, ctx, error)) return false;
+  bump(path);
+  applied_.insert(path.string() + "|" + to.name);
   return true;
 }
 
@@ -897,7 +1453,9 @@ bool Databases::drop_table(std::string_view tenant, std::string_view database, s
       while (q.step()) schemas.insert(q.text(0));
     }
     db.exec("DROP TABLE \"" + std::string(table) + "\"");
-    for (const char* sql : {"DELETE FROM goober_columns WHERE table_name = ?", "DELETE FROM goober_indexes WHERE table_name = ?"}) {
+    // A person's drop frees a tombstoned table's name and its dropped columns' (041 § 5).
+    for (const char* sql : {"DELETE FROM goober_columns WHERE table_name = ?", "DELETE FROM goober_indexes WHERE table_name = ?",
+                            "DELETE FROM goober_dropped WHERE table_name = ?"}) {
       sqlite::Stmt d(db, sql);
       d.bind(1, table).run();
     }
@@ -962,6 +1520,17 @@ bj::object Databases::describe(std::string_view tenant, std::string_view databas
     tables.push_back(bj::object{{"table", t}, {"rows", rows}, {"columns", std::move(columns)}, {"indexes", std::move(indexes)}});
   }
   out["tables"] = std::move(tables);
+  // Tombstones (041 § 5): tables and columns a schema dropped, kept for older boxes' SQL.
+  bj::array dropped;
+  {
+    sqlite::Stmt q(db, "SELECT table_name, column_name, schema, dropped_ms FROM goober_dropped ORDER BY table_name, column_name");
+    while (q.step()) {
+      bj::object d{{"table", q.text(0)}, {"schema", q.text(2)}, {"dropped", base::format_utc_ms(q.int64(3))}};
+      if (!q.text(1).empty()) d["column"] = q.text(1);
+      dropped.push_back(std::move(d));
+    }
+  }
+  out["dropped"] = std::move(dropped);
   return out;
 }
 

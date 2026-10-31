@@ -484,6 +484,13 @@ void Host::register_changeset_tools() {
            for (const auto& v : *a) {
              auto s = schemas_->check(schema_text(v), &err);
              if (!s) return refuse("schemas: " + err);
+             // A next version (041) can drop data and may wait for a person, so it can't be one step
+             // of a change set that applies and rolls back by itself.
+             if (!s->follows.empty()) {
+               return refuse("schemas: " + s->name + " follows " + s->follows +
+                             "; a schema's next version goes through schema_put and, for drops or forced "
+                             "changes, a person's approval, not a change set");
+             }
              put(bj::object{{"kind", "schema"}, {"name", s->name}, {"schema", schema_text(v)}});
              added.push_back(bj::value("schema:" + s->name));
            }

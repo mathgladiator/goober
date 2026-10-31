@@ -10,8 +10,14 @@ operator queries.
 - **A statement can't see past its grant.** Every table, column, and operation is checked
   by SQLite's authorizer at prepare time, so the host and SQLite can't disagree about what
   a statement touches. PRAGMA, ATTACH, transactions, DDL, and impure functions are refused.
-- **Schemas only expand.** A changed column or index is refused, before anything is
-  written, and an upload is checked against every tenant's existing copy first.
+- **Schemas only expand, unless they follow.** A schema without `follows` that changes a
+  column or index is refused before anything is written, and an upload is checked against
+  every tenant's existing copy first. A schema that `follows` another is applied as one step,
+  in one transaction, after the one it follows (`design/machine/041.SchemaEvolution.md`):
+  nothing that drops or rewrites data applies without a person's approval and a snapshot
+  first, older boxes' SQL keeps preparing (tombstones), a dropped name is never reused, and a
+  primary key never changes. A forced table's rows each pass the new shape's constraints, or
+  the database stays as it was.
 - **What the host declared is recorded in the database** (`goober_schemas`,
   `goober_columns`, `goober_indexes`), so comparisons never depend on parsing SQL.
 - **Every statement is bounded** by a row limit and a step budget.

@@ -1013,13 +1013,14 @@ const views = {
 function dropsCard(tenant, unbound, snapshots) {
   const owner = (state.me.roles || []).includes('host:owner');
   const out = h('p', { class: 'muted small' });
-  const ask = (args, target, what) => async () => {
-    const typed = prompt(`${what} ${target}?\nThe host takes a snapshot first. Type ${target} to go ahead.`);
+  const ask = (args, target, what, said) => async () => {
+    const typed = prompt(`${what} ${target}?\n${said || 'The host takes a snapshot first.'} Type ${target} to go ahead.`);
     if (typed === null) return;
     const why = prompt('Why? (kept in the change log)') || '';
     try {
       const r = await api('write/drop', Object.assign({ tenant, confirm: typed, why }, args));
       out.textContent = r.retired ? `Retired ${r.retired}.` : r.deleted ? `Deleted ${r.deleted}.`
+        : r.approved ? `Approved ${r.approved}: it applies as boxes name it, each database snapshotted first.`
         : `Dropped ${r.dropped}. Its snapshot: ${r.snapshot}.`;
       render(true);
     } catch (e) { out.textContent = e.message; }
@@ -1036,7 +1037,18 @@ function dropsCard(tenant, unbound, snapshots) {
   for (const s of unbound.unnamed_schemas || []) {
     rows.push({ what: 'schema', name: s, rows: '', act: button('Retire', ask({ kind: 'schema', schema: s }, s, 'Retire schema')) });
   }
+  // Schemas whose step drops or rewrites data wait for a person (041 § 6): what each would do.
+  const held = (unbound.held_schemas || []).map((s) => {
+    const says = (s.step.changes || []).filter((c) => c.kind !== 'expansion' && c.kind !== 'indexing').map((c) => c.says);
+    const lines = says.concat(s.step.consequences || []);
+    return h('div', { class: 'small' },
+      h('p', {}, h('b', { class: 'mono' }, s.schema), ` follows ${s.step.from}. `,
+        button('Approve', ask({ kind: 'schema_approve', schema: s.schema }, s.schema, 'Approve schema',
+          lines.join('\n') + '\nEach database is snapshotted before it changes.')) || ''),
+      h('ul', {}, lines.map((l) => h('li', {}, l))));
+  });
   return card('Unbound, and snapshots',
+    held.length ? h('details', { open: true }, h('summary', {}, `Schemas waiting for a person (${held.length})`), held) : null,
     h('p', { class: 'muted small' }, 'What no box binds (active or disabled), which a person may drop or retire here, and the database snapshots. ' +
       'Agents can only point at these (db_unbound); dropping is yours. ' + (owner ? '' : 'Only host:owner drops.')),
     rows.length ? table([

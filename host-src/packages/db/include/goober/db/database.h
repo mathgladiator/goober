@@ -16,6 +16,16 @@
 
 namespace goober::db {
 
+// An upgrade box's rows handler (design/machine/041.SchemaEvolution.md § 7): one row in the from
+// shape to the same row in the to shape, or nullopt with why.
+using RowTransform = std::function<std::optional<bj::object>(const bj::object& row, std::string* error)>;
+
+// What an upgrade did, or would do, to one database.
+struct UpgradeReport {
+  int64_t rows = 0;     // rows passed through a handler
+  bj::array failures;   // {table, key, error}, at most 20
+};
+
 // Tenant databases: storage/sqlite3/$tenant/databases/$database.db, created on first use
 // and grown only by expanding schemas (design/machine/008.Databases.md §3). Thread-safe.
 class Databases {
@@ -38,6 +48,14 @@ class Databases {
   // Where stamped keys come from: the host's id service (038 § 2). Set before the first open;
   // without it, an insert into a table keyed by id fails.
   void set_id_source(std::function<int64_t()> ids) { ids_ = std::move(ids); }
+  // Where a schema's `follows` is looked up and its approval read (041). Without it, a schema
+  // that follows another can't be applied.
+  void set_schema_store(const SchemaStore* store) { store_ = store; }
+  // Called before a step drops data, rebuilds a table, or rewrites rows in a database that
+  // already held the schema it follows: the host takes a snapshot (041 § 4). False stops the step.
+  using BeforeChange = std::function<bool(const std::string& tenant, const std::string& database,
+                                          const std::string& note, std::string* error)>;
+  void set_before_change(BeforeChange f) { before_change_ = std::move(f); }
 
   std::filesystem::path file(std::string_view tenant, std::string_view database) const;
   bool exists(std::string_view tenant, std::string_view database) const;
@@ -54,7 +72,23 @@ class Databases {
 
   // Whether `schemas` can all apply to one database, as when boxes share it: each is
   // applied in turn to an empty one, and the first that would change another is named.
-  static bool compatible(const std::vector<const Schema*>& schemas, std::string* error);
+  // A schema that follows another is applied after it, looked up in `store`.
+  static bool compatible(const std::vector<const Schema*>& schemas, std::string* error,
+                         const SchemaStore* store = nullptr);
+
+  // The schemas applied to a database, oldest first; empty when it doesn't exist.
+  std::vector<std::string> applied_schemas(std::string_view tenant, std::string_view database) const;
+  // What a step would do to a database that holds its `from` (041 § 3): the values a
+  // contraction would drop, the rows of dropped tables, and the rows of forced tables.
+  bj::object step_impact(std::string_view tenant, std::string_view database, const Step& step,
+                         const Schema& from) const;
+  // Applies `to` to an existing database, running each forced table's rows through its
+  // handler (041 § 7), in one transaction. With keep_going, every failing row is reported (up
+  // to 20) before the step is refused; without, the first stops it. Nothing changes on failure.
+  // A dry run on copies passes require_approval false: it is how a person sees what it does.
+  bool upgrade(std::string_view tenant, std::string_view database, const Schema& to,
+               const std::map<std::string, RowTransform>& rows, bool keep_going, UpgradeReport* report,
+               std::string* error, bool require_approval = true);
 
   // The tenants that have a databases directory, and the databases each one holds.
   std::vector<std::string> tenants() const;
@@ -82,6 +116,8 @@ class Databases {
  private:
   std::filesystem::path root_;
   std::function<int64_t()> ids_;
+  const SchemaStore* store_ = nullptr;
+  BeforeChange before_change_;
   struct Watcher {
     sqlite3* db = nullptr;  // closed by the destructor, or when it is dropped from watchers_
     int64_t used = 0;

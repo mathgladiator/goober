@@ -322,6 +322,52 @@ bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m
   return true;
 }
 
+// routes.upgrade.$table (420; design/machine/041.SchemaEvolution.md § 7): how each row of a table
+// becomes the next schema version's shape. Only the host calls it, once per row, during an upgrade.
+bool parse_upgrades(const bj::value& upgrades, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!upgrades.is_object()) return *error = "routes.upgrade must be an object", false;
+  std::string err;
+  auto version = [](std::string v) {
+    if (v.ends_with(".schema")) v.resize(v.size() - 7);
+    return v;
+  };
+  for (const auto& kv : upgrades.as_object()) {
+    std::string where = "routes.upgrade." + std::string(kv.key());
+    if (!base::is_valid_name(kv.key())) return *error = where + ": the key is the table the route upgrades", false;
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    const auto& def = kv.value().as_object();
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "from" || k == "to" || k == "rows" || k == "timeout-ms") continue;
+      if (k == "writes" || k == "reads") {
+        return *error = where + "." + k + ": boxes write and read with SQL, so there are no named writes or reads to "
+                        "translate yet; an upgrade runs once no box pinned to from (or older) uses the table "
+                        "(design/machine/041.SchemaEvolution.md § 7)",
+               false;
+      }
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    HttpRoute r;
+    r.verb = "upgrade";
+    r.upgrade_table = std::string(kv.key());
+    r.upgrade_from = version(get_string(def, "from", &err).value_or(""));
+    r.upgrade_to = version(get_string(def, "to", &err).value_or(""));
+    if (!base::is_valid_name(r.upgrade_from) || !base::is_valid_name(r.upgrade_to) || r.upgrade_from == r.upgrade_to) {
+      return *error = where + ": from and to name the schema version before and the one after, like core13 and core14", false;
+    }
+    const auto* rows = get_object(def, "rows", &err);
+    auto name = rows ? get_string(*rows, "name", &err) : std::nullopt;
+    if (!name || !base::is_valid_name(*name)) return *error = where + ".rows.name is required, matching [a-z][a-z0-9_]*", false;
+    if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+    r.name = *name;
+    r.timeout_ms = get_int(def, "timeout-ms", &err);
+    if (!err.empty()) return *error = where + ": " + err, false;
+    if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 1000)) return *error = where + ".timeout-ms must be 1 to 1000", false;
+    m->upgrades.push_back(std::move(r));
+  }
+  return true;
+}
+
 // routes.timer.$key (045.Time.md). Timers have no verb, no requirements, and no "public":
 // only the host calls them.
 bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifest* m, std::string* error) {
@@ -1614,6 +1660,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
         if (!parse_jobs(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
+      if (protocol == "upgrade") {
+        if (!parse_upgrades(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
       if (protocol == "internal") {
         if (!parse_internal(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
@@ -1769,6 +1819,25 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     if (!t.at_field.empty() && st->active_field.empty()) {
       return *error = "routes.timer: " + t.name + " fires once per row, so " + st->name +
                           " needs an active-field the host can turn off after the fire", std::nullopt;
+    }
+  }
+  // An upgrade box is a pure function (420): only upgrade routes, all for one step, and nothing
+  // that reaches data, the network, or a value that could differ between runs.
+  if (!m.upgrades.empty()) {
+    const char* other = !m.routes.empty() ? "http or sse routes" : !m.tools.empty() ? "mcp tools" : !m.timers.empty() ? "timers"
+                        : !m.internal.empty() ? "internal routes" : !m.identity.empty() ? "identity routes"
+                        : !m.mail.empty() ? "mail routes" : !m.results.empty() ? "result routes" : !m.jobs.empty() ? "jobs"
+                        : !m.data.empty() ? "data strategies" : !m.external.empty() ? "external services"
+                        : !m.flags.empty() ? "flags" : nullptr;
+    if (other) {
+      return *error = "an upgrade box is a pure function (420): it has routes.upgrade and nothing else, so no " +
+                      std::string(other),
+             std::nullopt;
+    }
+    for (const auto& u : m.upgrades) {
+      if (u.upgrade_from != m.upgrades[0].upgrade_from || u.upgrade_to != m.upgrades[0].upgrade_to) {
+        return *error = "routes.upgrade: every route of an upgrade box names the same from and to", std::nullopt;
+      }
     }
   }
   return m;

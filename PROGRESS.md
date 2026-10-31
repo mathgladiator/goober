@@ -76,7 +76,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 390 Quotas | none | | |
 | 400 Cluster | none | Single machine only. | |
 | 410 API | partial | 70 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, backups, source projects, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
-| 420 Migration | partial | Expand-only schema application, refused changes named per tenant (008 §3). | Contraction, emulated type changes, upgrade boxes. |
+| 420 Migration | mostly | `follows` steps classified by kind; expansions, emulated type changes, and indexing in place; contractions as tombstones after a person's approval; upgrade boxes with rows handlers, dry run on copies, snapshot first (041). | `writes` and `reads` handlers (no named writes yet), so a forced upgrade waits for older boxes to go; emulated reads aren't converted for older boxes; tombstoned columns aren't removed. |
 | 521 Source | built | Drafted by Claude at the human's request, uncommitted for the human. Projects with numbered revisions, content stored once, commits that land on top when they don't overlap, diffs, revert; builds of Rust (in a bubblewrap sandbox, offline, vendored crates), WAT, or prebuilt WASM; deploys of schemas, boxes, and sites; eleven MCP tools and `goober.py source` (020). | Branches, merges inside a file, GitHub mirroring, deleting projects, crates beyond the vendored set. |
 | 663 Backups | built | Drafted by Claude at the human's request, uncommitted for the human. Sealed (ChaCha20 + HMAC) nightlies kept keep-days by timestamp, page-level database increments, attachments queued once each, rotation, `backup_status`, and `goober-host rehydrate` into a sandboxed devbox (019). | A panel page, multipart uploads past 5 GiB, two destinations, key rotation, restoring into a live host. |
 | 800 Crawl | partial | Drafted by Claude at the human's request, uncommitted for the human (Q32). The robot: robots.txt, pacing per site, public addresses only (pinned through redirects), a cache with conditional refetches, opt-out; views (html, text, markdown, links, meta with the shop platform, JSON-LD, tables, select, extract); operator crawls with scope, sitemaps, and records; a `web` service for boxes; the ranches example (017). | JavaScript rendering, a public opt-out page, sharing crawl results between boxes, robots and pacing state across restarts. |
@@ -709,9 +709,30 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Member kinds for 420's schema evolution, when it lands (042 § 2's seam).
 - [ ] A panel page for change sets (the read tools are callable from the panel already).
 
+### Phase 36: schema evolution (420; 041)
+The human, 2026-10-31: "Let's do schema changes next."
+- [x] `"follows"`: a schema's next version, in one line per schema; `plan_step` classifies
+      every change (expansion, contraction, indexing, emulated, forced, refused) with a
+      sentence and 420's consequences; a key change is refused at `schema_put`; tests.
+- [x] Steps applied in place, in order, on each database: rebuilds for emulated changes
+      (id triggers and indexes kept), tombstones for dropped columns and tables (older boxes
+      read the default, their writes are dropped), dropped names never reused, a snapshot
+      before anything is dropped or rewritten, and a refusal when a schema outside the line
+      declares the table; tests.
+- [x] A person approves a step that drops or forces in the panel (`schema_approve`, audited,
+      in the change log); uploads naming a held schema are refused; `db_unbound`'s
+      `held_schemas`; `schema_check` says what each database would lose; tests.
+- [x] Upgrade boxes: `routes.upgrade` (rows handlers; pure: nothing else in the box, no clock,
+      a fixed seed), `upgrade_dry_run` on copies naming failing rows, `upgrade_start` after a
+      passed dry run and the approval, snapshot first, refused while a box pinned to the old
+      version uses the table; the box guide's "Changing a schema"; tests.
+- [ ] 041 § 10's decisions: `follows`, tombstones (physical removal of columns not built),
+      approvals for drops, `writes`/`reads` handlers (waiting for named writes), forced
+      defaults and unique indexes, upgrades run like jobs.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
 mail routes (038), the upload verb (060), the key vault (064), approvals, deployments,
-bundles, working sets (300 to 320), stability (330), quotas (390), the cluster (400),
-and contraction (420). Each waits for the human to pull it forward.
+bundles, working sets (300 to 320), stability (330), quotas (390), and the cluster (400).
+Each waits for the human to pull it forward.

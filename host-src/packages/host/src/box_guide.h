@@ -243,8 +243,9 @@ through the mail service. Failures are retried in order, then given up after 8 t
      "note": {"type": "string", "nullable": true}},
      "indexes": {"orders_by_title": {"columns": ["title"], "unique": false}}}}}
    Types: id, int32, int64, double, float, boolean, string. A schema name is a version: never
-   reused, so try one with schema_check (it stores nothing) before schema_put. Later schemas
-   may only add tables, nullable or defaulted columns, and indexes.
+   reused, so try one with schema_check (it stores nothing) before schema_put. A schema
+   without "follows" may only add tables, nullable or defaulted columns, and indexes. To change
+   a table, write its next version with "follows" (see "Changing a schema" below).
    The primary key is always the host's id, never a natural key: a key like an address and a
    day (addr|day) is a unique index on its own columns,
      "indexes": {"seen_by_addr_day": {"columns": ["addr", "day"], "unique": true}}
@@ -341,6 +342,33 @@ through the mail service. Failures are retried in order, then given up after 8 t
 - The From address: a mail service's "from" is fixed in the manifest, per service, and a box
   can't choose another per call. A box sending as admin@ and another as agent@ each declare
   their own mail service with that "from".
+
+## Changing a schema (design/machine/041.SchemaEvolution.md)
+
+- The next version names the one it replaces: {"schema": "orders2", "follows": "orders1",
+  "tables": {...}}. Its tables replace orders1's: a table, column, or index it leaves out is
+  dropped. Only one version may follow each, so versions form a line.
+- schema_check says what the step does, change by change, with its consequences and, for each
+  database holding orders1, the rows holding data a drop would lose. Read it before schema_put.
+- Applied when a box version names orders2, with nothing more: new tables, new nullable or
+  defaulted columns, new or dropped indexes, and int32 to int64, float to double, allowing
+  null, or a longer max-length (older boxes see the new values as they are).
+- Waits for a person to approve the schema in the panel (Database view; db_unbound lists it
+  under held_schemas), and no box may name it until then: a dropped column or table. The data
+  goes; older boxes still running read the column's default (or null, 0, '') and their writes
+  to it are dropped; a dropped table reads as empty. A dropped name is never used again.
+- Forced, with an upgrade box, after that approval: anything else (a new column existing rows
+  can't fill, a narrower or different type, no longer allowing null, a shorter max-length, a
+  changed default, a new unique index on an existing table). An upgrade box has only
+  {"routes": {"upgrade": {"orders": {"from": "orders1", "to": "orders2", "rows": {"name":
+  "upgrade_orders_row"}}}}}; its handler gets one row in the old shape as its JSON body and
+  answers it in the new shape with a 200, the key unchanged. It has no clock (now_ms 0) and no
+  data. It runs once no box pinned to orders1 (or older) uses the table: move those boxes to
+  orders2 first (they wait for the upgrade) or disable them. upgrade_dry_run runs it on copies
+  of every database and names each failing row; upgrade_start runs it for real, with a
+  snapshot of each database first.
+- A primary key never changes, not even forced. A rename is a drop and an add, which loses the
+  data: add the new column, move the data with a job, and drop the old one in a later version.
 
 ## Jobs: moving data, once (routes.job)
 

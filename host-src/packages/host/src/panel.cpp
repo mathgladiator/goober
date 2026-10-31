@@ -305,10 +305,11 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
             bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
-    // Dropping a database, a table, or a snapshot, or retiring a schema (008 § 11): a person's act.
+    // Dropping a database, a table, or a snapshot, retiring a schema (008 § 11), or approving a
+    // schema that drops or rewrites data (041 § 6): a person's act.
     if (tool == "write/drop") {
       auto [status, body] = panel_drop(*who, args, request_id);
-      audit("panel.drop", me, arg_text(args, "kind") + ":" + arg_text(args, "tenant") + "/" + arg_text(args, "confirm"),
+      audit(arg_text(args, "kind") == "schema_approve" ? "panel.schema_approve" : "panel.drop", me, arg_text(args, "kind") + ":" + arg_text(args, "tenant") + "/" + arg_text(args, "confirm"),
             status == 200 ? "ok" : "refused", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
@@ -668,6 +669,7 @@ void Host::register_panel_tools() {
            add_routes(m.identity, "identity");
            add_routes(m.results, "result");
            add_routes(m.jobs, "job");
+           add_routes(m.upgrades, "upgrade");
            box_node(only, 1);
            // Boxes that call this one come in from the left.
            for (const auto& c : calls) {
