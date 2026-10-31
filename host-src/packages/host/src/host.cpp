@@ -1243,7 +1243,10 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                                      {"level", line.level},
                                                      {"text", line.text}}));
   }
-  if (result.outcome != runtime::wasm::CallResult::Outcome::kOk) {
+  // A call that may just return (a timer, an identity event, mail, an outbox result) and did is
+  // no failure: nothing goes in the box's log for it.
+  bool quiet_return = options.no_response_ok && result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
+  if (result.outcome != runtime::wasm::CallResult::Outcome::kOk && !quiet_return) {
     log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
                                                      {"request_id", request_id},
                                                      {"version", ref.box->version},

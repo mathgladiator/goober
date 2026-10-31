@@ -557,6 +557,20 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       its acknowledgement; `deletions` and the panel show who hasn't, and what is overdue past
       30 days; `box_guide`; tests.
 
+### The engineers' friction, 2026-10-30: source and box lifecycle
+- [x] Staged commits: `source_stage` builds one commit over several calls, kept in source.db
+      for an hour; `source_commit {stage}` commits it whole (020 § 13); tests.
+- [x] `schema_check`: schema_put's checks and warnings, nothing stored; a build's "isn't
+      stored" error points at goober.project.json's `schemas`; tests.
+- [x] `version_upload {activate: false}` stores a version dark for version_promote; tests.
+- [x] `box_disable {box, why}` / `box_enable`: a box out of service and back, kept across
+      restarts, in version_list and the change log; tests. One route alone: deploy a version
+      without it.
+- [x] A call that may just return (a timer, an identity event, mail) no longer logs
+      `no_response` in the box's log; test.
+- [x] schema_put, the key refusal, and `box_guide` say a natural key is a unique index, not the
+      primary key.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

@@ -419,3 +419,25 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   // Job routes have no address: nothing on the web reaches them.
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/move_members").status, 404);
 }
+
+// schema_check: everything schema_put checks, nothing stored, so a name is never spent on a try.
+TEST_F(DataRoutesTest, SchemaCheckStoresNothing) {
+  const char* text = R"({"schema":"tries1","tables":{"seen":{"columns":{
+      "id":{"type":"id","primary-key":true},"addr":{"type":"string"},"day":{"type":"string"},"user_id":{"type":"string"}},
+      "indexes":{"seen_by_addr_day":{"columns":["addr","day"],"unique":true}}}}})";
+  auto c = tool("schema_check", {{"schema", text}});
+  ASSERT_EQ(c.at("ok"), true) << json::dump(c);
+  EXPECT_EQ(c.at("stored"), false);
+  EXPECT_NE(json::dump(c.at("warnings")).find("seen.user_id looks like a reference"), std::string::npos) << json::dump(c);
+  EXPECT_EQ(json::dump(tool("schema_list", {})).find("tries1"), std::string::npos);
+  // A natural key as the primary key is refused, saying what to do.
+  auto bad = tool("schema_check", {{"schema", R"({"schema":"tries2","tables":{"seen":{"columns":{
+      "key":{"type":"string","primary-key":true}}}}})"}});
+  ASSERT_TRUE(bad.as_object().contains("error"));
+  EXPECT_NE(std::string(bad.at("error").as_string()).find("unique index"), std::string::npos) << json::dump(bad);
+  // Once stored, the same content checks out as stored; other content under the name doesn't.
+  ASSERT_FALSE(tool("schema_put", {{"schema", text}}).as_object().contains("error"));
+  EXPECT_EQ(tool("schema_check", {{"schema", text}}).at("stored"), true);
+  EXPECT_TRUE(tool("schema_check", {{"schema", R"({"schema":"tries1","tables":{"x":{"columns":{"a":{"type":"string"}}}}})"}})
+                  .as_object().contains("error"));
+}

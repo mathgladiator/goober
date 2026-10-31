@@ -47,6 +47,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
       m[t] = Rule::kBox;
     }
     for (const char* t : {"user_delete", "deletions"}) m[t] = Rule::kTenant;
+    for (const char* t : {"box_disable", "box_enable"}) m[t] = Rule::kBox;
     m["version_upload"] = Rule::kManifest;
     for (const char* t : {"mcp_tools_preview", "route_check"}) m[t] = Rule::kDomain;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
@@ -55,6 +56,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
                           "source_log", "source_read", "source_revert", "source_tree"}) {
       m[t] = Rule::kProject;
     }
+    m["source_stage"] = Rule::kProject;
     m["source_create"] = Rule::kProjectCreate;
     m["attachment_upload_part"] = Rule::kTicket;
     for (const char* t : {"change_get", "source_job", "job_status"}) m[t] = Rule::kResult;
@@ -67,6 +69,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
                           "spec_list", "spec_get", "approval_status"}) {
       m[t] = Rule::kOpen;
     }
+    m["schema_check"] = Rule::kOpen;
     for (const char* t : {"host_health", "ids_status", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
                           "backup_status", "crawl_list", "crawl_pages", "crawl_records", "crawl_rerun", "crawl_start",
                           "crawl_stop", "web_optout", "log_verify", "log_status", "agent_audit"}) {
@@ -253,9 +256,13 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       std::string out_of;
       if (!box_in(text_arg(args, "box"), &out_of)) return who + ", and box " + text_arg(args, "box") + " serves " + out_of + widen;
       // Promoting makes that version's manifest the one that runs, so it is the one checked.
-      if (tool == "version_promote") {
+      if (tool == "version_promote" || tool == "box_enable") {
         std::string err;
-        auto text = boxes_->manifest_text(text_arg(args, "box"), text_arg(args, "version"));
+        std::string version = text_arg(args, "version");
+        if (version.empty() && tool == "box_enable") {
+          if (auto d = boxes_->disabled(text_arg(args, "box"))) version = d->version;
+        }
+        auto text = boxes_->manifest_text(text_arg(args, "box"), version);
         auto m = text ? manifest::parse_manifest(*text, &err) : std::nullopt;
         if (!m) return std::nullopt;  // the tool says there's no such version
         if (!manifest_in(*m, &out_of)) return who + ", and that version of " + text_arg(args, "box") + " serves " + out_of + widen;

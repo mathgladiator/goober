@@ -6,8 +6,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 
 #include "goober/base/files.h"
 #include "goober/base/process.h"
@@ -49,6 +51,32 @@ std::string find_cargo(const config::HostConfig& cfg) {
 std::string find_rustup_home() {
   std::string home = env_or("RUSTUP_HOME", (fs::path(env_or("HOME", "/nonexistent")) / ".rustup").string());
   return fs::is_directory(home) ? home : "";
+}
+
+// How many threads this process's user runs right now, from /proc (0 when it can't tell).
+int64_t user_threads() {
+  uid_t me = getuid();
+  int64_t n = 0;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator("/proc", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::string pid = it->path().filename().string();
+    if (pid.empty() || !std::isdigit(static_cast<unsigned char>(pid[0]))) continue;
+    std::ifstream status(it->path() / "status");
+    std::string line;
+    bool mine = false;
+    while (std::getline(status, line)) {
+      if (line.starts_with("Uid:")) {
+        std::istringstream in(line.substr(4));
+        uid_t real = 0;
+        in >> real;
+        mine = real == me;
+      } else if (mine && line.starts_with("Threads:")) {
+        n += std::atoll(line.c_str() + 8);
+        break;
+      }
+    }
+  }
+  return n;
 }
 
 std::string find_program(const std::string& name) {
@@ -383,8 +411,11 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
       // (a fork bomb), through prlimit when the machine has it; and a build doesn't start on a
       // nearly full disk, which the WAL and every tenant's databases share.
       if (std::string prlimit = find_program("prlimit"); !prlimit.empty()) {
+        // RLIMIT_NPROC counts every thread the user owns, not just the build's: the cap is what
+        // the user already runs plus 2048 for the build, so a busy machine still builds.
+        int64_t nproc = user_threads() + 2048;
         argv.insert(argv.begin(), {prlimit, "--as=" + std::to_string(int64_t(8) << 30),
-                                   "--fsize=" + std::to_string(int64_t(2) << 30), "--nproc=2048", "--"});
+                                   "--fsize=" + std::to_string(int64_t(2) << 30), "--nproc=" + std::to_string(nproc), "--"});
       }
       {
         std::error_code ec;

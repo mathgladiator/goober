@@ -7,6 +7,7 @@
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
+#include "goober/json/json.h"
 
 namespace goober::boxes {
 namespace fs = std::filesystem;
@@ -241,16 +242,21 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
 
 std::optional<UploadResult> BoxRegistry::upload(std::string_view manifest_text, std::string_view module,
                                                 std::string_view types_text, std::string* error) {
-  return upload_or_check(manifest_text, module, types_text, false, error);
+  return upload_or_check(manifest_text, module, types_text, Mode::kActivate, error);
 }
 
 bool BoxRegistry::check(std::string_view manifest_text, std::string_view module, std::string_view types_text,
                         std::string* error) {
-  return upload_or_check(manifest_text, module, types_text, true, error).has_value();
+  return upload_or_check(manifest_text, module, types_text, Mode::kCheck, error).has_value();
+}
+
+std::optional<UploadResult> BoxRegistry::store(std::string_view manifest_text, std::string_view module,
+                                               std::string_view types_text, std::string* error) {
+  return upload_or_check(manifest_text, module, types_text, Mode::kStore, error);
 }
 
 std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manifest_text, std::string_view module,
-                                                         std::string_view types_text, bool dry_run, std::string* error) {
+                                                         std::string_view types_text, Mode mode, std::string* error) {
   std::lock_guard lock(mu_);
   auto m = manifest::parse_manifest(manifest_text, error);
   if (!m) return std::nullopt;
@@ -275,16 +281,60 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
   if (!types_text.empty()) hashed += "\ntypes\n" + std::string(types_text);
   std::string version = base::sha256_hex(hashed).substr(0, 24);
   std::string dir = "boxes/" + m->box + "/versions/" + version;
+  std::string box = m->box;
   wal::Bundle bundle = {
       {wal::FileChange::Kind::kWrite, dir + "/manifest.json", std::string(manifest_text)},
       {wal::FileChange::Kind::kWrite, dir + "/box.wasm", wasm},
-      {wal::FileChange::Kind::kWrite, "boxes/" + m->box + "/active", version},
   };
+  if (mode == Mode::kActivate) {
+    bundle.push_back({wal::FileChange::Kind::kWrite, "boxes/" + box + "/active", version});
+    std::error_code ec;
+    if (fs::exists(wal_.root() / "boxes" / box / "disabled", ec)) {
+      bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
+    }
+  }
   if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
   UploadResult result{version, m->warnings};
   auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled, *t});
-  if (!activate(candidate, bundle, error, dry_run)) return std::nullopt;
+  // Every mode checks the candidate against the active boxes as if it went live now.
+  if (!activate(candidate, bundle, error, mode != Mode::kActivate)) return std::nullopt;
+  if (mode == Mode::kStore && !wal_.commit(bundle, error)) return std::nullopt;
   return result;
+}
+
+std::optional<std::string> BoxRegistry::disable(const std::string& box, const std::string& why, std::string* error) {
+  std::lock_guard lock(mu_);
+  auto current = active();
+  auto it = current->boxes.find(box);
+  if (it == current->boxes.end()) return *error = "no active box named " + box, std::nullopt;
+  std::string version = it->second->version;
+  auto next = std::make_shared<ActiveSet>();
+  for (const auto& [name, b] : current->boxes) {
+    if (name != box) next->boxes[name] = b;
+  }
+  if (!next->build(error)) return std::nullopt;
+  std::string record = json::dump(boost::json::object{{"version", version}, {"why", why.substr(0, 500)}});
+  wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
+                        {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
+  if (!wal_.commit(bundle, error)) return std::nullopt;
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+  return version;
+}
+
+std::optional<BoxRegistry::Disabled> BoxRegistry::disabled(const std::string& box) const {
+  if (!base::is_valid_name(box)) return std::nullopt;
+  auto text = base::read_file(wal_.root() / "boxes" / box / "disabled");
+  if (!text) return std::nullopt;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  if (!v || !v->is_object()) return Disabled{};
+  const auto& o = v->as_object();
+  auto str = [&](const char* k) {
+    const auto* x = o.if_contains(k);
+    return x && x->is_string() ? std::string(x->as_string()) : std::string();
+  };
+  return Disabled{str("version"), str("why")};
 }
 
 bool BoxRegistry::promote(const std::string& box, const std::string& version, std::string* error) {
@@ -297,6 +347,10 @@ bool BoxRegistry::promote(const std::string& box, const std::string& version, st
   if (!loaded) return false;
   if (check_ && !check_(loaded->manifest, error)) return false;
   wal::Bundle bundle = {{wal::FileChange::Kind::kWrite, "boxes/" + box + "/active", version}};
+  std::error_code ec;
+  if (fs::exists(wal_.root() / "boxes" / box / "disabled", ec)) {
+    bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
+  }
   return activate(std::make_shared<const ActiveBox>(std::move(*loaded)), bundle, error);
 }
 

@@ -21,7 +21,13 @@ version_upload {manifest, wat | wasm_base64, types?}
 - wat: WebAssembly text, for small boxes; or wasm_base64: a compiled module (Rust with
   `cargo build --release --target wasm32-unknown-unknown`).
 - types: the OpenAPI document the manifest's "types" names, when it names one.
+- activate: false stores the version dark (every check runs, nothing changes for callers);
+  version_promote {box, version} makes it live when you're ready, like a mail route whose MX
+  already points here.
 Store database schemas first with schema_put. Then check box_logs, access_log, and db_query.
+Out of service: box_disable {box, why} stops every route, tool, timer, mail route, and job of
+a box, keeping its versions and data; box_enable {box} puts the same version back. To take
+out one route, deploy a version without it.
 
 ## The boundary (goober-abi@1)
 
@@ -164,7 +170,12 @@ through the mail service. Failures are retried in order, then given up after 8 t
      "note": {"type": "string", "nullable": true}},
      "indexes": {"orders_by_title": {"columns": ["title"], "unique": false}}}}}
    Types: id, int32, int64, double, float, boolean, string. A schema name is a version: never
-   reused. Later schemas may only add tables, nullable or defaulted columns, and indexes.
+   reused, so try one with schema_check (it stores nothing) before schema_put. Later schemas
+   may only add tables, nullable or defaulted columns, and indexes.
+   The primary key is always the host's id, never a natural key: a key like an address and a
+   day (addr|day) is a unique index on its own columns,
+     "indexes": {"seen_by_addr_day": {"columns": ["addr", "day"], "unique": true}}
+   and an insert uses ON CONFLICT (addr, day) DO UPDATE or DO NOTHING.
    Ids (design/human/021.PrimaryKeys.md), the rules every box keeps:
    - Only the host mints ids. Key every table "id": {"type": "id", "primary-key": true} and
      leave it out of every insert: the host stamps the next id from its service. Naming a key

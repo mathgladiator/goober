@@ -101,6 +101,17 @@ bool valid_path(std::string_view path);
 // Text a person or a model can read: valid UTF-8 without NUL.
 bool is_text(std::string_view bytes);
 
+// A commit built over several calls (020 § 13): the changes one operator has staged on a
+// project, made from base_rev, kept until committed, discarded, or an hour without a change.
+inline constexpr int64_t kDraftTtlMs = 3600 * 1000;
+inline constexpr size_t kMaxCommitChanges = 500;
+struct Draft {
+  std::string id;  // the stage id, answered when staging and named again when committing
+  int64_t base_rev = 0;
+  int64_t updated_ms = 0;
+  std::vector<Change> changes;  // one per path, sorted by path; content nullopt deletes
+};
+
 class Store {
  public:
   explicit Store(std::filesystem::path file);
@@ -130,6 +141,16 @@ class Store {
                                   std::string* error);
 
   void set_deployed(const std::string& name, int64_t rev, int64_t now_ms);
+
+  // Adds changes to `op`'s draft on a project (making it, from base_rev, when there is none):
+  // a later change to a path replaces an earlier one. Refused, staging nothing, when a draft
+  // exists from another base_rev, when base_rev isn't a revision, for a bad path or size, or
+  // past 500 paths.
+  std::optional<Draft> stage(const std::string& name, const std::string& op, int64_t base_rev,
+                             const std::vector<Change>& changes, int64_t now_ms, std::string* error);
+  // `op`'s live draft on a project, or nullopt (none, or expired).
+  std::optional<Draft> draft(const std::string& name, const std::string& op, int64_t now_ms);
+  void discard(const std::string& name, const std::string& op);
 
   // One revision's message, author, time, and changed paths.
   std::optional<Revision> revision(const std::string& name, int64_t rev);

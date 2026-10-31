@@ -171,6 +171,69 @@ TEST_F(HostTest, BoxesDeployAndAnswer) {
             std::string::npos);
 }
 
+// A version stored dark (activate: false) serves nothing until promoted; a disabled box serves
+// nothing until enabled, and both show in version_list and the change log.
+TEST_F(HostTest, DarkVersionsAndDisabledBoxes) {
+  auto sc = [](const bj::value& v) { return v.at("result").at("structuredContent"); };
+  auto manifest = [](const char* path) {
+    return bj::object{{"box", "hello"},
+                      {"domains", bj::array{"*"}},
+                      {"routes", bj::object{{"http", bj::object{{path, bj::object{{"get", bj::object{{"name", "echo"}, {"public", true}}}}}}}}}};
+  };
+  auto first = tool("version_upload", {{"manifest", manifest("/one/{thing : string}")}, {"wat", kHelloWat}});
+  ASSERT_EQ(first.at("result").at("isError"), false) << json::dump(first);
+  std::string v1(sc(first).at("version").as_string());
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/one/x").status, 200);
+
+  // Stored dark: every check ran, the old version still answers.
+  auto dark = tool("version_upload", {{"manifest", manifest("/two/{thing : string}")}, {"wat", kHelloWat}, {"activate", false}});
+  ASSERT_EQ(dark.at("result").at("isError"), false) << json::dump(dark);
+  EXPECT_EQ(sc(dark).at("active"), false);
+  std::string v2(sc(dark).at("version").as_string());
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/one/x").status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 404);
+  // Checks still run in the dark: a broken module is refused.
+  auto broken = tool("version_upload", {{"manifest", manifest("/three")}, {"wat", "(module"}, {"activate", false}});
+  EXPECT_EQ(broken.at("result").at("isError"), true);
+  ASSERT_EQ(tool("version_promote", {{"box", "hello"}, {"version", v2}}).at("result").at("isError"), false);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/one/x").status, 404);
+
+  // Disabled: nothing answers, the versions stay, and enabling brings back the same version.
+  EXPECT_EQ(tool("box_disable", {{"box", "hello"}}).at("result").at("isError"), true);  // why is required
+  auto off = tool("box_disable", {{"box", "hello"}, {"why", "it mails the wrong people"}});
+  ASSERT_EQ(off.at("result").at("isError"), false) << json::dump(off);
+  EXPECT_EQ(sc(off).at("version").as_string(), v2);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 404);
+  auto list = tool("version_list", {{"box", "hello"}});
+  std::string listed(list.at("result").at("content").at(0).at("text").as_string());
+  EXPECT_NE(listed.find("\"disabled\": true"), std::string::npos) << listed;
+  EXPECT_NE(listed.find("wrong people"), std::string::npos) << listed;
+  EXPECT_EQ(listed.find("\"active\": true"), std::string::npos) << listed;
+  auto changes = tool("changes", {{"kind", "deploy"}});
+  EXPECT_NE(json::dump(changes).find("disable"), std::string::npos) << json::dump(changes);
+  // The box is gone from service across a restart too.
+  host.reset();
+  {
+    std::string err;
+    auto cfg = config::parse_config(
+        R"({"listen":{"port":0},"storage":"storage","domains":{"localhost":{"tenant":"playground"}},
+            "operations":{"token":")" + std::string(kToken) + R"("},"threads":{"network":1,"boxes":2},
+            "limits":{"timeout-ms":{"default":200,"max":500}}})",
+        root, &err);
+    host = std::make_unique<host::Host>(cfg);
+    port = host->start();
+  }
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 404);
+  auto on = tool("box_enable", {{"box", "hello"}});
+  ASSERT_EQ(on.at("result").at("isError"), false) << json::dump(on);
+  EXPECT_EQ(sc(on).at("active").as_string(), v2);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 200);
+  // Enabled again, it isn't disabled any more: enabling twice says so.
+  EXPECT_EQ(tool("box_enable", {{"box", "hello"}}).at("result").at("isError"), true);
+  (void)v1;
+}
+
 TEST_F(HostTest, BadUploadsExplainThemselves) {
   auto v = tool("version_upload", {{"manifest", "{\"box\":\"x\"}"}, {"wat", "(module)"}});
   EXPECT_EQ(v.at("result").at("isError"), true);

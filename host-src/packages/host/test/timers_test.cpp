@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 
 #include "goober/host/host.h"
 #include "goober/json/json.h"
@@ -142,6 +143,17 @@ TEST_F(TimersTest, OperatorsSeeThePlanAndFireNow) {
   EXPECT_EQ(count("morning"), 3);
   EXPECT_FALSE(host->run_timer_now("morning", "elsewhere", &err));
   EXPECT_FALSE(host->run_timer_now("nope", "playground", &err));
+  // A timer may just return: that's no failure, so the box's log says nothing about it.
+  std::string log;
+  std::error_code ec;
+  for (auto it = fs::recursive_directory_iterator(root / "storage" / "logs", ec); !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    if (it->is_regular_file() && it->path().string().find("clock") != std::string::npos) {
+      std::ifstream in(it->path());
+      log += std::string(std::istreambuf_iterator<char>(in), {});
+    }
+  }
+  EXPECT_EQ(log.find("no_response"), std::string::npos) << log;
 }
 
 // Quality review 4: two boxes with the same strategy name keep their own rows.

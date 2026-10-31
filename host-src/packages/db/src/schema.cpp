@@ -62,7 +62,9 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   c->max_length = json::get_int(o, "max-length", &err);
   if (!err.empty()) return fail(error, where + ": " + err);
   if (c->primary_key && ((c->type != "id" && c->type != "int64") || c->nullable)) {
-    return fail(error, where + ": a primary key is a non-nullable id (or, as tables were keyed before, int64)");
+    return fail(error, where + ": a primary key is a non-nullable id, which the host stamps (or, as tables were keyed "
+                              "before, int64). A natural key, like an address and a day, is a unique index on its own "
+                              "columns: \"indexes\": {\"t_by_addr_day\": {\"columns\": [\"addr\", \"day\"], \"unique\": true}}");
   }
   if (c->max_length && (c->type != "string" || *c->max_length < 1)) {
     return fail(error, where + ": max-length is a positive length for a string");
