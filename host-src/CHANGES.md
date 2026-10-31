@@ -6,6 +6,10 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- content_deploy {dry_run: true} runs every check, renders each URL signed out from the would-be files, lints it, and answers status, body_etag, and problems; nothing is stored, and it never waits for approval.
+- content_stage builds one content deploy over several calls (kept an hour); content_deploy {tenant, stage: true} deploys the whole draft at once, with every check first.
+- page_lint {body, path, format} lints an unsaved page; page_render {as: "signed_out"} shows what a visitor gets (a gated page's 303 or 401); content_deploy items take expect_status and expect_location, verified signed out.
+- Title and description lengths count characters, not bytes (title_chars).
 - route_try: call any stored version's HTTP route (dark ones too) as signed_out or as an account ({email}), before version_promote. GETs read live data read-only; writes run on copies and report the rows they changed and what they would have queued. Nothing reaches people or real data.
 - whats_new: this list, by day; call it after a deploy or a reconnect to learn what arrived.
 - A real job_start snapshots every database the box may write before its first batch (the run's snapshots name them); db_restore_to_new brings the data back as it was.

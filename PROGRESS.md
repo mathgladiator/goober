@@ -646,6 +646,18 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       the access log and left out of traffic and performance; `box_guide`; tests.
 - [ ] Tries of MCP tools and mail routes (only HTTP routes now).
 
+### Content deploys checked before they're live (a site's engineers, 2026-10-30; 031 § 4–5)
+- [x] `content_deploy {dry_run: true}`: every check, then each URL rendered signed out from the
+      would-be files and linted; nothing stored; never waits for approval; its body_etag is
+      the one the deploy serves; tests.
+- [x] `content_stage` builds one deploy over several calls (a draft per operator and tenant,
+      kept an hour, in storage); `content_deploy {stage: true}` writes it all at once, and an
+      approval hold shows every staged item; tests.
+- [x] Items say what a visitor should get (`expect_status`, `expect_location`), so gated pages
+      verify; files under `_` aren't fetched; `page_render {as: "signed_out"}` previews the
+      303; `page_lint` lints an unsaved body; title and description lengths count characters,
+      not bytes; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

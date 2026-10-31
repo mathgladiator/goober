@@ -103,6 +103,10 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   };
   if (tool == "mail_unsubscribed") return !args.contains("set");
   if (tool == "version_upload") return flag("dry_run");
+  // A content dry run stores nothing; staging builds only the operator's own draft, which no
+  // one sees until a content_deploy (which waits) writes it.
+  if (tool == "content_deploy") return flag("dry_run");
+  if (tool == "content_stage") return true;
   return is_read_tool(tool);
 }
 

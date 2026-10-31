@@ -38,7 +38,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "partial_put", "push_send", "pwa_delete", "pwa_get", "pwa_list", "pwa_put", "pwa_subscriptions",
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
           "template_put", "template_delete", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
-          "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
+          "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "content_stage", "list_etags",
           "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow", "bus_status", "box_render",
           "job_list", "job_dry_run", "job_start", "job_stop"}) {
       m[t] = Rule::kTenant;
@@ -462,10 +462,17 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
   // revision checked is the one that runs (a commit landing in between can't slip past it).
   {
     auto fill_tenant = policy.prepare;
-    policy.prepare = [this, fill_tenant](const mcp::Tool& tool, bj::object& args) {
+    policy.prepare = [this, fill_tenant, operator_name](const mcp::Tool& tool, bj::object& args) {
       if (fill_tenant) fill_tenant(tool, args);
       if ((tool.name == "source_deploy" || tool.name == "source_build") && !args.contains("rev")) {
         if (auto p = source_->get(text_arg(args, "project")); p && p->head > 0) args["rev"] = p->head;
+      }
+      // A staged content deploy carries its items from here on, so a person approving it sees
+      // exactly what will be written, and a draft staged again after the hold doesn't slip in.
+      if (tool.name == "content_deploy" && !args.contains("stage_version")) {
+        auto* s = args.if_contains("stage");
+        std::string ignored;  // no draft: the tool says so when it runs
+        if (s && s->is_bool() && s->as_bool()) expand_content_stage(operator_name, args, &ignored);
       }
     };
   }

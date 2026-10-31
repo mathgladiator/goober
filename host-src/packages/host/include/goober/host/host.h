@@ -614,6 +614,18 @@ class Host {
   void register_content_kit_tools();
   // GET a path of one of this host's sites through its own listener, signed out.
   struct HttpOut fetch_self(const std::string& domain, const std::string& path);
+  // Staged content deploys (content_stage, 031 § 4): one draft per operator and tenant in
+  // storage/operations/content-stage, gone an hour after its last change.
+  static constexpr int64_t kContentStageMs = 60 * 60 * 1000;
+  std::mutex content_stage_mu_;
+  std::filesystem::path content_stage_file(const std::string& op, const std::string& tenant) const;
+  std::optional<boost::json::object> load_content_stage(const std::string& op, const std::string& tenant);
+  // A content_deploy {stage: true}'s arguments with the draft's items merged in (an item given
+  // in the call replaces the staged one at its path) and stage_version set; false when there is
+  // no draft. The operator's MCP policy calls it before an approval hold.
+  bool expand_content_stage(const std::string& op, boost::json::object& args, std::string* error);
+  // The draft, once deployed, unless it was staged again since `version`.
+  void drop_content_stage(const std::string& op, const std::string& tenant, int64_t version);
   // The panel's Operators view, and its two writes (030 § 2; 029 § 6).
   boost::json::object panel_operators(const SignedIn& who);
   std::pair<int, boost::json::object> panel_set_scope(const SignedIn& who, const boost::json::object& args,

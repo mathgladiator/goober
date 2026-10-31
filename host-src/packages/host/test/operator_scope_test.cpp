@@ -274,6 +274,14 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   EXPECT_NE(std::string(call("mail_unsubscribed", R"({"tenant":"kc","email":"a@example.com","set":true})").at("text").as_string())
                 .find("pending_approval"),
             std::string::npos);
+  // Staging builds only the agent's own draft, and a content dry run stores nothing: neither
+  // waits. Deploying the draft waits, and what the person approves names every staged item.
+  not_held("content_stage", R"({"tenant":"kc","files":[{"path":"staged/one.txt","text":"1"}]})");
+  not_held("content_deploy", R"({"tenant":"kc","stage":true,"dry_run":true})");
+  auto staged = std::string(call("content_deploy", R"({"tenant":"kc","stage":true})").at("text").as_string());
+  EXPECT_NE(staged.find("pending_approval"), std::string::npos) << staged;
+  EXPECT_NE(api(boss, "approvals").body.find("staged/one.txt"), std::string::npos);
+  EXPECT_FALSE(base::read_file(root / "storage/content/kc/staged/one.txt"));
   auto held = call("content_put", R"({"tenant":"kc","path":"a.txt","text":"two"})");
   EXPECT_FALSE(held.at("isError").as_bool());
   auto text = std::string(held.at("text").as_string());

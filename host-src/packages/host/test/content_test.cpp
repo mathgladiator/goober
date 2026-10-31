@@ -881,3 +881,101 @@ TEST_F(SiteRoutesTest, TemplatedBoxRoutesVaryOnAcceptWhicheverTheyServe) {
   // A route without a template negotiates nothing, and adds nothing.
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/brands/plain").headers.count("vary"), 0u);
 }
+
+// Engineer D (2026-10-30): a content deploy can be dry run (checked and rendered from the
+// would-be files, nothing stored), built over several calls (content_stage), and told what a
+// visitor should get at a gated URL; page_render previews as a signed-out visitor; page_lint
+// lints an unsaved page; lengths count characters, not bytes.
+TEST_F(SiteRoutesTest, ContentDeploysDryRunStageAndExpectGates) {
+  // A dry run renders the page with a partial from the same call, and stores neither.
+  bj::object page{{"path", "/alpha"}, {"format", "fragment"}, {"body", "<p>Hi</p><!--#include nav-->"}};
+  bj::object nav{{"path", "_partials/nav.html"}, {"text", "<nav>Home</nav>"}};
+  auto dry = tool("content_deploy", {{"pages", bj::array{page}}, {"files", bj::array{nav}}, {"dry_run", true}});
+  ASSERT_TRUE(dry.at("ok").as_bool()) << json::dump(dry);
+  EXPECT_EQ(dry.at("stored"), false);
+  EXPECT_FALSE(host->content().get("playground", "alpha.html"));
+  EXPECT_FALSE(host->content().get("playground", "_partials/nav.html"));
+  const auto& would = dry.at("items").as_array();
+  ASSERT_EQ(would.size(), 2u);
+  EXPECT_EQ(would[0].at("status"), 200);
+  EXPECT_EQ(would[1].at("served"), false);  // a partial isn't served at its own URL
+  std::string would_etag(would[0].at("body_etag").as_string());
+  // The real deploy serves exactly what the dry run said it would.
+  auto real = tool("content_deploy", {{"pages", bj::array{page}}, {"files", bj::array{nav}}});
+  ASSERT_TRUE(real.at("ok").as_bool()) << json::dump(real);
+  EXPECT_EQ(std::string(real.at("items").at(0).at("body_etag").as_string()), would_etag);
+  EXPECT_NE(fetch(port, bhttp::verb::get, "/alpha").body.find("<nav>Home</nav>"), std::string::npos);
+  // A failing check: nothing would be written, and it says so.
+  auto bad = tool("content_deploy", {{"pages", bj::array{bj::object{{"path", "/beta"}, {"format", "markdown"}, {"body", "B"},
+                                                                    {"sha256", "00"}}}},
+                                     {"dry_run", true}});
+  EXPECT_FALSE(bad.at("ok").as_bool());
+  EXPECT_NE(json::dump(bad).find("nothing would be written"), std::string::npos) << json::dump(bad);
+
+  // A gated page: a visitor gets the 303 to sign-in, which the item can expect.
+  bj::object gated{{"path", "/members"}, {"format", "markdown"}, {"body", "Members only."},
+                   {"fields", bj::object{{"requirements", bj::array{bj::array{"owner"}}}}}};
+  auto plain = tool("content_deploy", {{"pages", bj::array{gated}}});
+  EXPECT_FALSE(plain.at("ok").as_bool());  // 200 expected, 303 served
+  EXPECT_NE(json::dump(plain).find("status 303"), std::string::npos) << json::dump(plain);
+  gated["expect_status"] = 303;
+  gated["expect_location"] = "/identity/sign-in?return=%2Fmembers";
+  auto expected = tool("content_deploy", {{"pages", bj::array{gated}}});
+  ASSERT_TRUE(expected.at("ok").as_bool()) << json::dump(expected);
+  EXPECT_EQ(expected.at("items").at(0).at("status"), 303);
+  auto dry_gated = tool("content_deploy", {{"pages", bj::array{gated}}, {"dry_run", true}});
+  ASSERT_TRUE(dry_gated.at("ok").as_bool()) << json::dump(dry_gated);
+  gated["expect_location"] = "/elsewhere";
+  EXPECT_FALSE(tool("content_deploy", {{"pages", bj::array{gated}}, {"dry_run", true}}).at("ok").as_bool());
+
+  // page_render as a signed-out visitor: the 303 (or 401 for an API caller); as the operator, the page.
+  auto out = tool("page_render", {{"tenant", "playground"}, {"path", "/members"}, {"as", "signed_out"}});
+  EXPECT_EQ(out.at("status"), 303) << json::dump(out);
+  EXPECT_EQ(out.at("location"), "/identity/sign-in?return=%2Fmembers");
+  auto api = tool("page_render", {{"tenant", "playground"}, {"path", "/members"}, {"as", "signed_out"}, {"accept", "application/json"}});
+  EXPECT_EQ(api.at("status"), 401);
+  EXPECT_EQ(tool("page_render", {{"tenant", "playground"}, {"path", "/members"}}).at("status"), 200);
+  EXPECT_TRUE(tool("page_render", {{"tenant", "playground"}, {"path", "/members"}, {"as", "admin"}}).as_object().contains("error"));
+
+  // Staged over several calls, then deployed at once; the draft is gone after.
+  auto s1 = tool("content_stage", {{"tenant", "playground"}, {"pages", bj::array{bj::object{{"path", "/s1"}, {"format", "markdown"}, {"body", "One."}}}}});
+  ASSERT_FALSE(s1.as_object().contains("error")) << json::dump(s1);
+  EXPECT_EQ(s1.at("live"), false);
+  auto s2 = tool("content_stage", {{"tenant", "playground"}, {"files", bj::array{bj::object{{"path", "data/a.csv"}, {"text", "a\n1\n"}},
+                                                                                 bj::object{{"path", "data/b.csv"}, {"text", "b\n"}}}}});
+  EXPECT_EQ(s2.at("version"), 2);
+  auto s3 = tool("content_stage", {{"tenant", "playground"}, {"remove", bj::array{"data/b.csv"}}});
+  EXPECT_EQ(json::dump(s3.at("files")), R"(["data/a.csv"])");
+  EXPECT_TRUE(tool("content_stage", {{"tenant", "playground"}, {"pages", bj::array{bj::object{{"path", "/x"}}}}})
+                  .as_object()
+                  .contains("error"));  // a bad page stages nothing
+  EXPECT_FALSE(host->content().get("playground", "s1.md"));
+  auto staged_dry = tool("content_deploy", {{"tenant", "playground"}, {"stage", true}, {"dry_run", true}});
+  ASSERT_TRUE(staged_dry.at("ok").as_bool()) << json::dump(staged_dry);
+  EXPECT_EQ(staged_dry.at("items").as_array().size(), 2u);
+  EXPECT_FALSE(host->content().get("playground", "s1.md"));
+  auto staged = tool("content_deploy", {{"tenant", "playground"}, {"stage", true}});
+  ASSERT_TRUE(staged.at("ok").as_bool()) << json::dump(staged);
+  EXPECT_TRUE(host->content().get("playground", "s1.md"));
+  EXPECT_TRUE(host->content().get("playground", "data/a.csv"));
+  EXPECT_FALSE(host->content().get("playground", "data/b.csv"));
+  auto again = tool("content_deploy", {{"tenant", "playground"}, {"stage", true}});
+  ASSERT_TRUE(again.as_object().contains("error"));
+  EXPECT_NE(std::string(again.at("error").as_string()).find("no staged draft"), std::string::npos);
+  EXPECT_EQ(tool("content_stage", {{"tenant", "playground"}, {"discard", true}}).at("discarded"), false);
+
+  // page_lint on an unsaved page; a title of 50 characters with "·" and an emoji (more bytes) passes.
+  std::string title = "Grilling guide · smoke, salt, and patience 🔥 at ho";  // 50 characters, 54 bytes
+  std::string description(120, 'd');
+  std::string doc = "<!doctype html><html><head><title>" + title + "</title><meta name=\"description\" content=\"" +
+                    description + "\"></head><body><p>x</p></body></html>";
+  auto lint = tool("page_lint", {{"tenant", "playground"}, {"path", "/draft"}, {"format", "document"}, {"body", doc}, {"strict", true}});
+  ASSERT_FALSE(lint.as_object().contains("error")) << json::dump(lint);
+  EXPECT_EQ(lint.at("stored"), false);
+  EXPECT_EQ(lint.at("checks").at("title_chars"), 50) << json::dump(lint);
+  std::string lint_text = json::dump(lint);
+  EXPECT_EQ(lint_text.find("title is"), std::string::npos) << lint_text;
+  EXPECT_EQ(lint_text.find("description is"), std::string::npos) << lint_text;
+  EXPECT_NE(lint_text.find("no ld+json"), std::string::npos) << lint_text;
+  EXPECT_FALSE(host->content().get("playground", "draft.html"));
+}
