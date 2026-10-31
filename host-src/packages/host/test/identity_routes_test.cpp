@@ -6,7 +6,9 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
+#include "goober/base/hash.h"
 #include "goober/host/host.h"
+#include "../src/http_util.h"
 #include "goober/json/json.h"
 
 using namespace goober;
@@ -311,4 +313,50 @@ TEST_F(IdentityRoutesTest, OperatorsDeleteAccountsWithAReason) {
   EXPECT_NE(audit.find("user.delete"), std::string::npos);
   EXPECT_NE(audit.find("they asked by email"), std::string::npos);
   EXPECT_EQ(audit.find("bo@example.com"), std::string::npos);
+}
+
+// A deep link's fragment survives signing in: safe_return keeps a well-formed one, the sign-in
+// page copies location.hash into its return field with the one script its CSP allows by hash,
+// and the code form and the final redirect carry it.
+TEST(SafeReturn, KeepsAFragmentAndNothingDangerous) {
+  EXPECT_EQ(host::safe_return("/docs/guide#install"), "/docs/guide#install");
+  EXPECT_EQ(host::safe_return("/a?x=1#b-2_c.d~e%20f:g@h/i?j"), "/a?x=1#b-2_c.d~e%20f:g@h/i?j");
+  EXPECT_EQ(host::safe_return("//evil.example#x"), "/");
+  EXPECT_EQ(host::safe_return("#top"), "/");
+  EXPECT_EQ(host::safe_return("/a\\b#c"), "/");
+  // A fragment outside RFC 3986's characters, or too long, is dropped; the path stays.
+  EXPECT_EQ(host::safe_return("/a#<script>"), "/a");
+  EXPECT_EQ(host::safe_return("/a#x\"onload"), "/a");
+  EXPECT_EQ(host::safe_return("/a#" + std::string(257, 'x')), "/a");
+  EXPECT_EQ(host::safe_return("/a#"), "/a");
+  // javascript: in a fragment is only a fragment of a path on this site.
+  EXPECT_EQ(host::safe_return("/a#javascript:alert(1)"), "/a#javascript:alert(1)");
+}
+
+TEST_F(IdentityRoutesTest, ADeepLinksFragmentSurvivesSigningIn) {
+  auto page = fetch(port, bhttp::verb::get, "/identity/sign-in?return=%2Fowners");
+  ASSERT_EQ(page.status, 200);
+  EXPECT_NE(page.body.find("name=\"return\" data-fragment value=\"/owners\""), std::string::npos) << page.body;
+  // The page's one script is the one its CSP names by hash.
+  auto open = page.body.find("<script>"), close = page.body.find("</script>");
+  ASSERT_NE(open, std::string::npos);
+  std::string script = page.body.substr(open + 8, close - open - 8);
+  EXPECT_NE(script.find("location.hash"), std::string::npos);
+  auto digest = base::sha256(script);
+  std::string hash =
+      "'sha256-" + base::base64_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())) + "'";
+  EXPECT_NE(page.headers["content-security-policy"].find("script-src " + hash), std::string::npos)
+      << page.headers["content-security-policy"];
+  // What the script sends: the return with its fragment. The code form keeps it, and the
+  // redirect after the code lands on it.
+  auto start = fetch(port, bhttp::verb::post, "/identity/email/start",
+                     {{"content-type", "application/x-www-form-urlencoded"}},
+                     "email=boss%40example.com&return=%2Fowners%23install");
+  ASSERT_EQ(start.status, 200);
+  EXPECT_NE(start.body.find("value=\"/owners#install\""), std::string::npos) << start.body;
+  auto verify = fetch(port, bhttp::verb::post, "/identity/email/verify",
+                      {{"content-type", "application/x-www-form-urlencoded"}},
+                      "email=boss%40example.com&code=" + newest_code() + "&return=%2Fowners%23install");
+  ASSERT_EQ(verify.status, 303) << verify.body;
+  EXPECT_EQ(verify.headers["location"], "/owners#install");
 }
