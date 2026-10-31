@@ -234,3 +234,81 @@ TEST_F(IdentityRoutesTest, OperatorToolsGrantRolesAndLocalAliasesReachOtherDomai
   std::string err;
   EXPECT_EQ(json::parse(r.body, &err)->at("tenant"), "second");
 }
+
+// Deleting one's own account (design/machine/021.IdentityEvents.md § 6): the account page
+// offers it behind a typed DELETE; afterwards the cookie is cleared, the session is dead, the
+// address is gone from the realm, and it may sign up again as someone new.
+TEST_F(IdentityRoutesTest, PeopleDeleteTheirOwnAccounts) {
+  auto form = std::vector<std::pair<std::string, std::string>>{{"content-type", "application/x-www-form-urlencoded"}};
+  std::string ada = sign_in("ada%40example.com");
+  auto page = fetch(port, bhttp::verb::get, "/identity/account", {{"cookie", ada}});
+  ASSERT_EQ(page.status, 200);
+  EXPECT_NE(page.body.find("action=\"/identity/account/delete\""), std::string::npos);
+  auto with_cookie = form;
+  with_cookie.emplace_back("cookie", ada);
+  with_cookie.emplace_back("origin", "http://localhost");
+
+  // The wrong word deletes nothing.
+  auto wrong = fetch(port, bhttp::verb::post, "/identity/account/delete", with_cookie, "confirm=delete");
+  EXPECT_EQ(wrong.status, 400);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/account", {{"cookie", ada}}).status, 200);
+  // Another site's form can't do it.
+  auto cross = form;
+  cross.emplace_back("cookie", ada);
+  cross.emplace_back("origin", "https://evil.example");
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/account/delete", cross, "confirm=DELETE").status, 403);
+  // Signed out, nothing to delete.
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/identity/account/delete", form, "confirm=DELETE").status, 303);
+
+  auto done = fetch(port, bhttp::verb::post, "/identity/account/delete", with_cookie, "confirm=DELETE");
+  ASSERT_EQ(done.status, 200) << done.body;
+  EXPECT_NE(done.body.find("Your account is deleted"), std::string::npos);
+  EXPECT_NE(done.headers["set-cookie"].find("Max-Age=0"), std::string::npos);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/identity/account", {{"cookie", ada}}).status, 303);  // to sign-in
+  EXPECT_FALSE(host->identity().find_user("playground", "ada@example.com"));
+  auto realm = host->identity().describe("playground", 4'000'000'000'000);
+  EXPECT_EQ(json::dump(realm).find("ada@example.com"), std::string::npos);
+
+  // The address can sign up again: a new person.
+  std::string again = sign_in("ada%40example.com");
+  auto me = fetch(port, bhttp::verb::get, "/identity/me", {{"cookie", again}});
+  EXPECT_EQ(me.status, 200);
+}
+
+// The operator's way: user_delete, with a reason in the audit log and no address in it;
+// deletions reports it.
+TEST_F(IdentityRoutesTest, OperatorsDeleteAccountsWithAReason) {
+  auto tool = [&](const std::string& name, bj::object args) {
+    bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                   {"params", bj::object{{"name", name}, {"arguments", std::move(args)}}}};
+    auto r = fetch(port, bhttp::verb::post, "/goober-operations-mcp",
+                   {{"authorization", "Bearer test-token-0123456789"}}, json::dump(req));
+    std::string err;
+    return json::parse(r.body, &err)->at("result");
+  };
+  sign_in("bo%40example.com");
+  auto bo = host->identity().find_user("playground", "bo@example.com");
+  ASSERT_TRUE(bo);
+  EXPECT_EQ(tool("user_delete", {{"tenant", "playground"}, {"email", "bo@example.com"}}).at("isError"), true);  // no why
+  EXPECT_EQ(tool("user_delete", {{"tenant", "nope"}, {"email", "bo@example.com"}, {"why", "x"}}).at("isError"), true);
+  auto gone = tool("user_delete", {{"tenant", "playground"}, {"email", "bo@example.com"}, {"why", "they asked by email"}});
+  ASSERT_EQ(gone.at("isError"), false) << json::dump(gone);
+  EXPECT_EQ(gone.at("structuredContent").at("deleted").as_string(), std::to_string(bo->user_id));
+  EXPECT_FALSE(host->identity().find_user("playground", "bo@example.com"));
+  // Once.
+  EXPECT_EQ(tool("user_delete", {{"tenant", "playground"}, {"user_id", std::to_string(bo->user_id)}, {"why", "again"}})
+                .at("isError"),
+            true);
+  auto report = tool("deletions", {{"tenant", "playground"}}).at("structuredContent");
+  ASSERT_EQ(report.at("deletions").as_array().size(), 1u) << json::dump(report);
+  EXPECT_EQ(report.at("deletions").at(0).at("how"), "operator");
+  EXPECT_EQ(report.at("deletions").at(0).at("user_id").as_string(), std::to_string(bo->user_id));
+  // The audit log has it, by id and reason, and never the address.
+  std::string audit;
+  for (const auto& f : base::list_files(root / "storage/logs")) {
+    if (f.find("audit") != std::string::npos) audit += base::read_file(root / "storage/logs" / f).value_or("");
+  }
+  EXPECT_NE(audit.find("user.delete"), std::string::npos);
+  EXPECT_NE(audit.find("they asked by email"), std::string::npos);
+  EXPECT_EQ(audit.find("bo@example.com"), std::string::npos);
+}

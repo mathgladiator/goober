@@ -240,6 +240,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_mail_out_tools();
   register_consent_tools();
   register_invite_tools();
+  register_deletion_tools();
   register_web_tools();
   register_source_tools();
   register_job_tools();

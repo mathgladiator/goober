@@ -29,6 +29,10 @@ void ensure_cursors(sqlite::Db& db) {
   db.exec("CREATE TABLE IF NOT EXISTS goober_identity_cursors (box TEXT NOT NULL, route TEXT NOT NULL, "
           "after_id INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0, "
           "PRIMARY KEY (box, route))");
+  // What each box did with each deletion (021 § 6): acknowledged (it answered under 500) or
+  // failing (given up after every try). Nothing yet is pending.
+  db.exec("CREATE TABLE IF NOT EXISTS goober_deletion_acks (event_id INTEGER NOT NULL, box TEXT NOT NULL, "
+          "state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (event_id, box))");
 }
 
 }  // namespace
@@ -143,8 +147,10 @@ void Host::identity_tick(int64_t now_ms) {
       for (const auto& e : d.events) {
         // Other kinds move the cursor without a call, as does a person since deleted or disabled.
         auto person = e.kind == route.identity_event ? identity_->user(d.tenant, e.user_id) : std::nullopt;
-        // invite-declined is heard as nobody: the person never signed in (029 § 2.5).
-        bool as_nobody = e.kind == route.identity_event && e.kind == identity::kInviteDeclined;
+        // invite-declined is heard as nobody: the person never signed in (029 § 2.5); and deleted,
+        // since the person is gone (021 § 6).
+        bool as_nobody = e.kind == route.identity_event &&
+                         (e.kind == identity::kInviteDeclined || e.kind == identity::kDeleted);
         if (!person && !as_nobody) {
           save(e.id, 0, 0);
           d.after_id = e.id;
@@ -163,6 +169,7 @@ void Host::identity_tick(int64_t now_ms) {
                         {"user_id", std::to_string(e.user_id)},
                         {"email", e.email},
                         {"at", base::format_utc_ms(e.at_ms)}};
+        if (e.kind == identity::kDeleted) body.erase("email");  // the address is gone; the id is what boxes hold
         if (e.invite_id) {
           body["invite_id"] = std::to_string(e.invite_id);
           body["box"] = e.box.empty() ? bj::value(nullptr) : bj::value(e.box);
@@ -186,8 +193,18 @@ void Host::identity_tick(int64_t now_ms) {
         pseudo.method = "identity";
         pseudo.path = "identity:" + route.name;
         pseudo.headers.emplace_back("goober-request-id", request_id);
+        // A box's answer to a deletion is its acknowledgement (or, given up, its failure).
+        auto record_ack = [&](const char* state) {
+          if (e.kind != identity::kDeleted) return;
+          std::lock_guard lock(timers_->mu);
+          auto& db = timer_progress(d.tenant);
+          ensure_cursors(db);
+          sqlite::Stmt s(db, "INSERT OR REPLACE INTO goober_deletion_acks (event_id, box, state, at) VALUES (?, ?, ?, ?)");
+          s.bind(1, e.id).bind(2, box_name).bind(3, std::string_view(state)).bind(4, base::now_unix_ms()).run();
+        };
         if (ok) {
           access_log(pseudo, call.result.status ? call.result.status : 204, started_us, d.domain, json::dump(call.extra));
+          record_ack("acknowledged");
           save(e.id, 0, 0);
           d.after_id = e.id;
           d.failures = 0;
@@ -200,6 +217,7 @@ void Host::identity_tick(int64_t now_ms) {
           access_log(pseudo, 500, started_us, d.domain, json::dump(call.extra));
           std::cerr << "goober-host: identity route " << route.name << " in " << box_name << " gave up on event " << e.id
                     << " after " << failures << " tries\n";
+          record_ack("failing");
           save(e.id, 0, 0);
           d.after_id = e.id;
           d.failures = 0;
@@ -223,6 +241,160 @@ void Host::identity_tick(int64_t now_ms) {
       timers_->identity_running.erase(d.key);  // the queue is full; next tick
     }
   }
+}
+
+// ---- Deletions (021 § 6)
+
+namespace {
+constexpr int64_t kErasureDays = 30;
+constexpr int64_t kDayMs = 24LL * 3600 * 1000;
+
+std::optional<std::string> string_arg(const bj::object& args, const char* key) {
+  auto it = args.find(key);
+  if (it == args.end() || !it->value().is_string()) return std::nullopt;
+  return std::string(it->value().get_string());
+}
+}  // namespace
+
+std::optional<identity::Deletion> Host::delete_account(const std::string& tenant, int64_t user_id, const std::string& how,
+                                                       const std::string& actor, const std::string& why_given,
+                                                       std::string* why) {
+  auto gone = identity_->delete_user(tenant, user_id, how, actor, base::now_unix_ms(), why);
+  // The audit log names the account by its id; the address is gone from the realm.
+  audit("user.delete", actor, "user:" + tenant + "/" + std::to_string(user_id), gone ? "ok" : "refused",
+        bj::object{{"tenant", tenant}, {"how", how}, {"why", gone ? why_given : *why}});
+  return gone;
+}
+
+bj::object Host::deletion_report(const std::string& tenant, int64_t now_ms) {
+  auto cfg = config_.get();
+  auto active = boxes_->active();
+  struct BoxInfo {
+    std::string name, route;  // route: the box's "deleted" identity route, or ""
+    bool holds_data = false;
+  };
+  std::vector<BoxInfo> boxes;
+  for (const auto& [name, box] : active->boxes) {
+    bool serves = false;
+    for (const auto& [tn, dm] : tenants_of(*cfg, box->manifest)) serves |= tn == tenant;
+    BoxInfo b{name, "", false};
+    for (const auto& r : box->manifest.identity) {
+      if (r.identity_event == identity::kDeleted) b.route = r.name;
+    }
+    for (const auto& d : box->manifest.data) {
+      if (d.applies_schema() && (serves || d.tenant == tenant)) b.holds_data = true;
+    }
+    if (!serves && !b.holds_data) continue;
+    if (b.route.empty() && !b.holds_data) continue;
+    boxes.push_back(std::move(b));
+  }
+  // What each box did with each deletion, and how far its route has read.
+  std::map<std::pair<int64_t, std::string>, std::string> acks;
+  std::map<std::string, int64_t> cursors;
+  {
+    std::lock_guard lock(timers_->mu);
+    auto& db = timer_progress(tenant);
+    ensure_cursors(db);
+    sqlite::Stmt a(db, "SELECT event_id, box, state FROM goober_deletion_acks");
+    while (a.step()) acks[{a.int64(0), a.text(1)}] = a.text(2);
+    sqlite::Stmt c(db, "SELECT box, route, after_id FROM goober_identity_cursors");
+    while (c.step()) cursors[c.text(0) + "|" + c.text(1)] = c.int64(2);
+  }
+  bj::array list;
+  int overdue = 0, open = 0;
+  for (const auto& del : identity_->deletions(tenant, 500)) {
+    bj::array states;
+    bool all_done = true;
+    for (const auto& b : boxes) {
+      std::string state;
+      if (b.route.empty()) {
+        state = "no_route";
+      } else if (auto it = acks.find({del.event_id, b.name}); it != acks.end()) {
+        state = it->second;
+      } else if (auto cur = cursors.find(b.name + "|" + b.route); cur != cursors.end() && cur->second >= del.event_id) {
+        state = "missed";  // the route started reading after this deletion
+      } else {
+        state = "pending";
+      }
+      all_done &= state == "acknowledged";
+      states.push_back(bj::object{{"box", b.name}, {"route", b.route.empty() ? bj::value(nullptr) : bj::value(b.route)},
+                                  {"state", state}});
+    }
+    int64_t age_days = (now_ms - del.at_ms) / kDayMs;
+    bool late = !all_done && age_days >= kErasureDays;
+    open += all_done ? 0 : 1;
+    overdue += late ? 1 : 0;
+    list.push_back(bj::object{{"user_id", std::to_string(del.user_id)},
+                              {"event_id", tenant + ":" + std::to_string(del.event_id)},
+                              {"at", base::format_utc_ms(del.at_ms)},
+                              {"how", del.how},
+                              {"age_days", age_days},
+                              {"acknowledged", all_done},
+                              {"overdue", late},
+                              {"boxes", std::move(states)}});
+  }
+  return bj::object{{"tenant", tenant},
+                    {"erasure_days", kErasureDays},
+                    {"unacknowledged", open},
+                    {"overdue", overdue},
+                    {"deletions", std::move(list)}};
+}
+
+void Host::register_deletion_tools() {
+  auto tenant_prop = mcp::string_property("A tenant name, like playground.");
+  auto known_tenant = [this](const std::optional<std::string>& t) {
+    if (!t) return false;
+    for (const auto& [d, e] : config_.get()->domains) {
+      if (e.tenant == *t) return true;
+    }
+    return false;
+  };
+  mcp_->add_tool(
+      {"user_delete",
+       "Deletes a person's account in a tenant's realm, for good: their sessions, agents' grants, roles, and pending "
+       "codes end, and their address is erased everywhere the realm keeps it. The user id stays as a tombstone, never "
+       "reused; the address may sign up again as a new person. Boxes with a routes.identity \"deleted\" route hear it "
+       "and must erase their rows for that user_id within 30 days (see deletions). Give the email or the user_id, and "
+       "why (it goes in the audit log). People delete their own accounts at /identity/account.",
+       mcp::object_schema({{"tenant", tenant_prop},
+                           {"email", mcp::string_property("The person's address.")},
+                           {"user_id", mcp::string_property("The person's user id, instead of the address.")},
+                           {"why", mcp::string_property("Why, for the audit log: like \"the person asked by email\".")}},
+                          {"tenant", "why"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = string_arg(args, "tenant");
+         if (!known_tenant(tenant)) return mcp::ToolResult::fail("not a tenant in the host config");
+         auto why_given = string_arg(args, "why").value_or("");
+         if (why_given.empty()) return mcp::ToolResult::fail("why is required: it goes in the audit log");
+         int64_t user_id = 0;
+         if (auto email = string_arg(args, "email")) {
+           auto u = identity_->find_user(*tenant, *email);
+           if (!u) return mcp::ToolResult::fail("no account with that address in " + *tenant);
+           user_id = u->user_id;
+         } else if (auto id = string_arg(args, "user_id")) {
+           user_id = std::atoll(id->c_str());
+         } else if (auto it = args.find("user_id"); it != args.end() && it->value().is_int64()) {
+           user_id = it->value().as_int64();
+         }
+         if (user_id <= 0) return mcp::ToolResult::fail("give the email or the user_id");
+         std::string why;
+         auto gone = delete_account(*tenant, user_id, "operator", "operator:" + current_operator(), why_given, &why);
+         if (!gone) return mcp::ToolResult::fail(why);
+         return mcp::ToolResult::ok(bj::object{{"deleted", std::to_string(gone->user_id)},
+                                               {"tenant", *tenant},
+                                               {"event_id", *tenant + ":" + std::to_string(gone->event_id)},
+                                               {"next", "deletions shows which boxes have acknowledged it"}});
+       }});
+  mcp_->add_tool({"deletions",
+                  "Accounts deleted in a tenant's realm, and for each, every box that holds the tenant's data: "
+                  "acknowledged (its routes.identity \"deleted\" route answered), pending, failing (given up), missed "
+                  "(the route was added after), or no_route. Boxes must erase a deleted person's rows within 30 days; "
+                  "overdue marks a deletion past that with a box not acknowledged.",
+                  mcp::object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this, known_tenant](const bj::object& args) {
+                    auto tenant = string_arg(args, "tenant");
+                    if (!known_tenant(tenant)) return mcp::ToolResult::fail("not a tenant in the host config");
+                    return mcp::ToolResult::ok(deletion_report(*tenant, base::now_unix_ms()));
+                  }});
 }
 
 }  // namespace goober::host

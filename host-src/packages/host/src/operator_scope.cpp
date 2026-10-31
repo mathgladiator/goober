@@ -46,6 +46,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote", "source_box_history"}) {
       m[t] = Rule::kBox;
     }
+    for (const char* t : {"user_delete", "deletions"}) m[t] = Rule::kTenant;
     m["version_upload"] = Rule::kManifest;
     for (const char* t : {"mcp_tools_preview", "route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;

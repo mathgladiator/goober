@@ -276,6 +276,12 @@ A deployed revision's files, with the box versions and build log, are in
 - **Pages, data, everything:** restore a backup onto your laptop to look first
   (`just rehydrate ~/copy`), then decide.
 
+## Someone asks to be deleted
+
+People can delete their own account on the site's account page (/identity/account). If someone
+asks you instead, have Grok run `user_delete` with their address and why. The panel's
+**Operators** view lists deletions that a box hasn't erased yet; past 30 days they show in red.
+
 ## When in doubt
 
 `READINESS.md` says what is built and what isn't; `design/QUESTIONS.md` lists the decisions

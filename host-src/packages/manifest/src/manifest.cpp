@@ -322,8 +322,10 @@ bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manif
   for (const auto& kv : routes.as_object()) {
     std::string event(kv.key());
     std::string where = "routes.identity." + event;
-    if (event != "first-verified" && event != "signed-in" && event != "invite-accepted" && event != "invite-declined") {
-      return *error = where + ": the identity events are first-verified, signed-in, invite-accepted, and invite-declined", false;
+    if (event != "first-verified" && event != "signed-in" && event != "invite-accepted" && event != "invite-declined" &&
+        event != "deleted") {
+      return *error = where + ": the identity events are first-verified, signed-in, invite-accepted, invite-declined, "
+                              "and deleted", false;
     }
     if (!kv.value().is_object()) return *error = where + " must be an object", false;
     const auto& def = kv.value().as_object();

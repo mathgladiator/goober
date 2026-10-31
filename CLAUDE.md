@@ -128,7 +128,9 @@ Read these before doing design work:
     bucket (git-am patches and deployed snapshots, `goober-host source-mirror`), and the panel's
     Source view.
   - `design/machine/021.IdentityEvents.md`: accounts exist once an address is proved (invites
-    expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins.
+    expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins;
+    deleting an account (§ 6): erased with a tombstone id, a `deleted` event boxes acknowledge
+    within 30 days, `user_delete`, and `deletions`.
   - `design/machine/022.MailTemplates.md`: every mail rendered from a template (subject, text,
     HTML, a layout), defaults for each host mail, overrides per tenant or host, and box templates.
   - `design/machine/023.OperatorOAuth.md`: a second OAuth issuer, `/oauth/operator`, in the host
