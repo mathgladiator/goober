@@ -158,6 +158,38 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
       if (held) extra["held"] = true;
     }
   };
+  // A write answers with the change ids it made (028 § 5), so a reviewer can pin them without
+  // looking them up: the change log's rows with this request's id, after the call began.
+  if (changes_) {
+    auto prepare = policy.prepare;
+    auto filter = policy.filter;
+    auto before = std::make_shared<int64_t>(0);
+    policy.prepare = [this, prepare, before](const mcp::Tool& tool, bj::object& args) {
+      if (prepare) prepare(tool, args);
+      try {
+        *before = changes_->last_id();
+      } catch (const std::exception&) {
+        *before = -1;
+      }
+    };
+    policy.filter = [this, filter, before, request_id](const std::string& tool, bj::value& result) -> std::optional<std::string> {
+      if (filter) {
+        if (auto refused = filter(tool, result)) return refused;
+      }
+      if (*before < 0 || !result.is_object()) return std::nullopt;
+      try {
+        auto ids = changes_->ids_since(request_id, *before);
+        if (!ids.empty()) {
+          bj::array a;
+          for (int64_t id : ids) a.push_back(id);
+          if (ids.size() == 1) result.as_object()["change_id"] = ids[0];
+          result.as_object()["change_ids"] = std::move(a);
+        }
+      } catch (const std::exception&) {
+      }
+      return std::nullopt;
+    };
+  }
   auto reply = mcp_->handle(req.body, policy);
   if (calls > 1) extra["calls"] = calls;
   std::string perr;

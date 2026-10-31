@@ -101,6 +101,9 @@ pages answer only GETs no box route takes. route_check(domain, path, verb) names
   "template": "order",                      browsers asking for HTML get the JSON rendered
   "cors": ["https://app.example.com"]       browser pages there may call it with a bearer token
 }}}}
+A route with a template negotiates on Accept (HTML for browsers, JSON otherwise), so the host
+sends Vary: Accept on every answer from it, either representation, a 304 too, merged with any
+Vary of your own (send Vary: Cookie yourself if signed-in callers get other JSON).
 Templates escape every value, {{x}} and {{{x}}} alike, except two the host makes: {{{body}}}
 and {{{json_ld}}}. Put structured data in the JSON as "json_ld" (an object, or a string of
 JSON), and write {{{json_ld}}} in <head>, with no <script> tag of your own: the host writes the
