@@ -1529,17 +1529,18 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   if (session) sql_errors = session->errors();
   BoxCall out{std::move(result), std::move(extra), std::move(perf), calls_out, std::move(used), std::move(failure),
               std::move(failure_message), std::move(sql_errors)};
-  if (!options.perf_by_caller && !options.dry_run) record_box_call(out, tenant, request_id, input.now_ms);
+  if (!options.perf_by_caller) record_box_call(out, tenant, request_id, input.now_ms, options.dry_run);
   return out;
 }
 
 void Host::record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id,
-                           int64_t now_ms) {
+                           int64_t now_ms, bool trial) {
   if (!failures_) return;
   const auto& p = call.perf;
   // A cache hit ran no box.
   if (p.cache == "hit") return;
-  failures_->call(now_ms, tenant, p.box, p.route, p.verb);
+  // A try or a dry run counts in no rate; only its failures are kept, apart.
+  if (!trial) failures_->call(now_ms, tenant, p.box, p.route, p.verb);
   auto version = call.extra.if_contains("version");
   auto record = [&](const std::string& cls, const std::string& message, int64_t n) {
     if (n <= 0) return;
@@ -1554,6 +1555,7 @@ void Host::record_box_call(const BoxCall& call, const std::string& tenant, const
     e.message = message;
     e.request_id = request_id;
     e.n = n;
+    if (trial) e.trial = p.verb == "job" ? "job_dry_run" : "route_try";
     failures_->failure(std::move(e));
   };
   if (!call.failure.empty()) record(call.failure, call.failure_message, 1);
@@ -1907,7 +1909,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     if (auto c = extra.if_contains("cache"); c && c->is_string()) p.cache = std::string(c->as_string());
     // A try isn't traffic: its numbers stay out of the performance report.
     if (!trying) perf_->record_call(p, base::now_unix_ms());
-    if (!trying) record_box_call(call, tenant, request_id, now_ms);
+    record_box_call(call, tenant, request_id, now_ms, trying != nullptr);
     extra["perf"] = p.to_json();
     extra_text = json::dump(extra);
   }

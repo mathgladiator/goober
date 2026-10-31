@@ -38,6 +38,8 @@ class Failures {
   //   outbox: a delivery the box queued went wrong. delivery_retry, delivery_dead.
   //   internal: a call to another box failed, counted on the caller. internal_failed.
   //   answer: what a mail route chose, not a fault. mail_rejected, mail_deferred.
+  //   job_failed (call): a job's batch the host couldn't take, though the call itself ran (an
+  //     answer that isn't {cursor, done}, a cursor that didn't move).
   // "" for a class this doesn't know.
   static std::string_view group_of(std::string_view cls);
 
@@ -54,6 +56,9 @@ class Failures {
     int64_t at_ms = 0;
     std::string tenant, box, version, route, kind, cls, message, request_id;
     int64_t n = 1;  // more than one for statements
+    // "" for real traffic. route_try or job_dry_run for a try on copies or read-only: kept apart
+    // (the newest 100 per box, 30 days), never counted in the rates, so trying never moves them.
+    std::string trial;
   };
   void failure(Event e);
   // Writes what's pending, and drops what's past keeping. Safe from any thread.
@@ -62,7 +67,8 @@ class Failures {
   // {window, step_ms, from_ms, to_ms, groups: {class: group}, totals: {calls, failures, classes:
   // {class: n}}, points: [{t, calls, failures, sql, outbox, internal, answer}], routes: [{tenant,
   // box, route, kind, calls, failures, classes}] (most failures first), latest: [{at_ms, tenant,
-  // box, version, route, kind, class, message, request_id}] (newest first, at most `latest`)}.
+  // box, version, route, kind, class, message, request_id}] (newest first, at most `latest`),
+  // tries: the same for failures of tries and dry runs, each with trial (route_try, job_dry_run)}.
   // Windows are 1h, 12h, 7d, and 30d. Empty tenant or box means every one.
   bj::object report(std::string_view window, const std::string& tenant, const std::string& box, int64_t now_ms,
                     size_t latest = 50);
@@ -76,6 +82,7 @@ class Failures {
   std::mutex pending_mu_;
   std::map<Key, int64_t> pending_;
   std::vector<Event> pending_events_;
+  std::vector<Event> pending_trials_;
   size_t dropped_events_ = 0;
 
   std::mutex db_mu_;

@@ -462,10 +462,12 @@ void Host::register_panel_tools() {
   mcp_->add_tool(
       {"box_failures",
        "How boxes fail (028 § 4.3), from the host's record of every box call (requests, tools, timers, mail, jobs, "
-       "internal calls; not route_try or dry runs): per box and route, calls and the failures by class, a series, and "
-       "the latest messages (newest first). Classes, by group: call (the call failed: trap, timeout, out_of_fuel, "
-       "failed, no_response, bad_response, bad_status, render_failed, outbox_failed, host_write_failed, "
-       "commit_failed, host_error); sql (statements refused or failed, per statement, even when the call went on: "
+       "internal calls): per box and route, calls and the failures by class, a series, and the latest messages "
+       "(newest first). Tries and dry runs (route_try, job_dry_run) count in none of that: their failures are listed "
+       "apart under tries, each with trial (route_try or job_dry_run), so a failed dry run says why. Classes, by "
+       "group: call (the call failed: trap, timeout, out_of_fuel, failed, no_response, bad_response, bad_status, "
+       "render_failed, outbox_failed, host_write_failed, commit_failed, host_error, job_failed: a job's batch the "
+       "host couldn't take, like an answer without a cursor or a cursor that didn't move); sql (statements refused or failed, per statement, even when the call went on: "
        "sql_error, no_clock, refused_write); outbox (deliveries the box queued: delivery_retry, delivery_dead); "
        "internal (a call to another box failed, on the caller: internal_failed); answer (a mail route chose: "
        "mail_rejected, mail_deferred). failures counts the call group alone. box_logs has each call's lines by "

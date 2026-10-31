@@ -573,7 +573,8 @@ void Host::register_tools() {
        "and checked again at promote: that is how a route moves between boxes (box_disable the old box, then "
        "version_promote the new; roll back with box_disable the new, box_enable the old); (3) dry_run: true checks "
        "everything and stores nothing, changes nothing (activate is ignored); schemas lets it use schemas not stored "
-       "yet. Returns version, active, and warnings; a dry run returns dry_run, ok, stored: false, active: false, and "
+       "yet. Returns version, active, warnings, and module_sha256 (the hex SHA-256 of the binary module, as "
+       "version_get answers it: compare it with your build); a dry run returns dry_run, ok, stored: false, active: false, and "
        "schemas_checked and schema_warnings when schemas were given. Every mode also returns review (what this "
        "version changes from the box's live version, as version_diff gives it, each change classed widens, narrows, "
        "or neutral) and widens: the changes that give the box more reach, as sentences (\"strategy s may now delete "
@@ -605,6 +606,15 @@ void Host::register_tools() {
            auto decoded = base::base64_decode(*b64);
            if (!decoded) return ToolResult::fail("wasm_base64 is not valid base64");
            module = std::move(*decoded);
+         }
+         // The binary module's digest, as version_get answers it for the stored version: a wat
+         // upload is stored compiled, so its digest is of the binary.
+         std::string module_sha256;
+         if (runtime::wasm::Engine::is_binary(module)) {
+           module_sha256 = base::sha256_hex(module);
+         } else {
+           std::string binary, werr;
+           if (runtime::wasm::Engine::wat_to_wasm(module, &binary, &werr)) module_sha256 = base::sha256_hex(binary);
          }
          std::string types;
          if (auto t = args.find("types"); t != args.end() && !t->value().is_null()) {
@@ -646,6 +656,7 @@ void Host::register_tools() {
            } clear;
            if (!boxes_->check(manifest, module, types, &err)) return ToolResult::fail(err);
            bj::object out{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}};
+           if (!module_sha256.empty()) out["module_sha256"] = module_sha256;
            attach_review(out);
            if (!pending.empty()) {
              bj::array names;
@@ -674,6 +685,7 @@ void Host::register_tools() {
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
          bj::object out{{"version", result->version}, {"active", activate}, {"warnings", warnings}};
+         if (!module_sha256.empty()) out["module_sha256"] = module_sha256;
          for (auto& kv : reviewed) out[kv.key()] = std::move(kv.value());
          if (auto* r = out.if_contains("review"); r && r->is_object()) r->as_object()["to"] = result->version;
          if (!activate) out["next"] = "stored, not live: version_promote {box, version} makes it active";
@@ -711,20 +723,26 @@ void Host::register_tools() {
                   }});
 
   mcp_->add_tool({"version_get",
-                  "Read tool. One stored version's manifest (live, dark, or old): {box, version, manifest}. The whole "
-                  "manifest, with the tools, timers, mail routes, jobs, data grants, and flags that box_list doesn't show.",
+                  "Read tool. One stored version's manifest (live, dark, or old): {box, version, manifest, "
+                  "module_sha256, module_bytes}. The whole manifest, with the tools, timers, mail routes, jobs, data "
+                  "grants, and flags that box_list doesn't show. module_sha256 is the hex SHA-256 of the stored "
+                  "binary module (a wat upload is stored compiled to binary): compare it with the sha256 of the "
+                  ".wasm you reviewed to know these are the same bytes.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
                     auto version = arg(args, "version");
                     if (!box || !version) return ToolResult::fail("box and version are required");
-                    auto text = boxes_->manifest_text(*box, *version);
-                    if (!text) return ToolResult::fail("no such version");
+                    auto files = boxes_->files(*box, *version);
+                    if (!files) return ToolResult::fail("no such version");
                     std::string err;
-                    auto v = json::parse(*text, &err);
-                    return ToolResult::ok(bj::object{{"box", *box}, {"version", *version},
-                                                     {"manifest", v ? *v : bj::value(*text)}});
+                    auto v = json::parse(files->manifest_text, &err);
+                    return ToolResult::ok(bj::object{{"box", *box},
+                                                     {"version", *version},
+                                                     {"manifest", v ? *v : bj::value(files->manifest_text)},
+                                                     {"module_sha256", base::sha256_hex(files->wasm)},
+                                                     {"module_bytes", files->wasm.size()}});
                   }});
 
   mcp_->add_tool(

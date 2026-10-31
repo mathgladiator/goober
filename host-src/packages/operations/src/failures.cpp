@@ -18,6 +18,7 @@ constexpr int64_t kMinutesKeptMs = 48 * kHourMs;
 constexpr int64_t kHoursKeptMs = 400 * 24 * kHourMs;
 constexpr int64_t kEventsKeptMs = 30 * 24 * kHourMs;
 constexpr int64_t kEventsPerBox = 200;
+constexpr int64_t kTrialsPerBox = 100;
 constexpr size_t kPendingEvents = 1000;  // between flushes; past it, counted but not kept
 constexpr size_t kMessageBytes = 300;
 
@@ -53,7 +54,8 @@ std::string_view Failures::group_of(std::string_view cls) {
       {"render_failed", "call"},
       {"host_write_failed", "call"}, {"commit_failed", "call"}, {"host_error", "call"},     {"sql_error", "sql"},
       {"no_clock", "sql"},        {"refused_write", "sql"},     {"delivery_retry", "outbox"}, {"delivery_dead", "outbox"},
-      {"internal_failed", "internal"}, {"mail_rejected", "answer"}, {"mail_deferred", "answer"}};
+      {"internal_failed", "internal"}, {"mail_rejected", "answer"}, {"mail_deferred", "answer"},
+      {"job_failed", "call"}};
   auto it = kGroups.find(cls);
   return it == kGroups.end() ? std::string_view() : it->second;
 }
@@ -72,6 +74,13 @@ Failures::Failures(fs::path db_file) {
       " box TEXT NOT NULL, version TEXT NOT NULL, route TEXT NOT NULL, kind TEXT NOT NULL, class TEXT NOT NULL,"
       " message TEXT NOT NULL, request_id TEXT NOT NULL, n INTEGER NOT NULL)");
   db_->exec("CREATE INDEX IF NOT EXISTS events_by_box ON events (box, id)");
+  // Tries and dry runs fail too, and an engineer needs why; they are kept apart from the
+  // traffic's events and never counted.
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS trials (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, tenant TEXT NOT NULL,"
+      " box TEXT NOT NULL, version TEXT NOT NULL, route TEXT NOT NULL, kind TEXT NOT NULL, class TEXT NOT NULL,"
+      " message TEXT NOT NULL, request_id TEXT NOT NULL, n INTEGER NOT NULL, trial TEXT NOT NULL)");
+  db_->exec("CREATE INDEX IF NOT EXISTS trials_by_box ON trials (box, id)");
 }
 
 Failures::~Failures() = default;
@@ -92,11 +101,13 @@ void Failures::call(int64_t at_ms, const std::string& tenant, const std::string&
 
 void Failures::failure(Event e) {
   if (e.n <= 0) return;
-  add(e.at_ms, e.tenant, e.box, e.route, e.kind, e.cls, e.n);
+  bool trial = !e.trial.empty();
+  if (!trial) add(e.at_ms, e.tenant, e.box, e.route, e.kind, e.cls, e.n);
   e.message = clip(std::move(e.message));
   std::lock_guard lock(pending_mu_);
-  if (pending_events_.size() < kPendingEvents) {
-    pending_events_.push_back(std::move(e));
+  auto& pending = trial ? pending_trials_ : pending_events_;
+  if (pending.size() < kPendingEvents) {
+    pending.push_back(std::move(e));
   } else {
     ++dropped_events_;
   }
@@ -104,15 +115,16 @@ void Failures::failure(Event e) {
 
 void Failures::flush(int64_t now_ms) {
   std::map<Key, int64_t> counts;
-  std::vector<Event> events;
+  std::vector<Event> events, trials;
   {
     std::lock_guard lock(pending_mu_);
     counts.swap(pending_);
     events.swap(pending_events_);
+    trials.swap(pending_trials_);
     dropped_events_ = 0;
   }
   std::lock_guard lock(db_mu_);
-  if (!counts.empty() || !events.empty()) {
+  if (!counts.empty() || !events.empty() || !trials.empty()) {
     db_->exec("BEGIN IMMEDIATE");
     try {
       std::set<std::string> boxes;
@@ -141,6 +153,23 @@ void Failures::flush(int64_t now_ms) {
         d.bind(1, box).bind(2, box).bind(3, kEventsPerBox);
         d.run();
       }
+      std::set<std::string> tried;
+      for (const auto& e : trials) {
+        sqlite::Stmt w(*db_,
+                       "INSERT INTO trials (at_ms, tenant, box, version, route, kind, class, message, request_id, n, "
+                       "trial) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        w.bind(1, e.at_ms).bind(2, e.tenant).bind(3, e.box).bind(4, e.version).bind(5, e.route).bind(6, e.kind);
+        w.bind(7, e.cls).bind(8, e.message).bind(9, e.request_id).bind(10, e.n).bind(11, e.trial);
+        w.run();
+        tried.insert(e.box);
+      }
+      for (const auto& box : tried) {
+        sqlite::Stmt d(*db_,
+                       "DELETE FROM trials WHERE box = ? AND id <= (SELECT id FROM trials WHERE box = ? ORDER BY id DESC "
+                       "LIMIT 1 OFFSET ?)");
+        d.bind(1, box).bind(2, box).bind(3, kTrialsPerBox);
+        d.run();
+      }
       db_->exec("COMMIT");
     } catch (...) {
       db_->exec("ROLLBACK");
@@ -151,7 +180,8 @@ void Failures::flush(int64_t now_ms) {
     last_drop_ms_ = now_ms;
     for (auto [sql, keep] : {std::pair{"DELETE FROM minutes WHERE t < ?", kMinutesKeptMs},
                              std::pair{"DELETE FROM hours WHERE t < ?", kHoursKeptMs},
-                             std::pair{"DELETE FROM events WHERE at_ms < ?", kEventsKeptMs}}) {
+                             std::pair{"DELETE FROM events WHERE at_ms < ?", kEventsKeptMs},
+                             std::pair{"DELETE FROM trials WHERE at_ms < ?", kEventsKeptMs}}) {
       sqlite::Stmt s(*db_, sql);
       s.bind(1, now_ms - keep);
       s.run();
@@ -240,6 +270,19 @@ bj::object Failures::report(std::string_view window, const std::string& tenant, 
                                   {"n", e.int64(9)}});
     }
   }
+  bj::array tries;
+  {
+    sqlite::Stmt e(*db_,
+                   "SELECT at_ms, tenant, box, version, route, kind, class, message, request_id, n, trial FROM trials "
+                   "WHERE at_ms >= ? AND (? = '' OR tenant = ?) AND (? = '' OR box = ?) ORDER BY id DESC LIMIT ?");
+    e.bind(1, from).bind(2, tenant).bind(3, tenant).bind(4, box).bind(5, box).bind(6, int64_t(latest));
+    while (e.step()) {
+      tries.push_back(bj::object{{"at_ms", e.int64(0)},  {"tenant", e.text(1)},  {"box", e.text(2)},
+                                 {"version", e.text(3)}, {"route", e.text(4)},   {"kind", e.text(5)},
+                                 {"class", e.text(6)},   {"message", e.text(7)}, {"request_id", e.text(8)},
+                                 {"n", e.int64(9)},      {"trial", e.text(10)}});
+    }
+  }
   bj::object totals_classes;
   for (const auto& [c, n] : classes) totals_classes[c] = n;
   bj::object groups;
@@ -247,7 +290,7 @@ bj::object Failures::report(std::string_view window, const std::string& tenant, 
                         "render_failed", "outbox_failed", "host_write_failed", "commit_failed", "host_error",
                         "sql_error", "no_clock",
                         "refused_write", "delivery_retry", "delivery_dead", "internal_failed", "mail_rejected",
-                        "mail_deferred"}) {
+                        "mail_deferred", "job_failed"}) {
     groups[c] = std::string(group_of(c));
   }
   return bj::object{{"window", std::string(window)},
@@ -258,7 +301,8 @@ bj::object Failures::report(std::string_view window, const std::string& tenant, 
                     {"totals", bj::object{{"calls", calls}, {"failures", failures}, {"classes", std::move(totals_classes)}}},
                     {"points", std::move(pts)},
                     {"routes", std::move(rows)},
-                    {"latest", std::move(events)}};
+                    {"latest", std::move(events)},
+                    {"tries", std::move(tries)}};
 }
 
 }  // namespace goober::operations

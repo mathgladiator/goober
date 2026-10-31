@@ -252,7 +252,10 @@ class Host {
     db::Session::Errors sql_errors;
   };
   // Records one box call, and how it failed, in failures_: by whoever records its perf.
-  void record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id, int64_t now_ms);
+  // trial: a try or dry run on copies or read-only; its failures are kept apart (box_failures'
+  // tries) and it counts in no rate.
+  void record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id, int64_t now_ms,
+                       bool trial = false);
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
   struct CallOptions {
@@ -880,6 +883,12 @@ class Host {
   std::thread job_thread_;
   std::condition_variable job_cv_;  // with timer_thread_mu_
   bool job_nudged_ = false;
+  // A dry run of a stored version that isn't live (dark, or older): loaded once per run, by
+  // "box@version", and let go when the run ends.
+  std::mutex job_versions_mu_;
+  std::map<std::string, std::shared_ptr<const boxes::ActiveBox>> job_versions_;
+  std::shared_ptr<const boxes::ActiveBox> job_box(const std::string& box, const std::string& version, bool dry_run,
+                                                  std::string* error);
   void init_jobs();
   void register_job_tools();
   void run_jobs();
