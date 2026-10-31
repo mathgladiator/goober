@@ -281,6 +281,22 @@ std::optional<bj::object> ChangeLog::get(int64_t id) {
   return row_of(s, true);
 }
 
+int64_t ChangeLog::last_id() {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "SELECT coalesce(max(id), 0) FROM changes");
+  return s.step() ? s.int64(0) : 0;
+}
+
+std::vector<int64_t> ChangeLog::ids_since(const std::string& request_id, int64_t after_id) {
+  std::lock_guard lock(mu_);
+  std::vector<int64_t> out;
+  if (request_id.empty()) return out;
+  sqlite::Stmt s(*db_, "SELECT id FROM changes WHERE request_id = ? AND id > ? ORDER BY id");
+  s.bind(1, request_id).bind(2, after_id);
+  while (s.step()) out.push_back(s.int64(0));
+  return out;
+}
+
 bj::array ChangeLog::actions(bool changed_only, int64_t before_id, int64_t limit) {
   std::lock_guard lock(mu_);
   sqlite::Stmt s(*db_,

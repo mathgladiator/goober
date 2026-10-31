@@ -70,6 +70,44 @@ bool prefers_html(std::string_view accept) {
   return json == std::string_view::npos || html < json;
 }
 
+// Folds every Vary header into one, with `add` too: names lowercased, each once, in the order
+// first seen; "*" alone when any says "*". No Vary at all stays none.
+void merge_vary(std::vector<std::pair<std::string, std::string>>& headers, const std::vector<std::string>& add) {
+  std::vector<std::string> names;
+  bool star = false;
+  auto take = [&](std::string_view list) {
+    size_t at = 0;
+    while (at <= list.size()) {
+      size_t comma = list.find(',', at);
+      std::string_view part = list.substr(at, comma == std::string_view::npos ? std::string_view::npos : comma - at);
+      while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) part.remove_prefix(1);
+      while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) part.remove_suffix(1);
+      std::string name = base::to_lower(part);
+      if (name == "*") star = true;
+      else if (!name.empty() && std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+      if (comma == std::string_view::npos) break;
+      at = comma + 1;
+    }
+  };
+  bool any = false;
+  for (const auto& [k, v] : headers) {
+    if (base::to_lower(k) == "vary") {
+      any = true;
+      take(v);
+    }
+  }
+  for (const auto& a : add) take(a);
+  if (!any && add.empty()) return;
+  std::erase_if(headers, [](const auto& h) { return base::to_lower(h.first) == "vary"; });
+  std::string merged;
+  if (star) {
+    merged = "*";
+  } else {
+    for (const auto& n : names) merged += (merged.empty() ? "" : ", ") + n;
+  }
+  if (!merged.empty()) headers.emplace_back("vary", merged);
+}
+
 // The endpoints worth slowing down per client address: guessing codes, minting tokens,
 // registering clients, uploading, and agents' calls. Everything else shares one budget.
 std::optional<std::pair<const char*, RateRule>> sensitive(const std::string& path_in, const std::string& method) {
@@ -1602,6 +1640,11 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       res.headers.emplace_back("vary", "origin");
     }
   }
+  // A route with a template answers HTML or JSON by Accept (007 § 8), so every answer from it
+  // says Vary: Accept, whichever it served, a 304 or an error included: a cache in front must
+  // never hand one caller's representation to another. One Vary header, the box's own names
+  // kept (case-insensitive, no repeats).
+  merge_vary(res.headers, !ref.route->template_name.empty() ? std::vector<std::string>{"accept"} : std::vector<std::string>{});
   finish(std::move(res), std::move(extra_text));
 }
 

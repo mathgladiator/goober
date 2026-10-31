@@ -783,3 +783,98 @@ TEST_F(SiteRoutesTest, BoxTemplatesRenderIntoTheTenantsLayout) {
                                      {"dry_run", true}});
   EXPECT_TRUE(bad.as_object().contains("error")) << json::dump(bad);
 }
+
+// A site's engineers' asks (2026-10-30): every tool says which etag it gives (the stored file's,
+// for if_etag, or the served body's), templates take if_etag like pages, and writes answer
+// with the change ids they made.
+TEST_F(SiteRoutesTest, EtagsAreLabelledTemplatesGuardWritesAndWritesNameTheirChanges) {
+  auto put = tool("page_put", {{"path", "/health/anxiety"}, {"format", "markdown"}, {"body", "# Calm\n\nBreathe."}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string file_etag(put.at("file_etag").as_string());
+  EXPECT_EQ(put.at("etag"), put.at("file_etag"));
+  ASSERT_TRUE(put.as_object().contains("change_id")) << json::dump(put);
+  auto change = tool("change_get", {{"id", put.at("change_id")}});
+  EXPECT_EQ(change.at("target"), "health/anxiety.md") << json::dump(change);
+  EXPECT_EQ(tool("page_get", {{"path", "/health/anxiety"}}).at("file_etag").as_string(), file_etag);
+  EXPECT_EQ(tool("list_etags", {{"paths", bj::array{"/health/anxiety"}}}).at("etags").at("/health/anxiety").at("file_etag").as_string(),
+            file_etag);
+  // What visitors get has the body's etag; both tools that look at it say so, beside the file's.
+  auto served = fetch(port, bhttp::verb::get, "/health/anxiety", {{"accept", "text/html"}});
+  auto render = tool("page_render", {{"tenant", "playground"}, {"path", "/health/anxiety"}});
+  EXPECT_EQ(render.at("file_etag").as_string(), file_etag);
+  EXPECT_EQ(render.at("body_etag"), render.at("etag"));
+  auto checked = tool("url_check", {{"urls", bj::array{"http://localhost/health/anxiety"}}}).at("results").at(0);
+  EXPECT_EQ(checked.at("body_etag").as_string(), served.headers["etag"]);
+  EXPECT_EQ(checked.at("file_etag").as_string(), file_etag);
+  EXPECT_NE(checked.at("body_etag").as_string(), file_etag);
+  // content_deploy says both, per item, and its lines name them.
+  auto deployed = tool("content_deploy", {{"pages", bj::array{bj::object{{"path", "/health/sleep"}, {"format", "markdown"}, {"body", "Sleep."}}}}});
+  ASSERT_TRUE(deployed.at("ok").as_bool()) << json::dump(deployed);
+  EXPECT_TRUE(deployed.at("items").at(0).as_object().contains("file_etag"));
+  EXPECT_TRUE(deployed.at("items").at(0).as_object().contains("body_etag"));
+  EXPECT_NE(std::string(deployed.at("lines").at(0).as_string()).find("file_etag"), std::string::npos);
+  ASSERT_TRUE(deployed.as_object().contains("change_ids")) << json::dump(deployed);
+
+  // Templates: an etag to read, and if_etag on writes, "none" for a new one.
+  auto got = tool("template_get", {{"tenant", "playground"}, {"name", "base"}});
+  EXPECT_EQ(got.at("file_etag"), "none") << json::dump(got);
+  auto first = tool("template_put", {{"tenant", "playground"}, {"name", "base"}, {"template", "<main>{{{body}}}</main>"},
+                                     {"if_etag", "none"}});
+  ASSERT_FALSE(first.as_object().contains("error")) << json::dump(first);
+  std::string t_etag(first.at("file_etag").as_string());
+  EXPECT_TRUE(first.as_object().contains("change_id")) << json::dump(first);
+  EXPECT_EQ(tool("template_get", {{"tenant", "playground"}, {"name", "base"}}).at("file_etag").as_string(), t_etag);
+  EXPECT_EQ(tool("template_list", {{"tenant", "playground"}}).at("file_etags").at("base").as_string(), t_etag);
+  EXPECT_EQ(tool("list_etags", {{"paths", bj::array{"_templates/base.html"}}}).at("etags").at("_templates/base.html").at("file_etag").as_string(),
+            t_etag);
+  // A teammate writes it meanwhile: the stale write is refused, nothing written.
+  tool("template_put", {{"tenant", "playground"}, {"name", "base"}, {"template", "<div>{{{body}}}</div>"}, {"if_etag", t_etag}});
+  auto stale = tool("template_put", {{"tenant", "playground"}, {"name", "base"}, {"template", "<p>{{{body}}}</p>"}, {"if_etag", t_etag}});
+  ASSERT_TRUE(stale.as_object().contains("error"));
+  EXPECT_NE(std::string(stale.at("error").as_string()).find("nothing written"), std::string::npos);
+  EXPECT_EQ(tool("template_get", {{"tenant", "playground"}, {"name", "base"}}).at("template"), "<div>{{{body}}}</div>");
+  EXPECT_TRUE(tool("template_put", {{"tenant", "playground"}, {"name", "base"}, {"template", "x"}, {"if_etag", "none"}})
+                  .as_object().contains("error"));
+  EXPECT_TRUE(tool("template_delete", {{"tenant", "playground"}, {"name", "base"}, {"if_etag", t_etag}}).as_object().contains("error"));
+  auto now = tool("template_get", {{"tenant", "playground"}, {"name", "base"}}).at("file_etag");
+  EXPECT_EQ(tool("template_delete", {{"tenant", "playground"}, {"name", "base"}, {"if_etag", now}}).at("deleted"), "_templates/base.html");
+  // A read changes nothing, so it names no change.
+  EXPECT_FALSE(tool("page_get", {{"path", "/health/anxiety"}}).as_object().contains("change_id"));
+}
+
+// A templated box route negotiates on Accept, so every answer from it says Vary: Accept,
+// merged with the box's own Vary into one header, HTML or JSON, 304 included (Engineer A).
+TEST_F(SiteRoutesTest, TemplatedBoxRoutesVaryOnAcceptWhicheverTheyServe) {
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"brands","domains":["*"],
+      "templates": {"brand": "<h1>{{name}}</h1>"},
+      "routes":{"http":{"/brands/rye":{"get":{"name":"brand","template":"brand","public":true}},
+                        "/brands/plain":{"get":{"name":"brand_plain","public":true}}}}})",
+                                   R"((module
+  (import "goober" "goober_header_set" (func $header (param i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "Vary")
+  (data (i32.const 48) "Cookie, ACCEPT")
+  (data (i32.const 64) "{\"name\":\"Rye\"}")
+  (func (export "goober_route_brand") (result i32)
+    (drop (call $header (i32.const 32) (i32.const 4) (i32.const 48) (i32.const 14)))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 64) (i32.const 14))) (i32.const 0))
+  (func (export "goober_route_brand_plain") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 64) (i32.const 14))) (i32.const 0))
+))", &err))
+      << err;
+  auto json_answer = fetch(port, bhttp::verb::get, "/brands/rye");
+  EXPECT_EQ(json_answer.headers["content-type"], "application/json");
+  EXPECT_EQ(json_answer.headers["vary"], "cookie, accept");
+  auto html_answer = fetch(port, bhttp::verb::get, "/brands/rye", {{"accept", "text/html"}});
+  EXPECT_EQ(html_answer.headers["content-type"], "text/html; charset=utf-8");
+  EXPECT_EQ(html_answer.headers["vary"], "cookie, accept");
+  // The conditional answer varies too.
+  auto again = fetch(port, bhttp::verb::get, "/brands/rye", {{"if-none-match", json_answer.headers["etag"]}});
+  EXPECT_EQ(again.status, 304);
+  EXPECT_EQ(again.headers["vary"], "cookie, accept");
+  // A route without a template negotiates nothing, and adds nothing.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/brands/plain").headers.count("vary"), 0u);
+}

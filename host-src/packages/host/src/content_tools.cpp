@@ -72,8 +72,13 @@ become front matter. Useful fields:
   redirect (/new) with redirect-status (301, 302, 307, 308, or 410).
 Preview anything, drafts included, with page_render before telling a person it is done: it
 answers status, hashes, and the deploy checks; add verbose: true for the HTML. page_get answers
-the page's etag; give it to page_put as if_etag ("none" for a new page) and the write is refused
-if someone changed the page since. list_etags gives many at once.
+the page's file_etag; give it to page_put as if_etag ("none" for a new page) and the write is
+refused if someone changed the page since. list_etags gives many at once, templates
+(_templates/base.html) and partials (_partials/nav.html) too; template_put and template_delete
+take if_etag the same way (template_get's file_etag). Two etags, never mixed up: file_etag is the
+stored file's, the one if_etag compares; body_etag is the served body's, after templates and
+partials, the one HTTP clients see (page_render and url_check give both). A write answers with
+the change_id (or change_ids) it made in the change log, to pin in a review.
 Try before writing: page_render also takes unsaved pages (each shaped like page_put's
 arguments), templates {name: text}, partials {name: html}, and files {path: text}, and renders
 as if they were written; nothing is stored. Add feed: true to get a listing's Atom too:
@@ -123,7 +128,8 @@ A directory without an index page is listed only if _templates/directory.html ex
 ## Deploying many files, and checking what visitors get [content_deploy, url_check, page_lint]
 content_deploy {pages: [page_put's arguments + sha256? + if_etag?], files: [{path, text | base64,
 sha256?, if_etag?}]} checks every item first (nothing is written if one fails), writes them all,
-then fetches each URL signed out and answers one line each: status, type, etag, ld+json count,
+then fetches each URL signed out and answers one line each: status, type, file_etag and
+body_etag (and the same in items, per URL), ld+json count,
 and any problem (unrendered {{, more than one or an unparseable ld+json, empty <p>, http: links,
 raw markdown links; strict: true adds title 50-60 and description 120-160 characters and exactly
 one ld+json). url_check does the fetching for any of this host's URLs; page_lint runs the
@@ -415,6 +421,19 @@ bj::array problems_of(const Inspection& in, bool html, bool strict) {
   return out;
 }
 
+// if_etag on a write, as page_put checks it: the stored file's etag must match (quoted or not),
+// and "none" means there must be no file yet. The refusal, or nullopt to go ahead.
+std::optional<std::string> etag_refusal(const content::ContentStore& store, const std::string& tenant,
+                                        const std::string& file, const std::optional<std::string>& want,
+                                        const std::string& what) {
+  if (!want) return std::nullopt;
+  auto got = store.get(tenant, file);
+  std::string current = got ? got->etag : "none";
+  if (*want == current || "\"" + *want + "\"" == current) return std::nullopt;
+  return "nothing written: if_etag is " + *want + " but the " + what + "'s file_etag is " + current +
+         " (someone changed it since you read it)";
+}
+
 // The content file answering a URL or naming itself, like page_get resolves it.
 std::optional<std::string> answering_file(const content::ContentStore& store, const std::string& tenant, const std::string& path) {
   std::string rel = path;
@@ -468,8 +487,8 @@ void Host::register_content_tools() {
                       {"template", string_property("The template to wrap the page in; defaults to page, or list.")},
                       {"fields", object_property("More front matter, like {\"date\": \"2026-10-26\", \"tags\": "
                                                  "[\"news\"]} or {\"list\": \"blog\"} for a listing.")},
-                      {"if_etag", string_property("Write only if the page's current etag (page_get, list_etags) is "
-                                                  "this; \"none\" writes only a new page.")}},
+                      {"if_etag", string_property("Write only if the page's current file_etag (page_get, list_etags) "
+                                                  "is this; \"none\" writes only a new page.")}},
                      {"tenant", "path", "format", "body"}),
        [this, known_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -519,12 +538,15 @@ void Host::register_content_tools() {
          auto written = content_->get(*tenant, file);
          return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", file}, {"url", url ? *url : ""},
                                           {"etag", written ? written->etag : ""},
+                                          {"file_etag", written ? written->etag : ""},
                                           {"replaced", std::move(removed)}, {"warnings", std::move(warnings)}});
        }});
 
   mcp_->add_tool(
-      {"page_get", "Reads the page at a URL (or a file path like blog/hello.md): its file, format, etag (give it to "
-                   "page_put as if_etag), front matter, and body.",
+      {"page_get", "Reads the page at a URL (or a file path like blog/hello.md): its file, format, file_etag (the "
+                   "stored file's; give it to page_put as if_etag; etag is the same value), front matter, and body. "
+                   "What visitors get carries a different etag, of the served body after templates and partials: "
+                   "page_render and url_check give it as body_etag.",
        object_schema({{"tenant", tenant_prop}, {"path", string_property("A URL like /blog/hello, or a file path.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
@@ -546,7 +568,8 @@ void Host::register_content_tools() {
          if (!p) return ToolResult::fail("no page at " + *path);
          auto f = content_->get(*tenant, p->path);
          return ToolResult::ok(bj::object{{"file", p->path}, {"url", p->url}, {"kind", site::kind_name(p->kind)},
-                                          {"etag", f ? f->etag : ""}, {"fields", p->fields}, {"body", p->body}});
+                                          {"etag", f ? f->etag : ""}, {"file_etag", f ? f->etag : ""},
+                                          {"fields", p->fields}, {"body", p->body}});
        }});
 
   // Shared partials (design/machine/027.Partials.md): _partials/$name.html, included by
@@ -595,6 +618,7 @@ void Host::register_content_tools() {
          auto now = content_->get(*tenant, partial_file(*name));
          return ToolResult::ok(bj::object{{"file", partial_file(*name)},
                                           {"etag", now ? now->etag : ""},
+                                          {"file_etag", now ? now->etag : ""},
                                           {"previous_etag", old ? bj::value(old->etag) : bj::value(nullptr)}});
        }});
   mcp_->add_tool(
@@ -615,7 +639,7 @@ void Host::register_content_tools() {
          std::string file = version ? "_partials/_versions/" + *name + "/" + *version + ".html" : partial_file(*name);
          auto f = content_->get(*tenant, file);
          if (!f) return ToolResult::fail("no partial " + *name + (version ? " version " + *version : ""));
-         return ToolResult::ok(bj::object{{"name", *name}, {"etag", f->etag}, {"html", f->data}});
+         return ToolResult::ok(bj::object{{"name", *name}, {"etag", f->etag}, {"file_etag", f->etag}, {"html", f->data}});
        }});
   mcp_->add_tool(
       {"partial_list",
@@ -643,6 +667,7 @@ void Host::register_content_tools() {
            std::string base = name.ends_with("@auth") ? name.substr(0, name.size() - 5) : name;
            out.push_back(bj::object{{"name", name},
                                     {"etag", file ? file->etag : ""},
+                                    {"file_etag", file ? file->etag : ""},
                                     {"bytes", file ? int64_t(file->data.size()) : 0},
                                     {"versions", std::move(versions)},
                                     {"included_by", used_by.count(base) ? used_by[base] : bj::array{}}});
@@ -701,7 +726,8 @@ void Host::register_content_tools() {
        "requirements render too. With drafts, drafts render; use it to preview before telling someone it's done. "
        "To try something without writing it, pass unsaved pages (each shaped like page_put's arguments), templates, "
        "partials, or files: the render sees them as if written, and nothing is stored. With feed, a listing's "
-       "/feed.xml is rendered too.",
+       "/feed.xml is rendered too. body_etag (also etag) is the served body's, after templates and partials, as "
+       "HTTP clients see it; file_etag is the stored file's, the one if_etag on writes compares against.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("The URL, like /blog or /blog/hello.")},
                       {"query", object_property("Query parameters, like {\"page\": \"2\"}.")},
@@ -816,7 +842,14 @@ void Host::register_content_tools() {
          constexpr size_t kMax = 200 * 1024;
          out["bytes"] = r.body.size();
          out["sha256"] = base::sha256_hex(r.body);
+         // Two etags: the served body's (what HTTP clients see), and the stored file's (what
+         // if_etag on writes compares against). "etag" stays the body's, as it was.
          out["etag"] = r.etag;
+         out["body_etag"] = r.etag;
+         if (!r.file.empty()) {
+           auto f = content_->get(*tenant, r.file);
+           out["file_etag"] = f ? bj::value(f->etag) : bj::value(nullptr);
+         }
          bool html = r.content_type.find("text/html") != std::string::npos;
          if (html) {
            auto in = inspect_html(r.body);
@@ -957,10 +990,14 @@ void Host::register_content_tools() {
        "(nothing stored), or put it under a new name (post-v2) and point a draft page at it. To add tags to <head> "
        "from a template wrapped in a layout, put them between <!--head--> and <!--/head-->; the built-in base prints "
        "them in its <head> ({{{head}}} in your own base). In a <script>, use {{{json.title}}}: each value as JSON. "
-       "Remove one with template_delete.",
+       "Remove one with template_delete. Pass if_etag (template_get's file_etag, or \"none\" for a new one) so you "
+       "never overwrite a teammate's change made since you read it.",
        object_schema({{"tenant", string_property("A tenant name, or _host for every tenant.")},
                       {"name", string_property("The template's name, like base, page, list, post, or directory.")},
-                      {"template", string_property("The Mustache text.")}},
+                      {"template", string_property("The Mustache text.")},
+                      {"if_etag", string_property("Write only if this tenant's stored template has this file_etag "
+                                                  "(template_get, template_list, list_etags); \"none\" writes only a "
+                                                  "new one.")}},
                      {"tenant", "name", "template"}),
        [this](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -973,15 +1010,20 @@ void Host::register_content_tools() {
          if (!err.empty()) return ToolResult::fail("front matter: " + err);
          if (!render::check_mustache(doc.body, &err)) return ToolResult::fail(err);
          std::string path = "_templates/" + *name + ".html";
+         if (auto refused = etag_refusal(*content_, *tenant, path, arg(args, "if_etag"), "template")) {
+           return ToolResult::fail(*refused);
+         }
          if (!content_->put(*tenant, path, *text, &err)) return ToolResult::fail(err);
-         return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", path}});
+         auto now = content_->get(*tenant, path);
+         return ToolResult::ok(bj::object{{"tenant", *tenant}, {"file", path}, {"file_etag", now ? now->etag : ""}});
        }});
 
   mcp_->add_tool({"template_delete",
                   "Removes a tenant's template; pages naming it then use the built-in one of that name, if any, or fail "
-                  "to render (page_lint finds them).",
+                  "to render (page_lint finds them). With if_etag, only if it hasn't changed since you read it.",
                   object_schema({{"tenant", string_property("A tenant name, or _host.")},
-                                 {"name", string_property("The template's name.")}},
+                                 {"name", string_property("The template's name.")},
+                                 {"if_etag", string_property("Delete only if the stored template's file_etag is this.")}},
                                 {"tenant", "name"}),
                   [this](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
@@ -989,13 +1031,18 @@ void Host::register_content_tools() {
                     if (!tenant || !name || !valid_template_name(*name)) return ToolResult::fail("tenant and a template name are required");
                     std::string path = "_templates/" + *name + ".html", err;
                     if (!content_->get(*tenant, path)) return ToolResult::fail("no template " + *name + " for " + *tenant);
+                    if (auto refused = etag_refusal(*content_, *tenant, path, arg(args, "if_etag"), "template")) {
+                      return ToolResult::fail(*refused);
+                    }
                     if (!content_->remove(*tenant, path, &err)) return ToolResult::fail(err);
                     return ToolResult::ok(bj::object{{"tenant", *tenant}, {"deleted", path}});
                   }});
 
   mcp_->add_tool({"template_get",
                   "Reads a template's Mustache source as this tenant's pages get it: the tenant's own, else _host's, "
-                  "else the built-in one (base, page, list), so a built-in can be copied and changed.",
+                  "else the built-in one (base, page, list), so a built-in can be copied and changed. file_etag is this "
+                  "tenant's own stored template's, to give template_put as if_etag; \"none\" when the text comes from "
+                  "_host or the built-ins (template_put with if_etag \"none\" then makes the tenant's own).",
                   object_schema({{"tenant", tenant_prop}, {"name", string_property("The template's name, like page or list.")}},
                                 {"tenant", "name"}),
                   [this](const bj::object& args) {
@@ -1005,25 +1052,33 @@ void Host::register_content_tools() {
                     std::string source;
                     auto text = site_->find_template(*tenant, *name, &source);
                     if (!text) return ToolResult::fail("no template named " + *name + " for " + *tenant);
-                    return ToolResult::ok(bj::object{{"tenant", *tenant}, {"name", *name}, {"source", source}, {"template", *text}});
+                    auto own = content_->get(*tenant, "_templates/" + *name + ".html");
+                    return ToolResult::ok(bj::object{{"tenant", *tenant}, {"name", *name}, {"source", source},
+                                                     {"file_etag", own ? own->etag : "none"}, {"template", *text}});
                   }});
 
   mcp_->add_tool({"template_list",
                   "Lists a tenant's templates, and where base, page, list, and directory come from: the tenant, "
-                  "_host, or the built-ins (directory has none, so directory listings are off until it exists).",
+                  "_host, or the built-ins (directory has none, so directory listings are off until it exists). "
+                  "file_etags gives each of the tenant's own templates' file_etag, for template_put's if_etag.",
                   object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
                     if (!tenant) return ToolResult::fail("tenant is required");
                     bj::array own;
+                    bj::object etags;
                     for (const auto& f : content_->list(*tenant, "_templates/")) {
-                      if (f.ends_with(".html")) own.push_back(bj::value(f.substr(11, f.size() - 16)));
+                      if (!f.ends_with(".html")) continue;
+                      std::string n = f.substr(11, f.size() - 16);
+                      own.push_back(bj::value(n));
+                      if (auto got = content_->get(*tenant, f)) etags[n] = got->etag;
                     }
                     bj::object sources;
                     for (const char* n : {"base", "page", "list", "directory"}) {
                       std::string source;
                       sources[n] = site_->find_template(*tenant, n, &source) ? bj::value(source) : bj::value("none");
                     }
-                    return ToolResult::ok(bj::object{{"templates", std::move(own)}, {"defaults", std::move(sources)}});
+                    return ToolResult::ok(bj::object{{"templates", std::move(own)}, {"file_etags", std::move(etags)},
+                                                     {"defaults", std::move(sources)}});
                   }});
 
   mcp_->add_tool(
@@ -1329,6 +1384,17 @@ void Host::register_content_kit_tools() {
     auto in = inspect_html(html ? r.body : "");
     bj::object o{{"status", r.status}, {"content_type", r.content_type}, {"bytes", int64_t(r.body.size())},
                  {"sha256", base::sha256_hex(r.body)}};
+    // The served body's etag, as HTTP clients see it, and the stored file's, which if_etag compares.
+    if (auto e = r.header("etag"); !e.empty()) o["body_etag"] = e;
+    if (auto d = config_.get()->domains.find(domain); d != config_.get()->domains.end()) {
+      std::string bare = path.substr(0, path.find('?'));
+      if (auto file = answering_file(*content_, d->second.tenant, bare)) {
+        if (auto f = content_->get(d->second.tenant, *file)) {
+          o["file"] = *file;
+          o["file_etag"] = f->etag;
+        }
+      }
+    }
     if (!r.error.empty()) o["error"] = r.error;
     if (html) o["checks"] = in.to_json();
     auto problems = problems_of(in, html, strict);
@@ -1339,8 +1405,11 @@ void Host::register_content_kit_tools() {
 
   mcp_->add_tool(
       {"list_etags",
-       "The current etag (and file) of each path: a URL like /updates/hello (the file that answers it) or a file "
-       "like css/site.css. Use them as if_etag in page_put or content_deploy so a write never clobbers a newer one.",
+       "The current file_etag (and file) of each path: a URL like /updates/hello (the file that answers it), a file "
+       "like css/site.css, a template as _templates/base.html, or a partial as _partials/nav.html. Use them as if_etag "
+       "in page_put, content_deploy, template_put, or template_delete so a write never clobbers a newer one. These are "
+       "the stored files' etags; the served body's etag (body_etag, in page_render and url_check) differs once "
+       "templates and partials apply.",
        object_schema({{"tenant", tenant_prop}, {"paths", list_of("Up to 200 URLs or file paths.")}}, {"tenant", "paths"}),
        [this, known_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -1353,7 +1422,7 @@ void Host::register_content_kit_tools() {
            std::string path(p.as_string());
            auto file = answering_file(*content_, *tenant, path);
            auto f = file ? content_->get(*tenant, *file) : std::nullopt;
-           out[path] = f ? bj::value(bj::object{{"file", *file}, {"etag", f->etag}}) : bj::value(nullptr);
+           out[path] = f ? bj::value(bj::object{{"file", *file}, {"etag", f->etag}, {"file_etag", f->etag}}) : bj::value(nullptr);
          }
          return ToolResult::ok(bj::object{{"tenant", *tenant}, {"etags", std::move(out)}});
        }});
@@ -1365,7 +1434,8 @@ void Host::register_content_kit_tools() {
        "for a new one) must match what's there; if any item fails, nothing is written. Then everything is written, "
        "and each URL is fetched signed out, as a visitor gets it: status, content type, and for HTML no unrendered "
        "{{, at most one parseable ld+json, no empty <p>, no http: links, no raw markdown links (strict adds title and "
-       "description lengths and exactly one ld+json). Answers one line per item, and ok.",
+       "description lengths and exactly one ld+json). Answers one line per item, ok, and items: each URL's file, "
+       "file_etag (the stored file's, for the next if_etag), and body_etag (the served body's).",
        object_schema({{"tenant", tenant_prop},
                       {"pages", bj::object{{"type", "array"},
                                            {"items", bj::object{{"type", "object"}}},
@@ -1475,17 +1545,23 @@ void Host::register_content_kit_tools() {
          }
          auto vb = args.if_contains("verify");
          bool verify = !(vb && vb->is_bool() && !vb->as_bool());
+         bj::array written;
          auto sb = args.if_contains("strict");
          bool strict = sb && sb->is_bool() && sb->as_bool();
          std::string domain = site_of(*tenant);
          for (const auto& it : items) {
            auto f = content_->get(*tenant, it.file);
            std::string etag = f ? f->etag : "";
+           bj::object item{{"url", it.url}, {"file", it.file}, {"file_etag", etag}};
            if (!verify) {
-             lines.push_back(bj::value("✓ " + it.url + " written " + etag));
+             lines.push_back(bj::value("✓ " + it.url + " written, file_etag " + etag));
+             written.push_back(std::move(item));
              continue;
            }
            auto c = check_path(domain, it.url == "/index.html" ? "/" : it.url, strict);
+           if (auto* b = c.if_contains("body_etag")) item["body_etag"] = *b;
+           item["status"] = c.at("status");
+           written.push_back(std::move(item));
            const auto& problems = c.at("problems").as_array();
            if (it.kind == "file" && c.at("status").as_int64() == 200 && f && std::string(c.at("sha256").as_string()) != base::sha256_hex(f->data)) {
              ok = false;
@@ -1493,19 +1569,21 @@ void Host::register_content_kit_tools() {
              continue;
            }
            std::string line = (problems.empty() ? "✓ " : "✗ ") + it.url + " " + std::to_string(c.at("status").as_int64()) +
-                              " " + std::string(c.at("content_type").as_string()) + " " + etag;
+                              " " + std::string(c.at("content_type").as_string()) + " file_etag " + etag;
+           if (auto* b = c.if_contains("body_etag"); b && b->is_string()) line += " body_etag " + std::string(b->as_string());
            if (auto* ch = c.if_contains("checks")) line += " ld=" + std::to_string(ch->at("ld_json").as_int64());
            for (const auto& p : problems) line += "; " + std::string(p.as_string());
            if (!problems.empty()) ok = false;
            lines.push_back(bj::value(line));
          }
-         return ToolResult::ok(bj::object{{"ok", ok}, {"lines", std::move(lines)}});
+         return ToolResult::ok(bj::object{{"ok", ok}, {"lines", std::move(lines)}, {"items", std::move(written)}});
        }});
 
   mcp_->add_tool(
       {"url_check",
        "Fetches URLs on this host's sites, signed out, as a visitor gets them, and answers for each: status, content "
-       "type, bytes, sha256, and for HTML the counts a deploy checks (ld+json, unrendered {{, empty <p>, http: links, "
+       "type, bytes, sha256, body_etag (the served body's) and file_etag (the stored file answering it, for if_etag), "
+       "and for HTML the counts a deploy checks (ld+json, unrendered {{, empty <p>, http: links, "
        "raw markdown links, title, description length) with the problems found. Replaces hand-written curl checks.",
        object_schema({{"urls", list_of("Up to 50: https://example.com/updates, or a path with tenant.")},
                       {"tenant", string_property("For paths without a host.")},

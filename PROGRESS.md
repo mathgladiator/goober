@@ -572,6 +572,14 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] schema_put, the key refusal, and `box_guide` say a natural key is a unique index, not the
       primary key.
 
+### Content: etags, templates, Vary, change ids (a site's engineers, 2026-10-30; 031 § 3, 007 § 8)
+- [x] Every tool says which etag: `file_etag` (stored, for `if_etag`) or `body_etag` (served);
+      `etag` kept as it was.
+- [x] Templates: `file_etag` in `template_get` and `template_list`, `if_etag` on `template_put`
+      and `template_delete`, templates and partials in `list_etags`; tests.
+- [x] Templated box routes send `Vary: Accept` on every answer, merged with the box's; test.
+- [x] Write tools answer the `change_ids` they made; test.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

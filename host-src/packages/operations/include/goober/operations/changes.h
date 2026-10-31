@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "goober/json/json.h"
 #include "goober/wal/wal.h"
@@ -60,6 +61,10 @@ class ChangeLog {
   bj::array list(const std::string& kind, const std::string& tenant, int64_t before_id, int64_t limit);
   // One row, with "before" and "after" when kept.
   std::optional<bj::object> get(int64_t id);
+  // The newest change's id, or 0: a tool call's changes are those after it, with its request id.
+  int64_t last_id();
+  // The ids of a request's changes after `after_id`, oldest first.
+  std::vector<int64_t> ids_since(const std::string& request_id, int64_t after_id);
   // Newest first: [{id, at_ms, operator, tool, request_id, args, failed, changes: [ids]}].
   bj::array actions(bool changed_only, int64_t before_id, int64_t limit);
 
