@@ -13,6 +13,8 @@ host serves only the routes it declares, checks every caller against their requi
 lets the box touch only the tables and columns it grants, and gives it nothing else: no
 files, no network, no clock but the host's. Deploy with version_upload; under this host's
 dev policy a version that passes the checks goes live at once (version_promote rolls back).
+To check without storing anything, pass dry_run: true; to store a version without it going
+live, pass activate: false (it is "stored dark"), then version_promote when ready.
 
 ## Deploying
 
@@ -701,8 +703,8 @@ patternProperties. Every refusal names the keyword and the schema.
 
 Write a site's nav once, with partial_put {tenant, name: "nav", html}, and put <!--#include nav-->
 where it goes: in documents and pages, in box templates, and in a box's own text/html when the
-route says "includes": true. One partial_put updates every page; no page is re-put, and every
-page's ETag changes. Links can say where they belong: data-match="/places" (that path and
+route says "includes": true. One partial_put updates every page; no page is re-put: every
+page's body_etag (what browsers see) changes, while its file_etag (the stored file's) doesn't. Links can say where they belong: data-match="/places" (that path and
 below), data-match-exact="/", or data-key="future" with <meta name="nav-key" content="future">
 on the page. The best fit for each request gets aria-current="page" and class "active". Write
 nav@auth too, and signed-in visitors get it instead. The partial is spliced raw, one level deep
