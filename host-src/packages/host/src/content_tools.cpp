@@ -2100,6 +2100,35 @@ void Host::register_content_kit_tools() {
                   [this](const bj::object&) { return ToolResult::ok(bj::object{{"tools", mcp_->schemas()}}); }});
 }
 
+// The site files a content_deploy's pages and files would write or remove (031 § 4): each page's
+// file and the other files answering its URL, and each file's path. A change set keeps their
+// bytes before it deploys, to put them back (042 § 5).
+std::optional<std::vector<std::string>> Host::content_deploy_files(const std::string& tenant, const bj::object& args,
+                                                                   std::string* error) {
+  std::vector<std::string> out;
+  if (auto* pages = args.if_contains("pages"); pages && pages->is_array()) {
+    for (const auto& pv : pages->as_array()) {
+      if (!pv.is_object()) return *error = "each page is an object of page_put's arguments", std::nullopt;
+      auto built = build_page(*site_, tenant, pv.as_object(), error);
+      if (!built) return std::nullopt;
+      out.push_back(built->file);
+      out.insert(out.end(), built->others.begin(), built->others.end());
+    }
+  }
+  if (auto* files = args.if_contains("files"); files && files->is_array()) {
+    for (const auto& fv : files->as_array()) {
+      auto* p = fv.is_object() ? fv.as_object().if_contains("path") : nullptr;
+      std::string path = p && p->is_string() ? std::string(p->as_string()) : "";
+      while (!path.empty() && path.front() == '/') path.erase(path.begin());
+      if (path.empty() || !base::is_safe_relative_path(path)) return *error = "a file is {path, text | base64} with a safe relative path", std::nullopt;
+      out.push_back(path);
+    }
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
 // ---- Staged content deploys (content_stage; 031 § 4) ----
 
 std::filesystem::path Host::content_stage_file(const std::string& op, const std::string& tenant) const {

@@ -6,6 +6,7 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- Change sets: one change made of schema adds, box versions, content, and flag values. changeset_create {title, why}, changeset_add {id, schemas?, versions? ({box, version, tries?} or {manifest, wat | wasm_base64}), content? ({tenant, pages?, files?} or {tenant, from_stage: true}), flags?}, changeset_preview {id} (every member's dry run, one widens list; stores nothing), changeset_apply {id} (snapshots, then schemas, versions, content, flags; a failure undoes what applied), changeset_rollback {id, force?} (all of it, in reverse; refused over later changes unless forced; schemas stay), changeset_show, changeset_list, changeset_discard. Drafts never wait for approval; apply and rollback do.
 - route_try reaches MCP tools ({tool, arguments, as: {email}}) and mail routes ({mail: {to, from, subject, text, headers?}}, answered with the SMTP reply), always on copies; a try's mail sender is never verified. Observers and the panel may try HTTP GETs and HEADs only.
 - version_health reads every access-log file still on the machine (7 days) for its window, not only the newest two, and leaves out route_try's calls.
 - partial_put, partial_delete, and content_put take if_etag (the file_etag you read, or "none" for a new one): no write lands over a teammate's change made since you read it. Every content write now can.

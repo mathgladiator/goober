@@ -57,7 +57,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "schema_check",
     "flag_list",
     "db_snapshots", "db_unbound",
-    "route_try"};
+    "route_try",
+    "changeset_show", "changeset_list", "changeset_preview"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -117,6 +118,8 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   // one sees until a content_deploy (which waits) writes it.
   if (tool == "content_deploy") return flag("dry_run");
   if (tool == "content_stage") return true;
+  // A change set's draft is the same: nothing is live until changeset_apply (which waits).
+  if (tool == "changeset_create" || tool == "changeset_add" || tool == "changeset_discard") return true;
   // A try only looks when it is an HTTP GET or HEAD (read-only on live data); a write's, a
   // tool's, or a mail route's try runs box code on copies, which is more than looking, so
   // observers and the panel (look-only for everyone) can't (approvals never hold a try,

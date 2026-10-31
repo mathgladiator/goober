@@ -829,6 +829,26 @@ class Host {
   // Box flags (design/machine/039.Flags.md; flags.cpp): set by operators, read through goober_flag.
   std::unique_ptr<class FlagStore> flags_;
   void register_flag_tools();
+  // Change sets (design/machine/042.ChangeSets.md; changesets.cpp): schema adds, box versions,
+  // content, and flags previewed, applied, and rolled back together; one JSON file each in
+  // storage/operations/changesets.
+  std::mutex changesets_mu_;
+  void register_changeset_tools();
+  std::filesystem::path changeset_file(const std::string& id) const;
+  std::optional<boost::json::object> load_changeset(const std::string& id);
+  bool save_changeset(const boost::json::object& cs, std::string* error);
+  bool changeset_visible(const boost::json::object& cs);
+  std::optional<std::string> changeset_scope_refusal(const boost::json::object& member);
+  std::optional<manifest::Manifest> changeset_manifest(const boost::json::object& cs, const std::string& box);
+  boost::json::object changeset_preview(const boost::json::object& cs, bool run_tries);
+  boost::json::object changeset_undo(const boost::json::object& step, const std::string& id);
+  // What a held changeset_apply shows the person approving it, and the draft version an
+  // apply is pinned to before it is held.
+  std::optional<boost::json::object> changeset_for_approval(const std::string& id);
+  std::optional<int64_t> changeset_draft_version(const std::string& id);
+  // The site files a content_deploy's pages and files would write or remove (content_tools.cpp).
+  std::optional<std::vector<std::string>> content_deploy_files(const std::string& tenant, const boost::json::object& args,
+                                                               std::string* error);
   // A declared flag's value for a tenant (set, or the default), or nullopt when undeclared.
   std::optional<std::string> flag_for(const manifest::Manifest& m, const std::string& tenant, std::string_view name);
   std::thread job_thread_;

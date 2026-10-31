@@ -270,6 +270,16 @@ bj::object Host::panel_approvals(const SignedIn& who) {
           o["review_error"] = rerr.empty() ? "unreadable" : rerr;
         }
       }
+      // A held change set shows its preview (without tries): every member and what widens.
+      if (o.at("tool") == "changeset_apply") {
+        std::string err;
+        auto held = json::parse(s.text(4), &err);
+        const auto* id = held && held->is_object() ? held->as_object().if_contains("id") : nullptr;
+        if (auto p = id && id->is_string() ? changeset_for_approval(std::string(id->as_string())) : std::nullopt) {
+          o["widens"] = p->at("widens");
+          o["changeset"] = std::move(*p);
+        }
+      }
       pending.push_back(std::move(o));
     }
   }

@@ -190,6 +190,11 @@ Read these before doing design work:
     a call does, no preview, half changes, concurrent edits, no undo), the practices per kind of change
     (preview, review with widenings, route_try, staging, if_etag, snapshots, version_health,
     whats_new), what was built overnight on 2026-10-31, and six decisions for the human.
+  - `design/machine/042.ChangeSets.md`: change sets: schema adds, box versions (stored or uploaded dark),
+    content, and flag values previewed together (each member's dry run, one list of widenings), applied
+    by one call in order (schemas, versions, content, flags) after snapshots and with what each replaced
+    kept, undone in reverse when a member fails, and rolled back by one call (refused over later changes
+    unless forced; schemas stay, as they only grow).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
