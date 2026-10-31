@@ -233,4 +233,35 @@ bool rehydrate(const RehydrateOptions& o, RehydrateReport* report, std::string* 
   return ok;
 }
 
+bool pull_source_mirror(const SourceMirrorOptions& o, SourceMirrorReport* report, std::string* error) {
+  if (!o.project.empty() && !base::is_safe_relative_path(o.project)) return *error = "not a project name: " + o.project, false;
+  fs::path work = o.dir / ".goober-tmp";
+  std::error_code ec;
+  fs::create_directories(work, ec);
+  if (ec) return *error = "can't make " + work.string() + ": " + ec.message(), false;
+  aws::S3 s3(o.location, [creds = o.credentials] { return std::optional(creds); }, work);
+  auto objects = s3.list(o.project.empty() ? "source/" : "source/" + o.project + "/", error);
+  if (!objects) return false;
+  for (const auto& obj : *objects) {
+    // source/PROJECT/patches/000042.patch.sealed or source/PROJECT/snapshots/000042.tar.gz.sealed
+    std::string rel = obj.key.substr(std::string("source/").size());
+    auto slash = rel.find('/');
+    if (slash == std::string::npos || !rel.ends_with(".sealed")) continue;
+    std::string project = rel.substr(0, slash);
+    std::string rest = rel.substr(slash + 1, rel.size() - slash - 1 - 7);
+    bool patch = rest.starts_with("patches/") && rest.ends_with(".patch");
+    bool snapshot = rest.starts_with("snapshots/") && rest.ends_with(".tar.gz");
+    if ((!patch && !snapshot) || !base::is_safe_relative_path(project + "/" + rest)) continue;
+    auto& counts = report->projects[project];
+    (patch ? counts.first : counts.second) += 1;
+    fs::path out = o.dir / project / rest;
+    if (fs::exists(out, ec)) continue;
+    fs::create_directories(out.parent_path(), ec);
+    if (!download_unsealed(s3, o.key, obj.key, work, out, error)) return false;
+    ++report->fetched;
+  }
+  fs::remove_all(work, ec);
+  return true;
+}
+
 }  // namespace goober::host

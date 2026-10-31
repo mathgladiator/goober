@@ -497,14 +497,22 @@ void Host::register_tools() {
          return ToolResult::ok(bj::object{{"version", result->version}, {"active", true}, {"warnings", warnings}});
        }});
 
-  mcp_->add_tool({"version_list", "Lists a box's versions, and which is active.",
+  mcp_->add_tool({"version_list",
+                  "Lists a box's versions, and which is active; a version a source deploy uploaded names its project, "
+                  "revision, and job (source).",
                   object_schema({{"box", string_property("The box name.")}}, {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
                     if (!box) return ToolResult::fail("box is required");
                     bj::array out;
                     for (const auto& v : boxes_->versions(*box)) {
-                      out.push_back(bj::object{{"version", v.version}, {"active", v.active}});
+                      bj::object o{{"version", v.version}, {"active", v.active}};
+                      if (source_) {
+                        if (auto d = source_->deploy_of_version(*box, v.version)) {
+                          o["source"] = bj::object{{"project", d->project}, {"rev", d->rev}, {"job", d->job}};
+                        }
+                      }
+                      out.push_back(std::move(o));
                     }
                     return ToolResult::ok(std::move(out));
                   }});

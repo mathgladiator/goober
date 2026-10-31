@@ -13,6 +13,7 @@
 #include "goober/base/process.h"
 #include "goober/base/time.h"
 #include "goober/host/backup.h"
+#include "goober/source/source.h"
 #include "keys.h"
 
 namespace goober::host {
@@ -180,6 +181,11 @@ void BackupService::tick(int64_t now_ms) {
     if (run_logs(now_ms, &error) < 0) record_error("logs", error, now_ms);
   } catch (const std::exception& e) {
     record_error("logs", e.what(), now_ms);
+  }
+  try {
+    if (run_source(now_ms, &error) < 0) record_error("source", error, now_ms);
+  } catch (const std::exception& e) {
+    record_error("source", e.what(), now_ms);
   }
   // Tonight's slot: today at nightly-at, or yesterday's if that hasn't come yet.
   int64_t slot = now_ms / kDayMs * kDayMs + int64_t(cfg->backup.nightly_minute) * 60000;
@@ -389,6 +395,96 @@ int BackupService::run_logs(int64_t now_ms, std::string* error) {
     ++put;
     set_meta("last_logs_ms", std::to_string(now_ms));
   }
+  return put;
+}
+
+int BackupService::run_source(int64_t now_ms, std::string* error) {
+  std::lock_guard lock(mu_);
+  auto cfg = config_();
+  if (!cfg->backup.enabled() || cfg->sandbox || !source_) return 0;
+  if (now_ms < std::atoll(meta("source_next_ms").c_str())) return 0;
+  auto pending = source_->mirror_pending(25);
+  if (pending.empty()) return 0;
+  auto key = this->key(error);
+  if (!key) return -1;
+  auto s3 = bucket(*cfg);
+  fs::path work = cfg->storage / "tmp" / "backup-source";
+  std::error_code ec;
+  fs::remove_all(work, ec);
+  fs::create_directories(work);
+  struct Cleanup {
+    fs::path p;
+    ~Cleanup() {
+      std::error_code ec;
+      fs::remove_all(p, ec);
+    }
+  } cleanup{work};
+  auto fail = [&](const std::string& why) {
+    *error = why;
+    int64_t failures = std::atoll(meta("source_failures").c_str());
+    set_meta("source_failures", std::to_string(failures + 1));
+    set_meta("source_next_ms", std::to_string(now_ms + std::min<int64_t>(10000LL << std::min<int64_t>(failures, 20), 3600000)));
+    return -1;
+  };
+  int put = 0;
+  for (const auto& item : pending) {
+    if (item.kind == "patch") {
+      auto patch = source_->patch(item.project, item.rev, error);
+      if (!patch) return fail(*error);
+      fs::path file = work / "revision.patch";
+      if (!base::write_file_durable(file, *patch)) return fail("can't write " + file.string());
+      if (!seal_and_put(*s3, *key, file, backup::source_patch_key(item.project, item.rev), error)) return fail(*error);
+    } else {
+      // The tree as it was deployed, and what each deploy of it did, build log included.
+      bj::array deploys;
+      bool kept = true;
+      for (const auto& d : source_->deploys(item.project, 1000)) {
+        if (d.rev != item.rev) continue;
+        auto job = source_->job(d.job);
+        if (!job) {
+          kept = false;  // its job is still being kept: next time
+          break;
+        }
+        bj::array boxes;
+        for (const auto& [box, version] : d.boxes) boxes.push_back(bj::object{{"box", box}, {"version", version}});
+        deploys.push_back(bj::object{{"job", d.job},
+                                     {"at", base::format_utc_ms(d.at_ms)},
+                                     {"by", d.author},
+                                     {"boxes", std::move(boxes)},
+                                     {"state", job->state},
+                                     {"log", job->log}});
+      }
+      if (!kept) continue;
+      auto revision = source_->revision(item.project, item.rev);
+      auto files = source_->files(item.project, item.rev, error);
+      if (!files || !revision) return fail(*error);
+      fs::path tree = work / "tree";
+      fs::remove_all(tree, ec);
+      fs::create_directories(tree);
+      for (const auto& f : *files) {
+        auto bytes = source_->read(item.project, item.rev, f.path, error);
+        if (!bytes) return fail(*error);
+        fs::create_directories((tree / f.path).parent_path(), ec);
+        if (!base::write_file_durable(tree / f.path, *bytes)) return fail("can't write " + f.path);
+      }
+      bj::object about{{"format", 1},
+                       {"project", item.project},
+                       {"rev", item.rev},
+                       {"message", revision->message},
+                       {"by", revision->author},
+                       {"at", base::format_utc_ms(revision->at_ms)},
+                       {"deploys", std::move(deploys)}};
+      if (!base::write_file_durable(tree / ".goober-deploy.json", json::pretty(about))) return fail("can't write the deploy's record");
+      fs::path packed = work / "snapshot.tar.gz";
+      if (!run_tar({"-czf", packed.string(), "-C", tree.string(), "."}, error)) return fail(*error);
+      if (!seal_and_put(*s3, *key, packed, backup::source_snapshot_key(item.project, item.rev), error)) return fail(*error);
+      fs::remove_all(tree, ec);
+    }
+    source_->mark_mirrored(item, now_ms);
+    ++put;
+  }
+  set_meta("source_failures", "0");
+  set_meta("last_source_ms", std::to_string(now_ms));
   return put;
 }
 
@@ -655,6 +751,15 @@ bj::object BackupService::status(bool with_points, int64_t now_ms) {
   out["last_nightly_at"] = when("last_nightly_ms");
   out["last_increment_at"] = when("last_increment_ms");
   out["last_logs_at"] = when("last_logs_ms");
+  // The source mirror (020 § 10): what's in the bucket, and what's still to go.
+  if (source_) {
+    bj::object mirror{{"last_at", when("last_source_ms")}};
+    int64_t pending = 0;
+    for (const auto& p : source_->list()) pending += source_->mirror_state(p.name).pending;
+    mirror["pending"] = pending;
+    if (auto next = std::atoll(meta("source_next_ms").c_str()); next > now_ms) mirror["retry_at"] = base::format_utc_ms(next);
+    out["source"] = std::move(mirror);
+  }
   out["last_error"] = meta("last_error");
   out["last_error_at"] = when("last_error_ms");
   out["key_confirmed_at"] = when("key_confirmed_ms");

@@ -28,6 +28,10 @@ std::array<uint8_t, 32> sha256(std::string_view data);
 // SHA-256 of the bytes, as 64 lowercase hex digits.
 std::string sha256_hex(std::string_view data);
 
+// SHA-1 of the bytes, as 40 lowercase hex digits. Only for names other tools define with it,
+// like git's object ids; never for anything that must resist a forger.
+std::string sha1_hex(std::string_view data);
+
 // SHA-256 of a file's bytes, read in pieces, as 64 lowercase hex digits; nullopt when it
 // can't be read.
 std::optional<std::string> sha256_file_hex(const std::filesystem::path& path);

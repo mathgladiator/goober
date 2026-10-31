@@ -127,6 +127,14 @@ svg.flow path.edge:hover { opacity: 1; }
 .diff .add { background: color-mix(in srgb, var(--ok) 18%, transparent); }
 .diff .del { background: color-mix(in srgb, var(--server) 16%, transparent); }
 .diff .gap { color: var(--muted); background: var(--bg); text-align: center; }
+.diff .file { font-weight: 600; background: var(--bg); }
+.diff .hunk { color: var(--p99); }
+.code { font-family: var(--mono); font-size: .8rem; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line);
+  border-radius: 6px; max-height: 75vh; overflow: auto; }
+.code div { display: flex; }
+.code .ln { flex: 0 0 3.5em; text-align: right; padding-right: 10px; margin-right: 10px; color: var(--muted);
+  border-right: 1px solid var(--line); user-select: none; }
+.code .ln + span { flex: 1; min-width: 0; }
 pre.json { font-family: var(--mono); font-size: .8rem; white-space: pre-wrap; word-break: break-word; background: var(--bg);
   border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 60vh; overflow: auto; margin: 0; }
 details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }

@@ -7,7 +7,9 @@
 
 #include "../../aws/test/fake_aws.h"
 #include "goober/base/files.h"
+#include "goober/base/process.h"
 #include "goober/host/backup.h"
+#include "goober/source/source.h"
 #include "goober/host/host.h"
 #include "../src/keys.h"
 
@@ -278,4 +280,60 @@ TEST_F(S3BackupTest, RotatedLogsAreArchivedSealedWithTheirManifests) {
   std::string err;
   ASSERT_TRUE(backup::unseal_file(key(), sealed_file, root / "archived.tar.gz", &err, sealed)) << err;
   EXPECT_GT(fs::file_size(root / "archived.tar.gz"), 0u);
+}
+
+// The source mirror (020 § 10): every revision's patch and every deployed revision's tree go up
+// sealed, once, never rotated; source-mirror reads them back for git am and tar.
+TEST_F(S3BackupTest, SourceHistoryIsMirroredSealedAndReadBack) {
+  auto& src = host->source();
+  std::string err;
+  ASSERT_TRUE(src.create("greeter", "says hello", 1, &err)) << err;
+  ASSERT_TRUE(src.commit("greeter", 0, {{"src/lib.rs", "fn hi() {}\n"}, {"box.wasm", std::string("\0asm\1\0\0\0", 8)}}, "Start",
+                         "token:grok", 10, &err))
+      << err;
+  ASSERT_TRUE(src.commit("greeter", 1, {{"src/lib.rs", "fn hi() { howdy(); }\n"}}, "Say howdy", "config", 20, &err)) << err;
+  // Revision 2 was deployed by job 7: its tree waits until the job itself is kept.
+  src.record_deploy(source::Deploy{7, "greeter", 2, 30, "config", {{"greeter", "v-abc"}}, ""});
+  int64_t t0 = utc(2026, 10, 27, 4, 0);
+  ASSERT_EQ(host->backup_run("source", t0, &err)->at("uploaded"), 2) << err;
+  EXPECT_EQ(keys("source/"), (std::vector<std::string>{"source/greeter/patches/000001.patch.sealed",
+                                                      "source/greeter/patches/000002.patch.sealed"}));
+  src.save_job(source::JobRecord{7, "greeter", "deploy", 2, "succeeded", "config", 25, 26, 30, "✓ revision 2 is live\n", "{}"});
+  ASSERT_EQ(host->backup_run("source", t0 + 1000, &err)->at("uploaded"), 1) << err;
+  EXPECT_EQ(keys("source/").back(), "source/greeter/snapshots/000002.tar.gz.sealed");
+  EXPECT_EQ(host->backup_run("source", t0 + 2000, &err)->at("uploaded"), 0);  // once each
+  for (const auto& k : keys("source/")) EXPECT_TRUE(fake.objects("backups").at("host1/" + k).starts_with("GOOBERS1")) << k;
+  EXPECT_EQ(src.mirror_state("greeter").patch_rev, 2);
+  EXPECT_EQ(src.mirror_state("greeter").pending, 0);
+  EXPECT_EQ(host->backup_status(false).at("source").at("pending"), 0);
+
+  // A rotation never touches it.
+  host->backup_tick(utc(2026, 11, 30, 3, 30));
+  EXPECT_EQ(keys("source/").size(), 3u);
+
+  host::SourceMirrorOptions o;
+  o.location = {"backups", "us-east-1", fake.endpoint(), "host1/"};
+  o.credentials = kCreds;
+  o.key = key();
+  o.dir = root / "mirror";
+  host::SourceMirrorReport report;
+  ASSERT_TRUE(host::pull_source_mirror(o, &report, &err)) << err;
+  EXPECT_EQ(report.fetched, 3);
+  EXPECT_EQ(report.projects.at("greeter"), (std::pair<int, int>{2, 1}));
+  EXPECT_EQ(base::read_file(o.dir / "greeter" / "patches" / "000002.patch"), src.patch("greeter", 2, &err));
+  fs::create_directories(root / "unpacked");
+  auto tar = base::run_process({"tar", "-xzf", (o.dir / "greeter" / "snapshots" / "000002.tar.gz").string(), "-C",
+                                (root / "unpacked").string()},
+                               "", 4096, 10000);
+  ASSERT_EQ(tar.exit_code, 0) << tar.err;
+  EXPECT_EQ(base::read_file(root / "unpacked" / "src" / "lib.rs"), "fn hi() { howdy(); }\n");
+  auto about = json::parse(*base::read_file(root / "unpacked" / ".goober-deploy.json"), &err);
+  ASSERT_TRUE(about) << err;
+  EXPECT_EQ(about->at("message"), "Say howdy");
+  EXPECT_EQ(about->at("deploys").at(0).at("boxes").at(0).at("version"), "v-abc");
+  EXPECT_EQ(about->at("deploys").at(0).at("log"), "✓ revision 2 is live\n");
+  // A second pull fetches only what's new.
+  report = {};
+  ASSERT_TRUE(host::pull_source_mirror(o, &report, &err)) << err;
+  EXPECT_EQ(report.fetched, 0);
 }

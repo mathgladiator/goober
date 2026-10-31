@@ -83,7 +83,10 @@ class BuildJobs {
  public:
   using Job = BuildJob;
   using Work = std::function<void(Job&)>;
-  BuildJobs();
+  using Finished = std::function<void(const Job&)>;
+  // Ids continue from `last_id` (the store's newest), so a kept job's number is never reused;
+  // `finished` is called with each job once it ends, off the lock, to keep it (020 § 9).
+  explicit BuildJobs(int64_t last_id = 0, Finished finished = nullptr);
   ~BuildJobs();
   // Queues work; it runs after every job queued before it.
   int64_t submit(Job job, Work work);
@@ -98,6 +101,7 @@ class BuildJobs {
   std::deque<std::pair<int64_t, Work>> queue_;
   std::map<int64_t, Job> jobs_;
   int64_t next_id_ = 1;
+  Finished finished_;
   bool stopping_ = false;
   std::thread worker_;
 };

@@ -31,6 +31,23 @@ CREATE TABLE IF NOT EXISTS trees (
 CREATE TABLE IF NOT EXISTS changes (
   project TEXT NOT NULL, rev INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY (project, rev, path)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS blobs (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, data BLOB NOT NULL) WITHOUT ROWID;
+-- Finished builds and deploys, with their logs (020 § 9).
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY, project TEXT NOT NULL, kind TEXT NOT NULL, rev INTEGER NOT NULL, state TEXT NOT NULL,
+  author TEXT NOT NULL, queued_ms INTEGER NOT NULL, started_ms INTEGER NOT NULL, finished_ms INTEGER NOT NULL,
+  log TEXT NOT NULL, result TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS jobs_by_project ON jobs (project, id);
+-- Deploys that went live, and the box versions each uploaded.
+CREATE TABLE IF NOT EXISTS deploys (
+  job INTEGER PRIMARY KEY, project TEXT NOT NULL, rev INTEGER NOT NULL, at_ms INTEGER NOT NULL, author TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS deploys_by_project ON deploys (project, job);
+CREATE TABLE IF NOT EXISTS deploy_boxes (
+  job INTEGER NOT NULL, box TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY (job, box)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS deploy_boxes_by_box ON deploy_boxes (box, version);
+-- What the source mirror has put in the bucket (020 § 10).
+CREATE TABLE IF NOT EXISTS mirrored (
+  project TEXT NOT NULL, rev INTEGER NOT NULL, kind TEXT NOT NULL, at_ms INTEGER NOT NULL,
+  PRIMARY KEY (project, rev, kind)) WITHOUT ROWID;
 )sql";
 
 struct Txn {
@@ -349,6 +366,153 @@ void Store::set_deployed(const std::string& name, int64_t rev, int64_t now_ms) {
   std::lock_guard lock(mu_);
   sqlite::Stmt s(*db_, "UPDATE projects SET deployed_rev = ?, deployed_ms = ? WHERE name = ?");
   s.bind(1, rev).bind(2, now_ms).bind(3, name).run();
+}
+
+std::optional<Revision> Store::revision(const std::string& name, int64_t rev) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "SELECT rev, message, author, at_ms FROM revisions WHERE project = ? AND rev = ?");
+  s.bind(1, name).bind(2, rev);
+  if (!s.step()) return std::nullopt;
+  Revision r{s.int64(0), s.text(1), s.text(2), s.int64(3), {}};
+  sqlite::Stmt c(*db_, "SELECT path FROM changes WHERE project = ? AND rev = ? ORDER BY path");
+  c.bind(1, name).bind(2, rev);
+  while (c.step()) r.changed.push_back(c.text(0));
+  return r;
+}
+
+void Store::save_job(const JobRecord& j) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_,
+                 "INSERT OR REPLACE INTO jobs (id, project, kind, rev, state, author, queued_ms, started_ms, finished_ms, "
+                 "log, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  s.bind(1, j.id).bind(2, j.project).bind(3, j.kind).bind(4, j.rev).bind(5, j.state).bind(6, j.author);
+  s.bind(7, j.queued_ms).bind(8, j.started_ms).bind(9, j.finished_ms).bind(10, j.log).bind(11, j.result).run();
+}
+
+std::optional<JobRecord> Store::job(int64_t id) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "SELECT id, project, kind, rev, state, author, queued_ms, started_ms, finished_ms, log, result "
+                       "FROM jobs WHERE id = ?");
+  s.bind(1, id);
+  if (!s.step()) return std::nullopt;
+  return JobRecord{s.int64(0), s.text(1),  s.text(2),  s.int64(3), s.text(4), s.text(5),
+                   s.int64(6), s.int64(7), s.int64(8), s.text(9),  s.text(10)};
+}
+
+std::vector<JobRecord> Store::jobs(const std::string& project, int limit) {
+  std::lock_guard lock(mu_);
+  std::vector<JobRecord> out;
+  sqlite::Stmt s(*db_, "SELECT id, project, kind, rev, state, author, queued_ms, started_ms, finished_ms, result FROM jobs "
+                       "WHERE ? = '' OR project = ? ORDER BY id DESC LIMIT ?");
+  s.bind(1, project).bind(2, project).bind(3, int64_t(std::clamp(limit, 1, 1000)));
+  while (s.step()) {
+    out.push_back(JobRecord{s.int64(0), s.text(1), s.text(2), s.int64(3), s.text(4), s.text(5), s.int64(6), s.int64(7),
+                            s.int64(8), "", s.text(9)});
+  }
+  return out;
+}
+
+int64_t Store::max_job_id() {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "SELECT coalesce(max(id), 0) FROM jobs");
+  s.step();
+  return s.int64(0);
+}
+
+void Store::record_deploy(const Deploy& d) {
+  std::lock_guard lock(mu_);
+  Txn txn(*db_);
+  sqlite::Stmt s(*db_, "INSERT OR REPLACE INTO deploys (job, project, rev, at_ms, author) VALUES (?, ?, ?, ?, ?)");
+  s.bind(1, d.job).bind(2, d.project).bind(3, d.rev).bind(4, d.at_ms).bind(5, d.author).run();
+  for (const auto& [box, version] : d.boxes) {
+    sqlite::Stmt b(*db_, "INSERT OR REPLACE INTO deploy_boxes (job, box, version) VALUES (?, ?, ?)");
+    b.bind(1, d.job).bind(2, box).bind(3, version).run();
+  }
+  txn.commit();
+}
+
+std::vector<Deploy> Store::read_deploys(const std::string& where, const std::string& arg, int limit) {
+  std::vector<Deploy> out;
+  sqlite::Stmt s(*db_, "SELECT d.job, d.project, d.rev, d.at_ms, d.author, coalesce(r.message, '') FROM deploys d "
+                       "LEFT JOIN revisions r ON r.project = d.project AND r.rev = d.rev WHERE " + where +
+                       " ORDER BY d.job DESC LIMIT ?");
+  s.bind(1, arg).bind(2, int64_t(std::clamp(limit, 1, 1000)));
+  while (s.step()) {
+    Deploy d;
+    d.job = s.int64(0);
+    d.project = s.text(1);
+    d.rev = s.int64(2);
+    d.at_ms = s.int64(3);
+    d.author = s.text(4);
+    d.message = s.text(5);
+    out.push_back(std::move(d));
+  }
+  for (auto& d : out) {
+    sqlite::Stmt b(*db_, "SELECT box, version FROM deploy_boxes WHERE job = ? ORDER BY box");
+    b.bind(1, d.job);
+    while (b.step()) d.boxes.emplace_back(b.text(0), b.text(1));
+  }
+  return out;
+}
+
+std::vector<Deploy> Store::deploys(const std::string& project, int limit) {
+  std::lock_guard lock(mu_);
+  return read_deploys("d.project = ?", project, limit);
+}
+
+std::vector<Deploy> Store::deploys_of_box(const std::string& box, int limit) {
+  std::lock_guard lock(mu_);
+  return read_deploys("d.job IN (SELECT job FROM deploy_boxes WHERE box = ?)", box, limit);
+}
+
+std::optional<Deploy> Store::deploy_of_version(const std::string& box, const std::string& version) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "SELECT job FROM deploy_boxes WHERE box = ? AND version = ? ORDER BY job DESC LIMIT 1");
+  s.bind(1, box).bind(2, version);
+  if (!s.step()) return std::nullopt;
+  auto found = read_deploys("d.job = CAST(? AS INTEGER)", std::to_string(s.int64(0)), 1);
+  if (found.empty()) return std::nullopt;
+  return found.front();
+}
+
+std::vector<MirrorItem> Store::mirror_pending(int limit) {
+  std::lock_guard lock(mu_);
+  std::vector<MirrorItem> out;
+  sqlite::Stmt p(*db_, "SELECT r.project, r.rev FROM revisions r WHERE NOT EXISTS (SELECT 1 FROM mirrored m WHERE "
+                       "m.project = r.project AND m.rev = r.rev AND m.kind = 'patch') ORDER BY r.at_ms, r.project, r.rev "
+                       "LIMIT ?");
+  p.bind(1, int64_t(limit));
+  while (p.step()) out.push_back(MirrorItem{p.text(0), p.int64(1), "patch"});
+  if (int(out.size()) >= limit) return out;
+  sqlite::Stmt s(*db_, "SELECT DISTINCT d.project, d.rev FROM deploys d WHERE NOT EXISTS (SELECT 1 FROM mirrored m "
+                       "WHERE m.project = d.project AND m.rev = d.rev AND m.kind = 'snapshot') ORDER BY d.project, d.rev "
+                       "LIMIT ?");
+  s.bind(1, int64_t(limit - int(out.size())));
+  while (s.step()) out.push_back(MirrorItem{s.text(0), s.int64(1), "snapshot"});
+  return out;
+}
+
+void Store::mark_mirrored(const MirrorItem& item, int64_t now_ms) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "INSERT OR REPLACE INTO mirrored (project, rev, kind, at_ms) VALUES (?, ?, ?, ?)");
+  s.bind(1, item.project).bind(2, item.rev).bind(3, item.kind).bind(4, now_ms).run();
+}
+
+MirrorState Store::mirror_state(const std::string& project) {
+  std::lock_guard lock(mu_);
+  MirrorState m;
+  sqlite::Stmt s(*db_, "SELECT kind, count(*), max(rev) FROM mirrored WHERE project = ? GROUP BY kind");
+  s.bind(1, project);
+  while (s.step()) {
+    if (s.text(0) == "patch") m.patches = s.int64(1), m.patch_rev = s.int64(2);
+    else m.snapshots = s.int64(1), m.snapshot_rev = s.int64(2);
+  }
+  sqlite::Stmt p(*db_, "SELECT (SELECT count(*) FROM revisions WHERE project = ?1) + "
+                       "(SELECT count(DISTINCT rev) FROM deploys WHERE project = ?1)");
+  p.bind(1, project);
+  p.step();
+  m.pending = p.int64(0) - m.patches - m.snapshots;
+  return m;
 }
 
 }  // namespace goober::source

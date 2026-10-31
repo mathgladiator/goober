@@ -212,6 +212,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_invite_tools();
   register_web_tools();
   register_source_tools();
+  backups_->set_source(source_.get());
   register_panel_tools();
   register_pwa_tools();
   register_library_tools();
@@ -252,8 +253,12 @@ std::optional<bj::object> Host::backup_run(const std::string& what, int64_t now_
     error->clear();
     out["uploaded"] = backups_->run_assets(now_ms, error);
     ok = error->empty();
+  } else if (what == "source") {
+    int put = backups_->run_source(now_ms, error);
+    out["uploaded"] = put;
+    ok = put >= 0;
   } else {
-    *error = "what is nightly, increment, or assets";
+    *error = "what is nightly, increment, assets, or source";
   }
   if (!ok) return std::nullopt;
   return out;

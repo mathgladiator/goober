@@ -434,7 +434,8 @@ BuildResult build_project(source::Store& store, const std::string& project, int6
   return out;
 }
 
-BuildJobs::BuildJobs() : worker_([this] { run(); }) {}
+BuildJobs::BuildJobs(int64_t last_id, Finished finished)
+    : next_id_(last_id + 1), finished_(std::move(finished)), worker_([this] { run(); }) {}
 
 BuildJobs::~BuildJobs() {
   {
@@ -500,6 +501,14 @@ void BuildJobs::run() {
     }
     if (job.state == "running") job.state = "failed";
     job.finished_ms = base::now_unix_ms();
+    // Kept before it shows as done, so a reader that sees it finished can find it in the store.
+    if (finished_) {
+      try {
+        finished_(job);
+      } catch (const std::exception& e) {
+        job.log += std::string("(the job couldn't be kept: ") + e.what() + ")\n";
+      }
+    }
     {
       std::lock_guard lock(mu_);
       jobs_[job.id] = job;

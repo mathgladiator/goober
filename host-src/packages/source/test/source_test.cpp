@@ -154,5 +154,66 @@ TEST(Source, DiffBetweenRevisions) {
   EXPECT_EQ(only->find("a.txt"), std::string::npos);
 }
 
+TEST(Source, GitBinaryPiecesMatchGit) {
+  EXPECT_EQ(git_blob_id(""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+  EXPECT_EQ(git_blob_id("hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a");
+  // Two stored blocks past 65535 bytes, and git's length letters: A is 1 byte, a is 27.
+  auto lit = git_binary_literal(std::string(70000, 'x'));
+  EXPECT_TRUE(lit.starts_with("literal 70000\nz")) << lit.substr(0, 40);
+}
+
+// The mirror's patches replay into git: `git am` of every revision, in order, gives each
+// revision's tree exactly, binary files, spaces, empty files, and deletions included.
+TEST(Source, PatchesReplayIntoGit) {
+  if (!base::run_process({"git", "--version"}, "", 4096, 5000).started) GTEST_SKIP() << "no git";
+  auto s = fresh("patches");
+  std::string err;
+  ASSERT_TRUE(s->create("p", "", 1, &err));
+  std::string wasm;
+  for (int i = 0; i < 70000; ++i) wasm += char((i * 7919) % 256);
+  ASSERT_TRUE(s->commit("p", 0,
+                        {{"src/lib.rs", "fn main() {}\n"}, {"manifest.json", "{}"}, {"box.wasm", wasm},
+                         {"a b.txt", "spaced\n"}, {"empty.txt", ""}, {"ünï.md", "# ünï\n"}},
+                        "Start\n\nWhy:\n---\ndiff -u is not a patch here", "token:grok", 1793000000000, &err))
+      << err;
+  wasm[100] = 'z';
+  ASSERT_TRUE(s->commit("p", 1, {{"src/lib.rs", "fn main() { hi(); }\n"}, {"manifest.json", std::nullopt}, {"box.wasm", wasm}},
+                        "More", "oauth:me@example.com:dyn_1", 1793000100000, &err))
+      << err;
+  ASSERT_TRUE(s->commit("p", 2, {{"box.wasm", std::nullopt}, {"empty.txt", "now text"}}, "Less", "config", 1793000200000, &err))
+      << err;
+  ASSERT_TRUE(s->revert("p", 1, "config", 1793000300000, &err)) << err;
+
+  auto dir = fs::path(GOOBER_TEST_TMP) / "source-patches-git";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  base::ProcessOptions o;
+  o.cwd = dir;
+  o.env = std::vector<std::string>{"PATH=/usr/bin:/bin:/usr/local/bin", "HOME=" + dir.string(), "GIT_CONFIG_NOSYSTEM=1",
+                                   "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com"};
+  auto git = [&](std::vector<std::string> args, const std::string& input = "") {
+    args.insert(args.begin(), "git");
+    return base::run_process(args, input, 8 << 20, 20000, o);
+  };
+  ASSERT_EQ(git({"init", "-q"}).exit_code, 0);
+  for (int64_t rev = 1; rev <= 4; ++rev) {
+    auto patch = s->patch("p", rev, &err);
+    ASSERT_TRUE(patch) << err;
+    auto am = git({"am", "-q", "--keep-cr"}, *patch);
+    ASSERT_EQ(am.exit_code, 0) << "revision " << rev << ": " << am.err << am.out << "\n" << patch->substr(0, 2000);
+    auto files = s->files("p", rev, &err);
+    std::string want;
+    for (const auto& f : *files) want += f.path + "\n";
+    EXPECT_EQ(git({"-c", "core.quotePath=false", "ls-files"}).out, want) << "revision " << rev;
+    for (const auto& f : *files) {
+      EXPECT_EQ(base::read_file(dir / f.path), s->read("p", rev, f.path, &err)) << f.path << " at " << rev;
+    }
+  }
+  auto log = git({"log", "--reverse", "--format=%an|%s|%b"});
+  EXPECT_NE(log.out.find("token:grok|Start|Why:\n ---\n diff -u is not a patch here"), std::string::npos) << log.out;
+  EXPECT_NE(log.out.find("Goober-Revision: 4"), std::string::npos) << log.out;
+  EXPECT_NE(log.out.find("oauth:me@example.com:dyn_1|More"), std::string::npos) << log.out;
+}
+
 }  // namespace
 }  // namespace goober::source

@@ -326,8 +326,9 @@ void Host::register_data_tools() {
                   }});
   mcp_->add_tool({"backup_run",
                   "Runs a backup stream now: nightly (a whole sealed archive; increments then measure against it), "
-                  "increment (the databases' changed pages and changed files), or assets (queued attachments).",
-                  mcp::object_schema({{"what", mcp::enum_property("Which stream.", {"nightly", "increment", "assets"})}},
+                  "increment (the databases' changed pages and changed files), assets (queued attachments), or "
+                  "source (source projects' patches and deployed trees not yet in the bucket).",
+                  mcp::object_schema({{"what", mcp::enum_property("Which stream.", {"nightly", "increment", "assets", "source"})}},
                                      {"what"}),
                   [this](const bj::object& args) {
                     std::string err;

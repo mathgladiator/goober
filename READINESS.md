@@ -9,7 +9,7 @@
 | question | ready? | in one line |
 | --- | --- | --- |
 | 1. Host my static content | **Yes** | Markdown, HTML, templates, images. One-command deploy with TLS; the deploy offers to redirect `www.` to the site once its DNS points here. |
-| 2. Dynamic content deployed from Grok | **Yes, untried with Grok** | Grok keeps a project's source in the host, then commits, builds, and deploys it there. |
+| 2. Dynamic content deployed from Grok | **Yes, untried with Grok** | Grok keeps a project's source in the host, then commits, builds, and deploys it there. The panel's Source view shows every revision, diff, file, and build log, and which revision each box version came from; the history is mirrored to the backup bucket as patches git can replay (`design/machine/020.Source.md` § 9 to § 12). |
 | 3. GrokBot doing outreach and tracking | **Yes, untried with Grok** | `leads` and `ranches` boxes, with MCP tools an agent drives through a minted token. |
 | 3a. Facebook ads to collect emails and surveys | **Yes** | A landing page, consent, UTM tags per ad, confirmation mail through SES, counts and CSV. |
 | 3b. Track local ranches and their offerings | **Yes** | A CRM with an outreach log, and an offerings index the robot keeps current. |

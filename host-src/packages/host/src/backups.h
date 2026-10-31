@@ -20,6 +20,10 @@
 #include "goober/json/json.h"
 #include "goober/sqlite/sqlite.h"
 
+namespace goober::source {
+class Store;
+}
+
 namespace goober::host {
 
 class KeyStore;
@@ -43,6 +47,12 @@ class BackupService {
   // Rotated logs queued under logs/archive/ (design/machine/032.Logs.md § 2): each packed,
   // sealed, and put under logs/, its manifest beside it, then its queue link removed.
   int run_logs(int64_t now_ms, std::string* error);
+  // The source mirror (020 § 10): what the source store has yet to put in the bucket, a
+  // revision's patch or a deployed revision's tree, sealed; at most 25 a call. Returns how many
+  // went up, or -1 with `error` (the next try then waits, from 10 s doubling to an hour).
+  int run_source(int64_t now_ms, std::string* error);
+  // The source store the mirror reads; until it's set, there's nothing to mirror.
+  void set_source(source::Store* store) { source_ = store; }
 
   // Health is judged at now_ms (the wall clock, except in tests).
   boost::json::object status(bool with_points, int64_t now_ms);
@@ -68,7 +78,8 @@ class BackupService {
   std::recursive_mutex mu_;  // one stream at a time, and the state database
   std::unique_ptr<sqlite::Db> state_;
   int64_t scanned_ms_ = 0;
-  std::atomic<bool> nudged_{false};  // set from request threads without the lock
+  std::atomic<bool> nudged_{false};
+  source::Store* source_ = nullptr;  // set from request threads without the lock
 };
 
 }  // namespace goober::host

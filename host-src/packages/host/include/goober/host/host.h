@@ -121,6 +121,7 @@ class Host {
   site::Site& site() { return *site_; }
   attachments::Store& attachments() { return *attachments_; }
   db::SchemaStore& schemas() { return *schemas_; }
+  source::Store& source() { return *source_; }
   db::Databases& databases() { return *databases_; }
   boxes::BoxRegistry& boxes() { return *boxes_; }
   identity::Identity& identity() { return *identity_; }

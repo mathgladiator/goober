@@ -42,12 +42,14 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow", "bus_status", "box_render"}) {
       m[t] = Rule::kTenant;
     }
-    for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote"}) m[t] = Rule::kBox;
+    for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote", "source_box_history"}) {
+      m[t] = Rule::kBox;
+    }
     m["version_upload"] = Rule::kManifest;
     for (const char* t : {"mcp_tools_preview", "route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",
-                          "source_log", "source_read", "source_revert"}) {
+                          "source_log", "source_read", "source_revert", "source_tree"}) {
       m[t] = Rule::kProject;
     }
     m["source_create"] = Rule::kProjectCreate;

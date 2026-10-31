@@ -11,6 +11,7 @@
 // devbox from any restore point.
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -74,5 +75,22 @@ std::optional<std::vector<backup::RestorePoint>> list_restore_points(aws::S3& s3
 // files, every stored attachment, each database checked; then a sandbox config (localhost,
 // dev mailer, nothing leaves, no backups).
 bool rehydrate(const RehydrateOptions& options, RehydrateReport* report, std::string* error);
+
+// The source mirror (design/machine/020.Source.md § 10), read back: every sealed patch and
+// snapshot under source/ (or one project's), unsealed into DIR/PROJECT/patches/000042.patch and
+// DIR/PROJECT/snapshots/000042.tar.gz. Files already there are kept, so a second pull fetches
+// only what's new.
+struct SourceMirrorOptions {
+  aws::S3Location location;
+  aws::Credentials credentials;
+  backup::Key key{};
+  std::filesystem::path dir;
+  std::string project;  // "" for every project
+};
+struct SourceMirrorReport {
+  std::map<std::string, std::pair<int, int>> projects;  // project -> patches, snapshots
+  int fetched = 0;
+};
+bool pull_source_mirror(const SourceMirrorOptions& options, SourceMirrorReport* report, std::string* error);
 
 }  // namespace goober::host

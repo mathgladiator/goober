@@ -97,4 +97,9 @@ std::optional<RestorePoint> choose_point(const std::vector<RestorePoint>& points
   return best;
 }
 
+std::string source_revision_name(int64_t rev) {
+  std::string n = std::to_string(rev);
+  return n.size() >= 6 ? n : std::string(6 - n.size(), '0') + n;
+}
+
 }  // namespace goober::backup

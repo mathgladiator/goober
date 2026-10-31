@@ -193,7 +193,8 @@ For backups off the machine, give setup an S3 bucket. Setup stores the AWS keys 
 store (`goober-host key set aws_access_key_id`, value on stdin) and prints the **backup key**:
 keep a copy somewhere else, then run `goober-host backup key --confirm`. On your laptop,
 `just rehydrate ~/copy` rebuilds any moment as a sandboxed devbox
-(`design/machine/019.Backups.md`).
+(`design/machine/019.Backups.md`), and `just source-mirror ~/source` fetches every source
+project's history, as patches `git am` replays (`design/machine/020.Source.md` § 11).
 
 ## Receiving mail
 

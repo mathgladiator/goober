@@ -240,7 +240,21 @@ the grant (two parties holding one grant), and Grok must sign in again.
   `version_promote` the one before; or do it yourself with a token
   (`goober-host token create --name me`, then from the repo:
   `GOOBER_URL=https://kcmeatup.com GOOBER_TOKEN=… host-src/tools/goober.py call version_promote box=NAME version=ID`).
-- **Source:** `source_log` and `source_revert` on the project.
+- **Source:** `source_log` and `source_revert` on the project. The panel's **Source** view shows
+  every revision's diff, its files, and each build's log; a box's page says which revision
+  each version came from.
+
+**Read the source history from the bucket** (every revision, sealed, kept for good), on your
+laptop with the same keys as `just rehydrate`:
+
+```sh
+just source-mirror ~/goober-source   # reads ~/.config/goober/backup.env; add a project to fetch one
+git init ~/greeter-history && cd ~/greeter-history && git am ~/goober-source/greeter/patches/*.patch
+git log --stat                       # every revision, who made it, and why
+```
+
+A deployed revision's files, with the box versions and build log, are in
+`~/goober-source/PROJECT/snapshots/NNNNNN.tar.gz` (`.goober-deploy.json` inside).
 - **Pages, data, everything:** restore a backup onto your laptop to look first
   (`just rehydrate ~/copy`), then decide.
 

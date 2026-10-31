@@ -122,7 +122,10 @@ Read these before doing design work:
   - `design/machine/019.Backups.md`: S3 backups: sealing, the bucket's layout, the nightly,
     page-level increments, assets, rotation, `goober-host rehydrate`, and the tests.
   - `design/machine/020.Source.md`: source projects over MCP: storage, concurrency,
-    `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools.
+    `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools;
+    kept jobs and deploys (box versions back to revisions), the sealed mirror in the backup
+    bucket (git-am patches and deployed snapshots, `goober-host source-mirror`), and the panel's
+    Source view.
   - `design/machine/021.IdentityEvents.md`: accounts exist once an address is proved (invites
     expire in 30 days), sign-in events, and `routes.identity` for first verifications and sign-ins.
   - `design/machine/022.MailTemplates.md`: every mail rendered from a template (subject, text,

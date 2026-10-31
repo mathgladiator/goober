@@ -81,6 +81,16 @@ inline std::string asset_key(const std::string& tenant, int64_t id, const std::s
   return "assets/" + tenant + "/" + std::to_string(id) + "." + ext + ".sealed";
 }
 
+// The source mirror (design/machine/020.Source.md § 10): every revision's patch, and the tree of
+// every deployed revision. Revisions are six digits, so a listing sorts them.
+std::string source_revision_name(int64_t rev);
+inline std::string source_patch_key(const std::string& project, int64_t rev) {
+  return "source/" + project + "/patches/" + source_revision_name(rev) + ".patch.sealed";
+}
+inline std::string source_snapshot_key(const std::string& project, int64_t rev) {
+  return "source/" + project + "/snapshots/" + source_revision_name(rev) + ".tar.gz.sealed";
+}
+
 // Restore points, from a bucket listing: nights (nightly/STAMP.tar.gz.sealed) and the
 // increments under each (increments/NIGHT/STAMP/MANIFEST.json.sealed).
 struct RestorePoint {

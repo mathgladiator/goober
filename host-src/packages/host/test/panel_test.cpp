@@ -12,6 +12,7 @@
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
+#include "goober/source/source.h"
 
 using namespace goober;
 namespace asio = boost::asio;
@@ -236,6 +237,40 @@ TEST_F(PanelTest, AnObserverOnlyLooksOverMcpToo) {
   // The owner's token still lists everything.
   auto all = parse(mcp("0123456789abcdef0123", R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})").body);
   EXPECT_GT(all["result"].as_object()["tools"].as_array().size(), names.size());
+}
+
+// The Source view's reads (020 § 9): projects, a revision's files and diff, a file, the kept
+// jobs with their logs, and a box's versions back to their source. Building stays MCP's.
+TEST_F(PanelTest, TheSourceViewReadsProjectsJobsAndBoxHistory) {
+  auto& src = host->source();
+  std::string err;
+  ASSERT_TRUE(src.create("greeter", "says hello", 1, &err)) << err;
+  ASSERT_TRUE(src.commit("greeter", 0, {{"src/lib.rs", "fn hi() {}\n"}}, "Start", "config", 10, &err)) << err;
+  ASSERT_TRUE(src.commit("greeter", 1, {{"src/lib.rs", "fn hi() { howdy(); }\n"}}, "Say howdy", "config", 20, &err)) << err;
+  src.save_job(source::JobRecord{3, "greeter", "deploy", 2, "failed", "config", 25, 26, 30, "✗ box greeter: no\n", "{}"});
+  src.record_deploy(source::Deploy{3, "greeter", 2, 30, "config", {{"greeter", "v-abc"}}, ""});
+
+  std::string cookie = sign_in("watcher@example.com");  // an observer looks too
+  ASSERT_FALSE(cookie.empty());
+  auto list = parse(api(cookie, "source_list").body)["result"];
+  EXPECT_EQ(list.at(0).at("project"), "greeter");
+  EXPECT_EQ(list.at(0).at("mirror").at("pending"), 3);  // backups are off here: two patches, one tree
+  auto tree = parse(api(cookie, "source_tree", R"({"project":"greeter","rev":2})").body)["result"];
+  EXPECT_EQ(tree.at("message"), "Say howdy");
+  EXPECT_EQ(tree.at("changed").at(0), "src/lib.rs");
+  auto diff = parse(api(cookie, "source_diff", R"({"project":"greeter","from":1,"to":2,"verbose":true})").body)["result"];
+  EXPECT_NE(std::string(diff.at("diff").as_string()).find("+fn hi() { howdy(); }"), std::string::npos);
+  auto file = parse(api(cookie, "source_read", R"({"project":"greeter","rev":1,"paths":["src/lib.rs"]})").body)["result"];
+  EXPECT_EQ(file.at(0).at("text"), "fn hi() {}\n");
+  auto jobs = parse(api(cookie, "source_job", R"({"project":"greeter"})").body)["result"];
+  EXPECT_EQ(jobs.at(0).at("state"), "failed");
+  auto job = parse(api(cookie, "source_job", R"({"job":3,"verbose":true})").body)["result"];
+  EXPECT_EQ(job.at("log"), "✗ box greeter: no\n");
+  auto history = parse(api(cookie, "source_box_history", R"({"box":"greeter"})").body)["result"];
+  EXPECT_EQ(history.at("deploys").at(0).at("version"), "v-abc");
+  EXPECT_EQ(history.at("deploys").at(0).at("message"), "Say howdy");
+  EXPECT_EQ(api(cookie, "source_deploy", R"({"project":"greeter"})").status, 403);
+  EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body.find("async source()"), std::string::npos);
 }
 
 TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {

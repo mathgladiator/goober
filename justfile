@@ -97,6 +97,11 @@ restore from dir=dir: build
 rehydrate dest at="": build
     {{host_src}}/tools/rehydrate.sh {{quote(dest)}} {{quote(at)}}
 
+# Reads ~/.config/goober/backup.env, as rehydrate does.
+# Source projects' history from the S3 backups into DEST: patches for `git am`, deployed trees.
+source-mirror dest project="": build
+    {{host_src}}/tools/source-mirror.sh {{quote(dest)}} {{quote(project)}}
+
 # S3 backups end to end against a stand-in S3: nightly, increment, assets, rehydrate.
 backup-e2e: build
     python3 -I {{host_src}}/tools/backup_e2e.py

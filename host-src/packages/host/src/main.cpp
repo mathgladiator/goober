@@ -20,6 +20,8 @@
 //                [--endpoint URL] [--prefix P]] [--key-file F] [--keep-keys] [--port N]
 //       a sandboxed devbox from S3; AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and
 //       AWS_SESSION_TOKEN), and GOOBER_BACKUP_KEY unless --key-file
+//   goober-host source-mirror DIR [--project P] [the same bucket flags as rehydrate]
+//       every source project's patches and deployed snapshots from the bucket, unsealed
 //
 // The db commands read the database files directly, so they work whether or not the
 // host is running; exec is logged to logs/db.log as the operator "cli".
@@ -76,7 +78,9 @@ constexpr const char* kUsage =
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
-    "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n";
+    "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n"
+    "       goober-host source-mirror DIR [--project P] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
+    "                  [--prefix P]] [--key-file F]   (source history from the backup bucket, unsealed)\n";
 
 namespace bj = boost::json;
 
@@ -248,7 +252,7 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
 }
 
 struct Flags {
-  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts;
+  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts, project;
   bool confirm = false, keep_keys = false;
   uint16_t port = 8080;
 };
@@ -333,6 +337,62 @@ int run_backup_cli(const std::vector<std::string>& args, const std::string& conf
   return 2;
 }
 
+// Where the bucket is, the AWS keys to read it, and the backup key, as rehydrate and
+// source-mirror take them: 0, or the exit code after saying what's missing.
+int bucket_access(const Flags& flags, goober::aws::S3Location* location, goober::aws::Credentials* credentials,
+                  goober::backup::Key* backup_key) {
+  std::string err;
+  if (!flags.from.empty()) {
+    auto from = goober::config::load_config(flags.from, &err);
+    if (!from) return std::cerr << "goober-host: " << err << "\n", 1;
+    if (!from->backup.enabled()) return std::cerr << "goober-host: " << flags.from << " has no backup.s3\n", 1;
+    *location = {from->backup.bucket, from->backup.region.empty() ? from->aws.region : from->backup.region,
+                 from->backup.endpoint, from->backup.prefix};
+  }
+  if (!flags.bucket.empty()) location->bucket = flags.bucket;
+  if (!flags.region.empty()) location->region = flags.region;
+  if (!flags.endpoint.empty()) location->endpoint = flags.endpoint;
+  if (!flags.prefix.empty()) location->prefix = flags.prefix.back() == '/' ? flags.prefix : flags.prefix + "/";
+  if (location->bucket.empty()) return std::cerr << "goober-host: say where: --from host.json or --bucket\n", 2;
+  if (location->region.empty()) location->region = "us-east-1";
+  auto env = [](const char* k) { return std::string(std::getenv(k) ? std::getenv(k) : ""); };
+  *credentials = {env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"), env("AWS_SESSION_TOKEN")};
+  if (credentials->access_key_id.empty() || credentials->secret_access_key.empty()) {
+    return std::cerr << "goober-host: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY\n", 2;
+  }
+  std::string key_text = flags.key_file.empty() ? env("GOOBER_BACKUP_KEY") : goober::base::read_file(flags.key_file).value_or("");
+  auto key = goober::backup::parse_key(key_text);
+  if (!key) return std::cerr << "goober-host: the backup key (GOOBER_BACKUP_KEY or --key-file) must be 64 hex digits\n", 2;
+  *backup_key = *key;
+  return 0;
+}
+
+int run_source_mirror(const std::vector<std::string>& args, const Flags& flags) {
+  if (args.size() != 2) return std::cerr << kUsage, 2;
+  goober::host::SourceMirrorOptions o;
+  o.dir = args[1];
+  o.project = flags.project;
+  if (int code = bucket_access(flags, &o.location, &o.credentials, &o.key)) return code;
+  goober::host::SourceMirrorReport report;
+  std::string err;
+  if (!goober::host::pull_source_mirror(o, &report, &err)) return std::cerr << "goober-host: " << err << "\n", 1;
+  if (report.projects.empty()) {
+    std::cout << "the bucket holds no source mirror" << (o.project.empty() ? "" : " for " + o.project) << " yet\n";
+    return 0;
+  }
+  std::cout << "fetched " << report.fetched << " new file(s) into " << o.dir.string() << ":\n";
+  for (const auto& [project, n] : report.projects) {
+    std::cout << "  " << project << ": " << n.first << " patches, " << n.second << " deployed snapshots\n";
+  }
+  auto any = report.projects.begin()->first;
+  std::cout << "Each project's history replays into git, revision by revision:\n"
+            << "  git init " << any << "-history && cd " << any << "-history && git am " << (o.dir / any / "patches").string()
+            << "/*.patch\n"
+            << "A deployed revision's files, with .goober-deploy.json (its box versions and build log):\n"
+            << "  tar -xzf " << (o.dir / any / "snapshots").string() << "/NNNNNN.tar.gz\n";
+  return 0;
+}
+
 int run_rehydrate(const std::vector<std::string>& args, const Flags& flags) {
   if (args.size() != 2) return std::cerr << kUsage, 2;
   std::string err;
@@ -340,28 +400,7 @@ int run_rehydrate(const std::vector<std::string>& args, const Flags& flags) {
   o.dir = args[1];
   o.port = flags.port;
   o.keep_keys = flags.keep_keys;
-  if (!flags.from.empty()) {
-    auto from = goober::config::load_config(flags.from, &err);
-    if (!from) return std::cerr << "goober-host: " << err << "\n", 1;
-    if (!from->backup.enabled()) return std::cerr << "goober-host: " << flags.from << " has no backup.s3\n", 1;
-    o.location = {from->backup.bucket, from->backup.region.empty() ? from->aws.region : from->backup.region,
-                  from->backup.endpoint, from->backup.prefix};
-  }
-  if (!flags.bucket.empty()) o.location.bucket = flags.bucket;
-  if (!flags.region.empty()) o.location.region = flags.region;
-  if (!flags.endpoint.empty()) o.location.endpoint = flags.endpoint;
-  if (!flags.prefix.empty()) o.location.prefix = flags.prefix.back() == '/' ? flags.prefix : flags.prefix + "/";
-  if (o.location.bucket.empty()) return std::cerr << "goober-host: say where: --from host.json or --bucket\n", 2;
-  if (o.location.region.empty()) o.location.region = "us-east-1";
-  auto env = [](const char* k) { return std::string(std::getenv(k) ? std::getenv(k) : ""); };
-  o.credentials = {env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"), env("AWS_SESSION_TOKEN")};
-  if (o.credentials.access_key_id.empty() || o.credentials.secret_access_key.empty()) {
-    return std::cerr << "goober-host: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY\n", 2;
-  }
-  std::string key_text = flags.key_file.empty() ? env("GOOBER_BACKUP_KEY") : goober::base::read_file(flags.key_file).value_or("");
-  auto key = goober::backup::parse_key(key_text);
-  if (!key) return std::cerr << "goober-host: the backup key (GOOBER_BACKUP_KEY or --key-file) must be 64 hex digits\n", 2;
-  o.key = *key;
+  if (int code = bucket_access(flags, &o.location, &o.credentials, &o.key)) return code;
   if (!flags.at.empty()) {
     auto at = goober::backup::parse_moment(flags.at);
     if (!at) return std::cerr << "goober-host: --at is like 2026-10-26, 2026-10-26T18:00, or 2026-10-26T18:00:00Z (UTC)\n", 2;
@@ -414,7 +453,8 @@ int main(int argc, char** argv) {
     } else if (a == "--keep-keys") {
       flags.keep_keys = true;
     } else if ((a == "--hosts" || a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
-                a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port") && i + 1 < argc) {
+                a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port" || a == "--project") &&
+               i + 1 < argc) {
       std::string v = argv[++i];
       if (a == "--tenant") flags.tenant = v;
       if (a == "--hosts") flags.hosts = v;
@@ -425,6 +465,7 @@ int main(int argc, char** argv) {
       if (a == "--endpoint") flags.endpoint = v;
       if (a == "--prefix") flags.prefix = v;
       if (a == "--key-file") flags.key_file = v;
+      if (a == "--project") flags.project = v;
       if (a == "--port") flags.port = uint16_t(std::atoi(v.c_str()));
     } else if (a == "--version") {
       std::cout << "goober-host " << goober::host::kVersion << " (" << kBuildCommit << ")\n";
@@ -440,6 +481,7 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "db") return run_db(positional, config_path);
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
+  if (!positional.empty() && positional[0] == "source-mirror") return run_source_mirror(positional, flags);
   if (positional.size() == 1 && positional[0] == "audit") return goober::host::run_audit(config_path, caddyfile, json_out);
   if (positional.size() == 1 && positional[0] == "toolchain") return goober::host::run_toolchain_check(config_path);
   if (positional.size() == 3 && positional[0] == "operator" && positional[1] == "revoke") {

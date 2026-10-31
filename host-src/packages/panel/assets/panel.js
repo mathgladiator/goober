@@ -467,10 +467,11 @@ const views = {
   },
 
   async box(params, name) {
-    const [graph, versions, logs, changes] = await Promise.all([
+    const [graph, versions, logs, changes, sourceHistory] = await Promise.all([
       api('box_graph', { window: state.window, box: name }), api('version_list', { box: name }),
       api('box_logs', { box: name, limit: 30 }).catch(() => []),
-      api('changes', { kind: 'deploy', limit: 200, tenant: focus() ? focus()[0] : '' }).catch(() => ({ changes: [] }))]);
+      api('changes', { kind: 'deploy', limit: 200, tenant: focus() ? focus()[0] : '' }).catch(() => ({ changes: [] })),
+      api('source_box_history', { box: name, limit: 20 }).catch(() => ({ deploys: [] }))]);
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
     const deploys = changes.changes.filter((c) => c.target === name);
@@ -498,6 +499,8 @@ const views = {
           { label: 'Version', get: (v) => h('code', {}, v.version.slice(0, 16)) },
           { label: '', get: (v) => v.active ? h('span', { class: 'pill deploy' }, 'active') : '' },
           { label: 'Activated', get: (v) => deployedAt[v.version] ? fmt.time(deployedAt[v.version]) : '', cls: () => 'muted' },
+          { label: 'Source', get: (v) => v.source ? h('a', { href: '#/project/' + encodeURIComponent(v.source.project) + '?rev=' + v.source.rev },
+            v.source.project + ' r' + v.source.rev) : '' },
         ], versions)),
         card('Deploys', deploys.length ? changesTable(deploys.slice(0, 10)) : h('p', { class: 'muted' }, 'None recorded yet.'))),
       wideCard('Newest log lines', logs.length ? table([
@@ -507,6 +510,74 @@ const views = {
       ], logs.slice().reverse()) : h('p', { class: 'muted' }, 'No log lines.')),
       manifest ? wideCard('Manifest', h('details', {}, h('summary', {}, 'Show the active manifest'),
         h('pre', { class: 'json' }, JSON.stringify(manifest.manifest, null, 2)))) : null,
+      sourceCard(sourceHistory),
+    ];
+  },
+
+  // ---- source (020): projects, revisions, files, and the builds and deploys of each
+
+  async source() {
+    const [projects, jobs] = await Promise.all([api('source_list'), api('source_job', { limit: 20 })]);
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Source')),
+      wideCard('Projects', projects.length ? table([
+        { label: 'Project', get: (p) => h('a', { href: '#/project/' + encodeURIComponent(p.project) }, p.project) },
+        { label: 'Head', num: true, get: (p) => p.head },
+        { label: 'Deployed', num: true, get: (p) => p.deployed_rev ?? '–' },
+        { label: 'Updated', get: (p) => fmt.time(Date.parse(p.updated_at)), cls: () => 'muted' },
+        { label: 'In the bucket', get: (p) => mirrorText(p.mirror), cls: (p) => p.mirror && p.mirror.pending ? 'warn' : 'muted' },
+        { label: 'About', get: (p) => clip(p.description, 90), cls: () => 'muted' },
+      ], projects, (p) => { location.hash = '#/project/' + encodeURIComponent(p.project); })
+        : h('p', { class: 'muted' }, 'No source projects yet: an agent starts one with source_create.')),
+      wideCard('Builds and deploys', jobsTable(jobs, true)),
+    ];
+  },
+
+  async project(params, name) {
+    const rev = Number(params.get('rev') || 0), file = params.get('file');
+    if (file) return fileView(name, rev, file);
+    if (rev) return revisionView(name, rev);
+    const [projects, log, jobs] = await Promise.all([
+      api('source_list'), api('source_log', { project: name, limit: 100 }), api('source_job', { project: name, limit: 50 })]);
+    const p = projects.find((x) => x.project === name) || {};
+    const builds = {};
+    for (const j of jobs) (builds[j.rev] = builds[j.rev] || []).push(j);
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, name), h('a', { href: '#/source' }, '← Source'),
+        p.head ? h('a', { href: '#/project/' + encodeURIComponent(name) + '?rev=' + p.head }, 'Files at the head →') : null),
+      p.description ? h('p', { class: 'muted' }, p.description) : null,
+      h('div', { class: 'grid' }, card('', h('div', { class: 'stats' },
+        stat(p.head, 'revisions'), stat(p.deployed_rev ?? '–', 'deployed'), stat(mirrorText(p.mirror), 'in the backup bucket')))),
+      wideCard('Revisions', log.length ? table([
+        { label: 'Rev', num: true, get: (r) => h('a', { href: '#/project/' + encodeURIComponent(name) + '?rev=' + r.rev }, String(r.rev)) },
+        { label: '', get: (r) => r.rev === p.deployed_rev ? h('span', { class: 'pill deploy' }, 'deployed') : '' },
+        { label: 'Message', get: (r) => clip(r.message.split('\n')[0], 100) },
+        { label: 'By', get: (r) => r.by, cls: () => 'mono muted' },
+        { label: 'When', get: (r) => fmt.time(Date.parse(r.at)), cls: () => 'muted' },
+        { label: 'Files', get: (r) => clip(r.changed.join(', '), 80), cls: () => 'mono muted' },
+        { label: 'Builds', get: (r) => (builds[r.rev] || []).map((j) => jobPill(j)) },
+      ], log, (r) => { location.hash = '#/project/' + encodeURIComponent(name) + '?rev=' + r.rev; })
+        : h('p', { class: 'muted' }, 'Nothing committed yet.')),
+      wideCard('Builds and deploys', jobsTable(jobs, false)),
+    ];
+  },
+
+  async job(params, id) {
+    const j = await api('source_job', { job: Number(id), verbose: true });
+    const done = j.state === 'succeeded' || j.state === 'failed';
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, (j.kind === 'deploy' ? 'Deploy ' : 'Build ') + j.job),
+        jobPill(j), h('a', { href: '#/project/' + encodeURIComponent(j.project) + '?rev=' + j.rev }, j.project + ' revision ' + j.rev + ' →')),
+      h('div', { class: 'grid' }, card('', h('div', { class: 'stats' },
+        stat(j.by, 'by'), stat(j.queued_at ? fmt.time(Date.parse(j.queued_at)) : '–', 'queued'),
+        stat(j.started_at && j.finished_at ? fmt.us(1000 * (Date.parse(j.finished_at) - Date.parse(j.started_at))) : '–', 'took')))),
+      (j.boxes || []).length ? wideCard('Boxes', table([
+        { label: 'Box', get: (b) => h('a', { href: '#/box/' + encodeURIComponent(b.box) }, b.box) },
+        { label: 'Version', get: (b) => b.version ? h('code', {}, String(b.version).slice(0, 16)) : '' },
+        { label: 'Bytes', num: true, get: (b) => b.bytes ? fmt.bytes(b.bytes) : '' },
+        { label: 'Warnings', get: (b) => (b.warnings || []).join('; '), cls: () => 'muted' },
+      ], j.boxes)) : null,
+      wideCard(done ? 'Build log' : 'Build log (so far; this page refreshes)', h('pre', { class: 'source log' }, j.log || '(empty)')),
     ];
   },
 
@@ -1009,6 +1080,106 @@ function unblockForm(tenants) {
     h('label', {}, 'Tenant '), tenant, ' ', h('label', {}, 'Address '), email, statement, go, out);
 }
 
+// ------------------------------------------------------------------ source
+
+function mirrorText(m) {
+  if (!m) return '–';
+  if (!m.patches && !m.pending) return 'nothing yet';
+  return `${m.patches} patches, ${m.snapshots} deployed trees` + (m.pending ? ` (${m.pending} to go)` : '');
+}
+
+function jobPill(j) {
+  const cls = j.state === 'failed' ? 'failed' : j.state === 'succeeded' ? (j.kind === 'deploy' ? 'deploy' : 'partial') : '';
+  return h('a', { href: '#/job/' + j.job, class: 'pill ' + cls, title: j.state }, (j.kind === 'deploy' ? 'deploy ' : 'build ') + j.job +
+    (j.state === 'succeeded' ? '' : ' · ' + j.state));
+}
+
+function jobsTable(jobs, withProject) {
+  if (!jobs.length) return h('p', { class: 'muted' }, 'No builds or deploys yet.');
+  return table([
+    { label: 'Job', get: (j) => jobPill(j) },
+    withProject ? { label: 'Project', get: (j) => h('a', { href: '#/project/' + encodeURIComponent(j.project) }, j.project) } : null,
+    { label: 'Rev', num: true, get: (j) => j.rev },
+    { label: 'State', get: (j) => j.state, cls: (j) => j.state === 'failed' ? 'err' : j.state === 'succeeded' ? '' : 'warn' },
+    { label: 'By', get: (j) => j.by, cls: () => 'mono muted' },
+    { label: 'Queued', get: (j) => fmt.time(Date.parse(j.queued_at)), cls: () => 'muted' },
+    { label: 'Boxes', get: (j) => (j.boxes || []).map((b) => b.box + (b.version ? ' ' + String(b.version).slice(0, 8) : '')).join(', '), cls: () => 'mono muted' },
+  ].filter(Boolean), jobs, (j) => { location.hash = '#/job/' + j.job; });
+}
+
+// On a box's page: the source deploys behind its versions (020 § 9).
+function sourceCard(history) {
+  const deploys = (history && history.deploys) || [];
+  if (!deploys.length) return null;
+  return wideCard('From source', table([
+    { label: 'Version', get: (d) => h('code', {}, String(d.version || '').slice(0, 16)) },
+    { label: 'Project', get: (d) => h('a', { href: '#/project/' + encodeURIComponent(d.project) + '?rev=' + d.rev }, d.project + ' r' + d.rev) },
+    { label: 'Message', get: (d) => clip((d.message || '').split('\n')[0], 90) },
+    { label: 'Deployed by', get: (d) => d.by, cls: () => 'mono muted' },
+    { label: 'When', get: (d) => fmt.time(Date.parse(d.at)), cls: () => 'muted' },
+    { label: 'Log', get: (d) => h('a', { href: '#/job/' + d.job }, 'job ' + d.job) },
+  ], deploys));
+}
+
+// A unified diff as the host writes it, colored: file headers, hunks, additions, removals.
+function unifiedView(text) {
+  const box = h('div', { class: 'diff' });
+  for (const line of text.split('\n')) {
+    let cls = '';
+    if (line.startsWith('+++ ') || line.startsWith('--- ') || line.startsWith('Binary file ')) cls = 'file';
+    else if (line.startsWith('@@')) cls = 'hunk';
+    else if (line.startsWith('+')) cls = 'add';
+    else if (line.startsWith('-')) cls = 'del';
+    box.appendChild(h('div', { class: cls }, line || ' '));
+  }
+  return box;
+}
+
+function fileLink(name, rev, path) {
+  return h('a', { href: '#/project/' + encodeURIComponent(name) + '?rev=' + rev + '&file=' + encodeURIComponent(path) }, path);
+}
+
+async function revisionView(name, rev) {
+  const [tree, diff] = await Promise.all([
+    api('source_tree', { project: name, rev }),
+    rev > 1 ? api('source_diff', { project: name, from: rev - 1, to: rev, verbose: true }) : Promise.resolve(null)]);
+  const changed = new Set(tree.changed || []);
+  const base = '#/project/' + encodeURIComponent(name);
+  return [
+    h('div', { class: 'bar' }, h('h1', {}, name + ' · revision ' + rev), h('a', { href: base }, '← ' + name),
+      rev > 1 ? h('a', { href: base + '?rev=' + (rev - 1) }, '← ' + (rev - 1)) : null,
+      rev < tree.head ? h('a', { href: base + '?rev=' + (rev + 1) }, (rev + 1) + ' →') : null),
+    h('p', {}, h('b', {}, (tree.message || '').split('\n')[0]), h('span', { class: 'muted' }, ' · ' + (tree.by || '') + ' · ' + (tree.at ? fmt.time(Date.parse(tree.at)) : ''))),
+    (tree.message || '').includes('\n') ? h('pre', { class: 'json' }, tree.message) : null,
+    wideCard('What changed', diff ? (diff.diff && diff.diff !== '(no differences)' ? unifiedView(diff.diff) : h('p', { class: 'muted' }, 'No differences.'))
+      : h('p', { class: 'muted' }, 'The first revision: every file is new.')),
+    wideCard(`Files (${tree.files.length})`, table([
+      { label: 'Path', get: (f) => fileLink(name, rev, f.path), cls: () => 'mono' },
+      { label: '', get: (f) => changed.has(f.path) ? h('span', { class: 'pill deploy' }, 'changed') : '' },
+      { label: 'Size', num: true, get: (f) => fmt.bytes(f.size) },
+      { label: 'SHA-256', get: (f) => f.sha256.slice(0, 12), cls: () => 'mono muted' },
+    ], tree.files)),
+  ];
+}
+
+async function fileView(name, rev, path) {
+  const [file] = await api('source_read', { project: name, rev, paths: [path] });
+  const back = '#/project/' + encodeURIComponent(name) + '?rev=' + (rev || '');
+  let body;
+  if (typeof file.text === 'string') {
+    // Line numbers beside the text, each line placed as text.
+    const lines = file.text.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    body = h('div', { class: 'code' }, lines.map((l, i) => h('div', {}, h('span', { class: 'ln' }, String(i + 1)), h('span', {}, l || ' '))));
+  } else {
+    body = h('p', { class: 'muted' }, `Binary, ${fmt.bytes(file.size)}: not shown.`);
+  }
+  return [
+    h('div', { class: 'bar' }, h('h1', { class: 'mono' }, path), h('a', { href: back }, '← ' + name + (rev ? ' revision ' + rev : ''))),
+    wideCard(fmt.bytes(file.size), body),
+  ];
+}
+
 // ------------------------------------------------------------------ router
 
 let renderSeq = 0;
@@ -1018,10 +1189,12 @@ async function render(quiet) {
   const params = new URLSearchParams(query || '');
   const [view, arg] = route.split('/').map(decodeURIComponent);
   const name = view || 'overview';
-  const fn = Object.hasOwn(views, name) && (name !== 'box' && name !== 'change' || arg) ? views[name] : null;
+  const needsArg = ['box', 'change', 'project', 'job'].includes(name);
+  const fn = Object.hasOwn(views, name) && (!needsArg || arg) ? views[name] : null;
   for (const a of document.querySelectorAll('#nav a')) {
     const v = a.getAttribute('data-view');
-    a.classList.toggle('active', v === name || (v === 'boxes' && name === 'box') || (v === 'changes' && name === 'change'));
+    a.classList.toggle('active', v === name || (v === 'boxes' && name === 'box') || (v === 'changes' && name === 'change') ||
+      (v === 'source' && (name === 'project' || name === 'job')));
   }
   const seq = ++renderSeq;
   if (!quiet) { clear($main); $main.appendChild(h('p', { class: 'muted' }, 'Loading…')); }
@@ -1059,7 +1232,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'flow', 'boxes', 'box', 'perf', 'agents'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

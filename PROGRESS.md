@@ -489,6 +489,18 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Database versions; the route `cache` field with checks; 304s without the box;
       `cache_status`, `cache_clear` (waiting on 037 § 9's decisions).
 
+### Phase 30: source in the panel, and its history in the bucket (020 § 9 to § 12)
+- [x] Builds and deploys kept with their logs; deploys and the box versions each uploaded;
+      `source_tree`, `source_box_history`, `source_job` by project; `version_list` names a
+      version's source revision.
+- [x] The panel's Source view: projects, revisions, colored diffs, files with line numbers,
+      build logs, and a box's versions back to their source.
+- [x] The mirror: every revision as a sealed `git format-patch` patch (binary files as git
+      binary patches), every deployed revision as a sealed snapshot with its deploys and
+      logs, under `source/` in the backup bucket, never rotated; `goober-host source-mirror`
+      reads it back; `git am` replays it (tested).
+- [ ] Untried against real S3, like the rest of the backups.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

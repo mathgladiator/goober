@@ -43,6 +43,12 @@ std::string sha256_hex(std::string_view data) {
   return hex_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
 }
 
+std::string sha1_hex(std::string_view data) {
+  unsigned char digest[SHA_DIGEST_LENGTH];
+  SHA1(reinterpret_cast<const unsigned char*>(data.data()), data.size(), digest);
+  return hex_encode(std::string_view(reinterpret_cast<const char*>(digest), sizeof digest));
+}
+
 std::optional<std::string> sha256_file_hex(const std::filesystem::path& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) return std::nullopt;

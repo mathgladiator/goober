@@ -353,3 +353,52 @@ TEST_F(SourceToolsTest, DeployedToolsAreListedWithTheirTypes) {
   }
   EXPECT_EQ(listed, (std::set<std::string>{"add_location", "get_location", "import_locations", "list_locations"}));
 }
+
+// Jobs are kept with their logs across restarts, and every box version a deploy uploaded leads
+// back to its project and revision (020 § 9).
+TEST_F(SourceToolsTest, JobsAndDeploysAreKeptAndLeadBackToSource) {
+  ASSERT_EQ(tool("source_create", {{"project", "greeter"}, {"template", "wat-box"}}).at("head"), 1);
+  auto first = tool("source_deploy", {{"project", "greeter"}});
+  ASSERT_EQ(first.at("state"), "succeeded") << json::dump(first);
+  auto built = tool("source_build", {{"project", "greeter"}});
+  ASSERT_EQ(built.at("state"), "succeeded");
+  int64_t deploy_job = first.at("job").as_int64();
+
+  auto tree = tool("source_tree", {{"project", "greeter"}});
+  EXPECT_EQ(tree.at("rev"), 1);
+  EXPECT_EQ(tree.at("message"), "Start from the wat-box template");
+  EXPECT_EQ(tree.at("files").as_array().size(), 3u);
+  EXPECT_FALSE(tree.at("files").at(0).as_object().contains("text"));  // no contents: source_read has them
+
+  auto history = tool("source_box_history", {{"box", "greeter"}});
+  ASSERT_EQ(history.at("deploys").as_array().size(), 1u) << json::dump(history);
+  EXPECT_EQ(history.at("deploys").at(0).at("rev"), 1);
+  EXPECT_EQ(history.at("deploys").at(0).at("job"), deploy_job);
+  std::string version(history.at("deploys").at(0).at("version").as_string());
+  auto versions = tool("version_list", {{"box", "greeter"}});
+  EXPECT_EQ(std::string(versions.at(0).at("version").as_string()), version);
+  EXPECT_EQ(versions.at(0).at("source").at("project"), "greeter");
+  EXPECT_EQ(versions.at(0).at("source").at("rev"), 1);
+
+  auto jobs = tool("source_job", {{"project", "greeter"}});
+  ASSERT_EQ(jobs.as_array().size(), 2u);
+  EXPECT_EQ(jobs.at(0).at("kind"), "build");  // newest first
+  EXPECT_EQ(tool("source_job", {{"project", "nobody"}}).as_array().size(), 0u);
+  EXPECT_EQ(tool("source_list", {}).at(0).at("mirror").at("pending"), 2);  // a patch and a deployed tree, for when backups are on
+
+  // A new host on the same storage still has them, and numbers on from them.
+  host.reset();
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"localhost": {"tenant": "playground"}}, "operations": {"token": "test-token-0123456789"},
+      "threads": {"network": 1, "boxes": 2}})",
+                                  root, &err);
+  ASSERT_TRUE(cfg) << err;
+  host = std::make_unique<host::Host>(config::local_mode(cfg));
+  port = host->start();
+  auto kept = tool("source_job", {{"job", deploy_job}, {"verbose", true}});
+  EXPECT_EQ(kept.at("state"), "succeeded");
+  EXPECT_NE(std::string(kept.at("log").as_string()).find("is live"), std::string::npos) << json::dump(kept);
+  auto again = tool("source_build", {{"project", "greeter"}});
+  EXPECT_GT(again.at("job").as_int64(), deploy_job + 1);
+}
