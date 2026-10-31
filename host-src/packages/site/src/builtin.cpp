@@ -31,6 +31,7 @@ const std::map<std::string, std::string>& builtin_templates() {
 {{{json_ld}}}
 {{{head}}}
 <!--#include pwa-->
+<!--#include keep-fragment-->
 <style>
 :root{color-scheme:light dark;--fg:#1d1d1f;--bg:#fbfbf8;--muted:#6b6b6b;--line:#e3e1da;--accent:#2457d6;--card:#fff}
 @media (prefers-color-scheme:dark){:root{--fg:#ececec;--bg:#141414;--muted:#9a9a9a;--line:#2c2c2c;--accent:#7aa2ff;--card:#1c1c1c}}

@@ -608,9 +608,13 @@ std::pair<int, bj::object> Host::panel_set_scope(const SignedIn& who, const bj::
 
 void Host::register_scope_tools() {
   mcp_->add_tool({"operator_scope",
-                  "Read tool. Your own operator scope: scope is \"all\", or the list of tenants you're focused on. A "
-                  "tool aimed at another tenant is refused, and lists show only your tenants. Only a person changes it, "
-                  "in the panel's Operators view; no tool can.",
+                  "Read tool. Who you are to the host, and your scope. operator is the name the change log, the access "
+                  "log, and agent_audit record for every call you make: token:$name for a minted token (goober-host "
+                  "token create --name $name), oauth:$email:$client for an operator OAuth sign-in, or config for the "
+                  "host.json operations.token, which everyone holding it shares (then note says so: ask the person "
+                  "for a token of your own, so your changes are yours). scope is \"all\", or the list of tenants "
+                  "you're focused on. A tool aimed at another tenant is refused, and lists show only your tenants. "
+                  "Only a person changes it, in the panel's Operators view; no tool can.",
                   mcp::object_schema({}, {}), [this](const bj::object&) {
                     std::string me = current_operator();
                     auto s = operator_scope(me);
@@ -620,7 +624,13 @@ void Host::register_scope_tools() {
                       for (const auto& t : s.tenants) ts.push_back(bj::value(t));
                       scope = std::move(ts);
                     }
-                    return mcp::ToolResult::ok(bj::object{{"operator", me}, {"key", scope_key(me)}, {"scope", std::move(scope)}});
+                    bj::object out{{"operator", me}, {"key", scope_key(me)}, {"scope", std::move(scope)}};
+                    if (me == "config") {
+                      out["note"] = "you hold host.json's shared operations.token: the logs record every holder as "
+                                    "config, so nobody can tell your changes from another agent's. Ask the person to "
+                                    "mint you a token: goober-host token create --name <you>.";
+                    }
+                    return mcp::ToolResult::ok(std::move(out));
                   }});
 }
 

@@ -450,6 +450,17 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   EXPECT_EQ(broken.at("calls"), 3);
   EXPECT_NE(json::dump(broken.at("last_error")).find("500"), std::string::npos) << json::dump(broken);
 
+  // box_failures says why, apart from the traffic: under tries, never in the rates.
+  auto failures = tool("box_failures", {{"window", "1h"}, {"box", "mover"}});
+  ASSERT_TRUE(failures.as_object().contains("tries")) << json::dump(failures);
+  bool told = false;
+  for (const auto& t : failures.at("tries").as_array()) {
+    if (t.at("route") == "always_fails" && t.at("trial") == "job_dry_run" && t.at("class") == "bad_status") told = true;
+  }
+  EXPECT_TRUE(told) << json::dump(failures.at("tries"));
+  for (const auto& r : failures.at("routes").as_array()) EXPECT_NE(r.at("route"), "always_fails") << json::dump(r);
+  for (const auto& l : failures.at("latest").as_array()) EXPECT_NE(l.at("route"), "always_fails") << json::dump(l);
+
   // The list says where each job stands, and a run's status reads back.
   auto list = tool("job_list", {{"tenant", "playground"}});
   ASSERT_EQ(list.at("jobs").as_array().size(), 2u) << json::dump(list);
@@ -466,6 +477,52 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   EXPECT_EQ(by_number.at("state"), "done") << json::dump(by_number);
   // Job routes have no address: nothing on the web reaches them.
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/move_members").status, 404);
+}
+
+// job_dry_run of a version stored dark: tried on copies before it goes live; job_start waits
+// for that version to be promoted, then runs on the dry run that passed.
+TEST_F(DataRoutesTest, JobsDryRunAVersionStoredDark) {
+  auto put = tool("schema_put", {{"schema", R"({"schema":"move1","tables":{
+      "legacy":{"columns":{"name":{"type":"string"}}},
+      "members":{"columns":{"id":{"type":"id","primary-key":true},"old_id":{"type":"int64"},"name":{"type":"string"}},
+                 "indexes":{"members_by_old":{"columns":["old_id"],"unique":true}}}}})"}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  // Live: only the seed route; the job arrives in a version stored dark.
+  const char* live = R"({"box":"mover","domains":["*"],
+    "data":{"sqlite3":{"s":{"schema":"move1","database":"main","pattern":"sql",
+      "tables":{"legacy":{"read":true,"insert":true},"members":{"read":true,"insert":true}}}}},
+    "routes":{"http":{"/seed":{"post":{"name":"seed_legacy","public":true}}}}})";
+  ASSERT_TRUE(host->boxes().upload(live, kMoveWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/seed").status, 204);
+  auto dark = host->boxes().store(kMoveManifest, kMoveWat, "", &err);
+  ASSERT_TRUE(dark) << err;
+  bj::object args{{"box", "mover"}, {"job", "move_members"}, {"tenant", "playground"}};
+
+  // Without a version: the live one, which has no such job.
+  auto none = tool("job_dry_run", args);
+  ASSERT_TRUE(none.as_object().contains("error")) << json::dump(none);
+  // With the dark version: it runs on copies, and nothing real moves.
+  bj::object with = args;
+  with["version"] = dark->version;
+  auto dry = tool("job_dry_run", with);
+  ASSERT_EQ(dry.at("state"), "passed") << json::dump(dry);
+  EXPECT_EQ(std::string(dry.at("version").as_string()), dark->version);
+  auto count = tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", "SELECT count(*) FROM members"}});
+  EXPECT_EQ(count.at("rows").at(0).at(0), 0);
+  // job_start runs only the live version: naming the dark one is refused.
+  auto early = tool("job_start", with);
+  ASSERT_TRUE(early.as_object().contains("error")) << json::dump(early);
+  EXPECT_NE(std::string(early.at("error").as_string()).find("version_promote"), std::string::npos) << json::dump(early);
+  // The dry run counts as a try of that version: promoting it doesn't warn.
+  auto promoted = tool("version_promote", {{"box", "mover"}, {"version", dark->version}});
+  ASSERT_FALSE(promoted.as_object().contains("error")) << json::dump(promoted);
+  EXPECT_NE(json::dump(promoted.at("tried")).find("job_dry_run"), std::string::npos) << json::dump(promoted);
+  // Live now, and the dry run that passed lets the real run go.
+  auto run = tool("job_start", args);
+  ASSERT_EQ(run.at("state"), "done") << json::dump(run);
+  count = tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", "SELECT count(*) FROM members"}});
+  EXPECT_EQ(count.at("rows").at(0).at(0), 5);
 }
 
 // schema_check: everything schema_put checks, nothing stored, so a name is never spent on a try.

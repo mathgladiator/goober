@@ -230,3 +230,19 @@ TEST_F(LogsHostTest, CapabilityLinksArentKeptInStatsOrTheAccessLog) {
   EXPECT_EQ(text.find("/scan-"), std::string::npos) << text;  // the stats count them together
   EXPECT_NE(text.find("(not found)"), std::string::npos) << text;
 }
+
+// Who did what: each minted token is its own name in the logs; the shared config token is
+// "config", and operator_scope tells its holder to get a token of their own.
+TEST_F(LogsHostTest, EachTokenIsItsOwnNameInTheLogs) {
+  auto shared = op("operator_scope");
+  ASSERT_FALSE(shared.at("isError").as_bool()) << shared.at("text");
+  EXPECT_EQ(shared.at("value").at("operator"), "config");
+  EXPECT_NE(std::string(shared.at("value").at("note").as_string()).find("goober-host token create"), std::string::npos);
+  auto mine = call(token, "operator_scope");
+  EXPECT_EQ(mine.at("value").at("operator"), "token:grok");
+  EXPECT_FALSE(mine.at("value").as_object().contains("note"));
+  // A change made with the minted token is recorded under its name.
+  ASSERT_FALSE(call(token, "content_put", R"({"tenant":"acme","path":"who.txt","text":"x"})").at("isError").as_bool());
+  auto lines = op("log_search", R"({"log":"access","pattern":"\"operator\":\"token:grok\""})");
+  EXPECT_GE(lines.at("value").at("count").as_int64(), 1) << lines.at("text");
+}

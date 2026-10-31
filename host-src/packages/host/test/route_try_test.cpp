@@ -425,3 +425,59 @@ TEST_F(RouteTryTest, PromotingAnUntriedVersionWarnsButGoesLive) {
   EXPECT_EQ(tried.at("tried").at(0).at("kind"), "http");
   EXPECT_EQ(tried.at("tried").at(0).at("tenant"), "playground");
 }
+
+// An internal route, tried as its caller would call it: an operator's only way to call one.
+// Internal routes are in no HTTP route table, so one at /x never answers or shadows the site's /x.
+TEST_F(RouteTryTest, InternalRoutesAreTriedAsTheirCallerWouldCallThem) {
+  const char* echo = R"wat((module
+    (import "goober" "goober_request_size" (func $size (result i32)))
+    (import "goober" "goober_request_read" (func $read (param i32 i32) (result i32)))
+    (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 2)
+    (data (i32.const 0) "application/json")
+    (func $echo
+      (local $n i32)
+      (local.set $n (call $read (i32.const 1024) (call $size)))
+      (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 1024) (local.get $n))))
+    (func (export "goober_route_peek") (result i32) (call $echo) (i32.const 0))
+    (func (export "goober_route_make") (result i32) (call $echo) (i32.const 0))
+  ))wat";
+  const char* manifest = R"({"box":"ledger","domains":["*"],
+    "routes":{"internal":{
+      "/x":{"get":{"name":"peek","callers":["front"]}},
+      "/orders/{id : int64}":{"post":{"name":"make","callers":["front"],"requirements":[["owner"]]}}}}})";
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(manifest, echo, &err)) << err;
+
+  // The site's own /x answers, not the internal route at the same path.
+  auto page = tool("page_put", {{"tenant", "playground"}, {"path", "/x"}, {"format", "markdown"}, {"body", "site page ex"}});
+  ASSERT_FALSE(page.as_object().contains("error")) << json::dump(page);
+  auto x = fetch(port, bhttp::verb::get, "/x");
+  EXPECT_EQ(x.status, 200);
+  EXPECT_NE(x.body.find("site page ex"), std::string::npos) << x.body;
+
+  // Tried as front calls it: the request document carries the caller, the path, and the query.
+  auto peek = try_route({{"box", "ledger"}, {"internal", "peek"}, {"caller", "front"},
+                         {"arguments", bj::object{{"query", bj::object{{"q", "1"}}}}}});
+  ASSERT_FALSE(peek.as_object().contains("error")) << json::dump(peek);
+  EXPECT_EQ(peek.at("status"), 200);
+  EXPECT_EQ(peek.at("json").at("caller").at("box"), "front");
+  EXPECT_EQ(peek.at("json").at("path"), "/x");
+  EXPECT_EQ(peek.at("json").at("query").at("q"), "1");
+  EXPECT_TRUE(peek.as_object().contains("changes"));  // on copies
+
+  // A box the route doesn't list can't be the caller; nor can nobody.
+  auto stranger = try_route({{"box", "ledger"}, {"internal", "peek"}, {"caller", "other"}});
+  ASSERT_TRUE(stranger.as_object().contains("error"));
+  EXPECT_NE(std::string(stranger.at("error").as_string()).find("callers"), std::string::npos);
+  EXPECT_TRUE(try_route({{"box", "ledger"}, {"internal", "peek"}}).as_object().contains("error"));
+
+  // Checked as the call is: path values by type, and the person against the requirements.
+  auto bad_id = try_route({{"box", "ledger"}, {"internal", "make"}, {"caller", "front"},
+                           {"arguments", bj::object{{"path", bj::object{{"id", "abc"}}}}}});
+  ASSERT_TRUE(bad_id.as_object().contains("refused")) << json::dump(bad_id);
+  auto nobody = try_route({{"box", "ledger"}, {"internal", "make"}, {"caller", "front"},
+                           {"arguments", bj::object{{"path", bj::object{{"id", "7"}}}}}});
+  ASSERT_TRUE(nobody.as_object().contains("refused")) << json::dump(nobody);
+  EXPECT_EQ(nobody.at("refused").at("status"), 403);
+}

@@ -583,6 +583,15 @@ const views = {
         { label: 'Message', get: (e) => clip(e.message, 160) + (e.n > 1 ? ' ×' + e.n : ''), cls: () => 'mono' },
         { label: '', get: (e) => e.request_id ? h('a', { href: '#/logs?' + new URLSearchParams({ log: 'boxes/' + e.box, pattern: e.request_id, since: '7d' }) }, 'log →') : '' },
       ], f.latest) : h('p', { class: 'muted' }, 'Nothing failed in this window.')),
+      (f.tries || []).length ? wideCard('Tries and dry runs that failed (not counted above)', table([
+        { label: 'When', get: (e) => fmt.time(e.at_ms), cls: () => 'muted' },
+        { label: 'By', get: (e) => e.trial.replace(/_/g, ' '), cls: () => 'muted' },
+        { label: 'Box', get: (e) => h('a', { href: '#/box/' + encodeURIComponent(e.box) }, e.box) },
+        { label: 'Version', get: (e) => e.version, cls: () => 'muted' },
+        { label: 'Route', get: (e) => e.route + ' (' + e.kind + ')', cls: () => 'mono' },
+        { label: 'Class', get: (e) => e.class.replace(/_/g, ' ') },
+        { label: 'Message', get: (e) => clip(e.message, 160) + (e.n > 1 ? ' ×' + e.n : ''), cls: () => 'mono' },
+      ], f.tries)) : null,
     ];
   },
 

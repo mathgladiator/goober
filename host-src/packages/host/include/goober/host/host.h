@@ -252,7 +252,10 @@ class Host {
     db::Session::Errors sql_errors;
   };
   // Records one box call, and how it failed, in failures_: by whoever records its perf.
-  void record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id, int64_t now_ms);
+  // trial: a try or dry run on copies or read-only; its failures are kept apart (box_failures'
+  // tries) and it counts in no rate.
+  void record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id, int64_t now_ms,
+                       bool trial = false);
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
   struct CallOptions {
@@ -429,6 +432,19 @@ class Host {
                             std::string_view request);
   std::string internal_call(struct CallContext& ctx, const manifest::ExternalService& svc,
                             const manifest::ExternalMethod& m, const boost::json::value& request);
+  // The request document an internal route gets for `request` ({path, query, body}, as a box
+  // passes it to goober_call), checked as the call is: path values by the route's types, the
+  // person against its requirements, the body and query by its declared types. nullopt with
+  // `refusal` set to the JSON the caller would get. internal_call and route_try share it.
+  std::optional<boost::json::object> internal_request(const manifest::HttpRoute& route, const boxes::ActiveBox& callee,
+                                                      const boost::json::value& request,
+                                                      const std::optional<SignedIn>& who, const std::string& tenant,
+                                                      const std::string& domain, const boost::json::value& user,
+                                                      boost::json::object caller, const std::string& request_id,
+                                                      std::string* refusal);
+  std::string internal_answer(struct CallContext& ctx, const manifest::ExternalService& svc,
+                              const manifest::ExternalMethod& m, const manifest::HttpRoute& route, const std::string& path,
+                              const std::string& request_id, int64_t started, BoxCall& call);
   void egress_log(const std::string& tenant, const std::string& box, const std::string& service,
                   const std::string& method, const std::string& verb, const std::string& url, int status,
                   const std::string& error, int64_t us, size_t bytes_out, size_t bytes_in,
@@ -893,6 +909,12 @@ class Host {
   std::thread job_thread_;
   std::condition_variable job_cv_;  // with timer_thread_mu_
   bool job_nudged_ = false;
+  // A dry run of a stored version that isn't live (dark, or older): loaded once per run, by
+  // "box@version", and let go when the run ends.
+  std::mutex job_versions_mu_;
+  std::map<std::string, std::shared_ptr<const boxes::ActiveBox>> job_versions_;
+  std::shared_ptr<const boxes::ActiveBox> job_box(const std::string& box, const std::string& version, bool dry_run,
+                                                  std::string* error);
   void init_jobs();
   void register_job_tools();
   void run_jobs();

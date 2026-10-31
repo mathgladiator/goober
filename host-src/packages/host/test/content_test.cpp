@@ -991,3 +991,28 @@ TEST_F(SiteRoutesTest, ContentDeploysDryRunStageAndExpectGates) {
   EXPECT_NE(lint_text.find("no ld+json"), std::string::npos) << lint_text;
   EXPECT_FALSE(host->content().get("playground", "draft.html"));
 }
+
+// A deep link's #fragment through sign-in and a box's own return= flows: the browser never sends
+// it, so every page in the built-in layout loads the host's script that carries it, and the
+// return= checks keep it to the end.
+TEST_F(SiteRoutesTest, PagesCarryADeepLinksFragmentThroughReturnFlows) {
+  auto p = tool("page_put", {{"path", "/guide"}, {"format", "markdown"}, {"title", "Guide"}, {"body", "## Install"}});
+  ASSERT_FALSE(p.as_object().contains("error")) << json::dump(p);
+  auto page = fetch(port, bhttp::verb::get, "/guide", {{"accept", "text/html"}});
+  ASSERT_EQ(page.status, 200);
+  EXPECT_NE(page.body.find("<script src=\"/goober/keep-fragment.js\" defer></script>"), std::string::npos) << page.body;
+  // Allowed by the page's own policy: script-src 'self'.
+  EXPECT_NE(page.headers["content-security-policy"].find("script-src 'self'"), std::string::npos);
+
+  auto js = fetch(port, bhttp::verb::get, "/goober/keep-fragment.js");
+  ASSERT_EQ(js.status, 200);
+  EXPECT_EQ(js.headers["content-type"], "text/javascript; charset=utf-8");
+  EXPECT_NE(js.body.find("input[name=\"return\"][data-fragment]"), std::string::npos);
+  EXPECT_NE(js.body.find("a[data-keep-fragment],a[href^=\"/identity/sign-in\"]"), std::string::npos);
+  auto again = fetch(port, bhttp::verb::get, "/goober/keep-fragment.js", {{"if-none-match", js.headers["etag"]}});
+  EXPECT_EQ(again.status, 304);
+
+  // The fragment the script carries survives in the sign-in page's return field.
+  auto sign_in = fetch(port, bhttp::verb::get, "/identity/sign-in?return=%2Fguide%23install", {{"accept", "text/html"}});
+  EXPECT_NE(sign_in.body.find("value=\"/guide#install\""), std::string::npos) << sign_in.body;
+}

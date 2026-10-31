@@ -241,6 +241,19 @@ sudo systemctl stop goober-host
 
 To let Grok back in, connect it again; it signs you in by email code.
 
+**Give each engineer and agent its own token**, so the logs say who did what. The change log,
+the access log, and the panel's agent audit name every call by its token: `token:grok-data` for
+a minted one, `oauth:you@example.com:<client>` for an OAuth sign-in, and `config` for the
+`operations.token` in host.json, which everyone holding it shares. Mint one per agent, and
+revoke it by name when that agent is done:
+
+```sh
+sudo -u goober goober-host token create --name grok-data --config /srv/goober/host/host.json
+```
+
+An agent asks `operator_scope` to see the name it is recorded under; one holding the shared
+token is told to ask you for its own.
+
 **Keep Grok on one site** without stopping it: in the panel, **Operators**, uncheck "all" on
 your row and check the one tenant. Every agent signed in as you is then held to it, and so are
 you in the panel, until you check "all" again. A minted token can start that way:

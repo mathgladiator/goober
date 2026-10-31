@@ -2,6 +2,8 @@
 
 #include "jobs.h"
 
+#include "goober/operations/failures.h"
+
 #include <sqlite3.h>
 
 #include <chrono>
@@ -244,6 +246,30 @@ void Host::run_jobs() {
   }
 }
 
+std::shared_ptr<const boxes::ActiveBox> Host::job_box(const std::string& name, const std::string& version, bool dry_run,
+                                                      std::string* error) {
+  auto active = boxes_->active();
+  auto it = active->boxes.find(name);
+  if (it != active->boxes.end() && it->second->version == version) return it->second;
+  if (!dry_run) {
+    *error = it == active->boxes.end() ? "box " + name + " isn't active any more"
+                                       : "box " + name + " is now version " + it->second->version +
+                                             ": a job runs on the version it started on; dry run it again";
+    return nullptr;
+  }
+  std::lock_guard lock(job_versions_mu_);
+  auto found = job_versions_.find(name + "@" + version);
+  if (found != job_versions_.end()) return found->second;
+  std::string err;
+  auto loaded = boxes_->load(name, version, &err);
+  if (!loaded) {
+    *error = "can't load " + name + " version " + version + ": " + err;
+    return nullptr;
+  }
+  job_versions_[name + "@" + version] = loaded;
+  return loaded;
+}
+
 void Host::job_step(JobRun& r) {
   auto save = [&] {
     r.updated_ms = base::now_unix_ms();
@@ -262,16 +288,17 @@ void Host::job_step(JobRun& r) {
     if (r.dry_run) {
       std::error_code ec;
       fs::remove_all(job_copies(r.id), ec);
+      std::lock_guard lock(job_versions_mu_);
+      job_versions_.erase(r.box + "@" + r.version);
     }
   };
-  // The box version the run was started on, and still active: a new version is a new job.
-  auto active = boxes_->active();
-  auto it = active->boxes.find(r.box);
-  if (it == active->boxes.end()) return finish(r.dry_run ? "failed" : "paused", "box " + r.box + " isn't active any more");
-  auto box = it->second;
-  if (box->version != r.version) {
-    return finish(r.dry_run ? "failed" : "paused", "box " + r.box + " is now version " + box->version +
-                                                       ": a job runs on the version it started on; dry run it again");
+  // The box version the run was started on. A real run needs it still live: a new version is
+  // a new job. A dry run may be of any stored version, live or not.
+  std::shared_ptr<const boxes::ActiveBox> box;
+  {
+    std::string err;
+    box = job_box(r.box, r.version, r.dry_run, &err);
+    if (!box) return finish(r.dry_run ? "failed" : "paused", err);
   }
   const manifest::HttpRoute* route = nullptr;
   for (const auto& j : box->manifest.jobs) {
@@ -358,6 +385,22 @@ void Host::job_step(JobRun& r) {
     }
   }
   if (!why.empty()) {
+    // A batch the host couldn't take though the call ran (the call's own failure is recorded
+    // with it): box_failures says why, apart under tries for a dry run.
+    if (failures_ && out.failure.empty()) {
+      operations::Failures::Event e;
+      e.at_ms = base::now_unix_ms();
+      e.tenant = r.tenant;
+      e.box = r.box;
+      e.version = r.version;
+      e.route = r.job;
+      e.kind = "job";
+      e.cls = "job_failed";
+      e.message = "batch " + std::to_string(call) + ": " + why;
+      e.request_id = request_id;
+      if (r.dry_run) e.trial = "job_dry_run";
+      failures_->failure(std::move(e));
+    }
     keep_newest(r.errors, bj::object{{"call", call}, {"error", why}}, kKeepErrors);
     r.last_error = why;
     if (++r.failures_in_row >= kFailuresToStop) {
@@ -409,8 +452,22 @@ void Host::register_job_tools() {
     auto tenant = arg(args, "tenant").value_or("");
     auto active = boxes_->active();
     auto it = active->boxes.find(box_name);
-    if (it == active->boxes.end()) return ToolResult::fail("no active box named " + box_name);
-    const auto& box = it->second;
+    std::string version = arg(args, "version").value_or("");
+    std::shared_ptr<const boxes::ActiveBox> box;
+    if (it != active->boxes.end() && (version.empty() || version == it->second->version)) {
+      box = it->second;
+    } else if (!dry_run) {
+      return ToolResult::fail(it == active->boxes.end() ? "no active box named " + box_name
+                                                        : "job_start runs the live version, " + it->second->version +
+                                                              "; promote " + version + " first (version_promote)");
+    } else if (version.empty()) {
+      return ToolResult::fail("no active box named " + box_name + ": name a stored version (version_list)");
+    } else {
+      // A dry run of a stored version that isn't live: dark, or older (route_try does the same).
+      std::string err;
+      box = boxes_->load(box_name, version, &err);
+      if (!box) return ToolResult::fail("can't load " + box_name + " version " + version + ": " + err);
+    }
     bool has = false;
     for (const auto& j : box->manifest.jobs) has |= j.name == job;
     if (!has) return ToolResult::fail("box " + box_name + " has no job named " + job + " (routes.job)");
@@ -523,12 +580,21 @@ void Host::register_job_tools() {
   mcp_->add_tool({"job_dry_run",
                   "Changing tool (it waits for approval when that's on), though it changes no data: runs a box's job "
                   "for a tenant against copies of the tenant's databases the box names, then throws the copies away. "
+                  "The live version by default; version runs a stored one that isn't live (dark or older) without "
+                  "promoting it, and its passed dry run lets job_start run once that version is promoted. "
                   "Internal calls to other boxes are refused, and anything queued for delivery stays in the copies. "
                   "Returns the run: run (its id, a string), state (running, passed, or failed), calls, moved (rows the "
                   "box said it moved), errors, last_error, and the box's log. A real run (job_start) needs a passed "
                   "dry run of the same box version. One job runs at a time per tenant. Answers within 25 s; a run "
                   "still running is followed with job_status.",
-                  mcp::object_schema({{"box", box_prop}, {"job", job_prop}, {"tenant", tenant_prop}}, {"box", "job", "tenant"}),
+                  mcp::object_schema({{"box", box_prop},
+                                      {"job", job_prop},
+                                      {"tenant", tenant_prop},
+                                      {"version", mcp::string_property(
+                                                      "A stored version (version_list): the live one by default, or one "
+                                                      "stored dark (version_upload {activate: false}) or older, run "
+                                                      "without promoting it.")}},
+                                     {"box", "job", "tenant"}),
                   [start](const bj::object& args) { return start(args, true); }});
   mcp_->add_tool({"job_start",
                   "Changing tool. Runs a box's job for a tenant, for real, in batches, writing the tenant's real "
@@ -544,7 +610,10 @@ void Host::register_job_tools() {
                                       {"job", job_prop},
                                       {"tenant", tenant_prop},
                                       {"again", mcp::boolean_property("true runs a job that already finished again, "
-                                                                      "from the beginning. Default false.")}},
+                                                                      "from the beginning. Default false.")},
+                                      {"version", mcp::string_property(
+                                                      "Optional: the version you dry ran, as a check. A real run is "
+                                                      "always of the live version; another is refused until promoted.")}},
                                      {"box", "job", "tenant"}),
                   [start](const bj::object& args) { return start(args, false); }});
   mcp_->add_tool({"job_status",

@@ -863,7 +863,7 @@ Result Site::visit(const Visit& v) const {
   Result r = visit_unexpanded(v);
   if (r.status != 200 || r.kind == Kind::kStatic || !r.content_type.starts_with("text/html")) return r;
   auto e = expand_includes(store_, v.tenant, r.body, v.path, !v.user.is_null());
-  if (e.used.empty() && e.missing.empty() && !e.by_auth) return r;
+  if (e.used.empty() && e.missing.empty() && !e.by_auth && !e.builtin) return r;
   if (!e.errors.empty()) {
     std::string why;
     for (const auto& n : e.errors) why += (why.empty() ? "" : "; ") + n;

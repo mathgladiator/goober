@@ -4,6 +4,7 @@
 #include <boost/beast.hpp>
 
 #include "goober/base/files.h"
+#include "goober/base/hash.h"
 #include "goober/host/backup.h"
 #include "goober/host/host.h"
 #include "goober/ids/ids.h"
@@ -202,6 +203,16 @@ TEST_F(HostTest, DarkVersionsAndDisabledBoxes) {
   std::string v2(sc(dark).at("version").as_string());
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/one/x").status, 200);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/two/x").status, 404);
+  // The stored module's digest reads back: the upload's answer, version_get, and the bytes
+  // stored all agree, so a reviewer can match it against the build they read.
+  std::string digest(sc(dark).at("module_sha256").as_string());
+  EXPECT_EQ(digest.size(), 64u);
+  auto got = sc(tool("version_get", {{"box", "hello"}, {"version", v2}}));
+  EXPECT_EQ(std::string(got.at("module_sha256").as_string()), digest);
+  auto stored = host->boxes().files("hello", v2);
+  ASSERT_TRUE(stored);
+  EXPECT_EQ(digest, base::sha256_hex(stored->wasm));
+  EXPECT_EQ(got.at("module_bytes").as_int64(), int64_t(stored->wasm.size()));
   // Checks still run in the dark: a broken module is refused.
   auto broken = tool("version_upload", {{"manifest", manifest("/three")}, {"wat", "(module"}, {"activate", false}});
   EXPECT_EQ(broken.at("result").at("isError"), true);
