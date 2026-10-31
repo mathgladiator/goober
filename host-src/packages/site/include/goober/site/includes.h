@@ -18,6 +18,7 @@ struct Expanded {
   std::vector<std::string> missing;  // names with no partial
   std::vector<std::string> errors;   // "name: why" for a partial with parameters that didn't render (spliced as written)
   bool by_auth = false;              // a partial has an @auth variant: the answer depends on the cookie
+  bool builtin = false;              // a built-in partial (keep-fragment, pwa) added HTML
 };
 
 // The names a document's markers include, in order, each once.
@@ -36,5 +37,15 @@ std::string mark_active(std::string_view partial, std::string_view path, std::st
 
 // A partial's name: 1 to 64 of [a-z0-9_-].
 bool is_partial_name(std::string_view name);
+
+// Keeping a deep link's #fragment through a flow that leaves the page and comes back (sign-in,
+// a box's own consent or gate page). A browser never sends the fragment, so the page carries
+// it: the host serves this script at kKeepFragmentPath, and the built-in partial keep-fragment
+// (in the built-in base template) loads it. On load and on every hash change it appends the
+// page's #fragment to each <input name="return" data-fragment> and to the return= of each link
+// to /identity/sign-in or with data-keep-fragment (the current page when it has none). The
+// host's return= checks keep a fragment of up to 256 URL fragment characters.
+inline constexpr const char* kKeepFragmentPath = "/goober/keep-fragment.js";
+const char* keep_fragment_script();
 
 }  // namespace goober::site

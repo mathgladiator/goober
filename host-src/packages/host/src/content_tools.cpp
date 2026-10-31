@@ -190,6 +190,17 @@ keeps its own body, and a box never answers 5xx (that is the host's).
 Check one: url_check {url: "https://example.com/no-such-page"} fetches it as a visitor would.
 Errors don't count as the site's traffic: the panel's Errors view (error_report) has them.
 
+## Deep links through sign-in and return= flows
+A browser never sends a URL's #fragment, so /docs/guide#install would land at the page's top
+after signing in. Pages carry it themselves: <!--#include keep-fragment--> (the built-in base
+template already has it; add it to your own layout's <head>) loads the host's
+/goober/keep-fragment.js, which appends the page's #fragment to every
+<input type="hidden" name="return" data-fragment value="/docs/guide"> and to the return= of every
+link to /identity/sign-in or marked data-keep-fragment (the current page when the link has no
+return=). Sign-in and a gated page's 303 keep it to the end. A box's own gate or consent page
+does the same: put the return in such an input (or the link), and redirect to the return it gets
+back: a box's Location may carry a fragment of up to 256 URL fragment characters.
+
 ## Installable apps [pwa_put, pwa_get, pwa_list, pwa_delete]
 pwa_put {tenant, name, app: {scope: "/" or "/shop/", manifest: {name, short_name, icons,
 theme_color, ...}, offline: {fallback, precache}, push}} makes that part of the site an app:

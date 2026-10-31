@@ -262,11 +262,19 @@ Expanded expand_includes(const content::ContentStore& store, std::string_view te
     if (auth) out.by_auth = true;
     std::optional<content::File> f = signed_in && auth ? auth : store.get(tenant, file);
     if (signed_in && auth) file = "_partials/" + name + "@auth.html";
+    if (!f && name == "keep-fragment") {
+      // The built-in keep-fragment partial: the script that carries a deep link's #fragment
+      // through sign-in and a box's own return= flows. A tenant's own wins.
+      out.html += std::string("<script src=\"") + kKeepFragmentPath + "\" defer></script>";
+      out.builtin = true;
+      continue;
+    }
     if (!f && name == "pwa") {
       // The built-in pwa partial: the head tags of the app whose scope fits (782.PWA.md § 3),
       // or nothing, which is no miss. A tenant's own _partials/pwa.html wins.
       if (auto app = app_for(apps(store, tenant), path)) {
         out.html += head_tags(*app);
+        out.builtin = true;
         out.used.push_back("_apps/" + app->name + ".json");
       }
       continue;
@@ -294,6 +302,32 @@ Expanded expand_includes(const content::ContentStore& store, std::string_view te
   }
   out.html.append(html.substr(from));
   return out;
+}
+
+const char* keep_fragment_script() {
+  return R"js((function(){
+  function run(){
+    var h=location.hash;
+    if(!h||h.length>257)return;
+    var f=document.querySelectorAll('input[name="return"][data-fragment]');
+    for(var i=0;i<f.length;i++){var v=f[i].value,k=v.indexOf('#');f[i].value=(k<0?v:v.slice(0,k))+h;}
+    var a=document.querySelectorAll('a[data-keep-fragment],a[href^="/identity/sign-in"]');
+    for(var j=0;j<a.length;j++){
+      try{
+        var u=new URL(a[j].getAttribute('href'),location.href);
+        if(u.origin!==location.origin)continue;
+        var r=u.searchParams.get('return');
+        if(r===null)r=location.pathname+location.search;
+        var n=r.indexOf('#');
+        u.searchParams.set('return',(n<0?r:r.slice(0,n))+h);
+        a[j].setAttribute('href',u.pathname+u.search+u.hash);
+      }catch(e){}
+    }
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();
+  window.addEventListener('hashchange',run);
+})();
+)js";
 }
 
 }  // namespace goober::site

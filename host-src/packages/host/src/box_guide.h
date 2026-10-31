@@ -833,6 +833,11 @@ Components: <!--#include card title="Ribs" href="/ribs" badge="new"--> renders _
 as Mustache over those values ({{title}} escaped, {{#badge}}...{{/badge}} a section); without
 parameters a partial is spliced as written. A render error leaves it as written and sets
 x-goober-partial-error.
+A deep link's #fragment through a box's own return= flow (a consent page, a gate): render the
+return as <input type="hidden" name="return" data-fragment value="..."> (or a link with
+data-keep-fragment and return=), keep <!--#include keep-fragment--> in the page (the built-in
+base layout has it), and redirect to the return the form sends back, fragment and all.
+site_guide's "Deep links" section has the rest.
 
 ## Installable apps (PWA) and push
 

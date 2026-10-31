@@ -990,6 +990,23 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     return;
   }
 
+  if (path->path == site::kKeepFragmentPath && (req.method == "get" || req.method == "head")) {
+    // The script that keeps a deep link's #fragment through sign-in and return= flows.
+    Response res;
+    std::string body = site::keep_fragment_script();
+    std::string etag = "\"" + base::sha256_hex(body).substr(0, 16) + "\"";
+    res.headers.emplace_back("content-type", "text/javascript; charset=utf-8");
+    res.headers.emplace_back("cache-control", "no-cache");
+    res.headers.emplace_back("etag", etag);
+    res.headers.emplace_back("x-content-type-options", "nosniff");
+    if (req.header("if-none-match") == etag) {
+      res.status = 304;
+    } else {
+      res.body = std::move(body);
+    }
+    res.head_only = req.method == "head";
+    return finish(std::move(res), R"({"keep_fragment":true})");
+  }
   if (path->path.starts_with("/goober/pwa/")) {
     pool_->post([this, req, finish, p = path->path, tenant = *tenant] {
       try {
