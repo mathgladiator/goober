@@ -39,7 +39,8 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "realm_get", "role_grant", "role_revoke", "sessions_revoke", "template_get", "template_list",
           "template_put", "template_delete", "timer_run", "traffic", "invite_send", "invite_list", "invite_get", "invite_revoke",
           "mail_preferences", "mail_consent_record", "mail_lists", "content_deploy", "list_etags",
-          "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow", "bus_status", "box_render"}) {
+          "page_lint", "approval_record", "approval_verify", "approval_list", "uri_tree", "uri_flow", "bus_status", "box_render",
+          "job_list", "job_dry_run", "job_start", "job_stop"}) {
       m[t] = Rule::kTenant;
     }
     for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote", "source_box_history"}) {
@@ -54,7 +55,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     }
     m["source_create"] = Rule::kProjectCreate;
     m["attachment_upload_part"] = Rule::kTicket;
-    for (const char* t : {"change_get", "source_job"}) m[t] = Rule::kResult;
+    for (const char* t : {"change_get", "source_job", "job_status"}) m[t] = Rule::kResult;
     for (const char* t : {"domain_list", "box_list", "source_list", "timers_list", "outbox_dead_letters", "uri_stats",
                           "grant_usage"}) {
       m[t] = Rule::kFiltered;
@@ -412,7 +413,7 @@ std::optional<std::string> Host::scope_filter(const OperatorScope& scope, const 
   std::string names;
   for (const auto& t : scope.tenants) names += (names.empty() ? "" : ", ") + t;
   return "operator " + operator_name + " is focused on " + names + ", and this " +
-         (tool == "change_get" ? "change" : "job") + " is outside it";
+         (tool == "change_get" ? "change" : tool == "job_status" ? "run" : "job") + " is outside it";
 }
 
 mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, bool read_only, bool hold) {

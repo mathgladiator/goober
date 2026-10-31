@@ -288,3 +288,134 @@ TEST_F(DataRoutesTest, GrantUsageComparesGrantsWithWhatRan) {
   EXPECT_EQ(report.at(0).at("findings"), 3);
   EXPECT_TRUE(tool("grant_usage", {{"box", "nope"}}).as_object().contains("error"));
 }
+
+// Jobs (design/machine/038.Ids.md § 7): a box that moves rows from a table keyed the old way
+// into one keyed by host ids, in batches of two. A real run is refused until a dry run passed;
+// the dry run works on copies and leaves the real database alone; the real run finishes,
+// records done, and stamps host ids; a job that keeps failing fails its dry run.
+const char* kMoveWat = R"wat((module
+  (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "s")
+  (data (i32.const 64) "INSERT INTO legacy (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')")
+  (data (i32.const 160) "INSERT INTO members (old_id, name) SELECT id, name FROM legacy WHERE id NOT IN (SELECT old_id FROM members) ORDER BY id LIMIT 2")
+  (data (i32.const 304) "SELECT json_object('cursor', CAST(coalesce((SELECT max(old_id) FROM members), 0) AS TEXT), 'done', json(CASE WHEN EXISTS (SELECT 1 FROM legacy WHERE id NOT IN (SELECT old_id FROM members)) THEN 'false' ELSE 'true' END), 'moved', 2) AS a")
+  (data (i32.const 560) "[]")
+  (data (i32.const 592) "{\"error\":\"broken on purpose\"}")
+  ;; The first value of the result's first row, unescaped, into 12288: from after [[" to the closing ".
+  (func $first (param $n i32) (result i32)
+    (local $i i32) (local $o i32) (local $c i32)
+    (drop (call $result (i32.const 4096) (local.get $n)))
+    (local.set $i (i32.const 4096))
+    (block $found (loop $seek
+      (br_if $found (i32.and (i32.eq (i32.load8_u (local.get $i)) (i32.const 91))
+                             (i32.and (i32.eq (i32.load8_u (i32.add (local.get $i) (i32.const 1))) (i32.const 91))
+                                      (i32.eq (i32.load8_u (i32.add (local.get $i) (i32.const 2))) (i32.const 34)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $seek)))
+    (local.set $i (i32.add (local.get $i) (i32.const 3)))
+    (local.set $o (i32.const 12288))
+    (block $end (loop $copy
+      (local.set $c (i32.load8_u (local.get $i)))
+      (br_if $end (i32.eq (local.get $c) (i32.const 34)))
+      (if (i32.eq (local.get $c) (i32.const 92))
+        (then (local.set $i (i32.add (local.get $i) (i32.const 1)))
+              (local.set $c (i32.load8_u (local.get $i)))))
+      (i32.store8 (local.get $o) (local.get $c))
+      (local.set $o (i32.add (local.get $o) (i32.const 1)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $copy)))
+    (i32.sub (local.get $o) (i32.const 12288)))
+  (func (export "goober_route_seed_legacy") (result i32)
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 64) (i32.const 66) (i32.const 560) (i32.const 2)))
+    (drop (call $respond (i32.const 204) (i32.const 0) (i32.const 16) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+  (func (export "goober_route_move_members") (result i32)
+    (local $n i32)
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 160) (i32.const 127) (i32.const 560) (i32.const 2)))
+    (local.set $n (call $first (call $sql (i32.const 32) (i32.const 1) (i32.const 304) (i32.const 236) (i32.const 560) (i32.const 2))))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 12288) (local.get $n)))
+    (i32.const 0))
+  (func (export "goober_route_always_fails") (result i32)
+    (drop (call $respond (i32.const 500) (i32.const 0) (i32.const 16) (i32.const 592) (i32.const 29)))
+    (i32.const 0))
+))wat";
+
+const char* kMoveManifest = R"({"box":"mover","domains":["*"],
+  "data":{"sqlite3":{"s":{"schema":"move1","database":"main","pattern":"sql",
+    "tables":{"legacy":{"read":true,"insert":true},"members":{"read":true,"insert":true}}}}},
+  "routes":{"http":{"/seed":{"post":{"name":"seed_legacy","public":true}}},
+            "job":{"move":{"name":"move_members","timeout-ms":2000},"broken":{"name":"always_fails"}}}})";
+
+TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
+  auto put = tool("schema_put", {{"schema", R"({"schema":"move1","tables":{
+      "legacy":{"columns":{"name":{"type":"string"}}},
+      "members":{"columns":{"id":{"type":"id","primary-key":true},"old_id":{"type":"int64"},"name":{"type":"string"}},
+                 "indexes":{"members_by_old":{"columns":["old_id"],"unique":true}}}}})"}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(kMoveManifest, kMoveWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/seed").status, 204);
+  auto count = [&](const char* table) {
+    auto r = tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", std::string("SELECT count(*) FROM ") + table}});
+    return r.at("rows").at(0).at(0).as_int64();
+  };
+  ASSERT_EQ(count("legacy"), 5);
+
+  auto start = [&](const char* tool_name, const char* job, bj::object more = {}) {
+    bj::object args{{"box", "mover"}, {"job", job}, {"tenant", "playground"}};
+    for (auto& kv : more) args[kv.key()] = kv.value();
+    return tool(tool_name, std::move(args));
+  };
+  // No real run before a dry run has passed.
+  auto refused = start("job_start", "move_members");
+  ASSERT_TRUE(refused.as_object().contains("error"));
+  EXPECT_NE(std::string(refused.at("error").as_string()).find("job_dry_run first"), std::string::npos);
+
+  // The dry run: three batches (2, 2, 1), on copies; the real table is untouched.
+  auto dry = start("job_dry_run", "move_members");
+  ASSERT_EQ(dry.at("state"), "passed") << json::dump(dry);
+  EXPECT_EQ(dry.at("calls"), 3);
+  EXPECT_EQ(dry.at("dry_run"), true);
+  EXPECT_EQ(count("members"), 0);
+  EXPECT_FALSE(fs::exists(root / "storage" / "tmp" / "jobs" / std::string(dry.at("run").as_string())));
+
+  // The real run: the same batches, for real, with host ids.
+  auto run = start("job_start", "move_members");
+  ASSERT_EQ(run.at("state"), "done") << json::dump(run);
+  EXPECT_EQ(run.at("cursor"), "5");
+  EXPECT_EQ(run.at("moved"), 6);  // the box said 2 per batch
+  EXPECT_EQ(count("members"), 5);
+  auto ids = tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", "SELECT min(id) >= 4294967296 FROM members"}});
+  EXPECT_EQ(ids.at("rows").at(0).at(0), 1);
+  // Done is recorded: again only on purpose, and then it changes nothing (the box is idempotent).
+  auto twice = start("job_start", "move_members");
+  ASSERT_TRUE(twice.as_object().contains("error"));
+  EXPECT_NE(std::string(twice.at("error").as_string()).find("again: true"), std::string::npos);
+  auto again = start("job_start", "move_members", {{"again", true}});
+  EXPECT_EQ(again.at("state"), "done") << json::dump(again);
+  EXPECT_EQ(count("members"), 5);
+
+  // A job that keeps failing fails its dry run after three tries, saying why.
+  auto broken = start("job_dry_run", "always_fails");
+  ASSERT_EQ(broken.at("state"), "failed") << json::dump(broken);
+  EXPECT_EQ(broken.at("calls"), 3);
+  EXPECT_NE(json::dump(broken.at("last_error")).find("500"), std::string::npos) << json::dump(broken);
+
+  // The list says where each job stands, and a run's status reads back.
+  auto list = tool("job_list", {{"tenant", "playground"}});
+  ASSERT_EQ(list.at("jobs").as_array().size(), 2u) << json::dump(list);
+  for (const auto& j : list.at("jobs").as_array()) {
+    if (j.at("job") == "move_members") {
+      EXPECT_EQ(j.at("done"), true);
+      EXPECT_EQ(j.at("dry_run_passed"), true);
+    }
+  }
+  auto status = tool("job_status", {{"run", run.at("run")}});
+  EXPECT_EQ(status.at("state"), "done");
+  // Job routes have no address: nothing on the web reaches them.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/move_members").status, 404);
+}

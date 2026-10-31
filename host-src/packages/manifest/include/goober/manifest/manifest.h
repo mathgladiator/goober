@@ -275,6 +275,7 @@ struct Manifest {
   std::vector<HttpRoute> identity;  // routes.identity.$event, with verb "identity"
   std::vector<HttpRoute> mail;      // routes.mail.$address.receive, with verb "receive"
   std::vector<HttpRoute> results;   // routes.result.$name, with verb "result": outbox outcomes (035)
+  std::vector<HttpRoute> jobs;      // routes.job.$key, with verb "job": one-time work an operator starts (038 § 7)
   std::string types;             // the types document's file name (036), supplied with the version
   std::map<std::string, std::string> templates;  // Mustache templates by name, checked at upload
   std::vector<DataStrategy> data;

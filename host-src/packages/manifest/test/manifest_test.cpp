@@ -533,3 +533,27 @@ TEST(Manifest, SealedSecretsAndHostKeysStayWhereTheyBelong) {
     EXPECT_FALSE(parse_manifest(bad, &err)) << bad;
   }
 }
+
+// routes.job (design/machine/038.Ids.md § 7): a name and a timeout, nothing that would give it
+// an address or let anyone but an operator start it.
+TEST(Manifest, JobRoutes) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"mover","domains":["*"],
+    "routes":{"job":{"move":{"name":"move_members","timeout-ms":5000}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->jobs.size(), 1u);
+  EXPECT_EQ(m->jobs[0].verb, "job");
+  EXPECT_EQ(m->jobs[0].export_name(), "goober_route_move_members");
+  EXPECT_EQ(*m->jobs[0].timeout_ms, 5000);
+  auto refused = [&](const char* text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"m","public":true}}}})", "carry no public");
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"m","requirements":[["admin"]]}}}})", "carry no requirements");
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"m","timeout-ms":60000}}}})", "1 to 30000");
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"m","every-ms":1000}}}})", "unknown field");
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"timeout-ms":10}}}})", "name is required");
+  refused(R"({"box":"b","domains":["*"],"routes":{"job":{"m":{"name":"x"}},"timer":{"t":{"name":"x","every-ms":1000}}}})", "used twice");
+}

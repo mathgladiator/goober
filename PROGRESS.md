@@ -526,8 +526,9 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] The `id` column type: keys stamped by the host (`DEFAULT (goober_id())`, triggers that
       refuse a key a box names or changes), `ids` in `goober_sql`'s answer, ids as strings in
       JSON, warnings for keys and references that aren't ids, `box_guide`; tests.
-- [ ] Jobs (`routes.job`): dry runs on copies, batches with a kept cursor, `job_*` tools,
-      the panel (038 § 7).
+- [x] Jobs (`routes.job`): operator-started, dry runs on copies required first, batches with
+      a kept cursor that resume after a restart, pause and go on, `job_*` tools, the panel's
+      Jobs card, `box_guide`; tests.
 - [ ] The example boxes' schemas moved to `id` keys (new schema versions).
 - [ ] Operator tools take and give ids as strings (attachments, invites, users), as 021 says.
 - [ ] Identity events, the outbox, approvals, and other host tables still number their own

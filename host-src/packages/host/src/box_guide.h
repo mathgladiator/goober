@@ -208,6 +208,32 @@ through the mail service. Failures are retried in order, then given up after 8 t
    result. All of a request's writes commit together if the box answers below 500.
    Operators look with db_list, db_describe, and db_query.
 
+## Jobs: moving data, once (routes.job)
+
+When data has to change shape or move to another database (a new, unified database; a
+reference stored as text that should be an id), write a job box. Per 420, never edit data in
+place by hand.
+   "routes": {"job": {"move": {"name": "move_members", "timeout-ms": 5000}}}
+- Only an operator starts it, never a request: job_dry_run {box, job, tenant} first, which runs
+  the whole job on copies of the tenant's databases and throws them away; then job_start. A
+  real run is refused until a dry run of the same box version passed.
+- The host calls goober_route_move_members again and again. Its body is JSON
+  {"tenant", "cursor", "dry_run", "call"} (the first cursor is ""). Do one batch (a few hundred
+  rows), then answer 200 with {"cursor": "...", "done": false, "moved": 250}. The cursor is a
+  string you choose, like the last old id moved; it must change every batch until done: true.
+  Each call is one request: its SQL commits when it answers 200, and the host keeps the cursor
+  after the commit, so a restart resumes at the next batch.
+- Be idempotent: a batch may run twice. Write the new rows with
+  INSERT ... ON CONFLICT DO NOTHING on a unique column that remembers where each came from
+  (old_id), and skip what is there.
+- Ids: the new rows get fresh host ids (leave id out). Keep old_id, so references between moved
+  tables can be rewritten: move the parent table first, then look its new id up by old_id. A
+  reference to a user keeps the user's id, which never changes.
+- In a dry run, calls to other boxes are refused and anything queued for delivery stays in
+  the copies. Three failed batches in a row stop a run: a dry run fails, a real run pauses,
+  and job_start goes on from its cursor once fixed. job_status {run} and job_list {tenant}
+  say where it stands.
+
 ## Calling other services
 
 A box has no sockets. It calls services the manifest declares, through the host:

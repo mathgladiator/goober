@@ -200,6 +200,36 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
   return true;
 }
 
+// routes.job.$key (design/machine/038.Ids.md § 7): one-time work, like moving data between
+// databases, that only an operator starts, in batches. No address: only the host calls it.
+bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m, std::string* error) {
+  if (!jobs.is_object()) return *error = "routes.job must be an object", false;
+  std::string err;
+  for (const auto& kv : jobs.as_object()) {
+    std::string where = "routes.job." + std::string(kv.key());
+    if (!base::is_valid_name(kv.key())) return *error = where + ": a job's key matches [a-z][a-z0-9_]*", false;
+    if (!kv.value().is_object()) return *error = where + " must be an object", false;
+    const auto& def = kv.value().as_object();
+    for (const auto& f : def) {
+      std::string k(f.key());
+      if (k == "name" || k == "timeout-ms") continue;
+      if (k == "requirements" || k == "public") return *error = where + ": jobs are started by an operator and called only by the host, so they carry no " + k, false;
+      return *error = where + ": unknown field \"" + k + "\"", false;
+    }
+    HttpRoute r;
+    r.verb = "job";
+    auto name = get_string(def, "name", &err);
+    if (!name || !base::is_valid_name(*name)) return *error = where + ": name is required, matching [a-z][a-z0-9_]*", false;
+    if (!names->insert(*name).second) return *error = "route name \"" + *name + "\" is used twice", false;
+    r.name = *name;
+    r.timeout_ms = get_int(def, "timeout-ms", &err);
+    if (!err.empty()) return *error = where + ": " + err, false;
+    if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 30000)) return *error = where + ".timeout-ms must be 1 to 30000", false;
+    m->jobs.push_back(std::move(r));
+  }
+  return true;
+}
+
 // routes.timer.$key (045.Time.md). Timers have no verb, no requirements, and no "public":
 // only the host calls them.
 bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifest* m, std::string* error) {
@@ -1480,6 +1510,10 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
       }
       if (protocol == "timer") {
         if (!parse_timers(proto.value(), &names, &m, error)) return std::nullopt;
+        continue;
+      }
+      if (protocol == "job") {
+        if (!parse_jobs(proto.value(), &names, &m, error)) return std::nullopt;
         continue;
       }
       if (protocol == "internal") {

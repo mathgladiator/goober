@@ -45,7 +45,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
     "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
     "spec_list",       "spec_get",          "ids_status",          "approval_status",  "bus_status",      "box_render",
-    "source_tree",     "source_box_history", "grant_usage"};
+    "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -610,6 +610,7 @@ void Host::register_panel_tools() {
            add_routes(m.internal, "internal");
            add_routes(m.identity, "identity");
            add_routes(m.results, "result");
+           add_routes(m.jobs, "job");
            box_node(only, 1);
            // Boxes that call this one come in from the left.
            for (const auto& c : calls) {

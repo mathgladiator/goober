@@ -496,6 +496,7 @@ const views = {
       api('grant_usage', { box: name }).catch(() => [])]);
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
+    const jobs = manifest && manifest.manifest.routes && manifest.manifest.routes.job ? await jobsOf(name) : [];
     const deploys = changes.changes.filter((c) => c.target === name);
     const deployedAt = Object.fromEntries(deploys.map((c) => [c.detail.version, c.at_ms]));
     const routes = graph.nodes.filter((n) => n.kind === 'route');
@@ -505,6 +506,7 @@ const views = {
       manifest && manifest.manifest.mission ? h('p', { class: 'muted' }, manifest.manifest.mission) : null,
       wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) location.hash = '#/box/' + encodeURIComponent(n.label); })),
       grantsCard(grants[0]),
+      jobsCard(jobs),
       h('div', { class: 'grid' },
         wideCard('Routes', table([
           { label: 'Protocol', get: (r) => r.protocol },
@@ -1158,6 +1160,36 @@ function grantsCard(report) {
       f.suggested ? [': ', h('code', {}, JSON.stringify(f.suggested))] : null,
       f.columns ? [': ', h('code', {}, f.columns.join(', '))] : null)))
       : h('p', { class: 'muted small' }, 'Nothing to narrow: every grant has been used.'));
+}
+
+// A box's jobs (038 § 7) for every tenant on the host: job_list is per tenant.
+async function jobsOf(box) {
+  const domains = await api('domain_list').catch(() => []);
+  const tenants = [...new Set(domains.filter((d) => !d.redirect_to).map((d) => d.tenant))].sort();
+  const lists = await Promise.all(tenants.map((t) => api('job_list', { tenant: t }).catch(() => ({ jobs: [] }))));
+  return lists.flatMap((l) => l.jobs).filter((j) => j.box === box);
+}
+
+// On a box's page: its one-time jobs, per tenant, and where each stands. Started over MCP
+// (job_dry_run, then job_start); the panel only looks.
+function jobsCard(jobs) {
+  if (!jobs.length) return null;
+  const last = (j) => j.runs[0] || {};
+  return wideCard('Jobs', h('p', { class: 'muted small' },
+    'One-time work an operator starts: job_dry_run on copies first, then job_start. Runs go in batches and resume after a restart.'),
+  table([
+    { label: 'Tenant', get: (j) => j.tenant, cls: () => 'mono' },
+    { label: 'Job', get: (j) => j.job, cls: () => 'mono' },
+    { label: 'Dry run', get: (j) => j.dry_run_passed ? 'passed' : '—', cls: (j) => j.dry_run_passed ? '' : 'muted' },
+    { label: 'Done', get: (j) => j.done ? 'yes' : '—', cls: (j) => j.done ? '' : 'muted' },
+    { label: 'Newest run', get: (j) => last(j).run ? `${last(j).dry_run ? 'dry run' : 'run'} ${last(j).state}` : 'never',
+      cls: (j) => ['failed', 'paused'].includes(last(j).state) ? 'err' : 'muted' },
+    { label: 'Batches', num: true, get: (j) => last(j).calls ?? '' },
+    { label: 'Moved', num: true, get: (j) => last(j).moved ?? '' },
+    { label: 'Cursor', get: (j) => clip(last(j).cursor || '', 24), cls: () => 'mono muted' },
+    { label: 'Updated', get: (j) => last(j).updated_at ? fmt.time(Date.parse(last(j).updated_at)) : '', cls: () => 'muted' },
+    { label: 'Last error', get: (j) => clip(last(j).last_error || '', 100), cls: () => 'err' },
+  ], jobs));
 }
 
 // On a box's page: the source deploys behind its versions (020 § 9).

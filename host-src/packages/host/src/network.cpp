@@ -367,6 +367,9 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
     }
     if (!safe) return fail("a read changes nothing (a GET, a HEAD, or a subscription): " + svc->name + "." + m.name + " isn't a read");
   }
+  if (!svc->box.empty() && ctx.dry_run) {
+    return fail("a dry run reaches only copies of this box's own databases: " + svc->name + " is another box");
+  }
   if (!svc->box.empty()) return internal_call(ctx, *svc, m, request);
   if (svc->web) return web_call(ctx, *svc, request);
   if (svc->mail && m.name == "attachment") return mail_attachment_call(ctx, request);

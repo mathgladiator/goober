@@ -24,6 +24,7 @@
 #include "keys.h"
 #include "backups.h"
 #include "builder.h"
+#include "jobs.h"
 #include "grant_usage.h"
 #include "mailer.h"
 #include "network.h"
@@ -241,6 +242,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_invite_tools();
   register_web_tools();
   register_source_tools();
+  register_job_tools();
   backups_->set_source(source_.get());
   register_panel_tools();
   register_pwa_tools();
@@ -387,7 +389,7 @@ uint16_t Host::start() {
   {
     std::lock_guard lock(loops_mu_);
     int64_t now = base::now_unix_ms();
-    std::vector<std::string> names{"timers", "identity", "outbox", "crawler"};
+    std::vector<std::string> names{"timers", "identity", "outbox", "crawler", "jobs"};
     if (traffic_) names.push_back("traffic");
     if (!backups_manual_) names.push_back("backups");
     for (const auto& n : names) loops_[n] = LoopState{now, now, 0, "", ""};
@@ -396,6 +398,7 @@ uint16_t Host::start() {
   if (traffic_) traffic_thread_ = std::thread([this] { run_traffic(); });
   outbox_thread_ = std::thread([this] { run_outbox(); });
   crawl_thread_ = std::thread([this] { run_crawls(); });
+  job_thread_ = std::thread([this] { run_jobs(); });
   if (!backups_manual_) backup_thread_ = std::thread([this] { run_backups(); });
   if (cfg->backup.enabled() && !cfg->sandbox) {
     auto status = backups_->status(false, base::now_unix_ms());
@@ -433,7 +436,9 @@ void Host::stop() {
       timers_stopping_ = true;
     }
     timer_cv_.notify_all();
+    job_cv_.notify_all();
     timer_thread_.join();
+    if (job_thread_.joinable()) job_thread_.join();
     if (outbox_thread_.joinable()) outbox_thread_.join();
     if (crawl_thread_.joinable()) crawl_thread_.join();
     if (backup_thread_.joinable()) backup_thread_.join();
@@ -1152,7 +1157,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
   if (!m.data.empty()) {
-    session.emplace(*databases_, tenant, m.data, *schemas_);
+    session.emplace(options.databases ? *options.databases : *databases_, tenant, m.data, *schemas_);
     // The host writes too: the outbox, in the first strategy that applies a schema, and a
     // timer's at-field row. Those transactions take the write lock from the start, and the
     // outbox's database commits after the box's others (015 §4).
@@ -1184,6 +1189,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     net.who = who;
     net.route = ref.route->name;
     net.read_only = options.read_only;
+    net.dry_run = options.dry_run;
     input.call = [this, &net](std::string_view service, std::string_view method, std::string_view request) {
       return external_call(net, service, method, request);
     };
@@ -1316,7 +1322,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   }
   // The bus (040, design/machine/036.Bus.md): a strategy's topic moves when, and only when, its
   // writes committed. Topics are the request's tenant's.
-  if (committed) {
+  if (committed && !options.dry_run) {
     for (const auto& d : m.data) {
       if (d.publish.empty() || !session->wrote().count(d.name)) continue;
       if (auto topic = resolve_topic(d.publish, tenant, doc, who)) {
@@ -1326,7 +1332,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       }
     }
   }
-  if (ok && !net.pending.empty() && !session) {
+  if (ok && !net.pending.empty() && !session && !options.dry_run) {
     // A box without data has no transaction to join; its elements go in once it succeeded.
     std::string err;
     if (!enqueue_outbox(m, tenant, net.pending, nullptr, &err)) {

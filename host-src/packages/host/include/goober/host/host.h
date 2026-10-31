@@ -229,6 +229,10 @@ class Host {
     std::function<bool(db::Session&, std::string*)> before_commit;
     bool no_response_ok = false;  // a timer fire may just return: there is nobody to answer
     bool read_only = false;       // a GET, a HEAD, or a subscription (036 § 5): no writes, no effects
+    // A job's dry run (038 § 7): the box's databases are these copies, internal calls are
+    // refused (they'd reach other boxes' real data), and nothing is published or queued.
+    db::Databases* databases = nullptr;
+    bool dry_run = false;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -693,6 +697,18 @@ class Host {
   std::thread backup_thread_;
   bool backups_manual_ = false;
   void run_backups();
+  // One-time jobs (design/machine/038.Ids.md § 7; jobs.cpp): runs kept in operations/jobs.db,
+  // stepped one batch at a time by their own thread.
+  std::unique_ptr<class JobRuns> job_runs_;
+  std::thread job_thread_;
+  std::condition_variable job_cv_;  // with timer_thread_mu_
+  bool job_nudged_ = false;
+  void init_jobs();
+  void register_job_tools();
+  void run_jobs();
+  void job_step(struct JobRun& run);
+  void access_log_job(const struct JobRun& run, const std::string& request_id, const BoxCall& call);
+  std::filesystem::path job_copies(int64_t run) const;
   // Last, so it is destroyed first: no build runs while the rest of the host goes away.
   std::unique_ptr<class BuildJobs> jobs_;
 };

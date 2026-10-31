@@ -46,6 +46,8 @@ struct CallContext {
   std::vector<OutboxElement> pending;
   // A subscription's evaluation (036 § 5): only calls that change nothing.
   bool read_only = false;
+  // A job's dry run (038 § 7): no internal calls, which would reach other boxes' real data.
+  bool dry_run = false;
 };
 
 // A request ready to send: the URL, headers, and body after require is applied.
