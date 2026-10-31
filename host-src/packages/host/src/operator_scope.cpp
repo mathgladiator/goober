@@ -77,6 +77,12 @@ const std::map<std::string, Rule, std::less<>>& rules() {
       m[t] = Rule::kOpen;
     }
     m["schema_check"] = Rule::kOpen;
+    // Change sets check each member against the operator's scope themselves (changesets.cpp),
+    // as the tool that does it alone would be, and a focused operator sees only their own.
+    for (const char* t : {"changeset_create", "changeset_add", "changeset_show", "changeset_list", "changeset_preview",
+                          "changeset_apply", "changeset_rollback", "changeset_discard"}) {
+      m[t] = Rule::kOpen;
+    }
     for (const char* t : {"host_health", "ids_status", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
                           "backup_status", "crawl_list", "crawl_pages", "crawl_records", "crawl_rerun", "crawl_start",
                           "crawl_stop", "web_optout", "log_verify", "log_status", "agent_audit"}) {
@@ -470,6 +476,10 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
       }
       // A staged content deploy carries its items from here on, so a person approving it sees
       // exactly what will be written, and a draft staged again after the hold doesn't slip in.
+      // An apply runs the draft as it was when asked for: a member added while it waits is refused.
+      if (tool.name == "changeset_apply" && !args.contains("version")) {
+        if (auto v = changeset_draft_version(text_arg(args, "id"))) args["version"] = *v;
+      }
       if (tool.name == "content_deploy" && !args.contains("stage_version")) {
         auto* s = args.if_contains("stage");
         std::string ignored;  // no draft: the tool says so when it runs

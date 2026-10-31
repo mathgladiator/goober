@@ -677,14 +677,30 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Upload reviews (`review`, `widens`), `version_diff`, `version_health`; tests.
 - [x] A snapshot before every real job run; `if_etag` on every content write; integer
       arguments accept digit strings; `whats_new` from `host-src/CHANGES.md`; tests.
-- [ ] Decisions in 040 § 5: widening uploads waiting for a person, change sets, automatic
-      rollback (recommended no), a warning when promoting an untried version, 420's schema
-      evolution, deploy cadence.
+- [ ] Decisions in 040 § 5: widening uploads waiting for a person, automatic rollback
+      (recommended no), a warning when promoting an untried version, 420's schema evolution,
+      deploy cadence. Change sets: decided 2026-10-31 (build them) and built (phase 35, 042).
 - [x] Tries for MCP tools and mail routes (on copies; the hook's own matching and reply;
       a try's sender never verified); `version_health` over every local access-log file by
       the window, within a budget; route_try's observer rule tested, and enforced for the panel
       too (a try is a look only as an HTTP GET or HEAD).
 - [ ] Tries for timers.
+
+### Phase 35: change sets (042)
+- [x] `changeset_create`, `changeset_add` (schemas, versions stored or uploaded dark, content
+      merged by path or copied from `content_stage`, flags), `changeset_show`, `changeset_list`,
+      `changeset_discard`; drafts never wait for approval.
+- [x] `changeset_preview`: each member's own dry run (schema_check, version_upload dry run with
+      the set's schemas or the review against the live version, tries through route_try,
+      content_deploy dry run, flags against the box as it will be) and one list of widenings.
+- [x] `changeset_apply`: preview again, snapshots of the databases the versions may write, then
+      schemas, versions, content, flags, keeping what each replaced; a failure undoes what applied;
+      the draft version pinned before an approval hold; the person approving sees the preview.
+- [x] `changeset_rollback`: reverse order, files byte for byte, versions back (disabled boxes
+      disabled again), flags back, schemas left (they only grow); refused over later changes
+      unless forced; tests for apply, a failure partway, rollback, and a preview storing nothing.
+- [ ] Member kinds for 420's schema evolution, when it lands (042 § 2's seam).
+- [ ] A panel page for change sets (the read tools are callable from the panel already).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
