@@ -161,6 +161,11 @@ Otherwise a literal segment beats a parameter at the first place two patterns di
 boxes too: /places/new in one box wins over /places/{slug} in another. The host's own paths
 (/mcp, /oauth/, /.well-known/, /identity/, /attachment/, /goober/) come before any box, and
 pages answer only GETs no box route takes. route_check(domain, path, verb) names the answer.
+Only "http" routes enter that table. Internal, job, timer, and upgrade routes have no address
+on the web: an internal route's path is only its shape for callers, and never answers or
+shadows the site's own path. "domains" is required of every box; for a box with no http, mcp,
+or mail routes (a job box, an upgrade box, a box only other boxes call), it claims no path and
+only says which tenants' data the box serves (each of the listed domains' tenants).
 
 ### HTTP routes
 "routes": {"http": {"/orders/{order_id : int64}": {"get": {
@@ -792,6 +797,9 @@ deployed, and no chain of calls may loop. goober_call("billing", "create_invoice
 (its requirements are checked against that person), with what's left of the caller's time,
 and answers {"status", "body", "json"}. The callee sees "caller": {"box", "route"} in its
 request document. Its writes commit on their own, even if the caller later fails.
+An operator tries an internal route of any stored version, dark ones too, with route_try
+{domain, box, version?, internal: "create_invoice", caller: "jobs", arguments: {"path": {...},
+"query": {...}, "body": ...}, as?}: the same checks as the caller's call, run on copies.
 
 ## Types
 

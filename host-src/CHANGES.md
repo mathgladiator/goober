@@ -6,6 +6,7 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- route_try {internal: "<route>", caller: "<box>", arguments?: {path, query, body}, as?} calls an internal route of any stored version as that caller would through goober_call (caller must be in its callers; the same path, type, and requirement checks), on copies. Internal routes are in no HTTP route table: one at /x never answers or shadows the site's /x. A box with no http, mcp, or mail routes claims no path; its "domains" only say which tenants' data it serves.
 - job_dry_run {box, job, tenant, version?} runs a stored version that isn't live (dark or older) on copies, without promoting it; its pass counts as a try (version_promote's tried), and job_start runs once that version is promoted. job_start's version is a check: a real run is always of the live version.
 - box_failures lists failed tries and dry runs apart, under tries (each with trial: route_try or job_dry_run), so a failed dry run says why; they count in no rate. A job batch the host couldn't take (an answer without a cursor, a cursor that didn't move) is class job_failed.
 - version_get answers module_sha256 (hex SHA-256 of the stored binary module; a wat upload is stored compiled) and module_bytes; version_upload answers module_sha256 too, so a reviewer can match the bytes to their build.

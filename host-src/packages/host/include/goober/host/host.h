@@ -419,6 +419,19 @@ class Host {
                             std::string_view request);
   std::string internal_call(struct CallContext& ctx, const manifest::ExternalService& svc,
                             const manifest::ExternalMethod& m, const boost::json::value& request);
+  // The request document an internal route gets for `request` ({path, query, body}, as a box
+  // passes it to goober_call), checked as the call is: path values by the route's types, the
+  // person against its requirements, the body and query by its declared types. nullopt with
+  // `refusal` set to the JSON the caller would get. internal_call and route_try share it.
+  std::optional<boost::json::object> internal_request(const manifest::HttpRoute& route, const boxes::ActiveBox& callee,
+                                                      const boost::json::value& request,
+                                                      const std::optional<SignedIn>& who, const std::string& tenant,
+                                                      const std::string& domain, const boost::json::value& user,
+                                                      boost::json::object caller, const std::string& request_id,
+                                                      std::string* refusal);
+  std::string internal_answer(struct CallContext& ctx, const manifest::ExternalService& svc,
+                              const manifest::ExternalMethod& m, const manifest::HttpRoute& route, const std::string& path,
+                              const std::string& request_id, int64_t started, BoxCall& call);
   void egress_log(const std::string& tenant, const std::string& box, const std::string& service,
                   const std::string& method, const std::string& verb, const std::string& url, int status,
                   const std::string& error, int64_t us, size_t bytes_out, size_t bytes_in,

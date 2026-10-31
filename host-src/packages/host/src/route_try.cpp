@@ -119,7 +119,12 @@ void Host::register_try_tools() {
        "reply the sender would get), or timer (a timer route, fired once as the scheduler fires it, as nobody: "
        "at_ms is the fire's now, default the present; for a by_timer source, row names the row by its key, or the "
        "row due first from at_ms fires: the earliest at-field, or the next cron time in each row's zone; a fired "
-       "at-field row is turned off in the copies, as for real). as is \"signed_out\" (nobody; the default, and the only way mail arrives) or "
+       "at-field row is turned off in the copies, as for real), or internal (an internal route, called as the box named "
+       "caller would call it through goober_call: caller must be in the route's callers; arguments is the request the "
+       "caller passes, {path: {...}, query: {...}, body}, checked by the route's types; the person, if as names one, "
+       "must meet the route's requirements, since authority never grows. Internal routes are in no HTTP route table, "
+       "so they never answer or shadow a site path; route_try is the only way an operator calls one). as is "
+       "\"signed_out\" (nobody; the default, and the only way mail arrives) or "
        "{\"email\": ...}, an account in the realm, looked up and never signed in, whose roles meet the requirements "
        "exactly as for a real call; a tool always acts for somebody. A try's mail sender is never verified: verifying "
        "takes a real DKIM signature, so from_user_id is null and sender_why says why. It reaches no one and changes no "
@@ -143,11 +148,15 @@ void Host::register_try_tools() {
                                           "for a real request.")},
             {"body", mcp::string_property("For path: the request body as text, like a JSON document or a form.")},
             {"tool", mcp::string_property("An MCP tool's name (routes.mcp), instead of path.")},
-            {"arguments", mcp::any_property("For tool: its arguments, as an object.")},
+            {"arguments", mcp::any_property("For tool: its arguments, as an object. For internal: the request, "
+                                            "{\"path\": {...}, \"query\": {...}, \"body\": ...}, as the caller "
+                                            "passes it to goober_call.")},
             {"mail", mcp::any_property("A mail route, instead of path: {\"to\": \"support@example.com\", \"from\": "
                                        "\"Ada <ada@example.org>\", \"subject\": \"...\", \"text\": \"...\", "
                                        "\"headers\"?: {\"In-Reply-To\": \"<...>\"}}.")},
             {"timer", mcp::string_property("A timer route's name (routes.timer), instead of path.")},
+            {"internal", mcp::string_property("An internal route's name (routes.internal), instead of path.")},
+            {"caller", mcp::string_property("For internal: the calling box, one of the route's callers.")},
             {"at_ms", mcp::any_property("For timer: the fire's now, in milliseconds since 1970 (a number or a string "
                                         "of digits); default the present. It's the now_ms the box sees.")},
             {"row", mcp::string_property("For a timer with a by_timer source: the row's key, as timers_due names "
@@ -170,10 +179,10 @@ void Host::register_try_tools() {
          } done{this, op};
 
          bool http_try = args.contains("path"), tool_try = args.contains("tool"), mail_try = args.contains("mail");
-         bool timer_try = args.contains("timer");
-         if (int(http_try) + int(tool_try) + int(mail_try) + int(timer_try) != 1) {
-           return ToolResult::fail("give exactly one of path (an HTTP route), tool (an MCP tool), mail (a mail route), or "
-                                   "timer (a timer route)");
+         bool timer_try = args.contains("timer"), internal_try = args.contains("internal");
+         if (int(http_try) + int(tool_try) + int(mail_try) + int(timer_try) + int(internal_try) != 1) {
+           return ToolResult::fail("give exactly one of path (an HTTP route), tool (an MCP tool), mail (a mail route), "
+                                   "timer (a timer route), or internal (an internal route)");
          }
          std::string method = base::to_lower(text_arg(args, "method").value_or("get"));
          static const std::set<std::string> kMethods = {"get", "head", "post", "put", "patch", "delete"};
@@ -315,7 +324,11 @@ void Host::register_try_tools() {
          auto log_try = [&](const std::string& what, int status, int64_t started, bj::object line) {
            server::http::Request logged;
            logged.method = what;
-           logged.path = what + ":" + text_arg(args, what == "tool" ? "tool" : what == "timer" ? "timer" : "box").value_or("");
+           logged.path = what + ":" + text_arg(args, what == "tool"       ? "tool"
+                                                     : what == "timer"    ? "timer"
+                                                     : what == "internal" ? "internal"
+                                                                          : "box")
+                                           .value_or("");
            logged.headers.emplace_back("goober-request-id", request_id);
            line["try"] = true;
            line["operator"] = op;
@@ -447,6 +460,58 @@ void Host::register_try_tools() {
            }
            log_try("timer", ok ? (r.status ? r.status : 204) : 500, started,
                    bj::object{{"timer", name}, {"box", box_name}, {"due", base::format_utc_ms(due)}});
+           details(out);
+           return ToolResult::ok(std::move(out));
+         }
+
+         if (internal_try) {
+           std::string name = text_arg(args, "internal").value_or("");
+           std::string caller_box = text_arg(args, "caller").value_or("");
+           const manifest::HttpRoute* route = nullptr;
+           for (const auto& r : box->manifest.internal) {
+             if (r.name == name) route = &r;
+           }
+           if (!route) return ToolResult::fail("version " + box->version + " has no internal route " + name + " (routes.internal)");
+           if (caller_box.empty()) {
+             return ToolResult::fail("caller is required: the box that would call " + name + " (one of its callers)");
+           }
+           if (std::find(route->callers.begin(), route->callers.end(), caller_box) == route->callers.end()) {
+             return ToolResult::fail(name + " doesn't take calls from " + caller_box + "; its callers are " +
+                                     json::dump(bj::array(route->callers.begin(), route->callers.end())));
+           }
+           bj::value request = bj::object{};
+           if (const auto* a = args.if_contains("arguments"); a && a->is_object()) request = *a;
+           else if (a && !a->is_null()) return ToolResult::fail("arguments is {path, query, body}");
+           bj::object out{{"box", box_name}, {"version", box->version}, {"internal", name}, {"caller", caller_box},
+                          {"as", as_text}};
+           std::string refusal;
+           auto doc = internal_request(*route, *box, request, run.who, tenant, domain, user_json(run.who),
+                                       bj::object{{"box", caller_box}, {"route", "route_try"}, {"request_id", request_id}},
+                                       request_id, &refusal);
+           if (!doc) {
+             // What the caller's goober_call would get back, before the box runs.
+             std::string err;
+             auto v = json::parse(refusal, &err);
+             out["refused"] = v ? *v : bj::value(refusal);
+             out["note"] = "the call was refused before the box ran, as the caller's goober_call would be";
+             return ToolResult::ok(std::move(out));
+           }
+           mark("internal");
+           int64_t started = base::monotonic_us();
+           auto call = call_on_copies(boxes::RouteRef{box, route}, *doc, std::nullopt, false);
+           const auto& r = call.result;
+           bool ok = r.outcome == runtime::wasm::CallResult::Outcome::kOk;
+           int status = ok ? r.status : 500;
+           out["status"] = status;
+           out["outcome"] = runtime::wasm::outcome_name(r.outcome);
+           out["content_type"] = r.content_type;
+           out["body"] = r.body;
+           if (ok && r.content_type.starts_with("application/json")) {
+             std::string err;
+             if (auto v = json::parse(r.body, &err)) out["json"] = std::move(*v);
+           }
+           out["path"] = doc->at("path");
+           log_try("internal", status, started, bj::object{{"internal", name}, {"box", box_name}, {"caller", caller_box}});
            details(out);
            return ToolResult::ok(std::move(out));
          }
