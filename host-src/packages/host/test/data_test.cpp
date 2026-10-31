@@ -484,3 +484,109 @@ TEST_F(DataRoutesTest, SchemaCheckStoresNothing) {
   EXPECT_TRUE(tool("schema_check", {{"schema", R"({"schema":"tries1","tables":{"x":{"columns":{"a":{"type":"string"}}}}})"}})
                   .as_object().contains("error"));
 }
+
+// Performance recording (design/machine/037.Caching.md § 7): a GET that scans an unindexed
+// table is counted per route and per statement, and the report names the index it wants; a
+// GET that tries to write, and a GET whose database rarely changes, are findings too.
+const char* kPerfWat = R"wat((module
+  (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "s")
+  (data (i32.const 64) "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 300) INSERT INTO items (name, kind) SELECT 'n' || i, CASE WHEN i % 3 = 0 THEN 'x' ELSE 'y' END FROM c")
+  (data (i32.const 256) "SELECT json_group_array(name) FROM (SELECT name FROM items WHERE kind = ?  ORDER BY name LIMIT 5)")
+  (data (i32.const 384) "INSERT INTO items (name, kind) VALUES ('sneaky', 'z')")
+  (data (i32.const 464) "[\"x\"]")
+  (data (i32.const 496) "[]")
+  (func $answer (param $status i32) (param $n i32)
+    (drop (call $result (i32.const 8192) (local.get $n)))
+    (drop (call $respond (local.get $status) (i32.const 0) (i32.const 16) (i32.const 8192) (local.get $n))))
+  (func (export "goober_route_seed_items") (result i32)
+    (call $answer (i32.const 201) (call $sql (i32.const 32) (i32.const 1) (i32.const 64) (i32.const 174) (i32.const 496) (i32.const 2)))
+    (i32.const 0))
+  (func (export "goober_route_list_items") (result i32)
+    (call $answer (i32.const 200) (call $sql (i32.const 32) (i32.const 1) (i32.const 256) (i32.const 97) (i32.const 464) (i32.const 5)))
+    (i32.const 0))
+  (func (export "goober_route_sneaky_list") (result i32)
+    (call $answer (i32.const 200) (call $sql (i32.const 32) (i32.const 1) (i32.const 384) (i32.const 53) (i32.const 496) (i32.const 2)))
+    (i32.const 0))
+))wat";
+
+const char* kPerfManifest = R"({"box":"perfy","domains":["*"],
+  "data":{"sqlite3":{"s":{"schema":"perf1","database":"perf","pattern":"sql",
+    "tables":{"items":{"read":true,"insert":true}}}}},
+  "routes":{"http":{"/items":{"post":{"name":"seed_items","public":true},"get":{"name":"list_items","public":true}},
+                    "/items/sneaky":{"get":{"name":"sneaky_list","public":true}}}}})";
+
+TEST_F(DataRoutesTest, PerformanceIsRecordedAndReportedWithFindings) {
+  auto put = tool("schema_put", {{"schema", R"({"schema":"perf1","tables":{"items":{"columns":{
+      "id":{"type":"id","primary-key":true},"name":{"type":"string"},"kind":{"type":"string"}}}}})"}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(kPerfManifest, kPerfWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/items").status, 201);
+  for (int i = 0; i < 30; ++i) ASSERT_EQ(fetch(port, bhttp::verb::get, "/items").status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/items/sneaky").status, 200);  // the box answers its refusal
+
+  // Per route: the split of its time, its percentiles, and its costliest statement.
+  auto report = tool("perf_report", {{"tenant", "playground"}, {"box", "perfy"}});
+  ASSERT_TRUE(report.is_object()) << json::dump(report);
+  const bj::object* list = nullptr;
+  for (const auto& r : report.at("routes").as_array()) {
+    if (r.at("route") == "list_items") list = &r.as_object();
+  }
+  ASSERT_TRUE(list) << json::dump(report);
+  EXPECT_EQ(list->at("calls"), 30);
+  EXPECT_EQ(list->at("verb"), "get");
+  EXPECT_GT(list->at("p50_us").as_int64(), 0);
+  EXPECT_GE(list->at("p99_us").as_int64(), list->at("p50_us").as_int64());
+  for (const char* k : {"queue_us", "box_us", "sql_us", "statement_us", "bytes_out"}) {
+    EXPECT_TRUE(list->at("average").as_object().contains(k)) << k;
+  }
+  EXPECT_GT(list->at("average").at("bytes_out").as_int64(), 0);
+  EXPECT_NE(json::dump(list->at("costliest_statements")).find("WHERE kind = ? ORDER BY name"), std::string::npos)
+      << json::dump(*list);  // whitespace folded
+
+  // Findings: the scan wants an index on (kind, name); the sneaky GET tried to write; the
+  // list is read 30 times while its database changed once.
+  std::map<std::string, bj::object> found;
+  for (const auto& f : report.at("findings").as_array()) found[std::string(f.at("kind").as_string())] = f.as_object();
+  ASSERT_TRUE(found.count("missing_index")) << json::dump(report.at("findings"));
+  const auto& idx = found["missing_index"].at("evidence").at("suggested_index");
+  EXPECT_EQ(idx.at("table"), "items");
+  EXPECT_EQ(json::dump(idx.at("columns")), R"(["kind","name"])");
+  ASSERT_TRUE(found.count("get_writes")) << json::dump(report.at("findings"));
+  EXPECT_EQ(found["get_writes"].at("route"), "sneaky_list");
+  ASSERT_TRUE(found.count("cacheable")) << json::dump(report.at("findings"));
+  EXPECT_EQ(found["cacheable"].at("route"), "list_items");
+  EXPECT_EQ(found["cacheable"].at("evidence").at("database_writes"), 1);
+
+  // Per statement: SQLite's counters show the scan.
+  auto statements = tool("perf_statements", {{"tenant", "playground"}, {"sort", "fullscan"}});
+  ASSERT_TRUE(statements.is_array()) << json::dump(statements);
+  ASSERT_FALSE(statements.as_array().empty());
+  const auto& top = statements.at(0);
+  EXPECT_NE(std::string(top.at("sql").as_string()).find("WHERE kind = ?"), std::string::npos) << json::dump(top);
+  EXPECT_EQ(top.at("count"), 30);
+  EXPECT_GE(top.at("fullscan_steps").as_int64(), 30 * 290);  // about a row a step
+  EXPECT_EQ(top.at("routes").at(0), "list_items");
+
+  // The access log carries each call's split.
+  auto log = *base::read_file(root / "storage" / "logs" / "access.log");
+  EXPECT_NE(log.find("\"perf\":{\"box_us\""), std::string::npos);
+  EXPECT_NE(log.find("\"refused_writes\":1"), std::string::npos);
+}
+
+TEST(PerfStats, IndexColumnsReadsWhereAndOrderBy) {
+  std::string table;
+  auto cols = host::PerfStats::index_columns(
+      "SELECT a.name FROM \"items\" a WHERE a.kind = ? AND price >= :min AND note LIKE 'x%' ORDER BY a.name DESC", &table);
+  EXPECT_EQ(table, "items");
+  EXPECT_EQ(cols, (std::vector<std::string>{"kind", "price", "note", "name"}));
+  table.clear();
+  EXPECT_TRUE(host::PerfStats::index_columns("SELECT count(*) FROM t", &table).empty());
+  EXPECT_EQ(table, "t");
+  EXPECT_EQ(host::PerfStats::normalize_sql("  SELECT  1\n FROM\tt  "), "SELECT 1 FROM t");
+}

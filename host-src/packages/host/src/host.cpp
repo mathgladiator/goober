@@ -293,6 +293,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_source_tools();
   register_job_tools();
   register_flag_tools();
+  register_perf_tools();
   register_db_admin_tools();
   backups_->set_source(source_.get());
   register_panel_tools();
@@ -1047,9 +1048,10 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     auto ref = *match.value;
     // The queue holds a bounded amount of work; past it, the host says so rather than swell.
     bool queued = pool_->post(
-        [this, req, finish, ref, params = std::move(match.params), domain, tenant = *tenant, active]() mutable {
+        [this, req, finish, ref, params = std::move(match.params), domain, tenant = *tenant, active,
+         posted_us = base::monotonic_us()]() mutable {
           try {
-            serve_box(req, finish, ref, std::move(params), domain, tenant, active);
+            serve_box(req, finish, ref, std::move(params), domain, tenant, active, posted_us);
           } catch (const std::exception& e) {
             std::cerr << "goober-host: box " << ref.box->manifest.box << ": " << e.what() << "\n";
             finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"box call failed"})");
@@ -1218,6 +1220,9 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       return value;
     };
   }
+  // Where the call's time goes (037 § 7.1): inside goober_sql and in calls out, apart from the box's own.
+  int64_t sql_us = 0, out_us = 0;
+  int64_t call_started_us = base::monotonic_us();
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
   if (!m.data.empty()) {
@@ -1237,8 +1242,11 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       }
     }
     session->set_read_only(options.read_only);
-    input.sql = [&session](std::string_view strategy, std::string_view sql, std::string_view params) {
-      return session->run(strategy, sql, params);
+    input.sql = [&session, &sql_us](std::string_view strategy, std::string_view sql, std::string_view params) {
+      int64_t started = base::monotonic_us();
+      auto out = session->run(strategy, sql, params);
+      sql_us += base::monotonic_us() - started;
+      return out;
     };
   }
   // External services: calls go out through the host; effectful ones wait in `net.pending`
@@ -1254,8 +1262,11 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     net.route = ref.route->name;
     net.read_only = options.read_only;
     net.dry_run = options.dry_run;
-    input.call = [this, &net](std::string_view service, std::string_view method, std::string_view request) {
-      return external_call(net, service, method, request);
+    input.call = [this, &net, &out_us](std::string_view service, std::string_view method, std::string_view request) {
+      int64_t started = base::monotonic_us();
+      auto out = external_call(net, service, method, request);
+      out_us += base::monotonic_us() - started;
+      return out;
     };
   }
   // Host libraries (design/machine/831.Libraries.md): pure, on the request's clock, 10,000 calls
@@ -1291,7 +1302,9 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
   net.deadline_us = base::monotonic_us() + limits.timeout_ms * 1000;
   lib_deadline_us = net.deadline_us;
+  int64_t engine_started_us = base::monotonic_us();
   auto result = engine_->call(*ref.box->compiled, ref.route->export_name(), input, limits);
+  int64_t engine_us = base::monotonic_us() - engine_started_us;
 
   // Logs are side effects, written after the call, never interleaved.
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
@@ -1408,11 +1421,41 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     }
     extra["outbox"] = int64_t(net.pending.size());
   }
-  return BoxCall{std::move(result), std::move(extra)};
+  // Where the time went (037 § 7.1): the box's own work is the engine's time less its host calls.
+  CallPerf perf;
+  perf.tenant = tenant;
+  perf.box = m.box;
+  perf.route = route.name;
+  perf.verb = route.verb;
+  perf.status = result.status;
+  perf.failed = !ok || (result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status >= 500);
+  perf.sql_us = sql_us;
+  perf.out_us = out_us;
+  perf.box_us = std::max<int64_t>(0, engine_us - sql_us - out_us);
+  perf.total_us = base::monotonic_us() - call_started_us;
+  if (session) {
+    const auto& t = session->timing();
+    perf.lock_us = t.lock_us;
+    perf.statement_us = t.statement_us;
+    perf.commit_us = t.commit_us;
+    perf.refused_writes = t.refused_writes;
+    perf.statements = session->statements();
+    perf.databases_read.assign(session->databases_read().begin(), session->databases_read().end());
+    if (committed && !options.dry_run) {
+      perf.databases_written.assign(session->databases_written().begin(), session->databases_written().end());
+    }
+    if (!options.dry_run) perf_->record_statements(m.box, route.name, session->statement_records(), input.now_ms);
+  }
+  if (!options.perf_by_caller && !options.dry_run) {
+    perf_->record_call(perf, input.now_ms);
+    extra["perf"] = perf.to_json();
+  }
+  return BoxCall{std::move(result), std::move(extra), std::move(perf)};
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
-                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>) {
+                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>, int64_t posted_us) {
+  int64_t served_us = base::monotonic_us();
   auto cfg = config_.get();
   std::string request_id = req.header("goober-request-id");
   const auto& m = ref.box->manifest;
@@ -1532,7 +1575,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // begin deferred and never wait on the write lock, and its calls out must be reads.
   CallOptions options;
   options.read_only = req.method == "get" || req.method == "head";
+  options.perf_by_caller = true;
   auto call = call_box(ref, doc, tenant, request_id, who, options);
+  int64_t render_us = 0;  // templates and partials, timed where they run below
   auto& result = call.result;
   auto& extra = call.extra;
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
@@ -1577,7 +1622,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         bj::object query_obj;
         for (const auto& [k, v] : router::parse_query(req.query)) query_obj[k] = v;
         d["request"] = bj::object{{"path", req.path}, {"query", std::move(query_obj)}};
+        int64_t render_started = base::monotonic_us();
         html = site_->render_named(tenant, ref.route->template_name, std::move(d), &m.templates, &err);
+        render_us += base::monotonic_us() - render_started;
       } else if (err.empty()) {
         err = "the response is not a JSON object";
       }
@@ -1611,7 +1658,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
       if (k == "content-type" && v.starts_with("text/html")) html_out = true;
     }
     if (html_out && res.status < 300 && (templated || ref.route->includes)) {
+      int64_t include_started = base::monotonic_us();
       auto e = site::expand_includes(*content_, tenant, res.body, req.path, who.has_value());
+      render_us += base::monotonic_us() - include_started;
       res.body = std::move(e.html);
       if (e.by_auth) {
         std::erase_if(res.headers, [](const auto& h) { return h.first == "cache-control" || h.first == "vary"; });
@@ -1667,6 +1716,19 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // never hand one caller's representation to another. One Vary header, the box's own names
   // kept (case-insensitive, no repeats).
   merge_vary(res.headers, !ref.route->template_name.empty() ? std::vector<std::string>{"accept"} : std::vector<std::string>{});
+  // The call's numbers, completed with what only the route knows (037 § 7.1).
+  {
+    auto& p = call.perf;
+    p.queue_us = posted_us ? std::max<int64_t>(0, served_us - posted_us) : 0;
+    p.render_us = render_us;
+    p.bytes_out = int64_t(res.body.size());
+    p.status = res.status;
+    p.failed = p.failed || res.status >= 500;
+    p.total_us = base::monotonic_us() - served_us;
+    perf_->record_call(p, base::now_unix_ms());
+    extra["perf"] = p.to_json();
+    extra_text = json::dump(extra);
+  }
   finish(std::move(res), std::move(extra_text));
 }
 

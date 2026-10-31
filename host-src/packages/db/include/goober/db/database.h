@@ -87,6 +87,13 @@ struct TableUse {
 // Strategy -> table -> use.
 using Usage = std::map<std::string, std::map<std::string, TableUse>>;
 
+// One statement a box ran to its end, and what it cost (design/machine/037.Caching.md § 7.1):
+// its time stepping, rows returned, and SQLite's own counters (sqlite3_stmt_status).
+struct StatementRecord {
+  std::string strategy, tenant, database, sql;
+  int64_t us = 0, rows = 0, vm_steps = 0, fullscan_steps = 0, sorts = 0, autoindexes = 0;
+};
+
 // One request's use of its box's databases: one transaction per database touched,
 // committed or rolled back as a whole (008 §6). Not thread-safe; one per call.
 class Session {
@@ -123,9 +130,22 @@ class Session {
   const std::set<std::string>& wrote() const { return wrote_; }
   // What the statements that ran without error used of their grants.
   const Usage& used() const { return used_; }
+  // Where a request's SQL time went (037 § 7.1): waiting for a database's write lock (BEGIN),
+  // stepping statements, and committing; and statements refused because the request is a read.
+  struct Timing {
+    int64_t lock_us = 0, statement_us = 0, commit_us = 0, refused_writes = 0;
+  };
+  const Timing& timing() const { return timing_; }
+  const std::vector<StatementRecord>& statement_records() const { return statement_records_; }
+  // The databases a statement ran in, and those a statement wrote, as "tenant/database".
+  const std::set<std::string>& databases_read() const { return read_; }
+  const std::set<std::string>& databases_written() const { return written_; }
 
  private:
   Usage used_;
+  Timing timing_;
+  std::vector<StatementRecord> statement_records_;
+  std::set<std::string> read_, written_;
   struct Open {
     std::unique_ptr<sqlite::Db> db;
     bool in_transaction = false;

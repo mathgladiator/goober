@@ -190,6 +190,11 @@ struct Auth {
   std::set<std::string> tables;                      // the database's real tables; anything else read is a CTE
   std::string denied;
   std::map<std::string, TableUse> uses;              // what the statement was allowed to do, by table
+  // What the statement cost, once it ran to its end (037 § 7.1).
+  struct Cost {
+    bool ran = false;
+    int64_t us = 0, rows = 0, vm_steps = 0, fullscan_steps = 0, sorts = 0, autoindexes = 0;
+  } cost;
 };
 
 // A second check, independent of the authorizer: the compiled program itself. SQLite's
@@ -543,6 +548,7 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   };
   std::optional<Clockless> clockless;
   if (auth.strategy) clockless.emplace(db);
+  auto step_started = std::chrono::steady_clock::now();
   bj::array columns;
   int ncol = sqlite3_column_count(st.s);
   for (int i = 0; i < ncol; ++i) columns.push_back(bj::value(sqlite3_column_name(st.s, i)));
@@ -566,6 +572,15 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
     }
     rows.push_back(std::move(row));
   }
+  // SQLite's own counters say what the statement cost: a full scan or an automatic index in
+  // them is an index the schema lacks (037 § 7.1).
+  auth.cost.ran = true;
+  auth.cost.us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - step_started).count();
+  auth.cost.rows = n;
+  auth.cost.vm_steps = sqlite3_stmt_status(st.s, SQLITE_STMTSTATUS_VM_STEP, 0);
+  auth.cost.fullscan_steps = sqlite3_stmt_status(st.s, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0);
+  auth.cost.sorts = sqlite3_stmt_status(st.s, SQLITE_STMTSTATUS_SORT, 0);
+  auth.cost.autoindexes = sqlite3_stmt_status(st.s, SQLITE_STMTSTATUS_AUTOINDEX, 0);
   sqlite3_progress_handler(db, 0, nullptr, nullptr);
   clockless.reset();
   if (rc == SQLITE_INTERRUPT && t_clock_asked) {
@@ -994,10 +1009,19 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
   bool immediate = !read_only_ && (st->may_write() || expect_writes_.count(st->name));
   bool wrote = false;
   auto result = run_statement(raw, sql, params, auth, st->row_limit, st->step_budget, [&](bool readonly) {
-    if (!readonly && read_only_) return std::string("a read changes nothing (a GET, a HEAD, or a subscription): this statement writes");
+    if (!readonly && read_only_) {
+      ++timing_.refused_writes;
+      return std::string("a read changes nothing (a GET, a HEAD, or a subscription): this statement writes");
+    }
     wrote = !readonly;
     if (open.in_transaction) return std::string();
     char* msg = nullptr;
+    // Waiting for the write lock is the time BEGIN IMMEDIATE takes (037 § 7.1).
+    struct Lock {
+      Timing& t;
+      std::chrono::steady_clock::time_point at;
+      ~Lock() { t.lock_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - at).count(); }
+    } lock{timing_, std::chrono::steady_clock::now()};
     if (sqlite3_exec(raw, readonly && !immediate ? "BEGIN" : "BEGIN IMMEDIATE", nullptr, nullptr, &msg) != SQLITE_OK) {
       std::string why = msg ? msg : "begin failed";
       sqlite3_free(msg);
@@ -1014,7 +1038,17 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
     broken_ = "the request's transaction on " + database + " was rolled back, so nothing more can be written";
     return fail(broken_);
   }
-  if (wrote && !result.contains("error")) wrote_.insert(st->name);
+  if (wrote && !result.contains("error")) {
+    wrote_.insert(st->name);
+    written_.insert(st->tenant_for(tenant_) + "/" + database);
+  }
+  read_.insert(st->tenant_for(tenant_) + "/" + database);
+  if (auth.cost.ran) {
+    timing_.statement_us += auth.cost.us;
+    statement_records_.push_back(StatementRecord{st->name, st->tenant_for(tenant_), database, std::string(sql), auth.cost.us,
+                                                 auth.cost.rows, auth.cost.vm_steps, auth.cost.fullscan_steps,
+                                                 auth.cost.sorts, auth.cost.autoindexes});
+  }
   if (!result.contains("error")) {
     auto& used = used_[st->name];
     for (const auto& [table, use] : auth.uses) used[table].merge(use);
@@ -1043,6 +1077,11 @@ bool Session::commit(std::string* error) {
   }
   if (auto it = open_.find(commit_last_); it != open_.end()) order.emplace_back(&it->first, &it->second);
   bool ok = true;
+  struct Committing {
+    Timing& t;
+    std::chrono::steady_clock::time_point at;
+    ~Committing() { t.commit_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - at).count(); }
+  } committing{timing_, std::chrono::steady_clock::now()};
   for (auto [name, open] : order) {
     if (!open->in_transaction) continue;
     char* msg = nullptr;

@@ -18,6 +18,7 @@
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
 #include "goober/ids/ids.h"
+#include "goober/host/perf.h"
 #include "goober/logs/logs.h"
 #include "goober/mail_consent/consent.h"
 #include "goober/mail_inbound/mime.h"
@@ -232,6 +233,7 @@ class Host {
   struct BoxCall {
     runtime::wasm::CallResult result;
     boost::json::object extra;  // fields for the access log
+    CallPerf perf;              // where its time went (037 § 7.1)
   };
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
@@ -244,6 +246,9 @@ class Host {
     // refused (they'd reach other boxes' real data), and nothing is published or queued.
     db::Databases* databases = nullptr;
     bool dry_run = false;
+    // The caller adds what it alone knows (queue time, rendering, bytes) and records the call
+    // in perf_ itself (serve_box); otherwise call_box records it (037 § 7.1).
+    bool perf_by_caller = false;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -254,9 +259,10 @@ class Host {
   // /mcp on every domain: box tools for agents and people with bearer tokens (mcp_routes.cpp).
   void handle_tenant_mcp(const server::http::Request& req, const Finish& finish, const std::string& domain,
                          const std::string& tenant);
+  // `posted_us` is when the request was queued for a box thread (monotonic), for its queue time.
   void serve_box(server::http::Request req, Finish finish, boxes::RouteRef ref,
                  std::map<std::string, std::string> params, std::string domain, std::string tenant,
-                 std::shared_ptr<const boxes::ActiveSet> keep_alive);
+                 std::shared_ptr<const boxes::ActiveSet> keep_alive, int64_t posted_us = 0);
   // Content: pages, templates, listings, and static files (007.Content.md).
   void serve_content(const server::http::Request& req, const Finish& finish, const std::string& tenant,
                      const std::string& path);
@@ -721,6 +727,9 @@ class Host {
                         const boost::json::value& request);
   // What boxes do with their grants, since start (grant_usage.h; data_tools.cpp's grant_usage).
   std::unique_ptr<class GrantUsage> grant_usage_;
+  // Where calls' time goes, per route, and what each statement costs (037 § 7; perf.cpp).
+  std::unique_ptr<PerfStats> perf_ = std::make_unique<PerfStats>();
+  void register_perf_tools();
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();
