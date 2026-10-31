@@ -680,8 +680,11 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Decisions in 040 § 5: widening uploads waiting for a person, change sets, automatic
       rollback (recommended no), a warning when promoting an untried version, 420's schema
       evolution, deploy cadence.
-- [ ] Tries for MCP tools, mail routes, and timers; `version_health` over archived logs;
-      a test of route_try's observer rule.
+- [x] Tries for MCP tools and mail routes (on copies; the hook's own matching and reply;
+      a try's sender never verified); `version_health` over every local access-log file by
+      the window, within a budget; route_try's observer rule tested, and enforced for the panel
+      too (a try is a look only as an HTTP GET or HEAD).
+- [ ] Tries for timers.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

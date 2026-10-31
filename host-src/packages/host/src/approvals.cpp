@@ -155,7 +155,8 @@ void Host::saw_agent(const std::string& agent) {
 std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent, const std::string& tool,
                                                        const bj::object& args) {
   // Looking never waits; nor does asking about one's own requests.
-  if (is_read_call(tool, args) || tool == "approval_status") return std::nullopt;
+  // A route_try changes nothing real (its writes run on copies), so it never waits either.
+  if (is_read_call(tool, args) || tool == "approval_status" || tool == "route_try") return std::nullopt;
   if (!approvals_on(agent)) return std::nullopt;
   bj::object held = args;
   // A deploy or build held without a revision is pinned to the head now, so the person approves

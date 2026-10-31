@@ -234,7 +234,8 @@ std::optional<std::string> Host::mint_reply_address(const CallContext& ctx, cons
   return *local + "@" + domain;
 }
 
-std::optional<Host::MailMatch> Host::match_mail(const std::string& address, std::string* why) {
+std::optional<Host::MailMatch> Host::match_mail(const std::string& address, std::string* why,
+                                                std::shared_ptr<const boxes::ActiveBox> only) {
   auto parts = inbound::split_address(address);
   if (!parts) return *why = "not an address", std::nullopt;
   auto [local, domain] = *parts;
@@ -249,7 +250,10 @@ std::optional<Host::MailMatch> Host::match_mail(const std::string& address, std:
     int score;
   };
   std::optional<Candidate> best;
-  for (const auto& [box_name, box] : active->boxes) {
+  std::vector<std::shared_ptr<const boxes::ActiveBox>> boxes;
+  if (only) boxes.push_back(only);
+  else for (const auto& [name, b] : active->boxes) boxes.push_back(b);
+  for (const auto& box : boxes) {
     if (!box->manifest.applies_to(domain)) continue;
     for (const auto& r : box->manifest.mail) {
       std::string err;
@@ -417,6 +421,44 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     }
   };
 
+  std::string request_id = req.header("goober-request-id");
+  bj::object doc = mail_route_doc(*match, headers, body, message, from, size, automatic, std::move(attachments), request_id,
+                                  &log);
+  CallOptions options;
+  options.timeout_ms = route.timeout_ms;
+  options.no_response_ok = true;
+  auto call = call_box(match->ref, doc, match->tenant, request_id, std::nullopt, options);
+  const auto& r = call.result;
+  log["status"] = r.status;
+  log["box_outcome"] = runtime::wasm::outcome_name(r.outcome);
+  std::string outcome;
+  auto reply = mail_hook_reply(r, &outcome);
+  if (outcome == "delivered") {
+    if (message.from && !message.message_id.empty()) {
+      try {
+        auto db = open_mail_db();
+        // Kept 90 days: who wrote in is a relationship for transactional mail (029 § 3); a reply's
+        // thread is checked against the last 30.
+        db->exec("DELETE FROM received WHERE at_ms < " + std::to_string(base::now_unix_ms() - 90LL * 86400000));
+        sqlite::Stmt s(*db, "INSERT OR IGNORE INTO received (tenant, sender, message, at_ms) VALUES (?, ?, ?, ?)");
+        s.bind(1, match->tenant)
+            .bind(2, received_hash(message.from->address))
+            .bind(3, received_hash(message.message_id))
+            .bind(4, base::now_unix_ms())
+            .run();
+      } catch (const std::exception& e) {
+        std::cerr << "goober-host: mail in: couldn't note the sender: " << e.what() << "\n";
+      }
+    }
+  } else {
+    drop_attachments();
+  }
+  return answer(reply, outcome.c_str());
+}
+
+bj::object Host::mail_route_doc(const MailMatch& m, const inbound::Headers& headers, const std::string& body,
+                                const inbound::Message& message, const std::string& from, int64_t size, bool automatic,
+                                bj::array attachments, const std::string& request_id, bj::object* log) {
   // The sender, as a verified claim or not at all (038): see design/machine/024.MailIn.md § 5.
   // A verified sender with an account in this tenant's realm (not deleted, not disabled) is
   // named by its user id; the box still runs as nobody (decided 2026-10-31, 038 § 10).
@@ -425,13 +467,13 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   std::optional<int64_t> from_user_id;
   if (!sender.empty()) {
     try {
-      if (auto u = identity_->active_user(match->tenant, sender)) from_user_id = u->user_id;
+      if (auto u = identity_->active_user(m.tenant, sender)) from_user_id = u->user_id;
     } catch (const std::exception& e) {
       std::cerr << "goober-host: mail in: looking up the sender: " << e.what() << "\n";
     }
   }
-  log["sender_verified"] = !sender.empty();
-  if (from_user_id) log["from_user_id"] = std::to_string(*from_user_id);
+  (*log)["sender_verified"] = !sender.empty();
+  if (from_user_id) (*log)["from_user_id"] = std::to_string(*from_user_id);
   bj::value from_user = from_user_id ? bj::value(std::to_string(*from_user_id)) : bj::value(nullptr);
   auto mailbox = [](const inbound::Mailbox& b) { return bj::object{{"address", b.address}, {"name", b.name}}; };
   auto mailboxes = [&](const std::vector<inbound::Mailbox>& l) {
@@ -441,7 +483,7 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   };
   bj::array refs;
   for (const auto& r : message.references) refs.push_back(bj::value(r));
-  bj::object typed{{"to", match->to},
+  bj::object typed{{"to", m.to},
                    {"envelope_from", from},
                    {"from", message.from ? bj::value(mailbox(*message.from)) : bj::value(nullptr)},
                    {"sender", sender.empty() ? bj::value(nullptr) : bj::value(sender)},
@@ -468,7 +510,7 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     if (part.content_type != "text/calendar" && part.content_type != "application/ics" && !part.filename.ends_with(".ics")) continue;
     libraries::Context lctx{base::now_unix_ms()};
     std::string out = libraries::call(*libraries::find("ics", 1), "interpret",
-                                      json::dump(bj::object{{"ics", part.bytes}, {"me", match->to}}), lctx);
+                                      json::dump(bj::object{{"ics", part.bytes}, {"me", m.to}}), lctx);
     std::string perr;
     if (auto v = json::parse(out, &perr); v && v->is_object() && !v->as_object().contains("error")) {
       bj::object meaning = std::move(v->as_object());
@@ -477,35 +519,30 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
       break;
     }
   }
-  if (!match->reply_recipient.empty()) {
+  if (!m.reply_recipient.empty()) {
     // Whether the reply came from the address the token was sent to: a forwarded token still
     // works, but the box can tell.
-    typed["reply_from_recipient"] = !sender.empty() && sender == match->reply_recipient;
+    typed["reply_from_recipient"] = !sender.empty() && sender == m.reply_recipient;
   }
   bj::object params;
-  for (const auto& [k, v] : match->params) params[k] = v;
-  std::string request_id = req.header("goober-request-id");
-  bj::object doc{{"request_id", request_id},
+  for (const auto& [k, v] : m.params) params[k] = v;
+  return bj::object{{"request_id", request_id},
                  {"method", "receive"},
-                 {"path", "mail:" + match->to},
+                 {"path", "mail:" + m.to},
                  {"params", std::move(params)},
                  {"query", bj::object{}},
                  {"headers", bj::object{}},
                  {"body", json::dump(typed)},
-                 {"domain", match->domain},
-                 {"tenant", match->tenant},
+                 {"domain", m.domain},
+                 {"tenant", m.tenant},
                  {"user", nullptr},
-                 {"mail", bj::object{{"to", match->to},
+                 {"mail", bj::object{{"to", m.to},
                                      {"sender", sender.empty() ? bj::value(nullptr) : bj::value(sender)},
                                      {"from_user_id", from_user}}}};
-  CallOptions options;
-  options.timeout_ms = route.timeout_ms;
-  options.no_response_ok = true;
-  auto call = call_box(match->ref, doc, match->tenant, request_id, std::nullopt, options);
+}
+
+bj::object Host::mail_hook_reply(const runtime::wasm::CallResult& r, std::string* outcome) {
   using Outcome = runtime::wasm::CallResult::Outcome;
-  const auto& r = call.result;
-  log["status"] = r.status;
-  log["box_outcome"] = runtime::wasm::outcome_name(r.outcome);
   auto box_message = [&](const char* fallback) {
     std::string e;
     if (auto v = json::parse(r.body, &e); v && v->is_object() && v->as_object().contains("error") &&
@@ -515,31 +552,16 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     return std::string(fallback);
   };
   if (r.outcome == Outcome::kNoResponse || (r.outcome == Outcome::kOk && r.status >= 200 && r.status < 300)) {
-    if (message.from && !message.message_id.empty()) {
-      try {
-        auto db = open_mail_db();
-        // Kept 90 days: who wrote in is a relationship for transactional mail (029 § 3); a reply's
-        // thread is checked against the last 30.
-        db->exec("DELETE FROM received WHERE at_ms < " + std::to_string(base::now_unix_ms() - 90LL * 86400000));
-        sqlite::Stmt s(*db, "INSERT OR IGNORE INTO received (tenant, sender, message, at_ms) VALUES (?, ?, ?, ?)");
-        s.bind(1, match->tenant)
-            .bind(2, received_hash(message.from->address))
-            .bind(3, received_hash(message.message_id))
-            .bind(4, base::now_unix_ms())
-            .run();
-      } catch (const std::exception& e) {
-        std::cerr << "goober-host: mail in: couldn't note the sender: " << e.what() << "\n";
-      }
-    }
-    return answer(hook_discard(), "delivered");
+    *outcome = "delivered";
+    return hook_discard();
   }
-  drop_attachments();
   if (r.outcome == Outcome::kOk && r.status >= 400 && r.status < 500 && r.status != 429) {
-    return answer(hook_reject(550, "5.7.1", box_message("Refused by the recipient")), "box_rejected");
+    *outcome = "box_rejected";
+    return hook_reject(550, "5.7.1", box_message("Refused by the recipient"));
   }
   // 429, 503, a failure, a trap, a timeout: the sender tries again later, so nothing is lost.
-  return answer(hook_reject(451, "4.3.0", r.outcome == Outcome::kOk ? box_message("Try again later") : "Try again later"),
-                "box_deferred");
+  *outcome = "box_deferred";
+  return hook_reject(451, "4.3.0", r.outcome == Outcome::kOk ? box_message("Try again later") : "Try again later");
 }
 
 std::string Host::mail_attachment_call(CallContext& ctx, const bj::value& request) {

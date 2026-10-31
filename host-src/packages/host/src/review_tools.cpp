@@ -13,12 +13,18 @@
 #include "goober/base/time.h"
 #include "goober/boxes/review.h"
 #include "goober/host/host.h"
+#include "goober/logs/logs.h"
 
 namespace goober::host {
 namespace bj = boost::json;
 using mcp::ToolResult;
 
 namespace {
+
+// version_health's read budget over the access log: enough for a busy hour on each side.
+constexpr size_t kHealthLines = 400000;
+constexpr uint64_t kHealthBytes = uint64_t(512) << 20;
+
 
 std::optional<std::string> text_of(const bj::object& args, const char* key) {
   auto it = args.find(key);
@@ -188,12 +194,23 @@ void Host::register_review_tools() {
          out["went_live_at"] = base::format_utc_ms(live_ms);
          out["live_for_minutes"] = (now - live_ms) / 60000;
          out["previous"] = previous.empty() ? bj::value(nullptr) : bj::value(previous);
-         // The access log, newest files last: access.log.1 (rotated) then access.log.
+         // The access log over the whole window, every file still on the machine (access.log and its
+         // rotations, 7 days), read the way the log dive reads it, within a budget.
          std::map<std::string, Sample> before, after;
-         auto logs = config_.get()->storage / "logs";
-         for (const auto& file : {logs / "access.log.1", logs / "access.log"}) {
-           for (const auto& line : base::tail_lines(file, 200000)) {
-             if (line.find("\"box\":\"" + box + "\"") == std::string::npos) continue;
+         logs::Query q;
+         q.pattern = "\"box\":\"" + box + "\"";
+         q.since_ms = live_ms - window;
+         q.until_ms = live_ms + window;
+         q.limit = kHealthLines;
+         q.max_read = kHealthBytes;
+         auto found = logs::search(config_.get()->storage / "logs", {"access"}, q);
+         if (found.truncated) {
+           out["note"] = "the read budget (" + std::to_string(kHealthLines) + " lines, " + std::to_string(kHealthBytes >> 20) +
+                         " MiB) ended before the window did: the oldest calls of the window weren't counted";
+         }
+         {
+           for (const auto& hit : found.hits) {
+             const std::string& line = hit.line;
              std::string err;
              auto v = json::parse(line, &err);
              if (!v || !v->is_object()) continue;
@@ -203,6 +220,7 @@ void Host::register_review_tools() {
                return x && x->is_string() ? std::string(x->as_string()) : std::string();
              };
              if (str("box") != box) continue;
+             if (auto* t = o.if_contains("try"); t && t->is_bool() && t->as_bool()) continue;  // a route_try isn't traffic
              int64_t at = parse_utc_ms(str("at"));
              std::string ver = str("version"), route = str("route");
              Sample* s = nullptr;

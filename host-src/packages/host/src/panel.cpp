@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 
+#include "goober/base/encoding.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/calendar/zones.h"
@@ -116,6 +117,16 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   // one sees until a content_deploy (which waits) writes it.
   if (tool == "content_deploy") return flag("dry_run");
   if (tool == "content_stage") return true;
+  // A try only looks when it is an HTTP GET or HEAD (read-only on live data); a write's, a
+  // tool's, or a mail route's try runs box code on copies, which is more than looking, so
+  // observers and the panel (look-only for everyone) can't (approvals never hold a try,
+  // approvals.cpp: it changes nothing real).
+  if (tool == "route_try") {
+    if (args.contains("tool") || args.contains("mail")) return false;
+    const auto* m = args.if_contains("method");
+    std::string method = m && m->is_string() ? base::to_lower(m->as_string()) : "get";
+    return method == "get" || method == "head";
+  }
   return is_read_tool(tool);
 }
 

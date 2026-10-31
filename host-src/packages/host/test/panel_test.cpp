@@ -477,3 +477,37 @@ TEST_F(PanelTest, OperatorsSnapshotAndCreateOnlyAPersonDrops) {
   auto remaining = call("db_snapshots", R"({"tenant":"playground"})");
   for (const auto& s : remaining.at("snapshots").as_array()) EXPECT_NE(std::string(s.at("snapshot").as_string()), id);
 }
+
+// route_try in the panel, which only looks (and for an observer anywhere): an HTTP GET's try
+// reads live data and is allowed; a write's try runs box code on copies, so it is refused.
+TEST_F(PanelTest, AnObserverTriesGetsOnly) {
+  const char* wat = R"wat((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "{\22ok\22:true}")
+  (func (export "goober_route_look") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 11)))
+    (i32.const 0))
+  (func (export "goober_route_poke") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 11)))
+    (i32.const 0))
+))wat";
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"tryme","domains":["*"],"routes":{"http":{
+      "/look":{"get":{"name":"look","public":true}},"/poke":{"post":{"name":"poke","public":true}}}}})",
+                                   wat, &err))
+      << err;
+  std::string watcher = sign_in("watcher@example.com");
+  ASSERT_FALSE(watcher.empty());
+  auto look = api(watcher, "route_try", R"({"domain":"localhost","box":"tryme","path":"/look"})");
+  EXPECT_EQ(look.status, 200) << look.body;
+  EXPECT_NE(look.body.find("\"status\":200"), std::string::npos) << look.body;
+  auto poke = api(watcher, "route_try", R"({"domain":"localhost","box":"tryme","path":"/poke","method":"post"})");
+  EXPECT_EQ(poke.status, 403) << poke.body;
+  auto tool = api(watcher, "route_try", R"({"domain":"localhost","box":"tryme","tool":"x"})");
+  EXPECT_EQ(tool.status, 403) << tool.body;
+  // The panel is look-only for an owner too.
+  std::string boss = sign_in("boss@example.com");
+  EXPECT_EQ(api(boss, "route_try", R"({"domain":"localhost","box":"tryme","path":"/poke","method":"post"})").status, 403);
+}

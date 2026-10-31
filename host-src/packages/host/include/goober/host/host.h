@@ -435,7 +435,18 @@ class Host {
   };
   // The mail route that claims an address, with its params; nullopt with `why` when none does
   // (or its token is forged or expired).
-  std::optional<MailMatch> match_mail(const std::string& address, std::string* why);
+  // `only` looks in that one box version alone (route_try's dark versions), not the live boxes.
+  std::optional<MailMatch> match_mail(const std::string& address, std::string* why,
+                                      std::shared_ptr<const boxes::ActiveBox> only = nullptr);
+  // The call a mail route gets for one message (024 § 4), as the MTA hook builds it: the sender
+  // verified by DKIM or not at all, its user id, and the message's parts; fills `log`.
+  boost::json::object mail_route_doc(const MailMatch& m, const mail::inbound::Headers& headers, const std::string& body,
+                                     const mail::inbound::Message& message, const std::string& envelope_from, int64_t size,
+                                     bool automatic, boost::json::array attachments, const std::string& request_id,
+                                     boost::json::object* log);
+  // What the sending server hears for a mail route's answer: discard (delivered), or a reject
+  // with its SMTP status; `outcome` is delivered, box_rejected, or box_deferred.
+  static boost::json::object mail_hook_reply(const runtime::wasm::CallResult& r, std::string* outcome);
   int prune_mail(int64_t now_ms);
   // Mail checks for operators (mail_check.cpp): the SMTP listener mail in runs on, as host_health
   // reports it ({"configured"} when mail in isn't), and where to set a postal address.

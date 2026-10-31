@@ -38,6 +38,13 @@ or DELETE runs on copies of the tenant's databases, thrown away after, and answe
 each table held before and after, and what it would have queued for delivery. Calls to other
 boxes are refused in a write's try, and nothing reaches anyone. When every route answers as
 it should for every kind of caller, version_promote {box, version}.
+A version's MCP tools and mail routes are tried the same way, always on copies (they may write):
+route_try {domain, box, version, tool: "add_note", arguments: {...}, as: {"email": ...}} (a tool
+acts for somebody; its input is checked against its type, and a tool the account's roles don't
+meet answers listed: false), and route_try {domain, box, version, mail: {to: "support@example.com",
+from: "Ada <ada@example.org>", subject, text, headers?}}, which answers the SMTP reply the sender
+would get (delivered, rejected with your error, or deferred). A try's mail sender is never
+verified, so from_user_id is null: test the verified path with real mail.
 Store database schemas first with schema_put. Then check box_logs, access_log, and db_query.
 Out of service: box_disable {box, why} stops every route, tool, timer, mail route, and job of
 a box, keeping its versions and data; box_enable {box} puts the same version back. To take

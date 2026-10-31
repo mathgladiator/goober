@@ -122,7 +122,7 @@ class RouteTryTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({
         "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
-        "domains": {"localhost": {"tenant": "playground"}},
+        "domains": {"localhost": {"tenant": "playground"}, "example.com": {"tenant": "playground"}},
         "operations": {"token": "test-token-0123456789"},
         "threads": {"network": 1, "boxes": 2}})",
                                     root, &err);
@@ -248,4 +248,74 @@ TEST_F(RouteTryTest, AWritesTryCantCallAnotherBox) {
   // For real, the call goes through.
   auto real = fetch(port, bhttp::verb::post, "/run-ping", {{"origin", "http://localhost"}});
   EXPECT_NE(real.body.find("pong"), std::string::npos) << real.body;
+}
+
+// A tool and a mail route tried as the site's /mcp and the MTA hook would call them: always on
+// copies (they may write), a tool as an account only, mail as nobody with its sender unverified.
+const char* kToolsAndMailManifest = R"({"box":"notes","domains":["*"],
+  "data":{"sqlite3":{"notes":{"schema":"tries1","database":"notes","pattern":"sql",
+    "tables":{"notes":{"read":true,"insert":true}}}}},
+  "routes":{"mcp":{"add":{"tool":{"description":"Adds a note.","requirements":[["member"]]}}},
+            "mail":{"notes@":{"receive":{"name":"hello","public":true}}}}})";
+
+TEST_F(RouteTryTest, ToolsAndMailRoutesAreTriedOnCopies) {
+  tool("schema_put", {{"schema", R"({"schema":"tries1","tables":{"notes":{"columns":{"text":{"type":"string"}}}}})"}});
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(kToolsAndMailManifest, notes_wat("one"), &err)) << err;
+  tool("role_grant", {{"tenant", "playground"}, {"email", "member@example.com"}, {"role", "member"}});
+  tool("role_grant", {{"tenant", "playground"}, {"email", "other@example.com"}, {"role", "editor"}});
+  auto count = [&]() -> int64_t {
+    auto r = tool("db_query", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "SELECT count(*) FROM notes"}});
+    return r.as_object().contains("rows") ? r.at("rows").at(0).at(0).as_int64() : 0;
+  };
+
+  // One kind of call at a time.
+  EXPECT_TRUE(try_route({{"path", "/x"}, {"tool", "add"}}).as_object().contains("error"));
+  // A tool acts for somebody; one whose roles fall short isn't listed, and the box doesn't run.
+  EXPECT_TRUE(try_route({{"tool", "add"}}).as_object().contains("error"));
+  auto hidden = try_route({{"tool", "add"}, {"as", bj::object{{"email", "other@example.com"}}}});
+  ASSERT_TRUE(hidden.as_object().contains("listed")) << json::dump(hidden);
+  EXPECT_EQ(hidden.at("listed"), false) << json::dump(hidden);
+  // A member's call runs on copies: the box's insert shows, the real table is untouched.
+  auto added = try_route({{"tool", "add"}, {"as", bj::object{{"email", "member@example.com"}}}});
+  ASSERT_FALSE(added.as_object().contains("error")) << json::dump(added);
+  EXPECT_EQ(added.at("status"), 201);
+  EXPECT_EQ(added.at("is_error"), false);
+  EXPECT_EQ(added.at("logs").at(0).at("text"), "adding a note");
+  EXPECT_EQ(added.at("used").at("notes").at("notes").at("insert"), true) << json::dump(added);
+  EXPECT_EQ(count(), 0);
+  // Arguments a tool without an input type doesn't take are refused as /mcp refuses them.
+  auto extra = try_route({{"tool", "add"}, {"arguments", bj::object{{"x", 1}}}, {"as", bj::object{{"email", "member@example.com"}}}});
+  EXPECT_EQ(extra.at("error"), "this tool takes no input") << json::dump(extra);
+
+  // Mail: the route's answer becomes the SMTP reply; the sender is never verified in a try.
+  auto mail = try_route({{"mail", bj::object{{"to", "notes@example.com"}, {"from", "Ada <ada@example.org>"},
+                                             {"subject", "Hello"}, {"text", "Hi there"}}}});
+  ASSERT_FALSE(mail.as_object().contains("error")) << json::dump(mail);
+  EXPECT_EQ(mail.at("route"), "hello");
+  EXPECT_EQ(mail.at("outcome"), "delivered");
+  EXPECT_EQ(mail.at("smtp").at("status"), 250);
+  EXPECT_EQ(mail.at("sender_verified"), false);
+  EXPECT_FALSE(mail.at("sender_why").is_null());
+  // An address no route claims is refused at RCPT, before any box runs.
+  auto nobody = try_route({{"mail", bj::object{{"to", "nobody@example.com"}, {"from", "ada@example.org"}, {"text", "x"}}}});
+  EXPECT_EQ(nobody.at("outcome"), "no_route") << json::dump(nobody);
+  EXPECT_EQ(nobody.at("smtp").at("status"), 550);
+  // Mail always arrives as nobody.
+  EXPECT_TRUE(try_route({{"mail", bj::object{{"to", "notes@example.com"}, {"from", "ada@example.org"}}},
+                         {"as", bj::object{{"email", "member@example.com"}}}})
+                  .as_object()
+                  .contains("error"));
+
+  // The access log marks both.
+  std::ifstream in(root / "storage" / "logs" / "access.log");
+  std::string line;
+  bool tool_marked = false, mail_marked = false;
+  while (std::getline(in, line)) {
+    if (line.find("\"try\":true") == std::string::npos) continue;
+    tool_marked |= line.find("\"tool\":\"add\"") != std::string::npos;
+    mail_marked |= line.find("\"mail_try\":\"delivered\"") != std::string::npos;
+  }
+  EXPECT_TRUE(tool_marked);
+  EXPECT_TRUE(mail_marked);
 }
