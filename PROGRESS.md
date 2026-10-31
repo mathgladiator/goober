@@ -634,6 +634,11 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] SPF isn't evaluated: mail authenticated only by SPF stays unverified. Untried against
       real providers' mail through Stalwart.
 
+### Deep links through sign-in (006 § 2)
+- [x] A gated page's `#fragment` survives signing in: the sign-in page's one hash-allowed
+      script puts `location.hash` into `return`, `safe_return` keeps a well-formed fragment,
+      and the final 303 lands on it; tests. Untried in a real browser.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

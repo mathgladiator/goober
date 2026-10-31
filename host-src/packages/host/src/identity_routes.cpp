@@ -57,6 +57,24 @@ code{font-size:.9em}ul{padding-left:20px}a{color:var(--accent)}
 blockquote{margin:12px 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}
 )css";
 
+// A deep link into a gated page (/docs/guide#install) reaches the sign-in page with its
+// fragment, which a browser keeps across the redirect but never sends: this copies it into the
+// sign-in form's return field, so the code form and the final redirect carry it. Allowed by its
+// hash in the page's CSP; without it, the person lands at the page's top, as before.
+constexpr const char* kKeepFragment =
+    "(function(){var h=location.hash;if(!h||h.length>257)return;"
+    "var f=document.querySelectorAll('input[name=\"return\"][data-fragment]');"
+    "for(var i=0;i<f.length;i++){if(f[i].value.indexOf('#')<0)f[i].value+=h;}})();";
+
+// 'sha256-…' for the CSP's script-src.
+const std::string& keep_fragment_hash() {
+  static const std::string hash = [] {
+    auto digest = base::sha256(kKeepFragment);
+    return "'sha256-" + base::base64_encode(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size())) + "'";
+  }();
+  return hash;
+}
+
 }  // namespace
 
 std::string Host::session_cookie_name() const {
@@ -120,7 +138,8 @@ Response Host::identity_page(const std::string& tenant, int status, const std::s
   res.headers.emplace_back("content-security-policy",
                            std::string(tenant_css ? "default-src 'none'; style-src 'self' 'unsafe-inline'"
                                                   : "default-src 'none'; style-src 'unsafe-inline'") +
-                               "; form-action 'self'" +
+                               // Only the one script that keeps a deep link's fragment, by its hash.
+                               "; script-src " + keep_fragment_hash() + "; form-action 'self'" +
                                (form_action_extra.empty() ? "" : " " + form_action_extra) +
                                "; frame-ancestors 'none'; base-uri 'none'");
   return res;
@@ -162,11 +181,11 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
            "</strong></p>" + (error.empty() ? "" : "<p class=\"error\">" + html_escape(error) + "</p>") +
            "<form method=\"post\" action=\"/identity/email/start\"><label for=\"email\">Email</label>"
            "<input id=\"email\" type=\"email\" name=\"email\" required autofocus autocomplete=\"email\">"
-           "<input type=\"hidden\" name=\"return\" value=\"" + html_escape(ret) + "\">" +
+           "<input type=\"hidden\" name=\"return\" data-fragment value=\"" + html_escape(ret) + "\">" +
            (as_host ? "<input type=\"hidden\" name=\"as\" value=\"host\">" : "") +
            "<button>Email me a code</button></form>"
            "<p class=\"muted\">We'll email you a six-digit code to type here. Nothing to remember.</p>" +
-           local_note();
+           local_note() + "<script>" + kKeepFragment + "</script>";
   };
   // "By continuing, you accept the terms" (029 § 8), when the tenant has terms; never for the host.
   const auto& tenant_cfg = cfg->tenant(tenant);

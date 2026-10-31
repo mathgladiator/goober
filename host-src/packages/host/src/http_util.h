@@ -14,13 +14,23 @@ namespace goober::host {
 
 // Only a path on this site: no scheme, no "//host", and no byte a browser would strip or
 // reinterpret (tabs, spaces, controls, backslashes), so "/\t/evil.com" can't become "//evil.com".
+// A fragment ("/docs/guide#install", so a deep link survives signing in) is kept when it is at
+// most 256 of RFC 3986's fragment characters; any other fragment is dropped, the path kept.
 inline std::string safe_return(std::string_view r) {
-  if (r.empty() || r.size() > 2048 || r[0] != '/' || r.starts_with("//")) return "/";
-  for (char c : r) {
+  std::string_view path = r.substr(0, r.find('#'));
+  std::string_view fragment = r.size() > path.size() ? r.substr(path.size() + 1) : std::string_view();
+  if (path.empty() || path.size() > 2048 || path[0] != '/' || path.starts_with("//")) return "/";
+  for (char c : path) {
     unsigned char u = static_cast<unsigned char>(c);
     if (u <= 0x20 || u == 0x7f || c == '\\') return "/";
   }
-  return std::string(r);
+  bool keep = !fragment.empty() && fragment.size() <= 256;
+  for (char c : fragment) {
+    // unreserved, pct-encoded's "%", sub-delims, ":", "@", "/", "?" (RFC 3986 § 3.5)
+    keep = keep && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                    std::string_view("-._~%!$&'()*+,;=:@/?").find(c) != std::string_view::npos);
+  }
+  return keep ? std::string(path) + "#" + std::string(fragment) : std::string(path);
 }
 
 // A browser's state-changing request came from a page of this origin (scheme, host, and
