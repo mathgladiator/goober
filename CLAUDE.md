@@ -190,6 +190,11 @@ Read these before doing design work:
     a call does, no preview, half changes, concurrent edits, no undo), the practices per kind of change
     (preview, review with widenings, route_try, staging, if_etag, snapshots, version_health,
     whats_new), what was built overnight on 2026-10-31, and six decisions for the human.
+  - `design/machine/041.SchemaEvolution.md`: 420 on direct SQL: `"follows"` names a schema's previous
+    version; each change classified (expansion, contraction, indexing, emulated, forced, refused);
+    tombstones keep older boxes' SQL working; a person approves drops and forced steps in the panel;
+    upgrade boxes (`routes.upgrade`, rows only) run by `upgrade_dry_run` and `upgrade_start`, snapshot
+    first; departures from 420 and six decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
