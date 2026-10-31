@@ -120,6 +120,16 @@ TEST_F(HostTest, StaticContentThroughMcpIsServedAndPersisted) {
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/", "localhost", "", "", r.etag).status, 304);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/img/dot.png").content_type, "image/png");
   EXPECT_EQ(*base::read_file(root / "storage/content/playground/index.html"), "<h1>home</h1>");
+  // if_etag: "none" over an existing file, or a stale etag, writes nothing; the stored one writes.
+  auto file_etag = std::string(v.at("result").at("structuredContent").at("file_etag").as_string());
+  EXPECT_TRUE(tool("content_put", {{"tenant", "playground"}, {"path", "index.html"}, {"text", "x"}, {"if_etag", "none"}})
+                  .at("result").at("isError").as_bool());
+  EXPECT_TRUE(tool("content_put", {{"tenant", "playground"}, {"path", "index.html"}, {"text", "x"}, {"if_etag", "\"stale\""}})
+                  .at("result").at("isError").as_bool());
+  EXPECT_FALSE(tool("content_put", {{"tenant", "playground"}, {"path", "index.html"}, {"text", "<h1>home</h1>"}, {"if_etag", file_etag}})
+                   .at("result").at("isError").as_bool());
+  EXPECT_FALSE(tool("content_put", {{"tenant", "playground"}, {"path", "new.txt"}, {"text", "n"}, {"if_etag", "none"}})
+                   .at("result").at("isError").as_bool());
 
   auto list = tool("content_list", {{"tenant", "playground"}});
   EXPECT_NE(std::string(list.at("result").at("content").at(0).at("text").as_string()).find("img/dot.png"),

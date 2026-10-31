@@ -638,10 +638,14 @@ void Host::register_content_tools() {
        "<!--#include name-->, with no page re-put, and their body_etags change (their file_etags don't). Links may carry data-match=\"/places\" (that path and "
        "below), data-match-exact=\"/\", or data-key=\"x\" (a page's <meta name=\"nav-key\" content=\"x\">): the "
        "best fit for each request gets aria-current=\"page\" and class active. The previous version is kept "
-       "(ten in all). Answers file_etag and previous_etag. There is no if_etag: read partial_get's file_etag first, "
-       "and compare previous_etag with it after. Try a change first with page_render's partials (stores nothing). "
-       "A changing tool.",
-       object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}, {"html", string_property("The HTML, as served.")}},
+       "(ten in all). Pass if_etag (partial_get's file_etag, or \"none\" for a new one) so you never overwrite a "
+       "teammate's change made since you read it. Answers file_etag and previous_etag. Try a change first with "
+       "page_render's partials (stores nothing). A changing tool.",
+       object_schema({{"tenant", tenant_prop},
+                      {"name", partial_name_prop},
+                      {"html", string_property("The HTML, as served.")},
+                      {"if_etag", string_property("Write only if the stored partial has this file_etag (partial_get, "
+                                                  "partial_list, list_etags); \"none\" writes only a new one.")}},
                      {"tenant", "name", "html"}),
        [this, partial_file, versions_of, check_name](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -650,6 +654,9 @@ void Host::register_content_tools() {
          if (!tenant || !name || !html) return ToolResult::fail("tenant, name, and html are required");
          if (!check_name(*name)) return ToolResult::fail("a partial's name is 1 to 64 of [a-z0-9_-], optionally ending @auth");
          if (html->size() > 256 * 1024) return ToolResult::fail("a partial is at most 256 KiB");
+         if (auto refused = etag_refusal(*content_, *tenant, partial_file(*name), arg(args, "if_etag"), "partial")) {
+           return ToolResult::fail(*refused);
+         }
          std::string err;
          auto old = content_->get(*tenant, partial_file(*name));
          if (old) {
@@ -730,8 +737,12 @@ void Host::register_content_tools() {
        }});
   mcp_->add_tool(
       {"partial_delete", "Removes a shared partial, live at once: its markers then render empty. Its kept versions "
-                         "stay, so partial_get {version} and partial_put can bring it back. A changing tool.",
-       object_schema({{"tenant", tenant_prop}, {"name", partial_name_prop}}, {"tenant", "name"}),
+                         "stay, so partial_get {version} and partial_put can bring it back. With if_etag, only if it "
+                         "hasn't changed since you read it. A changing tool.",
+       object_schema({{"tenant", tenant_prop},
+                      {"name", partial_name_prop},
+                      {"if_etag", string_property("Delete only if the stored partial's file_etag is this.")}},
+                     {"tenant", "name"}),
        [this, partial_file, check_name](const bj::object& args) {
          auto tenant = arg(args, "tenant");
          auto name = arg(args, "name");
@@ -739,6 +750,9 @@ void Host::register_content_tools() {
          std::string err;
          auto old = content_->get(*tenant, partial_file(*name));
          if (!old) return ToolResult::fail("no partial " + *name);
+         if (auto refused = etag_refusal(*content_, *tenant, partial_file(*name), arg(args, "if_etag"), "partial")) {
+           return ToolResult::fail(*refused);
+         }
          char stamp[32];
          std::snprintf(stamp, sizeof stamp, "%015lld", static_cast<long long>(base::now_unix_ms()));
          if (!content_->put(*tenant, "_partials/_versions/" + *name + "/" + stamp + ".html", old->data, &err) ||

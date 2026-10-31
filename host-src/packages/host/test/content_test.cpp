@@ -391,6 +391,15 @@ TEST_F(SiteRoutesTest, OnePartialWriteUpdatesEveryPage) {
   auto put = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", nav1}});
   ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
   EXPECT_TRUE(put.at("previous_etag").is_null());
+  // if_etag keeps a teammate's write: a stale etag, or "none" over an existing partial, writes nothing.
+  std::string etag(put.at("file_etag").as_string());
+  auto stale = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", "<nav>x</nav>"}, {"if_etag", "\"old\""}});
+  ASSERT_TRUE(stale.as_object().contains("error"));
+  EXPECT_NE(std::string(stale.at("error").as_string()).find("nothing written"), std::string::npos);
+  EXPECT_TRUE(tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", "<nav>x</nav>"}, {"if_etag", "none"}})
+                  .as_object().contains("error"));
+  EXPECT_TRUE(tool("partial_delete", {{"tenant", "playground"}, {"name", "nav"}, {"if_etag", "\"old\""}}).as_object().contains("error"));
+  // The matching etag writes: the second partial_put below passes it.
   tool("page_put", {{"tenant", "playground"}, {"path", "/"}, {"format", "document"},
                     {"body", "<!doctype html><body><!--#include nav--><h1>Home</h1></body>"}});
   std::string err;
@@ -429,7 +438,7 @@ TEST_F(SiteRoutesTest, OnePartialWriteUpdatesEveryPage) {
 
   // One write: every page has the new nav, and new ETags.
   const std::string nav2 = R"(<nav><a href="/" data-match-exact="/">Home</a> <a href="/jobs" data-match="/jobs">All jobs</a></nav>)";
-  auto second = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", nav2}});
+  auto second = tool("partial_put", {{"tenant", "playground"}, {"name", "nav"}, {"html", nav2}, {"if_etag", etag}});
   EXPECT_EQ(second.at("previous_etag"), put.at("etag"));
   auto home2 = fetch(port, bhttp::verb::get, "/");
   EXPECT_NE(home2.body.find("All jobs"), std::string::npos);

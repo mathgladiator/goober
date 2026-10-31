@@ -442,18 +442,28 @@ void Host::register_tools() {
        "application/atom+xml, .webmanifest, .json, .xml, .svg, ...). Both text and base64 are stored byte for byte, "
        "but a tool-call layer may change text on its way here (CRLF becoming LF): when the exact bytes matter, give "
        "sha256 and the write is refused unless what arrived matches. Returns path, bytes, sha256, content_type, and "
-       "file_etag (the stored file's; etag is the same value). There is no if_etag here: for pages, templates, and "
-       "partials use page_put, template_put, and partial_put, which take it.",
+       "file_etag (the stored file's; etag is the same value). Pass if_etag (content_get's or list_etags' file_etag, "
+       "or \"none\" for a new file) so you never overwrite a teammate's change made since you read it.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("A relative path, like index.html.")},
                       {"text", string_property("The file's contents as text.")},
                       {"base64", string_property("The file's contents as base64, for binary files.")},
-                      {"sha256", string_property("The SHA-256 (hex) the bytes must have, or nothing is written.")}},
+                      {"sha256", string_property("The SHA-256 (hex) the bytes must have, or nothing is written.")},
+                      {"if_etag", string_property("Write only if the stored file has this file_etag; \"none\" writes "
+                                                  "only a new file.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
          auto tenant = arg(args, "tenant");
          auto path = arg(args, "path");
          if (!tenant || !path) return ToolResult::fail("tenant and path are required");
+         if (auto want = arg(args, "if_etag")) {
+           auto got = content_->get(*tenant, *path);
+           std::string current = got ? got->etag : "none";
+           if (*want != current && "\"" + *want + "\"" != current) {
+             return ToolResult::fail("nothing written: if_etag is " + *want + " but the file's file_etag is " + current +
+                                     " (someone changed it since you read it)");
+           }
+         }
          auto text = arg(args, "text");
          auto b64 = arg(args, "base64");
          if (bool(text) == bool(b64)) return ToolResult::fail("give exactly one of text or base64");

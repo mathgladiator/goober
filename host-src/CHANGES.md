@@ -6,6 +6,7 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- partial_put, partial_delete, and content_put take if_etag (the file_etag you read, or "none" for a new one): no write lands over a teammate's change made since you read it. Every content write now can.
 - Every version_upload (live, activate: false, dry_run) answers review and widens: each change that adds reach (a grant, a write, a route made public, a new mail address, service, From address, domain, browser caching, flag value), in sentences; a person approving a held upload sees them. version_diff {box, from?, to?} compares stored versions; version_list shows stored_at.
 - version_health {box, minutes?}: after a version goes live, compares each route's failures and latency with the version it replaced, and names the version_promote that rolls back. Nothing rolls back by itself.
 - content_deploy {dry_run: true} runs every check, renders each URL signed out from the would-be files, lints it, and answers status, body_etag, and problems; nothing is stored, and it never waits for approval.
