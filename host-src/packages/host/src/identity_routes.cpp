@@ -332,6 +332,36 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
     if (who && !who->host) identity_->revoke_grant(tenant, who->user.user_id, get(form, "grant"), now);
     return finish(redirect("/identity/account"), R"({"identity":"grant_revoked"})");
   }
+  // Deleting one's own account (021 § 6): a typed confirmation, then signed out for good.
+  if (path == "/identity/account/delete" && is_post && !host_only) {
+    auto who = browser_session(req, tenant);
+    if (!who || who->host) return finish(redirect("/identity/sign-in?return=%2Fidentity%2Faccount"), "");
+    std::string typed = get(form, "confirm");
+    while (!typed.empty() && (typed.back() == ' ' || typed.back() == '\t')) typed.pop_back();
+    while (!typed.empty() && (typed.front() == ' ' || typed.front() == '\t')) typed.erase(0, 1);
+    if (typed != "DELETE") {
+      return finish(page(400, "Delete your account",
+                         "<h1>Not deleted</h1><p>To delete your account, type <strong>DELETE</strong> in the box, in "
+                         "capitals.</p><p><a href=\"/identity/account\">Back to your account</a></p>"),
+                    R"({"identity":"delete_unconfirmed"})");
+    }
+    std::string why;
+    auto gone = delete_account(tenant, who->user.user_id, "self", "user:" + std::to_string(who->user.user_id),
+                               "the person deleted it from their account page", &why);
+    if (!gone) {
+      return finish(page(400, "Delete your account", "<h1>Not deleted</h1><p>" + html_escape(why) + "</p>"),
+                    R"({"identity":"delete_refused"})");
+    }
+    auto res = page(200, "Account deleted",
+                    "<h1>Your account is deleted</h1><p>Your address, roles, sessions, and the apps and agents "
+                    "signed in as you are gone from <strong>" + html_escape(domain) +
+                    "</strong>. The site's own records about you are erased within 30 days.</p>"
+                    "<p class=\"muted\">If you asked not to get mail from this site, that choice is kept, so it "
+                    "stays that way.</p><p><a href=\"/\">Back to the site</a></p>");
+    res.headers.emplace_back("set-cookie", cookie("", 0));
+    return finish(std::move(res), json::dump(bj::object{{"identity", "account_deleted"},
+                                                        {"user_id", std::to_string(gone->user_id)}}));
+  }
   if ((path == "/identity/me" || path == "/identity/account") && is_get) {
     auto who = path == "/identity/me" ? signed_in(req, tenant) : browser_session(req, tenant);
     if (path == "/identity/me") {
@@ -421,7 +451,16 @@ void Host::handle_identity(const Request& req, const Finish& finish, const std::
                            html_escape(domain) + "</strong> &middot; user " + std::to_string(who->user.user_id) +
                            " in realm <code>" + html_escape(who->user.realm) + "</code></p><p><strong>Roles</strong></p><ul>" +
                            roles + "</ul>" + apps + (who->host ? std::string() : account_mail_section(tenant, who->user.email)) +
-                           "<form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>"
+                           "<form method=\"post\" action=\"/identity/sign-out\"><button>Sign out</button></form>" +
+                           (who->host ? std::string()
+                                      : "<details class=\"danger\"><summary>Delete my account</summary><p>This erases "
+                                        "your account on " + html_escape(domain) +
+                                        " for good: your address, roles, sessions, and every app and agent signed in "
+                                        "as you. The site erases its own records about you within 30 days. It can't "
+                                        "be undone.</p><form method=\"post\" action=\"/identity/account/delete\">"
+                                        "<label for=\"confirm\">Type DELETE to confirm</label><input id=\"confirm\" "
+                                        "name=\"confirm\" required autocomplete=\"off\" pattern=\"DELETE\">"
+                                        "<button class=\"secondary\">Delete my account</button></form></details>") +
                            "<p class=\"muted\"><a href=\"/\">Back to the site</a></p>"),
                   "");
   }

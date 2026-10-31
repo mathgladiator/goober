@@ -96,6 +96,14 @@ class Host {
   // Identity routes (design/machine/021.IdentityEvents.md): delivers sign-in events to the boxes
   // that declare them, and hourly prunes the realms. The timer thread calls it each second.
   void identity_tick(int64_t now_ms);
+  // Deleting an account (design/machine/021.IdentityEvents.md § 6): erased in the realm, the
+  // audit log told, boxes told by their routes.identity "deleted". `how` is self or operator.
+  std::optional<identity::Deletion> delete_account(const std::string& tenant, int64_t user_id, const std::string& how,
+                                                   const std::string& actor, const std::string& why_given,
+                                                   std::string* why);
+  // Each deletion in a tenant's realm with each box's state: acknowledged, pending, failing,
+  // missed (its route came after), or no_route (it holds the tenant's data and has no route).
+  boost::json::object deletion_report(const std::string& tenant, int64_t now_ms);
 
   // The outbox (035; design/machine/015.Network.md): delivers what's due and returns how
   // many were delivered. A host thread calls it every two seconds; tests call it directly.
@@ -658,6 +666,7 @@ class Host {
 
   // Invites (invites.cpp; 029 § 2).
   void register_invite_tools();
+  void register_deletion_tools();
   std::string invites_call(struct CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                            const boost::json::value& request);
   struct HttpOut deliver_outbox_invite(const std::string& tenant, const std::string& body, const std::string& key,

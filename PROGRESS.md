@@ -549,6 +549,14 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       no tool sets it (the human's choice).
 - [ ] `mail_domain_check` untried against real DNS and SES.
 
+### Phase 33: deleting an account (021 § 6)
+- [x] The person deletes their account on `/identity/account` (typed `DELETE`), or an operator
+      with `user_delete` (audited, tenant-scoped); sessions, grants, roles, and codes end; the
+      address leaves the realm; the id stays a tombstone; the same address may sign up anew.
+- [x] `routes.identity` `deleted`, called as nobody without the address; each box's answer is
+      its acknowledgement; `deletions` and the panel show who hasn't, and what is overdue past
+      30 days; `box_guide`; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

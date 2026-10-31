@@ -143,6 +143,9 @@ void migrate(sqlite::Db& db) {
   if (!has("tokens", "rotated_at")) db.exec("ALTER TABLE tokens ADD COLUMN rotated_at INTEGER");
   if (!has("events", "invite_id")) db.exec("ALTER TABLE events ADD COLUMN invite_id INTEGER");
   if (!has("events", "box")) db.exec("ALTER TABLE events ADD COLUMN box TEXT");
+  if (!has("users", "deleted_at")) db.exec("ALTER TABLE users ADD COLUMN deleted_at INTEGER");
+  db.exec("CREATE TABLE IF NOT EXISTS deletions (event_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, "
+          "at INTEGER NOT NULL, how TEXT NOT NULL)");
   if (!has("users", "verified_at")) {
     db.exec("ALTER TABLE users ADD COLUMN verified_at INTEGER");
     // Before the column, an account that ever signed in had proved its address.

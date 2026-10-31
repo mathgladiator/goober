@@ -293,7 +293,7 @@ int Identity::prune(std::string_view realm_name, int64_t now_ms) {
   // Invites never taken up: the address was never proved, so the account doesn't stay.
   Transaction tx(r.db);
   std::vector<std::pair<int64_t, std::string>> stale;
-  sqlite::Stmt find(r.db, "SELECT id, email FROM users WHERE verified_at IS NULL AND created_at < ?");
+  sqlite::Stmt find(r.db, "SELECT id, email FROM users WHERE verified_at IS NULL AND deleted_at IS NULL AND created_at < ?");
   find.bind(1, now_ms - kUnverifiedTtlMs);
   while (find.step()) stale.emplace_back(find.int64(0), find.text(1));
   for (const auto& [id, email] : stale) {

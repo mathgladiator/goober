@@ -44,6 +44,16 @@ inline constexpr std::string_view kFirstVerified = "first-verified";  // an addr
 inline constexpr std::string_view kSignedIn = "signed-in";            // every sign-in by an emailed code
 inline constexpr std::string_view kInviteAccepted = "invite-accepted";  // design/machine/029.Invites.md § 2.5
 inline constexpr std::string_view kInviteDeclined = "invite-declined";
+inline constexpr std::string_view kDeleted = "deleted";  // an account erased (021 § 6); its event holds no address
+
+// A deleted account, kept for good without its address, so boxes can be held to erasing their
+// rows (021 § 6).
+struct Deletion {
+  int64_t event_id = 0;  // the "deleted" event's id in the realm
+  int64_t user_id = 0;
+  int64_t at_ms = 0;
+  std::string how;  // "self" (the person, on their account page) or "operator"
+};
 
 // Invites (029 § 2): one reminder after 7 days, lapsed at 30, and the address cools 90 days.
 inline constexpr int64_t kInviteTtlMs = 30LL * 24 * 3600 * 1000;
@@ -100,7 +110,7 @@ struct SignIn {
 // One identity event, appended in the same transaction as the sign-in that caused it.
 struct Event {
   int64_t id = 0;  // increasing within the realm, never reused
-  std::string kind;  // kFirstVerified, kSignedIn, kInviteAccepted, or kInviteDeclined
+  std::string kind;  // kFirstVerified, kSignedIn, kInviteAccepted, kInviteDeclined, or kDeleted
   int64_t user_id = 0;  // 0 for invite-declined: nobody signed in
   std::string email;
   int64_t at_ms = 0;
@@ -276,6 +286,20 @@ class Identity {
   // kEventTtlMs, and accounts never proved within kUnverifiedTtlMs (with their roles).
   // Returns how many accounts were deleted.
   int prune(std::string_view realm, int64_t now_ms);
+
+  // ---- deleting an account (design/machine/021.IdentityEvents.md § 6)
+  // Erases a user: ends every session, token, and grant; drops roles, pending codes, and open
+  // invites to the address; replaces the address everywhere the realm keeps it (the account,
+  // its events, its audit rows, its invites) with "deleted:$id". The id stays, never reused and
+  // never signed in again; the same address may sign up again as a new user. Appends a
+  // "deleted" event (no address) and a lasting deletions row. `how` is "self" or "operator";
+  // `by` names who, for the audit. Refused in the host realm (operators are config).
+  std::optional<Deletion> delete_user(std::string_view realm, int64_t user_id, std::string_view how,
+                                      std::string_view by, int64_t now_ms, std::string* why);
+  // The live (not deleted) user with this address, with their roles.
+  std::optional<User> find_user(std::string_view realm, std::string_view email);
+  // Every deletion in the realm, newest first, at most `limit`.
+  std::vector<Deletion> deletions(std::string_view realm, int limit);
 
   // Identity events after `after_id`, oldest first, at most `limit`; and the newest event's id
   // (0 when there is none).

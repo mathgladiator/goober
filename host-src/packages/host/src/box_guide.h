@@ -151,6 +151,7 @@ Called by the host after the sign-in commits, as the person who signed in ({!use
 theirs). The body is {"event", "event_id", "user_id", "email", "at"}; event_id is the same on
 every retry, so record it if you must act once. Set up a new person's rows, or send a welcome
 through the mail service. Failures are retried in order, then given up after 8 tries.
+"deleted" is a person's account erased: see Deleted accounts below.
 
 ## Data
 
@@ -411,6 +412,24 @@ revoked, invite_id?, can_invite, why?}; goober_call("club", "revoke", {"invite_i
 one of yours. Hear the answers on identity routes: "routes": {"identity": {"invite-accepted":
 {"name": "joined"}, "invite-declined": {"name": "declined"}}}; the body adds invite_id and box,
 and invite-declined is called as nobody (user_id null). Don't mail invites yourself.
+
+## Deleted accounts (routes.identity "deleted")
+
+A person may delete their account (their account page, or an operator's user_delete). The
+host erases their address, roles, and sessions at once and keeps the user id as a tombstone.
+Every box that keeps rows about people must then erase or anonymize that person's rows within
+30 days, and say so by declaring the route:
+   "routes": {"identity": {"deleted": {"name": "forget_user"}}}
+- The body is {"event": "deleted", "event_id", "user_id", "at"}: no address, and the call is
+  made as nobody ({!user_id} is empty; use the body's user_id). Delete or blank every row keyed
+  by that user_id in each database the box owns, and anything it keeps about them (their
+  address too, if you stored one). Be idempotent on event_id: a call may come twice.
+- Answering under 500 (or not answering) is your acknowledgement; a failure is retried 8 times.
+  The operators' deletions tool and the panel list each deletion and every box holding the
+  tenant's data: acknowledged, pending, failing, missed (the route was added later; erase by
+  hand), or no_route. Past 30 days, a box that hasn't acknowledged is overdue.
+- The same address may sign up again later. It is a new person with a new id: never re-link
+  old rows to it.
 
 ## Receiving mail
 

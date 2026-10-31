@@ -167,3 +167,59 @@ TEST_F(IdentityEventsTest, AFailingRouteRetriesInOrderThenGivesUp) {
   host->identity_tick(t + 2000);
   EXPECT_EQ(count("grumpy"), 2);
 }
+
+// A deletion (021 § 6) reaches every box with a "deleted" route as nobody, with the user's id
+// and no address; each answer is that box's acknowledgement. A box holding the tenant's data
+// with no such route shows as no_route.
+TEST_F(IdentityEventsTest, DeletionsReachBoxesAndAreAcknowledged) {
+  const char* kEraserWat = R"wat((module
+    (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "w")
+    (data (i32.const 16) "INSERT INTO heard (what) VALUES (?)")
+    (data (i32.const 64) "[\22erased\22]")
+    (func (export "goober_route_erase") (result i32)
+      (drop (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 35) (i32.const 64) (i32.const 10)))
+      (i32.const 0))
+  ))wat";
+  const char* kEraser = R"({"box":"eraser","domains":["*"],
+    "data":{"sqlite3":{"w":{"schema":"heard1","database":"heard","pattern":"sql",
+                            "tables":{"heard":{"read":true,"insert":true}}}}},
+    "routes":{"identity":{"deleted":{"name":"erase"}}}})";
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(kEraser, kEraserWat, &err)) << err;
+  ASSERT_TRUE(host->boxes().upload(kManifest, kWat, &err)) << err;  // greeter: data, no "deleted" route
+  host->identity_tick(kNow);
+  sign_in("ada@example.com", kNow + 1000);
+  host->identity_tick(kNow + 2000);
+  auto ada = host->identity().find_user("playground", "ada@example.com");
+  ASSERT_TRUE(ada);
+  std::string why;
+  auto gone = host->delete_account("playground", ada->user_id, "operator", "test", "testing", &why);
+  ASSERT_TRUE(gone) << why;
+
+  auto states = [&](int64_t now) {
+    std::map<std::string, std::string> out;
+    auto r = host->deletion_report("playground", now);
+    for (const auto& b : r.at("deletions").at(0).at("boxes").as_array()) {
+      out[std::string(b.at("box").as_string())] = std::string(b.at("state").as_string());
+    }
+    return std::pair{out, r};
+  };
+  auto before = states(gone->at_ms + 3000);
+  EXPECT_EQ(before.first["eraser"], "pending");
+  EXPECT_EQ(before.first["greeter"], "no_route");
+
+  host->identity_tick(kNow + 4000);
+  EXPECT_EQ(count("erased"), 1);
+  auto after = states(gone->at_ms + 5000);
+  EXPECT_EQ(after.first["eraser"], "acknowledged");
+  EXPECT_EQ(after.second.at("deletions").at(0).at("acknowledged"), false);  // greeter never can
+  EXPECT_EQ(after.second.at("deletions").at(0).at("overdue"), false);
+  // Past 30 days with a box not acknowledged, it is overdue.
+  auto late = states(gone->at_ms + 31LL * 24 * 3600 * 1000);
+  EXPECT_EQ(late.second.at("overdue"), 1);
+  // Delivered once.
+  host->identity_tick(kNow + 6000);
+  EXPECT_EQ(count("erased"), 1);
+}

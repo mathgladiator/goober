@@ -709,6 +709,7 @@ const views = {
           { label: 'Set', get: (op) => op.scope === 'all' ? '' : op.scope.set_by + ' · ' + fmt.time(op.scope.at_ms), cls: () => 'muted small' },
         ], o.operators), status),
       await approvalsCard(),
+      await deletionsCard(tenants),
       wideCard('Lift a mail block', unblockForm(tenants)),
     ];
   },
@@ -1030,6 +1031,27 @@ function pager(rows, before, next) {
 
 // Lifting a block takes a person here, with a statement of why (029 § 6): no tool can.
 // Approvals per connected agent (035): off by default; when on, the agent's changing calls wait here.
+// Deleted accounts that some box hasn't acknowledged (021 § 6): each box holding the tenant's
+// data must erase the person's rows within 30 days; past that it is overdue.
+async function deletionsCard(tenants) {
+  const reports = await Promise.all(tenants.map((t) => api('deletions', { tenant: t }).catch(() => null)));
+  const rows = reports.filter(Boolean).flatMap((r) => r.deletions.filter((d) => !d.acknowledged)
+    .map((d) => ({ tenant: r.tenant, ...d })));
+  const waiting = (d) => d.boxes.filter((b) => b.state !== 'acknowledged');
+  return wideCard('Deleted accounts not yet erased everywhere', h('p', { class: 'muted small' },
+    'When a person deletes their account, every box holding the site\'s data must erase their rows within 30 days. ' +
+    'A box acknowledges by answering its routes.identity "deleted" route; a box with no such route can\'t.'),
+  rows.length ? table([
+    { label: 'Tenant', get: (d) => d.tenant, cls: () => 'mono' },
+    { label: 'User', get: (d) => d.user_id, cls: () => 'mono' },
+    { label: 'Deleted', get: (d) => fmt.time(Date.parse(d.at)), cls: () => 'muted' },
+    { label: 'Days', num: true, get: (d) => d.age_days, cls: (d) => d.overdue ? 'err' : '' },
+    { label: 'By', get: (d) => d.how, cls: () => 'muted' },
+    { label: 'Waiting on', get: (d) => waiting(d).map((b) => `${b.box} (${b.state.replace('_', ' ')})`).join(', '),
+      cls: (d) => d.overdue ? 'err' : '' },
+  ], rows) : h('p', { class: 'muted' }, 'None: every deletion has been acknowledged by every box.'));
+}
+
 async function approvalsCard() {
   const a = await api('approvals');
   const status = h('p', { class: 'muted small' });
