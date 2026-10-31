@@ -28,7 +28,7 @@ void Host::register_mail_out_tools() {
       {"mail_activity",
        "A tenant's recent mail, newest last: what arrived for its addresses (from, to, which box and route took "
        "it, and the answer: delivered, refused, deferred, dropped as automatic) and what its boxes sent (to, from, "
-       "subject, sent or failed and why). Use it to answer \"did my mail arrive?\" and \"did my reply go?\". "
+       "subject, sent or failed and why; test: true for mail_template_send_test). Use it to answer \"did my mail arrive?\" and \"did my reply go?\". "
        "Mail a box queued but the host hasn't sent yet is in outbox_list. Logs keep addresses only as hashes (032): "
        "each entry shows the address's domain and hash; give email to see only that address's mail, by name.",
        object_schema({{"tenant", string_property("A tenant name from the host config.")},
@@ -100,9 +100,10 @@ void Host::register_mail_out_tools() {
                         {"outcome", str(o, "status")}};
            if (auto f = str(o, "from_address"); !f.empty()) e["from"] = f;
            else if (auto g = who(o, "from"); !g.empty()) e["from"] = g;
-           for (const char* k : {"in_reply_to", "error", "message_id"}) {
+           for (const char* k : {"in_reply_to", "error", "message_id", "via"}) {
              if (auto s = str(o, k); !s.empty()) e[k] = s;
            }
+           if (auto* t = o.if_contains("test"); t && t->is_bool() && t->as_bool()) e["test"] = true;
            out.emplace_back(when(o), std::move(e));
          }
          std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });

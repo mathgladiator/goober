@@ -70,6 +70,7 @@ struct Mail {
   std::string list_unsubscribe = {};  // "<https://...>", or ""
   std::string list_id = {};           // "<digest.kc.example.com>" for a list's mail (RFC 2919), or ""
   std::string tenant = {};            // whose box sent it, for logs/mail.log; "" for host mail
+  bool test = false;                  // an operator's mail_template_send_test, marked so in logs/mail.log
   // A calendar invite (RFC 5546): its text/calendar body, sent beside the text and HTML and as
   // invite.ics, with its METHOD (REQUEST or CANCEL).
   std::string calendar = {};

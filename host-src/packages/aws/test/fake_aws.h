@@ -153,6 +153,20 @@ class FakeAws {
       r.body = "{\"MessageId\":\"fake-" + std::to_string(mails_.size()) + "\"}";
       return r;
     }
+    // GetEmailIdentity: example.com is verified with three DKIM tokens; anything else is unknown.
+    if (req.method == "get" && req.path.starts_with("/v2/email/identities/")) {
+      std::string id = base::percent_decode(req.path.substr(21)).value_or("");
+      if (id != "example.com") {
+        r.status = 404;
+        r.headers.emplace_back("content-type", "application/json");
+        r.body = R"({"message":"Email identity )" + id + R"( does not exist."})";
+        return r;
+      }
+      r.headers.emplace_back("content-type", "application/json");
+      r.body = R"({"IdentityType":"DOMAIN","VerifiedForSendingStatus":true,"VerificationStatus":"SUCCESS",)"
+               R"("DkimAttributes":{"SigningEnabled":true,"Status":"SUCCESS","Tokens":["tok1","tok2","tok3"]}})";
+      return r;
+    }
     std::string path = base::percent_decode(req.path).value_or(req.path);
     auto slash = path.find('/', 1);
     std::string bucket = path.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);

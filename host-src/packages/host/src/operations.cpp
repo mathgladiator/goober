@@ -304,8 +304,8 @@ void Host::register_tools() {
                                      "content such as error-message/404.html.");
 
   mcp_->add_tool({"host_health",
-                  "Uptime, request count, storage path, boxes, startup notes, how mail leaves, and whether backups "
-                  "are healthy.",
+                  "Uptime, request count, storage path, boxes, startup notes, how mail leaves, whether backups "
+                  "are healthy, and whether the SMTP listener mail in runs on answers (smtp_listener).",
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array notes;
                     for (const auto& n : startup_notes_) notes.push_back(bj::value(n));
@@ -329,10 +329,14 @@ void Host::register_tools() {
                         no_postal.push_back(bj::value(e.tenant));
                       }
                     }
+                    bj::value postal_how = no_postal.empty() ? bj::value(nullptr)
+                                                             : bj::value(postal_address_how("$tenant"));
                     return ToolResult::ok(bj::object{{"version", std::string(kVersion)},
                                                      {"build", kBuildCommit},
                                                      {"ready", readiness(false).second},
                                                      {"tenants_without_postal_address", std::move(no_postal)},
+                                                     {"postal_address_how", std::move(postal_how)},
+                                                     {"smtp_listener", smtp_listener()},
                                                      {"boxes_loaded", std::move(loaded)},
                                                      {"uptime_ms", base::now_unix_ms() - started_ms_},
                                                      {"requests", requests_.load()},
@@ -765,6 +769,14 @@ void Host::register_tools() {
                                                {"mission", box->manifest.mission},
                                                {"domains", domains},
                                                {"routes", routes}});
+                      // Mail routes: the addresses the box takes (mail_route_check says who takes one).
+                      if (!box->manifest.mail.empty()) {
+                        bj::array mail;
+                        for (const auto& r : box->manifest.mail) {
+                          mail.push_back(bj::object{{"address", r.mail_address}, {"name", r.name}});
+                        }
+                        out.back().as_object()["mail"] = std::move(mail);
+                      }
                     }
                     return ToolResult::ok(std::move(out));
                   }});

@@ -233,6 +233,7 @@ MailOutcome MailQueue::deliver(const identity::Mail& mail) {
                   {"status", out.sent ? "sent" : "failed"}};
   if (!out.message_id.empty()) line["message_id"] = out.message_id;
   if (!mail.tenant.empty()) line["tenant"] = mail.tenant;
+  if (mail.test) line["test"] = true;
   // The tenant's own sending address, not a person's: kept as it is.
   if (!mail.from_address.empty()) line["from_address"] = mail.from_address;
   if (!mail.in_reply_to.empty()) line["in_reply_to"] = mail.in_reply_to;

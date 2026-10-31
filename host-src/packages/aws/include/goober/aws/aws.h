@@ -147,4 +147,19 @@ struct SesResult {
 SesResult ses_send(const SesMessage& message, const Credentials& creds, const std::string& region,
                    const std::filesystem::path& scratch, const std::string& endpoint = "");
 
+// SES v2 GetEmailIdentity: whether a domain or address may send, and its DKIM (Easy DKIM's three
+// CNAME tokens and their status). `exists` is false when SES doesn't know the identity.
+struct SesIdentity {
+  bool ok = false;      // SES answered (exists or not)
+  bool exists = false;
+  bool verified_for_sending = false;
+  std::string verification_status;  // SUCCESS, PENDING, FAILED, TEMPORARY_FAILURE, NOT_STARTED
+  std::string dkim_status;          // the same vocabulary
+  bool dkim_signing = false;
+  std::vector<std::string> dkim_tokens;
+  std::string error;
+};
+SesIdentity ses_identity(const std::string& identity, const Credentials& creds, const std::string& region,
+                         const std::filesystem::path& scratch, const std::string& endpoint = "");
+
 }  // namespace goober::aws

@@ -97,7 +97,9 @@ sudo tail -n 5 /srv/goober/host/storage/logs/mail.log                       # ma
 
 Or ask Grok to run `host_health`, which reports backups, how mail leaves, and startup notes,
 and `mail_activity` with the tenant (kcmeatup), which lists the site's mail in and out and
-what happened to each.
+what happened to each (a `mail_template_send_test` shows as `test`). `mail_domain_check` with
+kcmeatup.com checks the mail DNS (MX, SPF, DMARC, SES's DKIM) and says which records to add;
+`host_health`'s `smtp_listener` says whether Stalwart answers on port 25.
 **Mail needs your postal address.** Outreach, lists, and invites are refused until the host
 config names it (CAN-SPAM). `host_health` lists `tenants_without_postal_address`. On the server,
 edit `/srv/goober/host/host.json` and add, next to `domains`:

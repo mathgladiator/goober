@@ -193,5 +193,24 @@ TEST(Ses, SendsRawMail) {
   EXPECT_EQ(fake.refused_signatures(), 0);
 }
 
+TEST(Ses, ReadsAnIdentitysVerificationAndDkim) {
+  testing::FakeAws fake(kCreds);
+  auto dir = scratch("ses-identity");
+  auto id = ses_identity("example.com", kCreds, "us-east-1", dir, fake.endpoint());
+  ASSERT_TRUE(id.ok) << id.error;
+  EXPECT_TRUE(id.exists);
+  EXPECT_TRUE(id.verified_for_sending);
+  EXPECT_EQ(id.dkim_status, "SUCCESS");
+  EXPECT_EQ(id.dkim_tokens, (std::vector<std::string>{"tok1", "tok2", "tok3"}));
+  auto none = ses_identity("other.example", kCreds, "us-east-1", dir, fake.endpoint());
+  EXPECT_TRUE(none.ok) << none.error;
+  EXPECT_FALSE(none.exists);
+  fake.fail_next(1, 503);
+  auto down = ses_identity("example.com", kCreds, "us-east-1", dir, fake.endpoint());
+  EXPECT_FALSE(down.ok);
+  EXPECT_FALSE(down.error.empty());
+  EXPECT_EQ(fake.refused_signatures(), 0);
+}
+
 }  // namespace
 }  // namespace goober::aws

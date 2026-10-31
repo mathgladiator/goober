@@ -142,8 +142,8 @@ std::optional<Host::MailCheck> Host::check_mail_category(const std::string& tena
   const std::string& postal = cfg->tenant(tenant).postal_address;
   auto need_postal = [&]() -> bool {
     if (!postal.empty()) return true;
-    *why = category + " mail needs the tenant's postal address: set tenants." + tenant +
-           ".postal-address in the host config (CAN-SPAM requires one in commercial mail)";
+    *why = category + " mail needs the tenant's postal address (CAN-SPAM requires one in commercial mail): " +
+           Host::postal_address_how(tenant);
     return false;
   };
   if (category != "list" && !list.empty()) return *why = "list goes with \"category\": \"list\"", std::nullopt;
@@ -429,7 +429,7 @@ std::string Host::mail_subscribe_call(CallContext& ctx, const manifest::External
   auto cfg = config_.get();
   const std::string& postal = cfg->tenant(ctx.tenant).postal_address;
   if (postal.empty()) {
-    return fail("list mail needs the tenant's postal address: set tenants." + ctx.tenant + ".postal-address in the host config");
+    return fail("list mail needs the tenant's postal address: " + Host::postal_address_how(ctx.tenant));
   }
   std::string hash = address_hash(to);
   if (consent_->block_of(ctx.tenant, to)) return fail("blocked: " + to + " asked for no more mail from this site");

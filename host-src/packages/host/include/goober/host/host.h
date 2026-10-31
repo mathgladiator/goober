@@ -378,8 +378,16 @@ class Host {
   // (or its token is forged or expired).
   std::optional<MailMatch> match_mail(const std::string& address, std::string* why);
   int prune_mail(int64_t now_ms);
+  // Mail checks for operators (mail_check.cpp): the SMTP listener mail in runs on, as host_health
+  // reports it ({"configured"} when mail in isn't), and where to set a postal address.
+  boost::json::object smtp_listener();
+  static std::string postal_address_how(const std::string& tenant);
+  // Where the SMTP listener is looked for: 127.0.0.1:25, or another port in tests.
+  void set_smtp_listener_port(uint16_t port) { smtp_port_ = port; }
 
  private:
+  std::atomic<uint16_t> smtp_port_{25};
+  void register_mail_check_tools();
   void handle_mail_hook(const server::http::Request& req, const Finish& finish);
   std::string reply_key();
   std::string load_reply_key();

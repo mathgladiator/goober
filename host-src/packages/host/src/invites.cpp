@@ -190,8 +190,7 @@ std::optional<identity::Invite> Host::make_invite(const std::string& tenant, ide
   inv.email = base::to_lower(inv.email);
   if (tc.postal_address.empty()) {
     *code = "no_postal_address";
-    return *why = "invites need the tenant's postal address: set tenants." + tenant + ".postal-address in the host config",
-           std::nullopt;
+    return *why = "invites need the tenant's postal address: " + Host::postal_address_how(tenant), std::nullopt;
   }
   if (consent_->block_of(tenant, inv.email)) {
     return *code = "blocked", *why = inv.email + " asked for no invites or mail from this site", std::nullopt;
@@ -484,7 +483,7 @@ std::string Host::invites_call(CallContext& ctx, const manifest::ExternalService
     inv.inviter_kind = "site";
   }
   if (tc.postal_address.empty()) {
-    return fail("invites need the tenant's postal address: set tenants." + ctx.tenant + ".postal-address in the host config");
+    return fail("invites need the tenant's postal address: " + Host::postal_address_how(ctx.tenant));
   }
   if (consent_->block_of(ctx.tenant, email)) return fail("blocked: " + email + " asked for no invites from this site");
   if (identity_->proved(ctx.tenant, email)) return fail("member: " + email + " already has an account here");

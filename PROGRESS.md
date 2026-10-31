@@ -536,6 +536,19 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Identity events, the outbox, approvals, and other host tables still number their own
       rows (038 § 11).
 
+### Mail, seen from the tools (a site's engineers' asks; 018 § 7, 024 § 7)
+- [x] `mail_template_send_test`'s mail shows in `mail_activity` (`test: true`); dev mail's log
+      lines carry the tenant and status like SES's and SMTP's.
+- [x] `mail_domain_check`: MX (this host's? port 25 tried on its own address only), SPF, DMARC,
+      and SES's identity, verification, and DKIM tokens with the records to add; tests on DNS
+      answers parsed from wire bytes, and SES against the stand-in.
+- [x] `host_health.smtp_listener`: the banner on 127.0.0.1:25, or why not.
+- [x] `mail_route_check` (the hook's own matching) and mail addresses in `box_list`.
+- [x] A per-sender daily limit as a `box_guide` recipe (the human chose boxes over a manifest key).
+- [x] Postal-address refusals and `host_health` say a person sets it at deploy or in host.json;
+      no tool sets it (the human's choice).
+- [ ] `mail_domain_check` untried against real DNS and SES.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

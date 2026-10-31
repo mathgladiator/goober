@@ -238,6 +238,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_data_tools();
   register_mail_tools();
   register_mail_out_tools();
+  register_mail_check_tools();
   register_consent_tools();
   register_invite_tools();
   register_web_tools();
@@ -570,10 +571,13 @@ void Host::write_dev_mail(const identity::Mail& mail) {
                                  base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), 4)));
   auto file = cfg->storage / "mail" / "outbox" / name;
   base::write_file_durable(file, eml);
-  log_line("mail", (bj::object{{"at", base::format_utc_ms(now)},
-                                          {"to", mail.to},
-                                          {"subject", mail.subject},
-                                          {"file", "mail/outbox/" + name}}));
+  // The fields the real mailers log, so mail_activity shows dev mail too.
+  bj::object line{{"at", base::format_utc_ms(now)}, {"to", mail.to},     {"subject", mail.subject},
+                  {"via", "dev"},                    {"status", "sent"}, {"file", "mail/outbox/" + name}};
+  if (!mail.tenant.empty()) line["tenant"] = mail.tenant;
+  if (!mail.from_address.empty()) line["from_address"] = mail.from_address;
+  if (mail.test) line["test"] = true;
+  log_line("mail", std::move(line));
   if (cfg->local) {
     std::string first = mail.text.substr(0, mail.text.find('\n'));
     std::cerr << "goober-host: mail to " << mail.to << ": " << first << "\n";

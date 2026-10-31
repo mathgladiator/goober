@@ -146,6 +146,10 @@ void Host::register_mail_tools() {
       }
       identity::Mail m{*to, "[Test] " + r->subject, r->text};
       m.html = r->html;
+      // Logged as the tenant's and marked a test, so mail_activity shows it. (The call itself is
+      // an operator action in the access log, like every tool call.)
+      if (*tenant != mt::kEveryTenant) m.tenant = *tenant;
+      m.test = true;
       mail_->send(std::move(m));
       out["sent_to"] = *to;
     }

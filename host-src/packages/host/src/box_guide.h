@@ -445,6 +445,20 @@ goober_call("mail", "attachment", {"id": "17"}) answers {filename, content_type,
 Reply tokens: send with "reply": {"route": "ticket_reply", "params": {"ticket": "42"}} and the
 host mints reply+<token>@your.domain as the Reply-To (the call answers it as reply_to). A
 reply arrives on ticket_reply with params.ticket = "42"; a forged token never reaches you.
+A daily limit per sender is the box's to keep, in SQL (the host limits only floods). A table
+keyed by id, with a unique index on the pair it counts:
+  "mail_counts": {"columns": {"id": {"type": "id", "primary-key": true},
+    "sender": {"type": "string", "max-length": 320}, "day": {"type": "string", "max-length": 10},
+    "n": {"type": "int64", "default": 0}},
+    "indexes": {"mail_counts_by_sender_day": {"columns": ["sender", "day"], "unique": true}}}
+then, first thing in the route, one statement (day is the UTC date from goober_now_ms, like
+"2026-10-30"; sender is from.address, lowercased):
+  INSERT INTO mail_counts (sender, day, n) VALUES (:sender, :day, 1)
+  ON CONFLICT (sender, day) DO UPDATE SET n = n + 1 RETURNING n
+Past your limit, answer 400 {"error": "Too many messages today; try tomorrow."}: the sender
+hears 550 with those words, and the count stays. from.address can be forged (sender is the
+verified one, when there is one), so this is a courtesy limit, not a defense. Delete rows
+older than a few days from a timer.
 
 ## An email worker (a model answering mail)
 
