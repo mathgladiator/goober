@@ -137,7 +137,8 @@ Read these before doing design work:
   - `design/machine/023.OperatorOAuth.md`: a second OAuth issuer, `/oauth/operator`, in the host
     realm, so agents that only speak OAuth (Grok) sign an operator in and reach the operator tools.
   - `design/machine/024.MailIn.md`: mail in: Stalwart on port 25 calling the host's MTA hook,
-    `routes.mail` addresses, the box's answer as the SMTP answer, reply tokens, and deploys.
+    `routes.mail` addresses, the box's answer as the SMTP answer, reply tokens, and deploys; the
+    host verifies DKIM, and a verified sender with an account arrives as `from_user_id` (§ 5).
   - `design/machine/025.Telephony.md`: a proposal: a phone number per tenant from a rented
     provider, `routes.phone` for texts and calls, a `phone` service for texts out, host-config
     grants checked at upload, spending as `host:owner`, STOP/HELP in the host; Q42 to Q49 open.

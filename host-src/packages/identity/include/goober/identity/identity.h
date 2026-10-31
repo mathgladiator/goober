@@ -298,6 +298,9 @@ class Identity {
                                       std::string_view by, int64_t now_ms, std::string* why);
   // The live (not deleted) user with this address, with their roles.
   std::optional<User> find_user(std::string_view realm, std::string_view email);
+  // The user an address belongs to when the account can act: neither deleted nor disabled. The
+  // address is matched whole, lowercased; a plus-tag is part of it (024 § 5).
+  std::optional<User> active_user(std::string_view realm, std::string_view email);
   // Every deletion in the realm, newest first, at most `limit`.
   std::vector<Deletion> deletions(std::string_view realm, int limit);
 

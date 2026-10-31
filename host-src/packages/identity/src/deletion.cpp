@@ -94,6 +94,17 @@ std::optional<User> Identity::find_user(std::string_view realm_name, std::string
   return User{id, email, std::string(realm_name), roles_of(r.db, id)};
 }
 
+std::optional<User> Identity::active_user(std::string_view realm_name, std::string_view email_in) {
+  std::string email = normalize_email(email_in);
+  auto& r = realm(realm_name);
+  std::lock_guard lock(r.mu);
+  sqlite::Stmt s(r.db, "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL AND disabled_at IS NULL");
+  s.bind(1, email);
+  if (!s.step()) return std::nullopt;
+  int64_t id = s.int64(0);
+  return User{id, email, std::string(realm_name), roles_of(r.db, id)};
+}
+
 std::vector<Deletion> Identity::deletions(std::string_view realm_name, int limit) {
   auto& r = realm(realm_name);
   std::lock_guard lock(r.mu);

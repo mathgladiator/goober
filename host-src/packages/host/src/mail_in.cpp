@@ -26,7 +26,9 @@
 #include "mail_hash.h"
 #include "goober/json/json.h"
 #include "goober/mail_inbound/address.h"
+#include "goober/mail_inbound/dkim.h"
 #include "goober/mail_inbound/mime.h"
+#include "dns.h"
 #include "network.h"
 
 namespace goober::host {
@@ -416,7 +418,21 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   };
 
   // The sender, as a verified claim or not at all (038): see design/machine/024.MailIn.md § 5.
-  std::string sender = verified_sender(o, message, from);
+  // A verified sender with an account in this tenant's realm (not deleted, not disabled) is
+  // named by its user id; the box still runs as nobody (decided 2026-10-31, 038 § 10).
+  std::string sender_why;
+  std::string sender = verified_sender(headers, body, &sender_why);
+  std::optional<int64_t> from_user_id;
+  if (!sender.empty()) {
+    try {
+      if (auto u = identity_->active_user(match->tenant, sender)) from_user_id = u->user_id;
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: mail in: looking up the sender: " << e.what() << "\n";
+    }
+  }
+  log["sender_verified"] = !sender.empty();
+  if (from_user_id) log["from_user_id"] = std::to_string(*from_user_id);
+  bj::value from_user = from_user_id ? bj::value(std::to_string(*from_user_id)) : bj::value(nullptr);
   auto mailbox = [](const inbound::Mailbox& b) { return bj::object{{"address", b.address}, {"name", b.name}}; };
   auto mailboxes = [&](const std::vector<inbound::Mailbox>& l) {
     bj::array a;
@@ -429,6 +445,8 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
                    {"envelope_from", from},
                    {"from", message.from ? bj::value(mailbox(*message.from)) : bj::value(nullptr)},
                    {"sender", sender.empty() ? bj::value(nullptr) : bj::value(sender)},
+                   {"sender_why", sender.empty() ? bj::value(sender_why) : bj::value(nullptr)},
+                   {"from_user_id", from_user},
                    {"to_list", mailboxes(message.to)},
                    {"cc", mailboxes(message.cc)},
                    {"reply_to", mailboxes(message.reply_to)},
@@ -477,7 +495,9 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
                  {"domain", match->domain},
                  {"tenant", match->tenant},
                  {"user", nullptr},
-                 {"mail", bj::object{{"to", match->to}, {"sender", sender.empty() ? bj::value(nullptr) : bj::value(sender)}}}};
+                 {"mail", bj::object{{"to", match->to},
+                                     {"sender", sender.empty() ? bj::value(nullptr) : bj::value(sender)},
+                                     {"from_user_id", from_user}}}};
   CallOptions options;
   options.timeout_ms = route.timeout_ms;
   options.no_response_ok = true;
@@ -547,8 +567,13 @@ std::string Host::mail_attachment_call(CallContext& ctx, const bj::value& reques
                                {"base64", base::base64_encode(s.blob(3))}});
 }
 
-std::string Host::verified_sender(const bj::object&, const inbound::Message&, const std::string&) {
-  return "";  // replaced below, once the sender check is in
+std::string Host::verified_sender(const inbound::Headers& headers, const std::string& body, std::string* why) {
+  // Stalwart 1.0.1's hook carries no authentication results (§ 5), but it hands over the
+  // headers and body exactly as sent, so the host verifies DKIM itself.
+  inbound::KeyLookup lookup = dkim_dns_ ? inbound::KeyLookup(dkim_dns_) : inbound::KeyLookup([](const std::string& name, std::string* e) {
+    return dns::lookup_txt(name, e);
+  });
+  return inbound::verified_author(headers, body, lookup, base::now_unix_ms() / 1000, why);
 }
 
 int Host::prune_mail(int64_t now_ms) {

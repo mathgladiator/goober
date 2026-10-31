@@ -116,6 +116,10 @@ class Host {
 
   // Waits until queued mail has been handed to the mail server (tests).
   void drain_mail();
+  // The TXT lookups DKIM keys come from (design/machine/024.MailIn.md § 5): DNS, unless a test
+  // sets a stand-in before mail arrives.
+  using TxtLookup = std::function<std::optional<std::vector<std::string>>(const std::string& name, std::string* error)>;
+  void set_dkim_dns(TxtLookup lookup) { dkim_dns_ = std::move(lookup); }
 
   // Backups to S3 (design/machine/019.Backups.md). A host thread ticks every few seconds;
   // tests turn that off with set_backups_manual(true) before start() and tick themselves.
@@ -414,9 +418,12 @@ class Host {
   std::optional<std::string> mint_reply_address(const struct CallContext& ctx, const boost::json::object& reply,
                                                 const std::string& recipient, std::string* error);
   std::string mail_attachment_call(struct CallContext& ctx, const boost::json::value& request);
-  // The sender as a verified claim (038 § The sender is a verified claim), or "".
-  std::string verified_sender(const boost::json::object& hook_request, const struct mail::inbound::Message& message,
-                              const std::string& envelope_from);
+  // The message's author as a verified claim (038 § The sender is a verified claim; 024 § 5):
+  // its one From address when a DKIM signature aligned with From's domain passes (DMARC
+  // passes on DKIM), or "" with `why`.
+  std::string verified_sender(const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body,
+                              std::string* why);
+  TxtLookup dkim_dns_;
   std::mutex mail_in_mu_;
   // Delivers one outbox mail element through the mailer, within the config's mail limits.
   struct HttpOut deliver_outbox_mail(const std::string& tenant, const std::string& body, int64_t now_ms);

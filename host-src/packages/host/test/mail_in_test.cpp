@@ -373,3 +373,71 @@ TEST_F(MailInTest, RepliesComeWithTheirOwnWordsAndRsvps) {
   EXPECT_EQ(typed.at("calendar").at("partstat"), "ACCEPTED");
   EXPECT_EQ(typed.at("calendar").at("attendee"), "ann@example.org");
 }
+
+// The sender named by its user id (decided 2026-10-31, 038 § 10; 024 § 5): only when an
+// aligned DKIM signature passes (the host verifies it; Stalwart 1.0.1 passes no results), and
+// only an account that can act. RFC 8463's own signed example, with its key in a stand-in DNS.
+TEST_F(MailInTest, AVerifiedSenderIsNamedByItsUserId) {
+  const std::string sig =
+      " v=1; a=ed25519-sha256; c=relaxed/relaxed;\r\n d=football.example.com; i=@football.example.com;\r\n"
+      " q=dns/txt; s=brisbane; t=1528637909; h=from : to :\r\n subject : date : message-id : from : subject : date;\r\n"
+      " bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;\r\n b=/gCrinpcQOoIfuHNQIbq4pgh9kyIK3AQUdt9OdqQehSwhEIug4D11Bus\r\n"
+      " Fa3bT3FY5OsU7ZbnKELq+eXdp1Q1Dw==\r\n";
+  const std::string body = "Hi.\r\n\r\nWe lost the game.  Are you hungry yet?\r\n\r\nJoe.\r\n";
+  host->set_dkim_dns([](const std::string& name, std::string* error) -> std::optional<std::vector<std::string>> {
+    if (name == "brisbane._domainkey.football.example.com") {
+      return std::vector<std::string>{"v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="};
+    }
+    return *error = "NXDOMAIN", std::nullopt;
+  });
+  auto deliver = [&](const std::string& text) {
+    bj::array headers{bj::array{"DKIM-Signature", sig},
+                      bj::array{"From", " Joe SixPack <joe@football.example.com>\r\n"},
+                      bj::array{"To", " Suzie Q <suzie@shopping.example.net>\r\n"},
+                      bj::array{"Subject", " Is dinner ready?\r\n"},
+                      bj::array{"Date", " Fri, 11 Jul 2003 21:00:37 -0700 (PDT)\r\n"},
+                      bj::array{"Message-ID", " <20030712040037.46341.5F8J@football.example.com>\r\n"}};
+    bj::object o{{"context", bj::object{{"stage", "data"}}},
+                 {"envelope", bj::object{{"from", bj::object{{"address", "joe@football.example.com"}}},
+                                         {"to", bj::array{bj::object{{"address", "support@kcmeatup.com"}}}}}},
+                 {"message", bj::object{{"headers", std::move(headers)}, {"contents", text},
+                                        {"size", int64_t(text.size() + 600)}}}};
+    EXPECT_EQ(action(call(json::dump(o))), "discard");
+    auto got = rows();
+    std::string err;
+    return json::parse(std::string(got.back().at(1).as_string()), &err)->as_object();
+  };
+
+  // Verified, but no account in this tenant: the address, and no user id.
+  auto typed = deliver(body);
+  EXPECT_EQ(typed.at("sender"), "joe@football.example.com");
+  EXPECT_TRUE(typed.at("sender_why").is_null());
+  EXPECT_TRUE(typed.at("from_user_id").is_null());
+
+  // An account: named by its id, as a string.
+  tool("role_grant", {{"tenant", "kc"}, {"email", "Joe@Football.example.com"}, {"role", "member"}});
+  auto user = host->identity().active_user("kc", "joe@football.example.com");
+  ASSERT_TRUE(user);
+  typed = deliver(body);
+  EXPECT_EQ(typed.at("from_user_id").as_string(), std::to_string(user->user_id));
+  EXPECT_GE(user->user_id, int64_t(1) << 32);
+
+  // Changed on the way: not verified, so no user id, whatever From says; the box learns why.
+  typed = deliver("Hi.\r\n\r\nWe won the game.\r\n");
+  EXPECT_TRUE(typed.at("sender").is_null());
+  EXPECT_TRUE(typed.at("from_user_id").is_null());
+  EXPECT_NE(std::string(typed.at("sender_why").as_string()).find("body hash"), std::string::npos);
+  EXPECT_EQ(typed.at("from").at("address"), "joe@football.example.com");  // what the message says, unverified
+
+  // A deleted account is never matched; nor is a domain with no DKIM key published.
+  tool("user_delete", {{"tenant", "kc"}, {"email", "joe@football.example.com"}, {"why", "asked to be forgotten"}});
+  typed = deliver(body);
+  EXPECT_EQ(typed.at("sender"), "joe@football.example.com");
+  EXPECT_TRUE(typed.at("from_user_id").is_null());
+  host->set_dkim_dns([](const std::string&, std::string* error) -> std::optional<std::vector<std::string>> {
+    return *error = "NXDOMAIN", std::nullopt;
+  });
+  typed = deliver(body);
+  EXPECT_TRUE(typed.at("sender").is_null());
+  EXPECT_NE(std::string(typed.at("sender_why").as_string()).find("no DKIM key"), std::string::npos);
+}

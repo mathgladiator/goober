@@ -618,6 +618,15 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       engine, with that reason in the error and `box_guide`; tests.
 - [ ] A linear-time regex engine, so `pattern` can be accepted.
 
+### Mail senders as user ids (024 § 5; 038 § 10, decided 2026-10-31)
+- [x] The host verifies DKIM on mail in (rsa-sha256, ed25519-sha256, both canonicalizations;
+      rsa-sha1, l=, testing and revoked keys refused); an aligned pass makes `sender`, else
+      `sender_why` says why; tested against RFC 8463's example and independently signed RSA.
+- [x] A verified sender with an account (not deleted, not disabled) arrives as `from_user_id`,
+      in the body and in `mail`; the box still runs as nobody; `box_guide` says how to use it.
+- [ ] SPF isn't evaluated: mail authenticated only by SPF stays unverified. Untried against
+      real providers' mail through Stalwart.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

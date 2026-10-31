@@ -559,7 +559,8 @@ support@ is that address on every domain the box serves (support@example.com for
 *@ takes what no other route claims. Parameters in the address arrive as params; a
 {name : token} part is a reply token (below). Mail routes are public: anyone can send.
 The request's body is the message as JSON: {to, envelope_from, from: {address, name}, sender
-(a verified address, or null), to_list, cc, reply_to, subject, text, html, message_id,
+(a verified address, or null), sender_why (why not, when null), from_user_id (the sender's
+user id, or null), to_list, cc, reply_to, subject, text, html, message_id,
 in_reply_to, references, date, attachments: [{id, filename, content_type, bytes, inline,
 content_id}], automatic, truncated, bytes, reply_text, calendar?}. text is always there (made from
 the HTML if needed). reply_text is the person's own words: the text above what they quote,
@@ -568,6 +569,16 @@ iPhone" (put "reply above this line" in what you send and that cuts too). An RSV
 invite arrives with calendar: {method: "REPLY", uid: "meetup-7@your.domain", attendee,
 partstat: ACCEPTED | DECLINED | TENTATIVE, sequence, comment}; to get it, send invites from an
 address a mail route takes, and let that route take an attachment (the .ics).
+Who wrote: from is what the message claims, and anyone can claim anything. sender is from's
+address only when the host verified it: a DKIM signature from From's own domain (or a parent
+of it) that checks out, so the domain's owner vouches for it. from_user_id is that verified
+sender's account in this site's realm, as a string, when one exists and isn't deleted or
+disabled: use it to join the mail to the person's rows, in any database, as you would
+{!user_id}. The address is matched whole, lowercased: ann+orders@example.org is not
+ann@example.org. Your box still runs as nobody: from_user_id says who wrote, it doesn't sign
+anyone in. When it's null, keep the address only as what was claimed (for a reply), never as
+a key. A reply-token route has its params from the token, which the host minted, whoever
+writes; reply_from_recipient says whether the verified sender is the address you sent it to.
 Answer 2xx (or nothing) to accept: the sender's server hears 250. Answer 4xx with
 {"error": "..."} to refuse: it hears 550 with your words. Answer 503 to defer: it hears 451
 and tries again later; your writes roll back. A failure or timeout defers too.
@@ -587,7 +598,7 @@ keyed by id, with a unique index on the pair it counts:
     "n": {"type": "int64", "default": 0}},
     "indexes": {"mail_counts_by_sender_day": {"columns": ["sender", "day"], "unique": true}}}
 then, first thing in the route, one statement (day is the UTC date from goober_now_ms, like
-"2026-10-30"; sender is from.address, lowercased):
+"2026-10-30"; :sender is the verified sender when there is one, else from.address, lowercased):
   INSERT INTO mail_counts (sender, day, n) VALUES (:sender, :day, 1)
   ON CONFLICT (sender, day) DO UPDATE SET n = n + 1 RETURNING n
 Past your limit, answer 400 {"error": "Too many messages today; try tomorrow."}: the sender
