@@ -486,6 +486,9 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       flags for the answers without a terminal; `tools/tenant_edit.py`, tested in CTest.
 - [x] Stalwart is provisioned only when something it is made from changed or it isn't up (a
       fingerprint kept beside its scripts); `--reprovision-mail` forces it (024 § 7).
+- [x] Backups never enter subtrees they don't hold (tmp/, build caches), and name the path,
+      owner, and mode of anything they must read and can't; every deploy gives storage back
+      to the host's user (`find -execdir chown -h`); the audit's `storage` check; tests.
 - [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
       vault key copied off the machine.
 

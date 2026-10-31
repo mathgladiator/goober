@@ -38,6 +38,15 @@ struct BackupOptions {
 // SQLite's sidecars.
 bool backed_up(const std::string& rel, const BackupOptions& options);
 
+// The regular files under `root`, relative and sorted: with `filter`, only those a backup
+// holds, and subtrees a backup never holds (tmp/, logs/, build caches) aren't entered, so what
+// is in them can't stop a backup. A directory or file that must be read and can't be fails
+// with its path, owner, and mode.
+bool backup_files(const std::filesystem::path& root, const BackupOptions* filter, std::vector<std::string>* out,
+                  std::string* error);
+// A path with its owner and mode, for errors: "/srv/x (owner root, mode 0700)".
+std::string describe_path(const std::filesystem::path& p);
+
 // A consistent copy of one SQLite database while it is in use, durably written.
 bool copy_database(const std::filesystem::path& from, const std::filesystem::path& to, std::string* error);
 

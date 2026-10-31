@@ -1,10 +1,14 @@
 #include "goober/host/backup.h"
 
 #include <fcntl.h>
+#include <pwd.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <sqlite3.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <set>
 
 #include "goober/base/files.h"
@@ -28,23 +32,22 @@ bool fsync_path(const fs::path& p) {
 
 bool copy_tree(const fs::path& from, const fs::path& to, bool backup, const BackupOptions& options, BackupReport* report,
                std::string* error) {
+  std::vector<std::string> rels;
+  if (!backup_files(from, backup ? &options : nullptr, &rels, error)) return false;
   std::error_code ec;
   std::set<fs::path> dirs{to};
-  for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
-       it.increment(ec)) {
-    if (!it->is_regular_file()) continue;
-    fs::path rel = fs::relative(it->path(), from);
-    if (backup && !backed_up(rel.generic_string(), options)) continue;
-    if (!backup && rel == "BACKUP.json") continue;
-    fs::path target = to / rel;
+  for (const auto& r : rels) {
+    if (!backup && r == "BACKUP.json") continue;
+    fs::path source = from / r;
+    fs::path target = to / r;
     fs::create_directories(target.parent_path());
     for (fs::path d = target.parent_path(); d != to && d.has_relative_path(); d = d.parent_path()) dirs.insert(d);
-    if (backup && it->path().extension() == ".db") {
-      if (!copy_database(it->path(), target, error)) return false;
+    if (backup && source.extension() == ".db") {
+      if (!copy_database(source, target, error)) return false;
       ++report->databases;
     } else {
-      if (!fs::copy_file(it->path(), target, fs::copy_options::overwrite_existing, ec)) {
-        *error = "cannot copy " + rel.string() + ": " + ec.message();
+      if (!fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec)) {
+        *error = "cannot copy " + describe_path(source) + ": " + ec.message();
         return false;
       }
       if (!fsync_path(target)) return *error = "cannot flush " + target.string(), false;
@@ -52,13 +55,66 @@ bool copy_tree(const fs::path& from, const fs::path& to, bool backup, const Back
     }
     report->bytes += int64_t(fs::file_size(target, ec));
   }
-  if (ec) return *error = "cannot read " + from.string() + ": " + ec.message(), false;
   // The directories too, so every name is durable before BACKUP.json says the copy is whole.
   for (const auto& d : dirs) fsync_path(d);
   return true;
 }
 
 }  // namespace
+
+std::string describe_path(const fs::path& p) {
+  struct stat st {};
+  if (::lstat(p.c_str(), &st) != 0) return p.string();
+  char mode[8];
+  std::snprintf(mode, sizeof mode, "%04o", unsigned(st.st_mode & 07777));
+  std::string owner = std::to_string(st.st_uid);
+  if (const passwd* pw = ::getpwuid(st.st_uid)) owner = pw->pw_name;
+  return p.string() + " (owner " + owner + ", mode " + mode + ")";
+}
+
+bool backup_files(const fs::path& root, const BackupOptions* filter, std::vector<std::string>* out, std::string* error) {
+  out->clear();
+  std::error_code ec;
+  if (!fs::is_directory(root, ec)) return true;
+  if (::access(root.c_str(), R_OK | X_OK) != 0) return *error = "cannot read " + describe_path(root), false;
+  std::string base = root.generic_string();
+  if (!base.empty() && base.back() != '/') base += '/';
+  auto rel_of = [&](const fs::path& p) {
+    std::string full = p.generic_string();
+    return full.starts_with(base) ? full.substr(base.size()) : full;
+  };
+  // A subtree a backup never holds (tmp/, logs/, a build cache) is never entered: what's in it
+  // can't stop a backup, whoever made it.
+  auto skipped = [&](const std::string& rel_dir) { return filter && !backed_up(rel_dir + "/probe", *filter); };
+  for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator();) {
+    if (ec) break;
+    const auto& entry = *it;
+    std::string rel = rel_of(entry.path());
+    std::error_code e2;
+    if (entry.is_directory(e2) && !entry.is_symlink(e2)) {
+      if (skipped(rel)) {
+        it.disable_recursion_pending();
+      } else if (::access(entry.path().c_str(), R_OK | X_OK) != 0) {
+        return *error = "cannot read " + describe_path(entry.path()) +
+                        ": the host's user must own everything in storage (a deploy fixes this)",
+               false;
+      }
+    } else if (entry.is_regular_file(e2) && !entry.is_symlink(e2)) {
+      if (!filter || backed_up(rel, *filter)) {
+        if (::access(entry.path().c_str(), R_OK) != 0) {
+          return *error = "cannot read " + describe_path(entry.path()) +
+                          ": the host's user must own everything in storage (a deploy fixes this)",
+                 false;
+        }
+        out->push_back(std::move(rel));
+      }
+    }
+    it.increment(ec);
+  }
+  if (ec) return *error = "cannot read " + root.string() + ": " + ec.message(), false;
+  std::sort(out->begin(), out->end());
+  return true;
+}
 
 bool backed_up(const std::string& r, const BackupOptions& options) {
   if (r.starts_with("logs/") || r.starts_with("mail/") || r.starts_with("tmp/") || r.starts_with("backup/")) return false;

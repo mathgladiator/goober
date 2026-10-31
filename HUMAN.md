@@ -125,8 +125,25 @@ must connect again. For an OAuth provider (Strava, X), register an app with the 
 `https://example.com/goober/connect/callback`, then have Grok `key_set` its client id and secret
 (hosts: the provider's token host).
 
-Is the backup key copied somewhere safe? Without it no backup can be read
-(`goober-host backup key --confirm` once you've copied it).
+Is the backup key copied somewhere safe? Without it no backup can be read. Print it with
+`sudo -u goober goober-host backup key --config /srv/goober/host/host.json`, keep it somewhere
+other than the server, then run the same with `--confirm`. Only you can do this: `host_health`
+keeps saying nobody has until you do.
+
+**Backups say "cannot read … (owner root, mode …)" or "Permission denied".** Something in
+storage isn't the host's user's, usually from a `goober-host` command run with `sudo` but
+without `-u goober`. The error names the path. To see every such path:
+
+```sh
+sudo find /srv/goober/host/storage ! -user goober                  # made by someone else
+sudo -u goober find /srv/goober/host/storage ! -readable           # the host can't read
+sudo -u goober goober-host audit --config /srv/goober/host/host.json   # the storage check
+```
+
+A deploy gives them back to `goober` and says which it changed. By hand:
+`sudo chown -hR goober: /srv/goober/host/storage`. Run every `goober-host` command on the
+server as `sudo -u goober`. Folders backups never hold (`tmp/`, `logs/`, build caches) no
+longer stop a backup either way.
 
 ## 5. Fix it by deploying again
 

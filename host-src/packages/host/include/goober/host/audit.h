@@ -5,6 +5,7 @@
 // suggestion with the steps to take, or quiet when host.json's audit.quiet names it. A finding
 // about a missing setting also says what to ask for (§ 8.2), so the deploy can ask and set it.
 
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -18,7 +19,7 @@ namespace goober::host {
 // Every check, by id: the ids audit.quiet may name. A check about one name (a finding whose data
 // has "domain") is also quieted for that name alone by "id:name", like "redirect:www.example.com".
 inline const std::vector<std::string> kAuditChecks = {"panel",     "caddy",  "mailer",  "backup",
-                                                      "operators", "postal", "redirect"};
+                                                      "operators", "postal", "redirect", "storage"};
 
 // One value the deploy may ask for (028 § 8.2). Kinds:
 // - "text": a string set at `path` in host.json, with `also` set beside it once answered;
@@ -58,6 +59,10 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
                                            const Resolver& resolve, const HasKey& has_key = nullptr);
 
 boost::json::object audit_json(const std::vector<AuditFinding>& findings);
+
+// The "storage" check: paths in storage not owned by the storage directory's owner (the host's
+// user), or that it can't read and write. An empty finding (no id) when storage doesn't exist.
+AuditFinding storage_finding(const std::filesystem::path& storage);
 
 // `goober-host audit [--config host.json] [--caddyfile PATH] [--json]`: prints the findings.
 // Exits 0 whatever it finds (an audit advises; it never fails a deploy), 1 on a bad config.

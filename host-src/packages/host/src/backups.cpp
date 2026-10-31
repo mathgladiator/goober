@@ -2,6 +2,9 @@
 
 #include "backups.h"
 
+#include <pwd.h>
+#include <unistd.h>
+
 #include <iostream>
 #include <set>
 
@@ -79,12 +82,12 @@ std::string signature(const fs::path& p) {
   return sig;
 }
 
-// Every file in storage a backup holds, relative and sorted, with assets left out.
-std::vector<std::string> storage_files(const fs::path& storage) {
+// Every file in storage a backup holds, relative and sorted, with assets left out. A file or
+// directory it can't read is an error naming it: missing it would look like a removal.
+std::optional<std::vector<std::string>> storage_files(const fs::path& storage, std::string* error) {
   std::vector<std::string> out;
-  for (const auto& rel : base::list_files(storage)) {
-    if (backed_up(rel, BackupOptions{.assets = false})) out.push_back(rel);
-  }
+  BackupOptions options{.assets = false};
+  if (!backup_files(storage, &options, &out, error)) return std::nullopt;
   return out;
 }
 
@@ -519,7 +522,9 @@ bool BackupService::run_increment(int64_t now_ms, std::string* error) {
   bj::object changed_shas;
   std::set<std::string> seen_files;
   int uploads = 0, n = 0;
-  for (const auto& rel : storage_files(cfg->storage)) {
+  auto rels = storage_files(cfg->storage, error);
+  if (!rels) return false;
+  for (const auto& rel : *rels) {
     fs::path file = cfg->storage / rel;
     std::string sig = signature(file);
     if (!is_db(rel)) {
@@ -764,9 +769,14 @@ bj::object BackupService::status(bool with_points, int64_t now_ms) {
   out["last_error_at"] = when("last_error_ms");
   out["key_confirmed_at"] = when("key_confirmed_ms");
   if (meta("key_confirmed_ms").empty()) {
-    out["key_warning"] = "Nobody has confirmed keeping a copy of the backup key. Without it the backups can't be read: run "
-                         "`goober-host backup key` on the server, store the key somewhere safe, then `goober-host backup key "
-                         "--confirm`.";
+    // The commands as the person types them on this server: as the host's user, with its config.
+    std::string user = "goober";
+    if (const passwd* pw = ::getpwuid(::geteuid())) user = pw->pw_name;
+    std::string as = "sudo -u " + user + " goober-host backup key" +
+                     (config_file_.empty() ? std::string() : " --config " + config_file_.string());
+    out["key_warning"] = "Nobody has confirmed keeping a copy of the backup key. Without it the backups can't be read. A "
+                         "person (not an agent) runs `" + as + "` on the server, keeps the key somewhere other than this "
+                         "machine, then runs `" + as + " --confirm`.";
   }
   bj::object assets;
   sqlite::Stmt s(reader, "SELECT state, count(*), min(queued_ms) FROM assets GROUP BY state");

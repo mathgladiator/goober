@@ -2,7 +2,10 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <pwd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <iostream>
@@ -320,7 +323,52 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     }
     add(std::move(f));
   }
+
+  // Storage is the host's user's, all of it: a file another user made (a command run as root)
+  // can stop backups, builds, and writes (019 § 4).
+  if (auto f = storage_finding(config.storage); !f.id.empty()) add(std::move(f));
   return out;
+}
+
+AuditFinding storage_finding(const std::filesystem::path& storage) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  if (!fs::is_directory(storage, ec)) return {};
+  struct stat top {};
+  if (::stat(storage.c_str(), &top) != 0) return {};
+  // The storage directory's owner is the host's user; the audit runs as that user.
+  std::vector<std::string> wrong;
+  int64_t count = 0;
+  auto note = [&](const fs::path& p, const std::string& why) {
+    ++count;
+    if (wrong.size() < 10) wrong.push_back(p.string() + " (" + why + ")");
+  };
+  if (::access(storage.c_str(), R_OK | W_OK | X_OK) != 0) note(storage, "the host's user can't read and write it");
+  for (auto it = fs::recursive_directory_iterator(storage, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    struct stat st {};
+    if (::lstat(it->path().c_str(), &st) != 0) continue;
+    bool dir = S_ISDIR(st.st_mode);
+    if (st.st_uid != top.st_uid) {
+      std::string owner = std::to_string(st.st_uid);
+      if (const passwd* pw = ::getpwuid(st.st_uid)) owner = pw->pw_name;
+      note(it->path(), "owned by " + owner);
+    } else if (!S_ISLNK(st.st_mode) && ::access(it->path().c_str(), dir ? (R_OK | W_OK | X_OK) : (R_OK | W_OK)) != 0) {
+      note(it->path(), "the host's user can't read and write it");
+    }
+    if (dir && ::access(it->path().c_str(), R_OK | X_OK) != 0) it.disable_recursion_pending();
+  }
+  std::string user = std::to_string(top.st_uid);
+  if (const passwd* pw = ::getpwuid(top.st_uid)) user = pw->pw_name;
+  if (count == 0) return {"storage", "ok", "everything in storage is the host's user's (" + user + ")", {}, {}, {}};
+  AuditFinding f{"storage", "warn",
+                 std::to_string(count) + " path(s) in storage the host's user (" + user +
+                     ") can't use: backups, builds, and writes there fail",
+                 {}, {{"paths", strings(wrong)}, {"count", count}}, {}};
+  for (const auto& w : wrong) f.steps.push_back(w);
+  f.steps.push_back("A deploy fixes it; by hand: sudo chown -hR " + user + ": " + storage.string() + " && sudo -u " + user +
+                    " chmod -R u+rwX " + storage.string());
+  return f;
 }
 
 bj::object audit_json(const std::vector<AuditFinding>& findings) {

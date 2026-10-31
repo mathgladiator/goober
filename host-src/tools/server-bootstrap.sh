@@ -197,6 +197,23 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
   as_user rm -rf "$USER_STAGE"
 fi
 
+# Storage is the host's user's, all of it (019 § 4): a path another user made, like a goober-host
+# command run as root, stops backups ("cannot read ... storage"), builds, and writes. Root gives
+# such paths back with `find -execdir chown -h`: from inside each directory find opened, on the
+# name itself, so a symlink the host's user plants can't aim root anywhere. What the host's own
+# user lacks (a directory made without u+rwx) the user fixes itself.
+if [[ -d "$DIR/storage" && ! -L "$DIR/storage" ]]; then
+  STRANGERS="$(find "$DIR/storage" -xdev ! -user "$RUN_AS" -print 2>/dev/null | head -n 20 || true)"
+  if [[ -n "$STRANGERS" ]]; then
+    echo "── storage: giving these back to $RUN_AS (they stop backups and writes)"
+    printf '%s\n' "$STRANGERS" | sed 's/^/   /'
+    find "$DIR/storage" -xdev ! -user "$RUN_AS" -execdir chown -h "$RUN_AS:$RUN_AS" {} + ||
+      echo "   ! some couldn't be given back; sudo -u $RUN_AS $BIN audit names them"
+  fi
+  as_user find "$DIR/storage" -xdev \( -type d ! -perm -u=rwx -exec chmod u+rwx {} \; \) -o \
+    \( -type f ! -perm -u=rw -exec chmod u+rw {} + \) 2>/dev/null || true
+fi
+
 if [[ -f "$DIR/host.json" ]]; then
   echo "── upgrading: checking the config with the new binary, then restarting"
   if ! sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json"; then

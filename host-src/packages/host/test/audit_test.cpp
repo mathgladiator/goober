@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
+#include <filesystem>
 #include <map>
 #include <set>
 
@@ -210,4 +213,25 @@ TEST(Audit, SuggestsRedirectingWwwAndChecksRedirects) {
   EXPECT_NE(find(all, "caddy").title.find("www.shop.example"), std::string::npos);
   all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}}));
   EXPECT_EQ(find(all, "redirect").level, "warn");
+}
+
+// Storage is the host's user's: a path it can't read or write is named, with the fix.
+TEST(Audit, StorageTheHostCantUseIsNamed) {
+  if (::geteuid() == 0) GTEST_SKIP() << "root reads everything";
+  namespace fs = std::filesystem;
+  auto storage = fs::path(GOOBER_TEST_TMP) / "audit_storage" / "storage";
+  std::error_code ec;
+  fs::permissions(storage / "tmp" / "locked", fs::perms::owner_all, ec);
+  fs::remove_all(storage.parent_path());
+  EXPECT_TRUE(host::storage_finding(storage).id.empty());  // no storage yet: nothing to say
+  fs::create_directories(storage / "tmp" / "locked");
+  EXPECT_EQ(host::storage_finding(storage).level, "ok");
+  fs::permissions(storage / "tmp" / "locked", fs::perms::none);
+  auto f = host::storage_finding(storage);
+  EXPECT_EQ(f.level, "warn");
+  EXPECT_EQ(f.data.at("count"), 1);
+  ASSERT_FALSE(f.steps.empty());
+  EXPECT_NE(f.steps[0].find("tmp/locked"), std::string::npos) << f.steps[0];
+  EXPECT_NE(f.steps.back().find("chown -hR"), std::string::npos) << f.steps.back();
+  fs::permissions(storage / "tmp" / "locked", fs::perms::owner_all, ec);
 }
