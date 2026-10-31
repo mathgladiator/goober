@@ -6,6 +6,12 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- Error pages: content_put {tenant, path: "error-message/404.html", text} (or 403, 500, ...) is the page a browser gets when the host answers that status. It is a template ({{status}}, {{reason}}, {{request_id}}, the site's data), "layout: base" front matter wraps it in the site's layout, and partials work; it renders for a visitor with no session. /error-message/... itself answers 404 and no sitemap lists it; page_put refuses that path. site_guide's "Error pages" lists the statuses.
+- A box route's 4xx with an empty body gets the site's error page for it (an API caller gets the host's JSON); a 4xx with a body keeps the box's body.
+- error_report {window, tenant?}: every 4xx and 5xx visitors and clients got, against all requests, by status and by place (a box route, a page, a host area, or "(not found)" for every path nothing answers), split by error_by (host, box, box_failed) and by whether a link on this site, another site, or none led there. The panel's Errors view.
+- box_failures {window, tenant?, box?, latest?}: every box call (requests, tools, timers, mail, jobs, internal calls) and how it failed, by class (trap, timeout, out_of_fuel, failed, bad_response, bad_status, render_failed, commit_failed, ...; sql_error, no_clock, refused_write per statement; delivery_retry, delivery_dead; internal_failed; mail_rejected, mail_deferred), per box and route, with the latest messages and request ids. The panel's Box failures view.
+- The sitemap's icicle (uri_tree) holds the site's own traffic: requests the host refused before any box ran ("(refused)") and paths nothing answers ("(not found)") stay out; a box route's own errors stay on it. Access lines say error_by and ref (same or other site).
+
 - route_try reaches MCP tools ({tool, arguments, as: {email}}) and mail routes ({mail: {to, from, subject, text, headers?}}, answered with the SMTP reply), always on copies; a try's mail sender is never verified. Observers and the panel may try HTTP GETs and HEADs only.
 - version_health reads every access-log file still on the machine (7 days) for its window, not only the newest two, and leaves out route_try's calls.
 - partial_put, partial_delete, and content_put take if_etag (the file_etag you read, or "none" for a new one): no write lands over a teammate's change made since you read it. Every content write now can.

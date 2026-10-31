@@ -50,6 +50,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "version_diff", "version_health",
     "perf_report", "perf_statements",
     "cache_status",
+    "error_report", "box_failures",
     "spec_list",       "spec_get",          "ids_status",          "approval_status",  "bus_status",      "box_render",
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
@@ -367,6 +368,7 @@ void Host::run_traffic() {
     lock.unlock();
     try {
       traffic_->catch_up(base::now_unix_ms());
+      if (failures_) failures_->flush(base::now_unix_ms());
       loop_beat("traffic");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: traffic rollups: " << e.what() << "\n";
@@ -434,6 +436,48 @@ void Host::register_panel_tools() {
          std::string w = window_of(args), tenant = arg_text(args, "tenant"), box = arg_text(args, "box");
          return ToolResult::ok(bj::object{{"series", traffic_->series(w, tenant, box, now)},
                                           {"routes", traffic_->routes(w, tenant, box, now)}});
+       }});
+
+  mcp_->add_tool(
+      {"error_report",
+       "What visitors and clients got that wasn't a success, from the access log's rollups (028 § 4.2): every 4xx and "
+       "5xx over the window as a series against all requests, by status, and by place (a box's route, a page's path, a "
+       "host area like identity or mcp, or \"(not found)\" for every path nothing answers), each split by who made it "
+       "(error_by: host, when no box ran: no such page, a gate, a refused input, a limit; box, when a box answered it; "
+       "box_failed, when a box ran and failed) and by whether the visitor followed a link from this site (same), "
+       "another site (other), or none. Box-to-box calls and route_try are left out. box_failures says why boxes "
+       "failed. A read tool.",
+       object_schema({{"window", window_prop}, {"tenant", string_property("Only this tenant.")}}, {}),
+       [this, window_of](const bj::object& args) {
+         if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
+         int64_t now = base::now_unix_ms();
+         traffic_->catch_up(now);
+         return ToolResult::ok(traffic_->errors(window_of(args), arg_text(args, "tenant"), now));
+       }});
+
+  mcp_->add_tool(
+      {"box_failures",
+       "How boxes fail (028 § 4.3), from the host's record of every box call (requests, tools, timers, mail, jobs, "
+       "internal calls; not route_try or dry runs): per box and route, calls and the failures by class, a series, and "
+       "the latest messages (newest first). Classes, by group: call (the call failed: trap, timeout, out_of_fuel, "
+       "failed, no_response, bad_response, bad_status, render_failed, outbox_failed, host_write_failed, "
+       "commit_failed, host_error); sql (statements refused or failed, per statement, even when the call went on: "
+       "sql_error, no_clock, refused_write); outbox (deliveries the box queued: delivery_retry, delivery_dead); "
+       "internal (a call to another box failed, on the caller: internal_failed); answer (a mail route chose: "
+       "mail_rejected, mail_deferred). failures counts the call group alone. box_logs has each call's lines by "
+       "request_id. A read tool.",
+       object_schema({{"window", window_prop},
+                      {"tenant", string_property("Only this tenant.")},
+                      {"box", string_property("Only this box.")},
+                      {"latest", integer_property("How many latest messages, 1 to 200 (default 50).")}},
+                     {}),
+       [this, window_of](const bj::object& args) {
+         if (!failures_) return ToolResult::fail("box failures are off: see host_health's startup notes");
+         int64_t now = base::now_unix_ms();
+         failures_->flush(now);
+         size_t latest = size_t(std::clamp<int64_t>(arg_int(args, "latest", 50), 1, 200));
+         return ToolResult::ok(
+             failures_->report(window_of(args), arg_text(args, "tenant"), arg_text(args, "box"), now, latest));
        }});
 
   mcp_->add_tool({"hot_boxes", "Boxes by heat (CPU time) over a window, with requests, server errors, fuel, and SQL calls.",

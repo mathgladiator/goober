@@ -177,6 +177,38 @@ function requestsChart(series) {
     h('span', {}, h('i', { class: 's4' }), '4xx'), h('span', {}, h('i', { class: 's5' }), '5xx')));
 }
 
+// Counts per point stacked by part ({key, cls, label}), with each point's rate against `of` in
+// its tooltip: the Errors and Box failures views.
+function stackedChart(series, parts, of, ofLabel, aria) {
+  const pts = series.points, W = 900, H = 150, L = 44, B = 22, T = 8;
+  const total = (p) => parts.reduce((a, x) => a + (p[x.key] || 0), 0);
+  const max = niceMax(Math.max(1, ...pts.map(total)));
+  const bw = (W - L) / pts.length;
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const g = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': aria });
+  for (const f of [0, 0.5, 1]) {
+    g.appendChild(s('line', { class: 'axis', x1: L, x2: W, y1: y(max * f), y2: y(max * f) }));
+    g.appendChild(s('text', { x: L - 6, y: y(max * f) + 4, 'text-anchor': 'end' }, fmt.n(max * f)));
+  }
+  pts.forEach((p, i) => {
+    const x = L + i * bw, w = Math.max(1, bw - (bw > 4 ? 1 : 0));
+    let base = 0;
+    for (const part of parts) {
+      const v = p[part.key] || 0;
+      if (v <= 0) continue;
+      g.appendChild(s('rect', { class: part.cls, x, width: w, y: y(base + v), height: y(base) - y(base + v) }));
+      base += v;
+    }
+    const hover = s('rect', { class: 'hover', x, width: bw, y: T, height: H - T - B });
+    const said = parts.filter((x) => p[x.key]).map((x) => `${fmt.n(p[x.key])} ${x.label}`);
+    hover.appendChild(s('title', {}, `${fmt.clock(p.t, series.step_ms)} · ${fmt.n(p[of])} ${ofLabel}` +
+      (said.length ? ' · ' + said.join(' · ') + ' (' + fmt.pct(total(p), p[of]) + ')' : '')));
+    g.appendChild(hover);
+  });
+  timeAxis(g, series, L, W, H - 6);
+  return h('div', {}, g, h('div', { class: 'legend' }, parts.map((x) => h('span', {}, h('i', { class: x.cls }), x.label))));
+}
+
 // p50 and p99 latency per point, on a log scale.
 function latencyChart(series) {
   const pts = series.points, W = 900, H = 130, L = 44, B = 22, T = 8;
@@ -449,6 +481,108 @@ const views = {
         { label: 'SQL', num: true, get: (r) => r.sql ? fmt.n(r.sql) : '' },
         { label: 'Outbox', num: true, get: (r) => r.outbox ? fmt.n(r.outbox) : '' },
       ], t.routes) : h('p', { class: 'muted' }, 'No requests in this window.')),
+    ];
+  },
+
+  // What visitors and clients got that wasn't a success (028 § 4.2), by who made it.
+  async errors(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || (focus() ? focus()[0] : '');
+    const e = await api('error_report', { window: state.window, tenant });
+    const t = e.totals;
+    const go = (v) => { if (v) params.set('tenant', v); else params.delete('tenant'); location.hash = '#/errors' + (params.toString() ? '?' + params : ''); };
+    const by = { host: 'the host (no box ran)', box: 'a box answered', box_failed: 'a box failed' };
+    const placeOf = (p) => p.box ? h('span', {}, h('a', { href: '#/box/' + encodeURIComponent(p.box) }, p.box), ' · ', h('span', { class: 'mono' }, p.route))
+      : p.place.startsWith('(') ? h('span', { class: 'muted' }, p.place) : h('span', { class: 'mono' }, p.place);
+    const logLink = (p) => h('a', { href: '#/logs?' + new URLSearchParams({ log: 'access', since: state.window === '30d' ? '7d' : state.window === '12h' ? '24h' : state.window,
+      pattern: '"status":' + p.status }) }, 'lines →');
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Errors'), windowPicker(render),
+        h('select', { onchange: (ev) => go(ev.target.value) }, focus() ? null : h('option', { value: '' }, 'all tenants'),
+          tenants.map((x) => h('option', { value: x, selected: x === tenant }, x)))),
+      h('p', { class: 'muted small' }, 'What visitors and clients got that wasn\'t a success, from the access log. Calls between boxes and tries are left out; Box failures has why boxes failed.'),
+      h('div', { class: 'stats' },
+        stat(fmt.pct(t.n4 + t.n5, t.n), 'of requests failed'), stat(fmt.n(t.n4), '4xx'), stat(fmt.n(t.n5), '5xx'),
+        stat(fmt.n(t.host), 'by the host'), stat(fmt.n(t.box), 'answered by boxes'), stat(fmt.n(t.box_failed), 'boxes failed')),
+      wideCard('Errors over time', stackedChart(e, [
+        { key: 'host', cls: 's3', label: 'by the host' }, { key: 'box', cls: 's4', label: 'answered by a box' },
+        { key: 'box_failed', cls: 's5', label: 'a box failed' }], 'n', 'requests', 'Errors over time')),
+      h('div', { class: 'grid' },
+        card('By status', e.statuses.length ? table([
+          { label: 'Status', get: (r) => String(r.status), cls: (r) => r.status >= 500 ? 'err' : 'warn' },
+          { label: 'Count', num: true, get: (r) => fmt.n(r.n) },
+          { label: 'Host', num: true, get: (r) => r.host ? fmt.n(r.host) : '' },
+          { label: 'Box', num: true, get: (r) => r.box ? fmt.n(r.box) : '' },
+          { label: 'Box failed', num: true, get: (r) => r.box_failed ? fmt.n(r.box_failed) : '' },
+        ], e.statuses) : h('p', { class: 'muted' }, 'No errors in this window.')),
+        card('Where visitors came from', table([
+          { label: 'Came', get: (r) => r[0] },
+          { label: 'Errors', num: true, get: (r) => fmt.n(r[1]) },
+        ], [['by a link on this site', e.referred.same], ['from another site', e.referred.other], ['with no link (typed, a bot, an app)', e.referred.none]]),
+          h('p', { class: 'muted small' }, 'An error behind a link on your own site is a broken link to fix.'))),
+      wideCard('Where', e.places.length ? table([
+        { label: 'Tenant', get: (p) => p.tenant || '–', cls: () => 'muted' },
+        { label: 'Place', get: placeOf },
+        { label: 'Status', get: (p) => String(p.status), cls: (p) => p.status >= 500 ? 'err' : 'warn' },
+        { label: 'Made by', get: (p) => by[p.error_by] || p.error_by },
+        { label: 'Count', num: true, get: (p) => fmt.n(p.n) },
+        { label: 'From this site', num: true, get: (p) => p.same ? fmt.n(p.same) : '', cls: (p) => p.same ? 'warn' : '' },
+        { label: 'Other site', num: true, get: (p) => p.other ? fmt.n(p.other) : '' },
+        { label: 'No link', num: true, get: (p) => p.none ? fmt.n(p.none) : '' },
+        { label: '', get: logLink },
+      ], e.places) : h('p', { class: 'muted' }, 'No errors in this window.'),
+        h('p', { class: 'muted small' }, '(not found) is every path nothing answers, counted together so a scan can\'t push out the rest; the access log has each one. Custom pages for these: error-message/404.html (site_guide).')),
+    ];
+  },
+
+  // How boxes fail (028 § 4.3): every box call, whatever started it, and each way it went wrong.
+  async failures(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || (focus() ? focus()[0] : ''), box = params.get('box') || '';
+    const f = await api('box_failures', { window: state.window, tenant, box, latest: 100 });
+    const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); location.hash = '#/failures' + (params.toString() ? '?' + params : ''); };
+    const boxes = [...new Set(f.routes.map((r) => r.box))].sort();
+    if (box && !boxes.includes(box)) boxes.push(box);
+    const pick = (label, values, value, key, all) => h('span', {}, h('label', {}, label + ' '),
+      h('select', { onchange: (ev) => go(key, ev.target.value) }, all ? h('option', { value: '' }, 'all') : null,
+        values.map((v) => h('option', { value: v, selected: v === value }, v))));
+    const groupOf = (c) => f.groups[c] || '';
+    const classList = (classes, group) => Object.entries(classes).filter(([c]) => groupOf(c) === group)
+      .map(([c, n]) => c.replace(/_/g, ' ') + ' ' + fmt.n(n)).join(', ');
+    const t = f.totals;
+    const sum = (g) => Object.entries(t.classes).filter(([c]) => groupOf(c) === g).reduce((a, [, n]) => a + n, 0);
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Box failures'), windowPicker(render),
+        pick('Tenant', tenants, tenant, 'tenant', !focus()), pick('Box', boxes, box, 'box', true)),
+      h('p', { class: 'muted small' }, 'Every box call (requests, tools, timers, mail, jobs, calls between boxes; not tries or dry runs), from the host\'s own record. Failed calls are the call group; SQL counts statements, even in calls that went on to succeed.'),
+      h('div', { class: 'stats' },
+        stat(fmt.n(t.calls), 'calls'), stat(fmt.pct(t.failures, t.calls), 'failed'), stat(fmt.n(t.failures), 'failed calls'),
+        stat(fmt.n(sum('sql')), 'SQL errors and refusals'), stat(fmt.n(sum('outbox')), 'deliveries gone wrong'),
+        stat(fmt.n(sum('internal')), 'calls to boxes failed')),
+      wideCard('Over time', stackedChart(f, [
+        { key: 'failures', cls: 's5', label: 'failed calls' }, { key: 'sql', cls: 's4', label: 'SQL' },
+        { key: 'outbox', cls: 'fp', label: 'deliveries' }, { key: 'internal', cls: 's3', label: 'calls to boxes' }],
+        'calls', 'calls', 'Box failures over time')),
+      wideCard('By route', f.routes.length ? table([
+        { label: 'Tenant', get: (r) => r.tenant || '–', cls: () => 'muted' },
+        { label: 'Box', get: (r) => h('a', { href: '#/box/' + encodeURIComponent(r.box) }, r.box) },
+        { label: 'Route', get: (r) => r.route, cls: () => 'mono' },
+        { label: 'Kind', get: (r) => r.kind, cls: () => 'muted' },
+        { label: 'Calls', num: true, get: (r) => fmt.n(r.calls) },
+        { label: 'Failed', num: true, get: (r) => r.failures ? fmt.n(r.failures) + ' (' + fmt.pct(r.failures, r.calls) + ')' : '', cls: (r) => r.failures ? 'err' : '' },
+        { label: 'How', get: (r) => classList(r.classes, 'call') },
+        { label: 'SQL', get: (r) => classList(r.classes, 'sql'), cls: () => 'warn' },
+        { label: 'Other', get: (r) => ['outbox', 'internal', 'answer'].map((g) => classList(r.classes, g)).filter(Boolean).join(', '), cls: () => 'muted' },
+      ], f.routes, (r) => go('box', r.box)) : h('p', { class: 'muted' }, 'No box calls in this window.')),
+      wideCard('Latest', f.latest.length ? table([
+        { label: 'When', get: (e) => fmt.time(e.at_ms), cls: () => 'muted' },
+        { label: 'Box', get: (e) => h('a', { href: '#/box/' + encodeURIComponent(e.box) }, e.box) },
+        { label: 'Version', get: (e) => e.version, cls: () => 'muted' },
+        { label: 'Route', get: (e) => e.route + ' (' + e.kind + ')', cls: () => 'mono' },
+        { label: 'Class', get: (e) => h('span', { class: 'pill ' + (groupOf(e.class) === 'call' ? 'failed' : '') }, e.class.replace(/_/g, ' ')) },
+        { label: 'Message', get: (e) => clip(e.message, 160) + (e.n > 1 ? ' ×' + e.n : ''), cls: () => 'mono' },
+        { label: '', get: (e) => e.request_id ? h('a', { href: '#/logs?' + new URLSearchParams({ log: 'boxes/' + e.box, pattern: e.request_id, since: '7d' }) }, 'log →') : '' },
+      ], f.latest) : h('p', { class: 'muted' }, 'Nothing failed in this window.')),
     ];
   },
 

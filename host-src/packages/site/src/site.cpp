@@ -200,6 +200,9 @@ std::optional<std::string> page_url(std::string_view path) {
 bool is_private_path(std::string_view path) {
   // Static site generators put their assets in these; nobody hides anything in them.
   static constexpr std::string_view kGeneratorDirs[] = {"_astro/", "_next/", "_nuxt/", "_app/"};
+  // Error pages (005 § Q51): the answer to a failed request, never a page of their own, so
+  // /error-message/404 is a 404 and no sitemap lists them.
+  if (path.starts_with("error-message/") || path == "error-message") return true;
   size_t start = 0;
   while (start <= path.size()) {
     bool generator = false;

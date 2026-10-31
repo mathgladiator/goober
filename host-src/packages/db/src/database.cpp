@@ -1052,6 +1052,22 @@ bool Session::host_exec(const manifest::DataStrategy& strategy, std::string_view
 }
 
 std::string Session::run(std::string_view strategy, std::string_view sql, std::string_view params_text) {
+  int64_t refused_before = timing_.refused_writes;
+  std::string out = run_one(strategy, sql, params_text);
+  // A write refused in a read is counted there (timing().refused_writes), not as an error.
+  if (out.starts_with("{\"error\":") && timing_.refused_writes == refused_before) {
+    std::string err;
+    auto v = json::parse(out, &err);
+    const auto* why = v && v->is_object() ? v->as_object().if_contains("error") : nullptr;
+    std::string text = why && why->is_string() ? std::string(why->as_string()) : out;
+    ++errors_.sql;
+    if (text.find("has no clock") != std::string::npos) ++errors_.no_clock;
+    errors_.last = std::move(text);
+  }
+  return out;
+}
+
+std::string Session::run_one(std::string_view strategy, std::string_view sql, std::string_view params_text) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   ++statements_;
   const manifest::DataStrategy* st = nullptr;

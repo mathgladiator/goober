@@ -93,7 +93,8 @@ Read these before doing design work:
     per tenant, route requirements), local mode, operator tokens, setup, and the justfile.
   - `design/machine/007.Content.md`: content as its own vector: pages (markdown, fragments,
     documents), Mustache templates with layouts, listings and feeds, and attachments at
-    `/attachment/$id.$ext` with uploads and MCP tools.
+    `/attachment/$id.$ext` with uploads and MCP tools; error pages (§ 13): `error-message/404.html`
+    as a template in the site's layout, never a page itself, and a box's empty 4xx gets it.
   - `design/machine/008.Databases.md`: tenant databases: JSON schemas that only expand,
     `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
     the operator's db tools and CLI, and grants as a box's whole reach with `grant_usage`
@@ -148,8 +149,9 @@ Read these before doing design work:
     `<!--#include name-->` in pages and box HTML, active links by `data-match`, `@auth` variants,
     ETags after expansion, and the `partial_*` tools.
   - `design/machine/028.Panel.md`: the operator panel: its own origin (`operations.domain` or
-    `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log, the
-    change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`;
+    `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log; errors
+    kept out of the icicle, the Errors view of what visitors got (`error_report`), and the Box
+    failures view of how boxes fail (`box_failures`) (§ 4.1 to § 4.3); the change log from the WAL's observer, data-flow graphs, the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
     and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal
     address, mailer, backups, AWS keys, operators); `--add-tenant` launches one more site.

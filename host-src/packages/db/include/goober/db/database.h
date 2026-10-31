@@ -130,6 +130,14 @@ class Session {
   // Runs one statement through a strategy and returns the result as JSON text:
   // {"columns","rows","changes","last_insert_id"} or {"error"}.
   std::string run(std::string_view strategy, std::string_view sql, std::string_view params);
+  // The statements that answered {"error"} (design/machine/028.Panel.md § 4.3): how many, those
+  // refused for asking the time, and the last error's text. Writes refused in a read are
+  // timing().refused_writes.
+  struct Errors {
+    int64_t sql = 0, no_clock = 0;
+    std::string last;
+  };
+  const Errors& errors() const { return errors_; }
 
   // Runs a statement for the host itself (like turning off a one-shot timer's row) in
   // the same transaction as the box's writes to that strategy's database, with no grants.
@@ -164,6 +172,8 @@ class Session {
   const std::set<std::string>& databases_written() const { return written_; }
 
  private:
+  std::string run_one(std::string_view strategy, std::string_view sql, std::string_view params);
+  Errors errors_;
   Usage used_;
   Timing timing_;
   std::vector<StatementRecord> statement_records_;

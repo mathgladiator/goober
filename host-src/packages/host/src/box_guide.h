@@ -132,6 +132,14 @@ The request document is JSON:
   do respond, any 2xx is success and the body is ignored (a mail route's 4xx sends its
   {"error": "..."} text to the sender); 500 and up, a trap, or a timeout rolls back the writes
   and counts as a failure. A job must respond (§ Jobs).
+- Errors, as visitors see them: an HTTP route's 4xx with an empty body (respond 404 with no
+  body) gets the site's own error page for that status, error-message/404.html, in the site's
+  layout (site_guide, Error pages), and an API caller gets the host's JSON error. A 4xx with a
+  body keeps your body. 5xx belongs to the host: a box that answers one, traps, or runs out of
+  time gets the site's 500 or 504 page, and the call counts as failed. Each box call, and each
+  way it went wrong (a trap, a timeout, a bad answer, SQL errors, deliveries, calls to other
+  boxes), is in box_failures {box, window} and the panel's Box failures view, with the latest
+  messages and their request_id for box_logs; what visitors got is error_report.
 
 ## The manifest
 

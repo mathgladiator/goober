@@ -433,6 +433,22 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   log["box_outcome"] = runtime::wasm::outcome_name(r.outcome);
   std::string outcome;
   auto reply = mail_hook_reply(r, &outcome);
+  // A box that ran and refused or put off the mail chose to (028 § 4.3): an answer, kept apart
+  // from failures, which call_box recorded.
+  if (failures_ && r.outcome == runtime::wasm::CallResult::Outcome::kOk &&
+      (outcome == "box_rejected" || outcome == "box_deferred")) {
+    operations::Failures::Event e;
+    e.at_ms = base::now_unix_ms();
+    e.tenant = match->tenant;
+    e.box = box.manifest.box;
+    e.version = box.version;
+    e.route = route.name;
+    e.kind = "mail";
+    e.cls = outcome == "box_rejected" ? "mail_rejected" : "mail_deferred";
+    e.message = "the box answered " + std::to_string(r.status);
+    e.request_id = request_id;
+    failures_->failure(std::move(e));
+  }
   if (outcome == "delivered") {
     if (message.from && !message.message_id.empty()) {
       try {

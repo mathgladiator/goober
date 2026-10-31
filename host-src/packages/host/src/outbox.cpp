@@ -489,6 +489,19 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
       }
       if (!recorded) return delivered;  // the next tick sends it again, under the same idempotency key
       if (ok) ++delivered;
+      // How boxes fail (028 § 4.3): a delivery the box queued that went wrong, on the box.
+      if (!ok && failures_) {
+        operations::Failures::Event e;
+        e.at_ms = now_ms;
+        e.tenant = tenant;
+        e.box = r.box;
+        e.route = r.service + "." + r.method;
+        e.kind = "outbox";
+        e.cls = state == "dead" ? "delivery_dead" : "delivery_retry";
+        e.message = reply.error.empty() ? "status " + std::to_string(reply.status) : reply.error;
+        e.request_id = r.idem_key;
+        failures_->failure(std::move(e));
+      }
       if (state == "dead") {
         std::cerr << "goober-host: outbox element " << r.id << " (" << r.service << "." << r.method << ") for " << tenant
                   << " is dead: " << (reply.error.empty() ? "status " + std::to_string(reply.status) : reply.error) << "\n";

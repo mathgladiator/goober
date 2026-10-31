@@ -165,6 +165,31 @@ the extension (.csv, .json, .xml, .atom, .rss, .webmanifest, .ics, .svg, .txt, .
 Paths with a segment that starts with "_" are never served. Text is stored byte for byte, but a
 tool-call layer can drop CR bytes on the way: give sha256 to make sure, or send base64.
 
+## Error pages: your own 404, 403, and the rest [content_put]
+When the host answers an error itself (no such page, a gate, a limit, a box that failed), a
+browser gets the site's page for that status: error-message/$status.html from the site's
+files, else the host's (tenant _host), else a plain "Uh Oh!" page. API callers (a bearer
+token, or Accept: application/json) get {"error", "status", "request_id"} instead. Write one
+with content_put {tenant, path: "error-message/404.html", text}; page_put won't, since an error
+page is no page: /error-message/404 itself answers 404, and no sitemap lists it.
+The page is a template: {{status}}, {{reason}} ("Not Found"), {{title}} ("404 Not Found"),
+{{request_id}}, and the site's data, and front matter puts it in your layout with its nav and
+footer:
+  ---
+  layout: base
+  ---
+  <h1>Not here</h1><p>Try the <a href="/">home page</a>.</p><!--#include footer-->
+<!--#include--> partials work. It is always rendered for a visitor with no session, so it never
+shows who is signed in. The statuses the host answers: 400 (a bad request), 401 (sign in;
+a browser on a gated page gets a 303 to sign-in instead), 403 (requirements not met, or a
+cross-site form), 404, 405 (a method nothing answers), 429 (too many requests), 500 (a box
+failed or answered badly), 503 (busy or not ready), and 504 (a box ran out of time). A box
+route that answers a 4xx with an empty body gets the site's page for it too: answer
+{"status": 404} with nothing else and the visitor sees your 404. A box's 4xx with a body
+keeps its own body, and a box never answers 5xx (that is the host's).
+Check one: url_check {url: "https://example.com/no-such-page"} fetches it as a visitor would.
+Errors don't count as the site's traffic: the panel's Errors view (error_report) has them.
+
 ## Installable apps [pwa_put, pwa_get, pwa_list, pwa_delete]
 pwa_put {tenant, name, app: {scope: "/" or "/shop/", manifest: {name, short_name, icons,
 theme_color, ...}, offline: {fallback, precache}, push}} makes that part of the site an app:
@@ -305,7 +330,8 @@ std::optional<BuiltPage> build_page(const site::Site& site, const std::string& t
   }
   std::string ext = *format == "markdown" ? ".md" : ".html";
   out.file = file_for(site, tenant, *path, ext);
-  if (site::is_private_path(out.file)) return *error = "a page's path can't have a segment starting with _", std::nullopt;
+  if (site::is_private_path(out.file)) return *error = "a page's path can't have a segment starting with _, or be under /error-message/ (error pages are "
+                   "files: content_put {path: \"error-message/404.html\"})", std::nullopt;
   if (*format != "document" || !fields.empty()) {
     out.text = "---\n";
     for (const auto& [k, v] : fields) {

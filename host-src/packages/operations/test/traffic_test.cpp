@@ -194,3 +194,44 @@ TEST_F(TrafficTest, OldMinutesAreDroppedAndHoursKept) {
   EXPECT_EQ(n, 0);
   EXPECT_EQ(t->routes("7d", "", "", later).size(), 1u);
 }
+
+// The Errors view (028 § 4.2): what visitors got, by who made it, with every path nothing
+// answers counted as one place and box-to-box calls left out.
+TEST_F(TrafficTest, ErrorsFromOutsideAreCountedByPlaceAndMaker) {
+  auto L = [&](int64_t ms, const std::string& rest) {
+    line(R"({"at":")" + at(ms) + R"(","domain":"kcmeatup.com",)" + rest + "}");
+  };
+  for (int i = 0; i < 6; ++i) L(kNoon + i * 1000, R"("path":"/","status":200,"us":10,"file":"index.md")");
+  for (const char* scan : {"/wp-login.php", "/.env", "/admin.php"}) {
+    L(kNoon, std::string(R"("path":")") + scan + R"(","status":404,"us":10,"error_by":"host")");
+  }
+  L(kNoon, R"("path":"/places/9","status":404,"us":10,"box":"kc","route":"place","outcome":"ok","error_by":"box","ref":"same")");
+  L(kNoon, R"("path":"/places/8","status":500,"us":10,"box":"kc","route":"place","outcome":"trap","error_by":"box_failed","ref":"other")");
+  L(kNoon, R"("path":"/members","status":401,"us":10,"file":"members.md","error_by":"host")");
+  L(kNoon, R"("path":"internal:kc/x","status":500,"us":10,"box":"kc","route":"x","outcome":"trap","internal":"web -> kc")");
+  auto t = open();
+  t->catch_up(kNoon + 60000);
+  auto e = t->errors("1h", "kcmeatup", kNoon + 60000);
+  const auto& totals = e.at("totals").as_object();
+  EXPECT_EQ(totals.at("n").as_int64(), 13);  // every request, the internal call's included
+  EXPECT_EQ(totals.at("n4").as_int64(), 5);
+  EXPECT_EQ(totals.at("n5").as_int64(), 1);  // the internal call's 500 isn't an outside error
+  EXPECT_EQ(totals.at("host").as_int64(), 4);
+  EXPECT_EQ(totals.at("box").as_int64(), 1);
+  EXPECT_EQ(totals.at("box_failed").as_int64(), 1);
+  const auto& places = e.at("places").as_array();
+  ASSERT_EQ(places.size(), 4u);
+  EXPECT_EQ(places[0].at("place"), "(not found)");
+  EXPECT_EQ(places[0].at("n").as_int64(), 3);
+  EXPECT_EQ(places[0].at("none").as_int64(), 3);
+  std::string all = json::dump(e);
+  EXPECT_EQ(all.find("wp-login"), std::string::npos) << all;
+  EXPECT_NE(all.find(R"("place":"/members")"), std::string::npos) << all;
+  EXPECT_NE(all.find(R"("route":"place","status":500,"error_by":"box_failed")"), std::string::npos) << all;
+  EXPECT_EQ(e.at("referred").at("same").as_int64(), 1);
+  EXPECT_EQ(e.at("referred").at("other").as_int64(), 1);
+  EXPECT_EQ(e.at("referred").at("none").as_int64(), 4);
+  ASSERT_EQ(e.at("statuses").as_array().size(), 3u);  // 401, 404, 500
+  // The 7-day window reads the hours, written alongside.
+  EXPECT_EQ(t->errors("7d", "", kNoon + 60000).at("totals").at("n4").as_int64(), 5);
+}

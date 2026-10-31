@@ -7,7 +7,7 @@ goober_package(
        goober_runtime_wasm goober_db goober_boxes goober_identity goober_mail_templates goober_mail_inbound goober_server_http goober_mcp goober_timers goober_web goober_source goober_operations goober_panel goober_webpush goober_calendar goober_libraries goober_mail_consent goober_logs goober_vault goober_specs goober_signing goober_bus goober_ids
   TESTS test/host_test.cpp test/identity_routes_test.cpp test/operator_tokens_test.cpp test/content_test.cpp test/data_test.cpp
         test/oauth_routes_test.cpp test/agents_test.cpp test/rate_limit_test.cpp test/mailer_test.cpp test/backup_test.cpp test/lifecycle_test.cpp test/timers_test.cpp test/identity_events_test.cpp test/operator_oauth_test.cpp test/mail_in_test.cpp test/network_test.cpp test/internal_test.cpp test/http_contract_test.cpp test/web_test.cpp test/mail_test.cpp test/s3_backup_test.cpp test/source_tools_test.cpp test/panel_test.cpp test/pwa_test.cpp test/libraries_test.cpp test/operator_scope_test.cpp test/invites_test.cpp test/logs_host_test.cpp test/http_test.cpp test/bus_test.cpp test/audit_test.cpp test/route_try_test.cpp test/cache_test.cpp
-        test/mail_check_test.cpp
+        test/mail_check_test.cpp test/errors_test.cpp
 )
 # MX and TXT lookups (dns.cpp) use glibc's resolver.
 target_link_libraries(goober_host PUBLIC resolv)

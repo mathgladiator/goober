@@ -27,6 +27,7 @@
 #include "goober/host/worker_pool.h"
 #include "goober/mcp/mcp.h"
 #include "goober/operations/changes.h"
+#include "goober/operations/failures.h"
 #include "goober/operations/live.h"
 #include "goober/operations/traffic.h"
 #include "goober/runtime_wasm/engine.h"
@@ -203,6 +204,8 @@ class Host {
   // The request id of the operator call running on this thread, for the change log.
   static std::string& current_request_id();
   std::unique_ptr<operations::Traffic> traffic_;
+  // How boxes fail (028 § 4.3): every box call and each way it went wrong.
+  std::unique_ptr<operations::Failures> failures_;
   std::unique_ptr<operations::ChangeLog> changes_;
   std::unique_ptr<server::http::Server> panel_server_;
   std::thread traffic_thread_;
@@ -243,7 +246,13 @@ class Host {
     CallPerf perf;              // where its time went (037 § 7.1)
     int64_t calls_out = 0;      // calls through goober_call (web, mail, other boxes, APIs)
     db::Usage used;             // what its statements did with each table (route_try reports it)
+    // How it failed, for the panel's box failures (028 § 4.3): a class from
+    // operations::Failures ("" when it didn't) with the message, and its statements' errors.
+    std::string failure, failure_message;
+    db::Session::Errors sql_errors;
   };
+  // Records one box call, and how it failed, in failures_: by whoever records its perf.
+  void record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id, int64_t now_ms);
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
   struct CallOptions {
@@ -352,8 +361,9 @@ class Host {
    private:
     std::string saved_op_, saved_req_;
   };
+  // host_error: the host made the answer (an error page or its JSON), not a box.
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
-                  const std::string& extra);
+                  const std::string& extra, bool host_error = false);
 
   std::filesystem::path config_file_;
   config::ConfigHolder config_;

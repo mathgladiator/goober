@@ -852,7 +852,23 @@ std::string Host::internal_call(CallContext& ctx, const manifest::ExternalServic
   pseudo.path = "internal:" + svc.box + path;
   pseudo.headers.emplace_back("goober-request-id", request_id);
   access_log(pseudo, status, started, ctx.domain, json::dump(call.extra));
-  if (status >= 500) return json::dump(bj::object{{"status", status}, {"error", svc.box + "." + m.name + " failed"}});
+  if (status >= 500) {
+    // On the caller too (028 § 4.3): the callee's own failure is on the callee.
+    if (failures_) {
+      operations::Failures::Event e;
+      e.at_ms = base::now_unix_ms();
+      e.tenant = ctx.tenant;
+      e.box = ctx.manifest->box;
+      e.route = ctx.route;
+      e.kind = "internal";
+      e.cls = "internal_failed";
+      e.message = svc.box + "." + m.name + " failed: " + (call.failure.empty() ? "status " + std::to_string(status)
+                                                                                 : call.failure);
+      e.request_id = ctx.request_id;
+      failures_->failure(std::move(e));
+    }
+    return json::dump(bj::object{{"status", status}, {"error", svc.box + "." + m.name + " failed"}});
+  }
   bj::object result{{"status", status}, {"content_type", r.content_type}, {"body", r.body}};
   if (r.content_type.starts_with("application/json")) {
     std::string err;

@@ -80,6 +80,15 @@ class Traffic {
   bj::array hot_boxes(std::string_view window, int64_t now_ms);
   // [{tenant, from_box, to_kind, to_name, n, errors, us, bytes_out, bytes_in}].
   bj::array edges(std::string_view window, const std::string& box, int64_t now_ms);
+  // What visitors and clients got that wasn't a success (028 § 4.2): every 4xx and 5xx answered
+  // to a request from outside (box-to-box calls and route_try left out), by who made it
+  // (error_by: host, box, or box_failed). {window, step_ms, from_ms, to_ms, totals: {n, n4, n5,
+  // host, box, box_failed}, points: [{t, n, n4, n5, host, box, box_failed}], statuses: [{status,
+  // n, host, box, box_failed}], places: [{tenant, place, box, route, status, error_by, n, same,
+  // other, none}] (most first, at most 200), referred: {same, other, none}}. A place is a box's
+  // route, a page's path, a host area (identity, oauth, mcp, operations, attachment, ...), or
+  // "(not found)" for every path nothing answers, so a scan can't push out the rest.
+  bj::object errors(std::string_view window, const std::string& tenant, int64_t now_ms);
 
  private:
   struct Window;
