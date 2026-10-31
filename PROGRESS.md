@@ -495,7 +495,11 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 ### Phase 29: reads, caching, and performance reports (037)
 - [x] GETs and HEADs change nothing: writes and effectful calls refused, reads begin
       deferred beside a writer; the leads box's mailed link confirms by a button; tests.
-- [ ] Per-call time split and per-statement statistics; `perf_report`, `perf_statements`.
+- [x] Per-call time split (queue, box, lock wait, statements, commit, calls out, render, bytes,
+      refused writes) in the access log and per route for an hour; per-statement statistics
+      with SQLite's counters; `perf_report` with findings (cacheable, missing_index with the
+      index, lock_wait, get_writes, subscription_churn, cache_mismatch) and `perf_statements`;
+      the panel's Performance view; tests (037 § 7).
 - [ ] Database versions; the route `cache` field with checks; 304s without the box;
       `cache_status`, `cache_clear` (waiting on 037 § 9's decisions).
 

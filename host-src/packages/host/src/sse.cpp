@@ -382,6 +382,8 @@ void Host::sse_evaluate(std::shared_ptr<SseGroup> g) {
       }
     }
   }
+  // How often an evaluation changed the answer (037 § 7.2's subscription_churn).
+  if (send_body) perf_->record_subscription(g->tenant, g->box, g->route, changed, base::now_unix_ms());
   // One string for every subscriber.
   auto shared = std::make_shared<const std::string>(std::move(message));
   for (const auto& s : send_to) s->send(shared);

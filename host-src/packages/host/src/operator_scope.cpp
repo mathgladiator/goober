@@ -62,6 +62,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     m["source_create"] = Rule::kProjectCreate;
     m["attachment_upload_part"] = Rule::kTicket;
     for (const char* t : {"change_get", "source_job", "job_status"}) m[t] = Rule::kResult;
+    for (const char* t : {"perf_report", "perf_statements"}) m[t] = Rule::kTenant;
     for (const char* t : {"domain_list", "box_list", "source_list", "timers_list", "outbox_dead_letters", "uri_stats",
                           "grant_usage"}) {
       m[t] = Rule::kFiltered;

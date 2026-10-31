@@ -801,7 +801,11 @@ const views = {
     const tenant = params.get('tenant') || (focus() ? focus()[0] : '');
     const win = params.get('window') || '15m', sort = params.get('sort') || 'p99', prefix = params.get('prefix') || '';
     const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); location.hash = '#/perf?' + params; };
-    const rows = await api('uri_stats', { tenant, window: win, sort, prefix, limit: 300 });
+    const ssort = params.get('ssort') || 'total';
+    const [rows, report, statements] = await Promise.all([
+      api('uri_stats', { tenant, window: win, sort, prefix, limit: 300 }),
+      api('perf_report', { tenant, window: win === '15m' || win === '5m' ? win : '1h' }).catch(() => ({ routes: [], findings: [] })),
+      api('perf_statements', { tenant, sort: ssort, limit: 30 }).catch(() => [])]);
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Performance'),
         h('select', { onchange: (e) => go('tenant', e.target.value) }, focus() ? null : h('option', { value: '' }, 'all tenants'),
@@ -821,6 +825,9 @@ const views = {
           { label: 'p99', num: true, get: (r) => fmt.us(r.p99_us), cls: (r) => r.p99_us > 1e6 ? 'err' : r.p99_us > 3e5 ? 'warn' : '' },
           { label: 'Max', num: true, get: (r) => fmt.us(r.max_us) },
         ], rows) : h('p', { class: 'muted' }, 'No requests in this window yet.')),
+      perfFindingsCard(report.findings),
+      perfRoutesCard(report.routes),
+      perfStatementsCard(statements, ssort, (x) => go('ssort', x)),
     ];
   },
 
@@ -1292,6 +1299,53 @@ function jobsCard(jobs) {
     { label: 'Updated', get: (j) => last(j).updated_at ? fmt.time(Date.parse(last(j).updated_at)) : '', cls: () => 'muted' },
     { label: 'Last error', get: (j) => clip(last(j).last_error || '', 100), cls: () => 'err' },
   ], jobs));
+}
+
+// Performance (037 § 7): what to fix, with its evidence (perf_report's findings).
+function perfFindingsCard(findings) {
+  if (!findings || !findings.length) return null;
+  return wideCard('Findings', h('ul', { class: 'findings' }, findings.map((f) => h('li', {},
+    h('span', { class: 'pill' }, f.kind.replace(/_/g, ' ')), ' ',
+    h('code', {}, f.box + (f.route ? ' · ' + f.route : '')), ' ', f.text,
+    f.evidence && f.evidence.suggested_index ? [': ', h('code', {}, JSON.stringify({ [f.evidence.suggested_index.name]: { columns: f.evidence.suggested_index.columns } }))] : null))));
+}
+
+// Where each route's time goes: the average call split into its parts.
+function perfRoutesCard(routes) {
+  if (!routes || !routes.length) return null;
+  const a = (r, k) => fmt.us(r.average[k] || 0);
+  return wideCard('Where the time goes (average per call)', table([
+    { label: 'Box · route', get: (r) => r.box + ' · ' + r.route, cls: () => 'mono' },
+    { label: 'Verb', get: (r) => r.verb, cls: () => 'muted' },
+    { label: 'Calls', num: true, get: (r) => fmt.n(r.calls) },
+    { label: 'p99', num: true, get: (r) => fmt.us(r.p99_us) },
+    { label: 'Queue', num: true, get: (r) => a(r, 'queue_us') },
+    { label: 'Box', num: true, get: (r) => a(r, 'box_us') },
+    { label: 'Lock wait', num: true, get: (r) => a(r, 'lock_us'), cls: (r) => r.average.lock_us > 5000 ? 'warn' : '' },
+    { label: 'SQL', num: true, get: (r) => a(r, 'statement_us') },
+    { label: 'Commit', num: true, get: (r) => a(r, 'commit_us') },
+    { label: 'Calls out', num: true, get: (r) => a(r, 'out_us') },
+    { label: 'Render', num: true, get: (r) => a(r, 'render_us') },
+    { label: 'Cache hits', num: true, get: (r) => r.cache.hit + r.cache.not_modified ? Math.round(100 * r.cache.hit_rate) + '%' : '' },
+    { label: 'Refused writes', num: true, get: (r) => r.refused_writes || '', cls: (r) => r.refused_writes ? 'err' : '' },
+  ], routes));
+}
+
+// Each SQL statement boxes ran in the last hour, with SQLite's own counters.
+function perfStatementsCard(rows, sort, onSort) {
+  return wideCard('Statements (last hour)', h('div', { class: 'bar' }, h('label', {}, 'Sort '),
+    segmented(['total', 'count', 'fullscan', 'max'], sort, onSort)),
+  rows && rows.length ? table([
+    { label: 'Box · strategy', get: (r) => r.box + ' · ' + r.strategy, cls: () => 'muted' },
+    { label: 'Statement', get: (r) => clip(r.sql, 140), cls: () => 'mono' },
+    { label: 'Runs', num: true, get: (r) => fmt.n(r.count) },
+    { label: 'Total', num: true, get: (r) => fmt.us(r.total_us) },
+    { label: 'Avg', num: true, get: (r) => fmt.us(r.avg_us) },
+    { label: 'Max', num: true, get: (r) => fmt.us(r.max_us) },
+    { label: 'Rows', num: true, get: (r) => fmt.n(r.rows) },
+    { label: 'Full-scan steps', num: true, get: (r) => fmt.n(r.fullscan_steps), cls: (r) => r.fullscan_steps / Math.max(r.count, 1) >= 100 ? 'warn' : '' },
+    { label: 'Auto index', num: true, get: (r) => r.autoindexes || '', cls: (r) => r.autoindexes ? 'warn' : '' },
+  ], rows) : h('p', { class: 'muted' }, 'No statements in the last hour.'));
 }
 
 // On a box's page: the source deploys behind its versions (020 § 9).

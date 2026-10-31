@@ -45,6 +45,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
     "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
     "source_checkout",
+    "perf_report", "perf_statements",
     "spec_list",       "spec_get",          "ids_status",          "approval_status",  "bus_status",      "box_render",
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
