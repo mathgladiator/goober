@@ -431,6 +431,49 @@ TEST_F(DbTest, IdKeysAreStampedByTheHost) {
   EXPECT_NE(std::string(e.at("error").as_string()).find("id service"), std::string::npos) << json::dump(e);
 }
 
+// The functions box_guide lists (008 § 5): the pure ones, including the JSON and date
+// functions, and json_each / json_tree over values; nothing else. Operators' db_query isn't
+// held to the list.
+TEST_F(DbTest, BoxSqlHasThePureFunctionsAndOperatorsHaveAll) {
+  manifest::TableGrant g;
+  g.read_all = true;
+  g.insert = true;
+  std::vector<manifest::DataStrategy> strategies{strategy(g)};
+  db::Session s(*dbs, "playground", strategies, *schemas);
+  auto ok = [&](const char* sql, const char* params = "") {
+    auto r = J(s.run("book", sql, params));
+    EXPECT_FALSE(r.as_object().contains("error")) << sql << " " << json::dump(r);
+    return r;
+  };
+  auto refused = [&](const char* sql) {
+    auto r = J(s.run("book", sql, ""));
+    ASSERT_TRUE(r.as_object().contains("error")) << sql;
+    EXPECT_NE(std::string(r.at("error").as_string()).find("pure functions"), std::string::npos) << json::dump(r);
+  };
+  ok("INSERT INTO entries (name, message, created_ms) VALUES ('a', '{\"k\": [1, 2]}', 1)");
+  auto j = ok("SELECT json_extract(message, '$.k[1]'), message ->> '$.k[0]', json_array_length(message, '$.k') FROM entries");
+  EXPECT_EQ(json::dump(j.at("rows")), "[[2,1,2]]");
+  auto each = ok("SELECT value FROM json_each(?) ORDER BY value", R"(["[3, 1, 2]"])");
+  EXPECT_EQ(json::dump(each.at("rows")), "[[1],[2],[3]]");
+  ok("SELECT count(*) FROM json_tree('{\"a\": {\"b\": 1}}')");
+  ok("SELECT json_each.value FROM entries, json_each(entries.message, '$.k')");
+  auto dates = ok("SELECT date(0, 'unixepoch'), strftime('%Y', 86400 * 365, 'unixepoch'), unixepoch('1970-01-02')");
+  EXPECT_EQ(json::dump(dates.at("rows")), R"([["1970-01-01","1971",86400]])");
+  ok("SELECT datetime('2026-10-30 12:00', '+1 day'), julianday('2000-01-01'), timediff('2026-10-30', '2026-10-01')");
+  // 'now' is accepted, and reads the machine's clock when the statement runs (box_guide says to
+  // pass the request's now_ms instead).
+  EXPECT_EQ(ok("SELECT date('now') IS NOT NULL").at("rows").at(0).at(0), 1);
+  refused("SELECT random()");
+  refused("SELECT randomblob(4)");
+  refused("SELECT changes()");
+  refused("SELECT last_insert_rowid()");
+  refused("SELECT sqlite_version()");
+  refused("SELECT load_extension('x')");
+  std::string err;
+  auto op = dbs->operate("playground", "guestbook", "SELECT sqlite_version(), typeof(random())", nullptr, 10, false, &err);
+  EXPECT_TRUE(op) << err;
+}
+
 TEST(Schema, WarnsAboutKeysAndReferencesThatArentIds) {
   std::string err;
   auto s = db::parse_schema(R"({"schema": "access3", "tables": {

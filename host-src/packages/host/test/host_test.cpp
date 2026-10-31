@@ -481,7 +481,10 @@ TEST(HostIds, NewIdsStartPastStoredOnesAndUsersTakeThem) {
       std::string e;
       return json::parse(r.body, &e)->at("result").at("structuredContent");
     };
-    EXPECT_EQ(tool("ids_status", {}).at("counter").as_string(), std::to_string(past));
+    auto fresh = tool("ids_status", {});
+    EXPECT_EQ(fresh.at("counter").as_string(), std::to_string(past));
+    // Nothing minted yet: the answer says what that means, rather than looking broken.
+    EXPECT_NE(std::string(fresh.at("note").as_string()).find("no id minted yet"), std::string::npos);
     tool("role_grant", {{"tenant", "shop"}, {"email", "ada@example.com"}, {"role", "member"}});
     tool("role_grant", {{"tenant", "shop"}, {"email", "bo@example.com"}, {"role", "member"}});
     auto users = tool("realm_get", {{"tenant", "shop"}}).at("users").as_array();
@@ -491,6 +494,7 @@ TEST(HostIds, NewIdsStartPastStoredOnesAndUsersTakeThem) {
     auto status = tool("ids_status", {});
     EXPECT_EQ(status.at("counter").as_string(), std::to_string(past + ids::kRangeLength));
     EXPECT_EQ(status.at("next").as_string(), std::to_string(past + 2));
+    EXPECT_FALSE(status.as_object().contains("note"));
   }
   // A restore: the counter moves past the restored ids and a margin beyond where it was.
   auto [from, to] = host::move_ids_past_restore(root / "storage");

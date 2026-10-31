@@ -360,10 +360,21 @@ void Host::register_tools() {
                       ranges.push_back(bj::object{{"start", std::to_string(r.start)}, {"length", r.length},
                                                   {"to", r.vended_to}, {"at", base::format_utc_ms(r.vended_ms)}});
                     }
-                    return ToolResult::ok(bj::object{{"counter", std::to_string(ids_->counter())},
-                                                     {"next", end ? bj::value(std::to_string(next)) : bj::value(nullptr)},
-                                                     {"range_end", end ? bj::value(std::to_string(end)) : bj::value(nullptr)},
-                                                     {"ranges", std::move(ranges)}});
+                    bool none_yet = ranges.empty();
+                    bj::object out{{"counter", std::to_string(ids_->counter())},
+                                   {"next", end ? bj::value(std::to_string(next)) : bj::value(nullptr)},
+                                   {"range_end", end ? bj::value(std::to_string(end)) : bj::value(nullptr)},
+                                   {"ranges", std::move(ranges)}};
+                    // What an empty answer means, since it looks like nothing is working.
+                    if (none_yet) {
+                      out["note"] = "no id minted yet: the first new user, invite, upload, or row keyed by id takes a "
+                                    "range of " + std::to_string(ids::kRangeLength) + " from the counter. Nothing needs "
+                                    "reserving: a job's inserts get their ids as they happen. Ids from before the service "
+                                    "(users who signed up earlier, rowid-keyed tables) are kept, below the counter.";
+                    } else if (!end) {
+                      out["note"] = "no range in use since the host started; the next new id takes one";
+                    }
+                    return ToolResult::ok(std::move(out));
                   }});
 
   mcp_->add_tool({"domain_list",
@@ -480,9 +491,15 @@ void Host::register_tools() {
        "stores it dark for version_promote to make live later. When the manifest names a "
        "types document (\"types\": \"x.openapi.json\"), pass that document as types: the OpenAPI components.schemas "
        "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset. With "
-       "dry_run, every check runs (conflicts with the active boxes included) and nothing is stored or changed.",
+       "dry_run, every check runs (conflicts with the active boxes included) and nothing is stored or changed; "
+       "schemas gives it schemas not stored yet. A dark version (activate: false) that conflicts with a live box "
+       "is stored with a warning, so a route or mail address can move between boxes: box_disable the old box, "
+       "then version_promote the new version (rollback: box_disable the new, box_enable the old).",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
+                      {"schemas", mcp::any_property("With dry_run: schemas the manifest uses that aren't stored yet "
+                                                    "(a list of schema objects or JSON texts), checked as schema_check "
+                                                    "checks them and used as if stored. Nothing is stored.")},
                       {"activate", mcp::boolean_property("false stores the version without making it active (every "
                                                          "check still runs); version_promote makes it live. Default true.")},
                       {"wat", string_property("The module as WebAssembly text.")},
@@ -510,9 +527,39 @@ void Host::register_tools() {
            types = t->value().is_string() ? std::string(t->value().get_string()) : json::pretty(t->value());
          }
          std::string err;
-         if (auto d = args.find("dry_run"); d != args.end() && d->value().is_bool() && d->value().get_bool()) {
+         bool dry_run = false;
+         if (auto d = args.find("dry_run"); d != args.end() && d->value().is_bool()) dry_run = d->value().get_bool();
+         // Schemas not stored yet, for a dry run only: checked as schema_check checks them, then
+         // used for the manifest's data checks as if stored, as a source build uses its own.
+         std::map<std::string, db::Schema> pending;
+         bj::array schema_warnings;
+         if (auto s = args.find("schemas"); s != args.end() && !s->value().is_null()) {
+           if (!dry_run) return ToolResult::fail("schemas are for dry_run; store them with schema_put before a real upload");
+           if (!s->value().is_array() || s->value().as_array().size() > 20) {
+             return ToolResult::fail("schemas is a list of up to 20 schemas, as JSON objects or text");
+           }
+           for (const auto& v : s->value().as_array()) {
+             std::string text = v.is_string() ? std::string(v.get_string()) : json::dump(v);
+             auto checked = schemas_->check(text, &err);
+             if (!checked) return ToolResult::fail("schemas: " + err);
+             for (const auto& w : checked->warnings) schema_warnings.push_back(bj::value(checked->name + ": " + w));
+             pending[checked->name] = *checked;
+           }
+         }
+         if (dry_run) {
+           pending_schemas_ = pending.empty() ? nullptr : &pending;
+           struct Clear {
+             ~Clear() { pending_schemas_ = nullptr; }
+           } clear;
            if (!boxes_->check(manifest, module, types, &err)) return ToolResult::fail(err);
-           return ToolResult::ok(bj::object{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}});
+           bj::object out{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}};
+           if (!pending.empty()) {
+             bj::array names;
+             for (const auto& [name, _] : pending) names.push_back(bj::value(name));
+             out["schemas_checked"] = std::move(names);
+             if (!schema_warnings.empty()) out["schema_warnings"] = std::move(schema_warnings);
+           }
+           return ToolResult::ok(std::move(out));
          }
          // activate: false stores a version dark: every check runs, and version_promote makes it live.
          bool activate = true;
@@ -604,7 +651,14 @@ void Host::register_tools() {
            version = disabled->version;
          }
          std::string err;
-         if (!boxes_->promote(*box, *version, &err)) return ToolResult::fail(err);
+         if (!boxes_->promote(*box, *version, &err)) {
+           // Another box took its names or addresses while it was off (a route moved): that box
+           // goes out first, which is the rollback of the move.
+           if (err.find("already used by box") != std::string::npos || err.find("already claimed by box") != std::string::npos) {
+             err += "; to roll back a move, box_disable that box first, then box_enable " + *box;
+           }
+           return ToolResult::fail(err);
+         }
          return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
        }});
 

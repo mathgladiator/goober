@@ -572,6 +572,18 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] schema_put, the key refusal, and `box_guide` say a natural key is a unique index, not the
       primary key.
 
+### The engineers' questions, 2026-10-30 (late): moving routes, dry runs, the guide's answers
+- [x] A route or mail address moves between boxes: a dark version that clashes with a live box
+      is stored with a warning; box_disable the old, version_promote the new; box_enable on the
+      old is refused while the new holds the names, saying how to roll back (005); test.
+- [x] `version_upload {dry_run, schemas}` checks a manifest against schemas not stored yet; test.
+- [x] `box_guide`: how path and mail-address parameters are decoded (tested), the exact list of
+      SQL functions (json_each and json_tree included; tested), ids from before the service and
+      what an empty `ids_status` means (now with a `note`), calls that may return without
+      answering, and that `box_render` runs neither the box nor the gate.
+- [ ] Box SQL's date functions accept 'now', which reads the machine's clock: impure, and
+      unseen by replays and 037's caching. Refusing it would break boxes that use it.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

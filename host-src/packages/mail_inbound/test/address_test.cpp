@@ -81,3 +81,28 @@ TEST(MailAddress, SplitsPlainAddresses) {
   EXPECT_FALSE(split_address("a b@example.com"));
   EXPECT_FALSE(split_address("@example.com"));
 }
+
+// What box_guide promises about a mail parameter: the address is lowercased whole before
+// matching; a parameter holds 1 to 64 of [a-z0-9._-], so "+" and "%" are never inside one and
+// nothing is percent-decoded; "+tag" is literal text, so support@ doesn't take support+tag@
+// (declare "support+{tag}@" for that); a parameter runs to the first occurrence of the literal
+// after it.
+TEST(MailAddress, ParametersAreLowercaseAndNeverDecoded) {
+  auto key = parse("list+{addr_key}@");
+  auto parts = split_address("List+AbC.9_x-Y@Example.com");
+  ASSERT_TRUE(parts);
+  auto m = match_local(key, parts->first);
+  ASSERT_TRUE(m);
+  EXPECT_EQ(m->at("addr_key"), "abc.9_x-y");
+  EXPECT_FALSE(match_local(key, "list+a%2bb"));  // % isn't a parameter character: no decoding
+  EXPECT_FALSE(match_local(key, "list+a+b"));    // nor is +
+  EXPECT_FALSE(match_local(key, "list+" + std::string(65, 'a')));
+  EXPECT_FALSE(match_local(parse("support@"), "support+tag"));
+  auto tagged = match_local(parse("support+{tag}@"), "support+orders");
+  ASSERT_TRUE(tagged);
+  EXPECT_EQ(tagged->at("tag"), "orders");
+  auto split = match_local(parse("{who}.{team}@"), "ann.b.sales");  // the first "." ends who
+  ASSERT_TRUE(split);
+  EXPECT_EQ(split->at("who"), "ann");
+  EXPECT_EQ(split->at("team"), "b.sales");
+}

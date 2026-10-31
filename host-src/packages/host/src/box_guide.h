@@ -24,10 +24,22 @@ version_upload {manifest, wat | wasm_base64, types?}
 - activate: false stores the version dark (every check runs, nothing changes for callers);
   version_promote {box, version} makes it live when you're ready, like a mail route whose MX
   already points here.
+- dry_run: true runs every check and stores nothing. With it, schemas: [schema, ...] checks the
+  manifest against schemas you haven't stored yet (schema_check's rules; nothing is stored).
 Store database schemas first with schema_put. Then check box_logs, access_log, and db_query.
 Out of service: box_disable {box, why} stops every route, tool, timer, mail route, and job of
 a box, keeping its versions and data; box_enable {box} puts the same version back. To take
 out one route, deploy a version without it.
+Route names and mail addresses are unique among the ACTIVE boxes only: a disabled box holds
+none, so another box may take them. Moving a route (say admin@example.com) from box old to
+box new, with a quick rollback:
+1. version_upload new's version with activate: false. It is stored dark; its clash with old
+   comes back as a warning ("not live-able while ..."), not a refusal.
+2. The cutover, two calls: box_disable {box: "old", why} then version_promote {box: "new",
+   version}. mail_route_check {domain, address} says who takes the address now.
+3. Rollback, two calls: box_disable {box: "new", why} then box_enable {box: "old"}. box_enable
+   on old while new holds the names is refused, naming new.
+A route name moves with its export: the new box must export goober_route_$name for it.
 
 ## The boundary (goober-abi@1)
 
@@ -56,6 +68,16 @@ The request document is JSON:
  "headers", "body": text, "domain", "tenant", "user": null or {"user_id", "email", "roles",
  "host", "agent", "client_id" (agents only)}, "client_key", "form" (forms only)}
 - An HTTP route: method get/post/put/patch/delete. Credentials (cookie, authorization) never appear.
+- How "params" are decoded. A path parameter is its one path segment, percent-decoded once,
+  case kept ("/brands/R%C3%BCe" gives "Rüe"); "+" stays "+" (only the query turns "+" into a
+  space); a segment that decodes to "/", NUL, ".", or ".." is refused with 400 before any box.
+  A mail route's parameter ("list+{addr_key}@") is matched after the whole address is
+  lowercased; it holds 1 to 64 of a-z 0-9 . _ - and nothing is percent-decoded, so "+" and "%"
+  are never inside one; it runs to the first occurrence of the text after it ("{who}.{team}@"
+  splits "ann.b.sales" into "ann" and "b.sales"). "+tag" is literal text: "support@" doesn't
+  take support+orders@ (the catch-all "*@" does, if you have one); declare "support+{tag}@" to
+  take tags. A {name : token} parameter reaches you as the claim you minted the token with,
+  never the token itself.
 - "form": a plain HTML form's fields (application/x-www-form-urlencoded), decoded, on routes
   without a json body type. One value per name (the last).
 - "client_key": 16 hex characters, the same for the same address on the same site, so a box
@@ -65,6 +87,13 @@ The request document is JSON:
 - An MCP tool: method "tool", path "mcp:$name", body = the checked input as JSON.
 - A timer: method "timer", path "timer:$name", body = the row as JSON (data-driven) or "",
   user null. A timer may simply return without responding.
+- Calls the host makes for itself (timers, identity events, mail routes, result routes) need
+  no goober_respond: returning 0 without one is success. Its writes commit; a mail route's
+  message counts as delivered; an identity event as acknowledged. Nothing goes in box_logs for
+  it, and the access log's line says "outcome": "no_response", which is not an error. If you
+  do respond, any 2xx is success and the body is ignored (a mail route's 4xx sends its
+  {"error": "..."} text to the sender); 500 and up, a trap, or a timeout rolls back the writes
+  and counts as a failure. A job must respond (§ Jobs).
 
 ## The manifest
 
@@ -114,6 +143,9 @@ tag. Tags between <!--head--> and <!--/head--> in the template go to the layout'
 The gate runs first: a refused request gets its 401 or sign-in redirect, never the page.
 Preview without deploying: box_render {path or box+template, data: sample JSON, templates:
 unsaved ones, base included}; check a manifest without storing it: version_upload {dry_run}.
+box_render runs neither the box nor the gate (there is no request): it renders whatever data
+you give, so a people-only route previews with or without "user"; to see the gate, request
+the real route signed out.
 Query parameters are OpenAPI schemas (036), one value each: {"type": "string"} (maxLength,
 minLength, enum, format date or date-time), {"type": "integer", "format": "int32"|"int64"}
 (minimum, maximum; int64 reaches the box as a string), {"type": "number", "format":
@@ -189,6 +221,14 @@ through the mail service. Failures are retried in order, then given up after 8 t
    - Ids cross JSON as strings ("4294967311"): rows read back from id columns, the "ids" an
      insert answers, and {!user_id}. Pass them back as strings; SQLite stores the integer.
    - Ids are unique, not dense and not a clock: sort by a time column, never by id.
+   - Nothing to reserve: every insert (a job's too) gets its id as it happens. ids_status
+     shows the counter, and the range in use once the host has minted its first id since it
+     started; a counter of 4294967296 with no ranges means none has been minted yet.
+   - From before the id service (design/machine/038.Ids.md § 6): people who signed up earlier
+     keep their ids, so {!user_id} holds their old, small id (as a string, like "2"), and new
+     people get ids from 4294967296 up; the two never collide. Tables keyed by int64 (or by
+     nothing) keep SQLite's rowids until a job moves their rows into a table keyed by id. A
+     reference column of type id holds old and new ids alike.
    schema_put warns about a key that isn't of type id (a table naming no key gets an old-style
    int64 rowid "id") and about a reference stored as text or int64. Heed the warnings.
 2. In the manifest:
@@ -218,7 +258,23 @@ through the mail service. Failures are retried in order, then given up after 8 t
    One statement per call; no PRAGMA, ATTACH, DDL, transactions, or REPLACE (use
    INSERT ... ON CONFLICT DO UPDATE); pure functions only; 2 s, 4 MiB per value, 8 MiB per
    result. All of a request's writes commit together if the box answers below 500.
-   Operators look with db_list, db_describe, and db_query.
+   The functions a box's SQL may call, and no others:
+   - JSON: json, json_array, json_array_length, json_extract, json_insert, json_object,
+     json_patch, json_quote, json_remove, json_replace, json_set, json_type, json_valid,
+     json_group_array, json_group_object, -> and ->>; and json_each(...) and json_tree(...) as
+     tables, over a value or a column you may read ("SELECT value FROM json_each(?)").
+   - Dates: date, time, datetime, julianday, unixepoch, strftime, timediff. They take 'now',
+     which reads the machine's clock when the statement runs; pass the request's now_ms
+     (goober_now_ms) instead, so a request has one time and a replay repeats it.
+   - Text and numbers: abs, ceil, ceiling, char, coalesce, concat, concat_ws, floor, format,
+     glob, hex, ifnull, iif, instr, length, like, likely, lower, ltrim, max, min, mod, nullif,
+     octet_length, pow, power, printf, quote, replace, round, rtrim, sign, sqrt, substr,
+     substring, trim, trunc, typeof, unicode, unlikely, upper.
+   - Aggregates and windows: avg, count, group_concat, max, min, string_agg, sum, total,
+     row_number, rank, dense_rank, lag, lead, first_value, last_value, ntile.
+   Refused, for being impure or about the connection: random, randomblob, changes,
+   last_insert_rowid (use the answer's "ids"), sqlite_version, load_extension, and the rest.
+   Operators look with db_list, db_describe, and db_query; theirs isn't held to this list.
 
 ## Jobs: moving data, once (routes.job)
 
