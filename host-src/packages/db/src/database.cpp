@@ -297,6 +297,12 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
       // A common table expression or subquery: its own reads are checked one by one.
       if (!g && !auth.tables.count(t) && !host_table(t)) return SQLITE_OK;
       if (!g) return deny("strategy " + auth.strategy->name + " can't read table " + t);
+      // No column at all (count(*), EXISTS (SELECT 1 ...)): SQLite asks with an empty name. It
+      // reveals rows, not values, so any read grant on the table covers it.
+      if (c.empty()) {
+        if (g->read_all || !g->read.empty()) return SQLITE_OK;
+        return deny("strategy " + auth.strategy->name + " can't read table " + t + ": it grants no column to read");
+      }
       if (!g->read_all && !g->read.count(c)) return deny("strategy " + auth.strategy->name + " can't read " + t + "." + c);
       if (!c.empty()) auth.uses[t].read.insert(c);
       return SQLITE_OK;
@@ -627,6 +633,15 @@ struct ApplyContext {
   bool keep_going = false;
   UpgradeReport* report = nullptr;
   std::vector<std::string>* pending = nullptr;  // a dry run's forced tables that still hold rows
+  // Boxes running on `from` or older that write `table` (041 § 6.1): a forced step waits for a
+  // person unless its tables are empty here and nothing older writes them. Unset: always waits.
+  Databases::OldWriters old_writers;
+  std::vector<std::string>* notes = nullptr;  // why a step applied without a person, for the caller
+  // Whether the database already held a version of the line this apply walks (so later steps
+  // in one walk rewrite real data too), and whether this apply's snapshot is taken: one is
+  // enough, since it copies the database as committed, before the walk began.
+  bool line_existed = false;
+  bool snapshot_taken = false;
 };
 
 std::string ident(const std::string& name) { return "\"" + name + "\""; }
@@ -938,7 +953,26 @@ void apply_in(sqlite::Db& db, const Schema& schema, ApplyContext& ctx);
 void apply_step(sqlite::Db& db, const Schema& from, const Schema& to, ApplyContext& ctx, bool existed) {
   Step step = plan_step(from, to);
   if (step.refused()) throw std::runtime_error("schema " + to.name + " changes a primary key, which never changes");
-  if (ctx.require_approval && step.needs_person() && (!ctx.store || !ctx.store->approval(to.name))) {
+  bool needs_person = step.needs_person();
+  // A forced step whose tables are empty here, with no older box writing them, has no rows to
+  // break and no older writes to fail: it applies without a person (041 § 6.1).
+  if (needs_person && !step.contracts() && ctx.old_writers) {
+    bool empty = true;
+    for (const auto& t : step.forced_tables) {
+      if (table_exists(db, t) && count_rows(db, t) > 0) empty = false;
+      if (!ctx.old_writers(from.name, t).empty()) empty = false;
+    }
+    if (empty) {
+      needs_person = false;
+      if (ctx.notes) {
+        std::string tables;
+        for (const auto& t : step.forced_tables) tables += (tables.empty() ? "" : ", ") + t;
+        ctx.notes->push_back(to.name + ": its forced tables (" + tables +
+                             ") are empty here and no older box writes them, so it applied without a person");
+      }
+    }
+  }
+  if (ctx.require_approval && needs_person && (!ctx.store || !ctx.store->approval(to.name))) {
     throw std::runtime_error("schema " + to.name + " drops or rewrites data, so it waits for a person to approve it in "
                              "the panel's Database view (041 § 6)");
   }
@@ -983,7 +1017,8 @@ void apply_step(sqlite::Db& db, const Schema& from, const Schema& to, ApplyConte
   }
   bool rewrites = step.contracts() || !step.forced_tables.empty();
   for (const auto& c : step.changes) rewrites |= c.kind == "emulated";
-  if (existed && rewrites && ctx.before_change) {
+  if (existed && rewrites && ctx.before_change && !ctx.snapshot_taken) {
+    ctx.snapshot_taken = true;
     std::string err;
     if (!ctx.before_change("before schema " + to.name, &err)) {
       throw std::runtime_error("the snapshot before schema " + to.name + " failed, so nothing changed: " + err);
@@ -1137,15 +1172,20 @@ void expand(sqlite::Db& db, const Schema& schema) {
 }
 
 void apply_in(sqlite::Db& db, const Schema& schema, ApplyContext& ctx) {
-  if (is_applied(db, schema.name)) return;
+  if (is_applied(db, schema.name)) {
+    ctx.line_existed = true;
+    return;
+  }
   if (!schema.follows.empty()) {
     if (!ctx.store) throw std::runtime_error("schema " + schema.name + " follows " + schema.follows + ", which can't be looked up here");
     auto from = ctx.store->get(schema.follows);
     if (!from) throw std::runtime_error("schema " + schema.name + " follows " + schema.follows + ", which isn't stored");
     // Every database goes through the same steps in order: the one before first.
-    bool existed = is_applied(db, from->name);
-    if (!existed) apply_in(db, *from, ctx);
-    apply_step(db, *from, schema, ctx, existed);
+    // A walk that began from a version the database already held rewrites real data at every
+    // step after it: v1 -> v4 snapshots before v3's drop too, not only before v2's.
+    if (!is_applied(db, from->name)) apply_in(db, *from, ctx);
+    else ctx.line_existed = true;
+    apply_step(db, *from, schema, ctx, ctx.line_existed);
   } else {
     expand(db, schema);
   }
@@ -1194,6 +1234,7 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
     if (!applied_.count(key)) {
       ApplyContext ctx;
       ctx.store = store_;
+      ctx.old_writers = old_writers_;
       if (before_change_) {
         ctx.before_change = [this, t = std::string(tenant), d = std::string(database)](const std::string& note, std::string* err) {
           return before_change_(t, d, note, err);
@@ -1218,8 +1259,57 @@ bool Databases::ensure_schema(std::string_view tenant, std::string_view database
   return open(tenant, database, &schema, error) != nullptr;
 }
 
+bool Databases::apply_now(std::string_view tenant, std::string_view database, const Schema& schema, bool dry_run,
+                          const BeforeChange& before, std::vector<std::string>* notes, std::string* error) {
+  if (!base::is_valid_name(tenant)) return *error = "bad tenant", false;
+  if (!is_valid_sql_name(database)) return *error = "bad database name: " + std::string(database), false;
+  auto path = file(tenant, database);
+  if (dry_run && !std::filesystem::exists(path)) {
+    // Nothing to change: a new database gets the whole line, checked on an empty one.
+    sqlite::Db db(":memory:");
+    install_id_functions(db.raw(), &ids_);
+    ApplyContext ctx;
+    ctx.dry_run = true;
+    ctx.store = store_;
+    ctx.old_writers = old_writers_;
+    ctx.notes = notes;
+    return apply_schema(db, schema, ctx, error);
+  }
+  std::filesystem::create_directories(path.parent_path());
+  install_clockless_vfs();
+  sqlite::Db db(path);
+  install_id_functions(db.raw(), &ids_);
+  std::lock_guard lock(mu_);
+  ApplyContext ctx;
+  ctx.dry_run = dry_run;
+  ctx.store = store_;
+  ctx.old_writers = old_writers_;
+  ctx.notes = notes;
+  if (!dry_run) {
+    const BeforeChange& f = before ? before : before_change_;
+    if (f) {
+      ctx.before_change = [&f, t = std::string(tenant), d = std::string(database)](const std::string& note, std::string* err) {
+        return f(t, d, note, err);
+      };
+    }
+  }
+  if (!apply_schema(db, schema, ctx, error)) return false;
+  if (!dry_run) {
+    bump(path);
+    applied_.insert(path.string() + "|" + schema.name);
+  }
+  return true;
+}
+
+int64_t Databases::row_count(std::string_view tenant, std::string_view database, std::string_view table) const {
+  if (!exists(tenant, database)) return -1;
+  sqlite::Db db(file(tenant, database));
+  if (!table_exists(db, std::string(table))) return -1;
+  return count_rows(db, std::string(table));
+}
+
 bool Databases::check(std::string_view tenant, std::string_view database, const Schema& schema,
-                      std::string* error) const {
+                      std::string* error, const OldWriters* old_writers) const {
   if (!exists(tenant, database)) return true;
   sqlite::Db db(file(tenant, database));
   install_id_functions(db.raw(), &ids_);
@@ -1230,6 +1320,7 @@ bool Databases::check(std::string_view tenant, std::string_view database, const 
   ctx.dry_run = true;
   ctx.store = store_;
   ctx.pending = &pending;
+  ctx.old_writers = old_writers ? *old_writers : old_writers_;
   if (apply_schema(db, schema, ctx, &why)) return true;
   *error = "tenant " + std::string(tenant) + ", database " + std::string(database) + ": " + why;
   return false;

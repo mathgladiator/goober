@@ -181,8 +181,12 @@ bj::object Host::schema_step_report(const db::Schema& s) const {
   auto step = db::plan_step(*from, s);
   out["step"] = step.to_json();
   bool stored = schemas_->get(s.name).has_value();
-  out["held"] = step.needs_person() && !schemas_->approval(s.name);
-  if (step.needs_person()) {
+  std::string immediate;
+  bool held = schema_held(s, "", &immediate);
+  out["held"] = held;
+  if (!immediate.empty()) {
+    out["immediate"] = immediate;
+  } else if (step.needs_person()) {
     out["approval"] = schemas_->approval(s.name)
                           ? "approved by a person in the panel"
                           : "it drops or rewrites data, so it applies nowhere until a person approves it in the panel's "
@@ -201,6 +205,108 @@ bj::object Host::schema_step_report(const db::Schema& s) const {
     }
   }
   out["databases"] = std::move(dbs);
+  return out;
+}
+
+std::vector<std::string> Host::older_writers(const std::string& from, const std::string& table,
+                                             const std::string& except_box) const {
+  // `from` and every version before it.
+  std::set<std::string> line;
+  for (auto s = schemas_->get(from); s; s = s->follows.empty() ? std::nullopt : schemas_->get(s->follows)) {
+    if (!line.insert(s->name).second) break;
+  }
+  if (line.empty()) line.insert(from);
+  std::vector<std::string> out;
+  for (const auto& [name, box] : boxes_->active()->boxes) {
+    if (name == except_box) continue;
+    for (const auto& d : box->manifest.data) {
+      if (!d.applies_schema() || !line.count(d.schema)) continue;
+      auto g = d.tables.find(table);
+      if (g == d.tables.end()) continue;
+      if (g->second.insert || g->second.update_all || !g->second.update.empty() || g->second.remove) {
+        out.push_back(name + "." + d.name + " (" + d.schema + ")");
+      }
+    }
+  }
+  return out;
+}
+
+bool Host::schema_held(const std::string& name, const std::string& except_box, std::string* immediate) const {
+  auto s = schemas_->get(name);
+  return s && schema_held(*s, except_box, immediate);
+}
+
+bool Host::schema_held(const db::Schema& s, const std::string& except_box, std::string* immediate) const {
+  if (s.follows.empty()) return false;
+  auto from = schemas_->get(s.follows);
+  if (!from) return false;
+  auto step = db::plan_step(*from, s);
+  if (!step.needs_person() || schemas_->approval(s.name)) return false;
+  if (step.contracts()) return true;
+  // Forced only: nothing to break where every forced table is empty and no older box writes it
+  // (041 § 6.1). Every database on a version this step passes through counts.
+  std::set<std::string> line;
+  for (auto f = from; f; f = f->follows.empty() ? std::nullopt : schemas_->get(f->follows)) {
+    if (!line.insert(f->name).second) break;
+  }
+  std::string empty_in;
+  for (const auto& tenant : databases_->tenants()) {
+    for (const auto& database : databases_->databases(tenant)) {
+      auto applied = databases_->applied_schemas(tenant, database);
+      if (std::find(applied.begin(), applied.end(), s.name) != applied.end()) continue;
+      bool on_line = false;
+      for (const auto& a : applied) on_line |= line.count(a) > 0;
+      if (!on_line) continue;
+      for (const auto& t : step.forced_tables) {
+        if (databases_->row_count(tenant, database, t) > 0) return true;
+      }
+      empty_in += (empty_in.empty() ? "" : ", ") + tenant + "/" + database;
+    }
+  }
+  for (const auto& t : step.forced_tables) {
+    if (!older_writers(from->name, t, except_box).empty()) return true;
+  }
+  if (immediate) {
+    std::string tables;
+    for (const auto& t : step.forced_tables) tables += (tables.empty() ? "" : ", ") + t;
+    *immediate = "no person needed: its forced tables (" + tables + ") are empty in every database on an older "
+                 "version (" + (empty_in.empty() ? std::string("none yet") : empty_in) +
+                 ") and no active box on an older version writes them, so nothing can break. Each database is "
+                 "checked again when the step applies; one that holds rows by then waits for a person (041 § 6.1)";
+  }
+  return false;
+}
+
+bj::array Host::schemas_report(const manifest::Manifest& m) const {
+  bj::array out;
+  auto cfg = config_.get();
+  std::set<std::pair<std::string, std::string>> seen;
+  for (const auto& d : m.data) {
+    if (!d.applies_schema()) continue;
+    std::set<std::string> tenants;
+    if (!d.tenant.empty()) {
+      tenants.insert(d.tenant);
+    } else {
+      for (const auto& [tn, _] : tenants_of(*cfg, m)) tenants.insert(tn);
+    }
+    for (const auto& tenant : tenants) {
+      std::string database = d.database_for(tenant);
+      if (!seen.insert({tenant + "/" + database, d.schema}).second) continue;
+      auto applied = databases_->applied_schemas(tenant, database);
+      bool is = std::find(applied.begin(), applied.end(), d.schema) != applied.end();
+      bj::object o{{"schema", d.schema}, {"tenant", tenant}, {"database", database}};
+      if (is) {
+        o["state"] = "applied";
+      } else {
+        o["state"] = "pending";
+        o["says"] = "applies on the first call that opens " + tenant + "/" + database +
+                    ", or now with schema_apply {tenant: \"" + tenant + "\", database: \"" + database +
+                    "\", schema: \"" + d.schema + "\"}";
+        if (!applied.empty()) o["applied_now"] = bj::value_from(applied);
+      }
+      out.push_back(std::move(o));
+    }
+  }
   return out;
 }
 
@@ -231,7 +337,7 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
                       "name a schema in service",
              false;
     }
-    if (schemas_->held(st.schema)) {
+    if (schema_held(*schema, m.box)) {
       return *error = where + ": schema " + st.schema + " drops or rewrites data (schema_check shows its step), so a "
                       "person approves it in the panel's Database view before any box may name it "
                       "(design/machine/041.SchemaEvolution.md § 6)",
@@ -277,8 +383,12 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
         return false;
       }
     }
+    // The box being checked stops writing on its older version when this one goes live.
+    db::Databases::OldWriters writers = [this, box = m.box](const std::string& from, const std::string& table) {
+      return older_writers(from, table, box);
+    };
     for (const auto& tenant : st.tenant.empty() ? tenants : std::set<std::string>{st.tenant}) {
-      if (!databases_->check(tenant, st.database_for(tenant), *schema, error)) {
+      if (!databases_->check(tenant, st.database_for(tenant), *schema, error, &writers)) {
         *error = where + ": " + *error;
         return false;
       }
@@ -500,7 +610,10 @@ void Host::register_data_tools() {
        "(int32 to int64, float to double, allowing null, a longer max-length) apply when a box names the version; "
        "contraction (a dropped column or table: older boxes then read its default and their writes to it are "
        "dropped) and forced (anything else, carried over by an upgrade box's rows handler) wait for a person to "
-       "approve the schema in the panel; a primary key never changes. Try it with schema_check first, which "
+       "approve the schema in the panel, except a forced step whose tables are empty in every database and written "
+       "by no older box (held: false, immediate says why); annotation (\"not-a-reference\") changes nothing stored; "
+       "a primary key never changes. A stored schema applies lazily, on the first call that opens a database for a "
+       "box naming it; schema_apply applies it now. Try it with schema_check first, which "
        "stores nothing and says what it would do to each database. Answers {schema, tables, warnings?, step?, "
        "held?, approval?, upgrade?, databases?}: the warnings name keys and references that aren't ids "
        "(\"not-a-reference\": true silences one on a column that only looks like a reference, like a "
@@ -554,6 +667,122 @@ void Host::register_data_tools() {
                         {"tables", std::move(tables)},
                         {"warnings", std::move(warnings)}};
          for (auto& kv : schema_step_report(*s)) out[kv.key()] = kv.value();
+         return ToolResult::ok(std::move(out));
+       }});
+
+  mcp_->add_tool(
+      {"schema_apply",
+       "Applies a stored schema to one tenant database now. Without it, a schema applies lazily: on the first call "
+       "(a request, a tool, a timer, a job) that opens the database for a box naming it, so a database nothing calls "
+       "stays where it was even after the box goes live. From whatever is applied, it walks the schema's line of "
+       "versions (\"follows\"): with v1 applied, applying v4 applies v2, v3, and v4 in turn, in one transaction, so "
+       "the database ends at v4 or stays at v1. A snapshot is taken first whenever a step drops or rewrites data. "
+       "Refused when a step waits for a person (a drop, or a forced change on a table holding rows or still written "
+       "by an older box: approve it in the panel's Database view) or for an upgrade box (upgrade_dry_run, then "
+       "upgrade_start). Needs no box: an operator may apply ahead of a box version that names it. Answers {tenant, "
+       "database, schema, dry_run, steps: [{from, to, changes, notes?}], applied_before, applied_after, "
+       "snapshot?, named_by}: each step's changes are schema_check's sentences, and named_by lists the active boxes "
+       "whose versions name the schema. With dry_run: true it changes nothing and takes no snapshot, and it is a read "
+       "tool; otherwise a changing tool (it waits for approval when an agent's approvals are on). db_describe "
+       "afterwards shows the schemas applied.",
+       object_schema({{"tenant", tenant_prop},
+                      {"database", db_prop},
+                      {"schema", string_property("A stored schema's name, like orders4.")},
+                      {"dry_run", mcp::boolean_property("Check every step on the database, change nothing.")}},
+                     {"tenant", "database", "schema"}),
+       [this](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto database = arg(args, "database");
+         auto name = arg(args, "schema");
+         if (!tenant || !database || !name) return ToolResult::fail("tenant, database, and schema are required");
+         bool dry_run = false;
+         if (auto* d = args.if_contains("dry_run"); d && d->is_bool()) dry_run = d->as_bool();
+         std::set<std::string> tenants;
+         for (const auto& [d, e] : config_.get()->domains) tenants.insert(e.tenant);
+         for (const auto& t : databases_->tenants()) tenants.insert(t);
+         if (!tenants.count(*tenant)) return ToolResult::fail("no tenant named " + *tenant);
+         if (!db::is_valid_sql_name(*database)) return ToolResult::fail("database must match [a-z][a-z0-9_]*");
+         auto schema = schemas_->get(*name);
+         if (!schema) return ToolResult::fail("no stored schema named " + *name + "; schema_put it first");
+         if (schemas_->retired(*name)) return ToolResult::fail("schema " + *name + " is retired");
+         auto before = databases_->applied_schemas(*tenant, *database);
+         auto has = [](const std::vector<std::string>& v, const std::string& n) {
+           return std::find(v.begin(), v.end(), n) != v.end();
+         };
+         // The versions to apply, oldest first: back along `follows` to one already applied.
+         std::vector<db::Schema> chain;
+         for (auto s = std::optional<db::Schema>(*schema); s && !has(before, s->name);
+              s = s->follows.empty() ? std::nullopt : schemas_->get(s->follows)) {
+           if (chain.size() > 1000) break;
+           chain.insert(chain.begin(), *s);
+         }
+         bj::array steps;
+         for (const auto& s : chain) {
+           bj::object st{{"to", s.name}};
+           if (s.follows.empty()) {
+             st["from"] = nullptr;
+             st["changes"] = bj::array{bj::object{{"kind", "expansion"}, {"says", "adds the tables and columns it names"}}};
+           } else if (auto f = schemas_->get(s.follows)) {
+             auto step = db::plan_step(*f, s).to_json();
+             st["from"] = s.follows;
+             st["changes"] = step["changes"];
+             st["needs_person"] = step["needs_person"];
+           }
+           steps.push_back(std::move(st));
+         }
+         bj::array named_by;
+         for (const auto& [box_name, box] : boxes_->active()->boxes) {
+           for (const auto& d : box->manifest.data) {
+             if (d.applies_schema() && d.schema == *name && d.tenant_for(*tenant) == *tenant &&
+                 d.database_for(*tenant) == *database) {
+               named_by.push_back(bj::value(box_name + "." + d.name));
+             }
+           }
+         }
+         auto list = [](const std::vector<std::string>& v) {
+           bj::array a;
+           for (const auto& s : v) a.push_back(bj::value(s));
+           return a;
+         };
+         bj::object out{{"tenant", *tenant}, {"database", *database}, {"schema", *name}, {"dry_run", dry_run},
+                        {"applied_before", list(before)}, {"named_by", std::move(named_by)}};
+         if (chain.empty()) {
+           out["steps"] = bj::array{};
+           out["applied_after"] = list(before);
+           out["note"] = *name + " is already applied here; nothing to do";
+           return ToolResult::ok(std::move(out));
+         }
+         std::vector<std::string> notes;
+         std::string snapshot, err;
+         db::Databases::BeforeChange snap = [this, &snapshot](const std::string& t, const std::string& d,
+                                                             const std::string& note, std::string* e) {
+           auto r = take_snapshot(t, d, note, current_operator(), true, e);
+           if (r) {
+             auto* id = r->if_contains("snapshot");
+             snapshot += (snapshot.empty() ? "" : ", ") + (id && id->is_string() ? std::string(id->as_string()) : "");
+           }
+           return r.has_value();
+         };
+         if (!databases_->apply_now(*tenant, *database, *schema, dry_run, snap, &notes, &err)) {
+           return ToolResult::fail("nothing changed: " + err);
+         }
+         for (const auto& n : notes) {
+           for (auto& st : steps) {
+             auto& o = st.as_object();
+             if (n.starts_with(std::string(o.at("to").as_string()) + ":")) o["notes"] = bj::array{bj::value(n)};
+           }
+         }
+         out["steps"] = std::move(steps);
+         if (dry_run) {
+           std::vector<std::string> would;
+           for (const auto& s : chain) would.push_back(s.name);
+           out["applied_after"] = list(before);
+           out["would_apply"] = list(would);
+           out["note"] = "a dry run: every step was checked on the database and rolled back; nothing changed";
+         } else {
+           out["applied_after"] = list(databases_->applied_schemas(*tenant, *database));
+           if (!snapshot.empty()) out["snapshot"] = snapshot;
+         }
          return ToolResult::ok(std::move(out));
        }});
 

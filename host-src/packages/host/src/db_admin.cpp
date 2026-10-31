@@ -370,7 +370,7 @@ void Host::register_db_admin_tools() {
          for (const auto& s : schemas_->list()) {
            if (!named.count(s) && !schemas_->retired(s)) schemas.push_back(bj::value(s));
            // Waiting for a person (041 § 6): the step they would approve.
-           if (schemas_->held(s)) {
+           if (schema_held(s)) {
              if (auto schema = schemas_->get(s)) {
                auto report = schema_step_report(*schema);
                held.push_back(bj::object{{"schema", s}, {"step", report["step"]}, {"databases", report["databases"]}});

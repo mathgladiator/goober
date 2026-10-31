@@ -325,6 +325,13 @@ TEST_F(DbTest, GrantsAreTheWholeReach) {
   allowed("SELECT name, approved FROM entries WHERE approved = 0");
   allowed("UPDATE entries SET approved = 1 WHERE name = 'a'");
   allowed("INSERT INTO entries (name, message) VALUES ('c', 'x') RETURNING name");
+  // Reading no column (how many rows, whether any) is covered by any read grant on the table.
+  allowed("SELECT count(*) FROM entries");
+  allowed("SELECT count(1) FROM entries");
+  allowed("SELECT 1 FROM entries LIMIT 1");
+  allowed("SELECT EXISTS (SELECT 1 FROM entries) AS any");
+  allowed("SELECT count(*) AS n FROM entries WHERE approved = 0");
+  refused("SELECT count(message) FROM entries");
   // The schema, the host's tables, and other databases.
   refused("SELECT * FROM sqlite_master");
   refused("SELECT * FROM sqlite_schema");
@@ -868,6 +875,37 @@ TEST_F(DbTest, EmulatedChangesRebuildTheTable) {
                   "never chooses a primary key"));
   // The old box keeps working against the new shape.
   EXPECT_FALSE(run_one(*dbs, *schemas, v1, "SELECT name, count FROM items").as_object().contains("error"));
+}
+
+// Naming v3 on a database at v1 applies v2 and v3 in one walk; v3's rewrite still takes the
+// snapshot (once), since the data it rewrites is what v1 held, though v2 was applied a moment ago.
+TEST_F(DbTest, AWalkOfVersionsSnapshotsBeforeALaterRewrite) {
+  int64_t next = (int64_t(1) << 32) + 1;
+  dbs->set_id_source([&] { return next++; });
+  dbs->set_schema_store(schemas.get());
+  int snapshots = 0;
+  dbs->set_before_change([&](const std::string&, const std::string&, const std::string&, std::string*) { return ++snapshots, true; });
+  std::string err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "walk1", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "count": {"type": "int32"}}}}})", &err)) << err;
+  auto items = [](const std::string& schema) {
+    auto s = strategy(all_grant(), schema);
+    s.tables.clear();
+    s.tables["items"] = all_grant();
+    s.database = "walk";
+    return std::vector<manifest::DataStrategy>{s};
+  };
+  ASSERT_FALSE(run_one(*dbs, *schemas, items("walk1"), "INSERT INTO items (count) VALUES (3)").as_object().contains("error"));
+  ASSERT_TRUE(schemas->put(R"({"schema": "walk2", "follows": "walk1", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "count": {"type": "int32"}, "note": {"type": "string", "nullable": true}}}}})",
+                           &err)) << err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "walk3", "follows": "walk2", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "count": {"type": "int64"}, "note": {"type": "string", "nullable": true}}}}})",
+                           &err)) << err;
+  auto rows = run_one(*dbs, *schemas, items("walk3"), "SELECT count, note FROM items");
+  ASSERT_FALSE(rows.as_object().contains("error")) << json::dump(rows);
+  EXPECT_EQ(json::dump(rows.at("rows")), R"([[3,null]])");
+  EXPECT_EQ(snapshots, 1);
 }
 
 // A forced change waits for an upgrade: a database with rows refuses the new version until its

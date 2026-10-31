@@ -369,6 +369,13 @@ Step plan_step(const Schema& from, const Schema& to) {
       bool same_default = fc.default_value.has_value() == tc->default_value.has_value() &&
                           (!fc.default_value || *fc.default_value == *tc->default_value);
       if (!same_default) add("forced", tt.name, fc.name, "changes " + where + "'s default, which changes what older boxes' inserts store");
+      // An annotation changes nothing stored: no data, no SQL, nothing an older box sees.
+      if (fc.not_a_reference != tc->not_a_reference) {
+        add("annotation", tt.name, fc.name,
+            (tc->not_a_reference ? "marks " + where + " \"not-a-reference\" (the reference warning is silenced)"
+                                 : "removes \"not-a-reference\" from " + where + " (the reference warning returns)") +
+                "; nothing stored changes");
+      }
     }
     for (const auto& tc : tt.columns) {
       if (ft->column(tc.name)) continue;
@@ -389,8 +396,9 @@ Step plan_step(const Schema& from, const Schema& to) {
       for (const auto* a : added) {
         if (d->type == a->type) {
           warn("If " + tt.name + "." + a->name + " renames " + tt.name + "." + d->name +
-               ", the drop loses the data: add the new column, move the data with a job, and drop the old one later, "
-               "or carry it over with an upgrade box.");
+               ", the drop loses the data: to the host a rename is a contraction and an expansion "
+               "(design/human/420.Migration.md), so add the new column, move the data with a job, and drop the old one "
+               "later, or carry it over with an upgrade box.");
         }
       }
     }

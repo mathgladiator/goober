@@ -617,3 +617,138 @@ TEST_F(PanelTest, AForcedStepWaitsForAPersonAndAnUpgradeBox) {
   auto described = json::dump(call("db_describe", R"({"tenant":"playground","database":"people"})"));
   EXPECT_NE(described.find(R"("column":"name")"), std::string::npos) << described;
 }
+
+// A schema applies lazily, on the first call that opens the database; promote says which are
+// pending, and schema_apply walks the line of versions now, in one transaction (041 § 6.1, § 8).
+// An annotation shows in the step; a forced step on empty tables with no older writer needs no
+// person, and one an older box still writes does.
+TEST_F(PanelTest, SchemaApplyWalksTheLineAndPromoteSaysWhatsPending) {
+  std::string token = "0123456789abcdef0123";
+  auto call = [&](const std::string& tool, const std::string& args) {
+    auto r = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":")" + tool +
+                            R"(","arguments":)" + args + "}}");
+    EXPECT_EQ(r.status, 200) << r.body;
+    auto result = parse(r.body)["result"].as_object();
+    std::string text(result.at("content").at(0).at("text").as_string());
+    if (result.at("isError").as_bool()) return bj::value(bj::object{{"error", text}});
+    std::string err;
+    auto v = json::parse(text, &err);
+    return v ? *v : bj::value(text);
+  };
+  auto error_of = [](const bj::value& v) {
+    return v.is_object() && v.as_object().contains("error") ? std::string(v.at("error").as_string()) : std::string();
+  };
+  ASSERT_EQ(error_of(call("schema_put", R"({"schema":{"schema":"orders1","tables":{
+      "orders":{"columns":{"id":{"type":"id","primary-key":true},"message_id":{"type":"string"}}},
+      "tags":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string"}}}}}})")), "");
+  ASSERT_EQ(error_of(call("db_create", R"({"tenant":"playground","database":"orders","schemas":["orders1"]})")), "");
+  ASSERT_EQ(error_of(call("db_exec", R"j({"tenant":"playground","database":"orders",
+      "sql":"INSERT INTO orders (message_id) VALUES ('m-1')"})j")), "");
+
+  // v2: an annotation only.
+  auto v2 = call("schema_put", R"({"schema":{"schema":"orders2","follows":"orders1","tables":{
+      "orders":{"columns":{"id":{"type":"id","primary-key":true},"message_id":{"type":"string","not-a-reference":true}}},
+      "tags":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string"}}}}}})");
+  ASSERT_EQ(error_of(v2), "") << json::dump(v2);
+  EXPECT_EQ(v2.at("step").at("changes").at(0).at("kind"), "annotation") << json::dump(v2);
+  EXPECT_EQ(v2.at("held"), false);
+  // v3: a required column with no default on tags, which is empty everywhere.
+  const char* v3 = R"({"schema":{"schema":"orders3","follows":"orders2","tables":{
+      "orders":{"columns":{"id":{"type":"id","primary-key":true},"message_id":{"type":"string","not-a-reference":true}}},
+      "tags":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string"},"code":{"type":"string"}}}}}})";
+  // While an older box writes tags, it waits for a person.
+  const char* wat = R"((module (memory (export "memory") 1) (func (export "goober_route_r") (result i32) (i32.const 0))))";
+  auto box = [](const char* name, const char* schema, const char* path) {
+    return std::string(R"({"box":")") + name + R"(","domains":["*"],"data":{"sqlite3":{"db":{"schema":")" + schema +
+           R"(","database":"orders","pattern":"sql","tables":{"tags":{"read":true,"insert":true}}}}},)"
+           R"("routes":{"http":{")" + path + R"(":{"get":{"name":"r","public":true}}}}})";
+  };
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(box("tagger", "orders1", "/t"), wat, &err)) << err;
+  auto held = call("schema_check", v3);
+  ASSERT_EQ(error_of(held), "") << json::dump(held);
+  EXPECT_EQ(held.at("held"), true) << json::dump(held);
+  ASSERT_EQ(error_of(call("box_disable", R"({"box":"tagger","why":"moving to orders4"})")), "");
+  auto free = call("schema_put", v3);
+  ASSERT_EQ(error_of(free), "") << json::dump(free);
+  EXPECT_EQ(free.at("held"), false) << json::dump(free);
+  EXPECT_NE(std::string(free.at("immediate").as_string()).find("empty"), std::string::npos);
+  ASSERT_EQ(error_of(call("schema_put", R"({"schema":{"schema":"orders4","follows":"orders3","tables":{
+      "orders":{"columns":{"id":{"type":"id","primary-key":true},"message_id":{"type":"string","not-a-reference":true},
+                           "total":{"type":"int64","nullable":true}}},
+      "tags":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string"},"code":{"type":"string"}}}}}})")),
+            "");
+
+  // A dry run walks v2, v3, v4 and changes nothing.
+  auto dry = call("schema_apply", R"({"tenant":"playground","database":"orders","schema":"orders4","dry_run":true})");
+  ASSERT_EQ(error_of(dry), "") << json::dump(dry);
+  EXPECT_EQ(json::dump(dry.at("would_apply")), R"(["orders2","orders3","orders4"])");
+  EXPECT_EQ(json::dump(dry.at("applied_after")), R"(["orders1"])");
+  EXPECT_EQ(dry.as_object().count("snapshot"), 0u);
+
+  // A box naming v4 goes live: nothing has opened the database, so v4 is pending, and promote says so.
+  auto stored = host->boxes().store(box("shop", "orders4", "/s"), wat, "", &err);
+  ASSERT_TRUE(stored) << err;
+  auto promoted = call("version_promote", R"({"box":"shop","version":")" + stored->version + R"("})");
+  ASSERT_EQ(error_of(promoted), "") << json::dump(promoted);
+  bool pending = false;
+  for (const auto& s : promoted.at("schemas").as_array()) {
+    if (s.at("database") == "orders" && s.at("tenant") == "playground") {
+      pending = s.at("state") == "pending";
+      EXPECT_NE(std::string(s.at("says").as_string()).find("schema_apply"), std::string::npos);
+    }
+  }
+  EXPECT_TRUE(pending) << json::dump(promoted);
+  auto described = call("db_describe", R"({"tenant":"playground","database":"orders"})");
+  EXPECT_EQ(json::dump(described.at("schemas")).find("orders4"), std::string::npos);
+
+  // Applied now: the whole line, snapshot first, the forced step noted as needing no person.
+  auto applied = call("schema_apply", R"({"tenant":"playground","database":"orders","schema":"orders4"})");
+  ASSERT_EQ(error_of(applied), "") << json::dump(applied);
+  EXPECT_EQ(json::dump(applied.at("applied_after")), R"(["orders1","orders2","orders3","orders4"])");
+  EXPECT_EQ(applied.at("steps").as_array().size(), 3u);
+  EXPECT_NE(json::dump(applied.at("steps").at(1)).find("without a person"), std::string::npos) << json::dump(applied);
+  EXPECT_TRUE(applied.as_object().contains("snapshot")) << json::dump(applied);
+  EXPECT_EQ(json::dump(applied.at("named_by")), R"(["shop.db"])");
+  EXPECT_EQ(call("db_query", R"({"tenant":"playground","database":"orders","sql":"SELECT message_id FROM orders"})")
+                .at("rows").at(0).at(0),
+            "m-1");
+  auto again = call("schema_apply", R"({"tenant":"playground","database":"orders","schema":"orders4"})");
+  EXPECT_EQ(again.at("steps").as_array().size(), 0u);
+  auto enabled = call("version_promote", R"({"box":"shop","version":")" + stored->version + R"("})");
+  bool now_applied = false;
+  for (const auto& s : enabled.at("schemas").as_array()) {
+    if (s.at("database") == "orders" && s.at("tenant") == "playground") now_applied = s.at("state") == "applied";
+  }
+  EXPECT_TRUE(now_applied) << json::dump(enabled);
+}
+
+// A forced step on a table that holds rows still waits for a person, and schema_apply says why.
+TEST_F(PanelTest, SchemaApplyRefusesAForcedStepOnRows) {
+  std::string token = "0123456789abcdef0123";
+  auto call = [&](const std::string& tool, const std::string& args) {
+    auto r = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":")" + tool +
+                            R"(","arguments":)" + args + "}}");
+    auto result = parse(r.body)["result"].as_object();
+    std::string text(result.at("content").at(0).at("text").as_string());
+    if (result.at("isError").as_bool()) return bj::value(bj::object{{"error", text}});
+    std::string err;
+    auto v = json::parse(text, &err);
+    return v ? *v : bj::value(text);
+  };
+  ASSERT_FALSE(call("schema_put", R"({"schema":{"schema":"kits1","tables":{"kits":{"columns":{
+      "id":{"type":"id","primary-key":true},"name":{"type":"string"}}}}}})").as_object().contains("error"));
+  ASSERT_FALSE(call("db_create", R"({"tenant":"playground","database":"kits","schemas":["kits1"]})").as_object().contains("error"));
+  ASSERT_FALSE(call("db_exec", R"j({"tenant":"playground","database":"kits","sql":"INSERT INTO kits (name) VALUES ('a')"})j")
+                   .as_object().contains("error"));
+  auto put = call("schema_put", R"({"schema":{"schema":"kits2","follows":"kits1","tables":{"kits":{"columns":{
+      "id":{"type":"id","primary-key":true},"name":{"type":"string"},"code":{"type":"string"}}}}}})");
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  EXPECT_EQ(put.at("held"), true);
+  auto refused = call("schema_apply", R"({"tenant":"playground","database":"kits","schema":"kits2"})");
+  ASSERT_TRUE(refused.as_object().contains("error"));
+  EXPECT_NE(std::string(refused.at("error").as_string()).find("waits for a person"), std::string::npos)
+      << json::dump(refused);
+  EXPECT_EQ(json::dump(call("db_describe", R"({"tenant":"playground","database":"kits"})").at("schemas")).find("kits2"),
+            std::string::npos);
+}

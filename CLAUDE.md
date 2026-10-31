@@ -196,9 +196,11 @@ Read these before doing design work:
     whats_new), what was built overnight on 2026-10-31, and six decisions for the human.
   - `design/machine/041.SchemaEvolution.md`: 420 on direct SQL: `"follows"` names a schema's previous
     version; each change classified (expansion, contraction, indexing, emulated, forced, refused);
-    tombstones keep older boxes' SQL working; a person approves drops and forced steps in the panel;
-    upgrade boxes (`routes.upgrade`, rows only) run by `upgrade_dry_run` and `upgrade_start`, snapshot
-    first; departures from 420 and six decisions for the human.
+    tombstones keep older boxes' SQL working; a person approves drops and forced steps in the panel
+    (not a forced step on empty tables no older box writes, § 6.1); schemas apply lazily, or now with
+    `schema_apply`, walking the line; upgrade boxes (`routes.upgrade`, rows only) run by
+    `upgrade_dry_run` and `upgrade_start`, snapshot first; departures from 420 and six decisions for
+    the human.
   - `design/machine/042.ChangeSets.md`: change sets: schema adds, box versions (stored or uploaded dark),
     content, and flag values previewed together (each member's dry run, one list of widenings), applied
     by one call in order (schemas, versions, content, flags) after snapshots and with what each replaced

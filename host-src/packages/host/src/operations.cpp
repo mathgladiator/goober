@@ -578,7 +578,9 @@ void Host::register_tools() {
        "version changes from the box's live version, as version_diff gives it, each change classed widens, narrows, "
        "or neutral) and widens: the changes that give the box more reach, as sentences (\"strategy s may now delete "
        "from members\", \"route GET /x is now public\"). Read widens before going live; a person approving a held "
-       "upload sees it too. After it goes live, version_health compares it with the version it replaced.",
+       "upload sees it too. A version that goes live also returns schemas: each schema it names, per database, "
+       "\"applied\" or \"pending\" (a schema applies on the first call that opens the database, or now with "
+       "schema_apply). After it goes live, version_health compares it with the version it replaced.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
                       {"schemas", mcp::any_property("With dry_run: schemas the manifest uses that aren't stored yet "
@@ -677,6 +679,12 @@ void Host::register_tools() {
          for (auto& kv : reviewed) out[kv.key()] = std::move(kv.value());
          if (auto* r = out.if_contains("review"); r && r->is_object()) r->as_object()["to"] = result->version;
          if (!activate) out["next"] = "stored, not live: version_promote {box, version} makes it active";
+         if (activate) {
+           if (auto live = boxes_->active(); live->boxes.count(box_name)) {
+             auto schemas = schemas_report(live->boxes.at(box_name)->manifest);
+             if (!schemas.empty()) out["schemas"] = std::move(schemas);
+           }
+         }
          return ToolResult::ok(std::move(out));
        }});
 
@@ -752,8 +760,9 @@ void Host::register_tools() {
       {"box_enable",
        "Changing tool. Puts a disabled box back in service at once: the version it had, or the version given, "
        "checked against the live boxes as any promotion is. Refused while another box holds its route names or "
-       "mail addresses (box_disable that box first: the rollback of a move). Returns box and active (the version "
-       "now live).",
+       "mail addresses (box_disable that box first: the rollback of a move). Returns box, active (the version "
+       "now live), and schemas: each schema it names, per database, \"applied\" or \"pending\" (applied on the "
+       "first call that opens the database, or now with schema_apply).",
        object_schema({{"box", string_property("The box name.")},
                       {"version", string_property("A version to serve instead of the one it had.")}},
                      {"box"}),
@@ -777,7 +786,12 @@ void Host::register_tools() {
            }
            return ToolResult::fail(err);
          }
-         return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
+         bj::object out{{"box", *box}, {"active", *version}};
+         if (auto live = boxes_->active(); live->boxes.count(*box)) {
+           auto schemas = schemas_report(live->boxes.at(*box)->manifest);
+           if (!schemas.empty()) out["schemas"] = std::move(schemas);
+         }
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool({"version_promote",
@@ -786,7 +800,9 @@ void Host::register_tools() {
                   "against the live boxes like an upload; a disabled box comes back with it. Returns box, active, "
                   "tried (what touched this version before: route_try calls by kind and tenant, a job_dry_run, or "
                   "having run live before), and warnings: a version nothing tried still goes live, with a warning "
-                  "saying so. Try first (route_try, job_dry_run), then promote, then version_health.",
+                  "saying so. schemas: each schema the version names, per database it opens, \"applied\" or \"pending\" (a "
+                  "schema applies on the first call that opens the database, or now with schema_apply). Try first "
+                  "(route_try, job_dry_run), then promote, then version_health.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
@@ -809,6 +825,10 @@ void Host::register_tools() {
                             "(route_try on it while it's stored dark) before promoting it."};
                       }
                       out["tried"] = std::move(tried);
+                    }
+                    if (auto live = boxes_->active(); live->boxes.count(*box)) {
+                      auto schemas = schemas_report(live->boxes.at(*box)->manifest);
+                      if (!schemas.empty()) out["schemas"] = std::move(schemas);
                     }
                     return ToolResult::ok(std::move(out));
                   }});

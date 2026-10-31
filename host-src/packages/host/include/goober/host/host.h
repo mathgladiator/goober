@@ -349,6 +349,19 @@ class Host {
   // A schema's step from the version it follows (design/machine/041.SchemaEvolution.md § 3), whether
   // it is held for a person, and what it would do to each database holding that version.
   boost::json::object schema_step_report(const db::Schema& s) const;
+  // Active boxes on schema `from` or a version before it whose grants write `table`, as
+  // "box.strategy (schema)", leaving out `except_box` (041 § 6.1).
+  std::vector<std::string> older_writers(const std::string& from, const std::string& table,
+                                         const std::string& except_box = "") const;
+  // Whether a stored schema waits for a person (041 § 6): its step drops or rewrites data and no
+  // person approved it, unless every step it forces meets empty tables in every database on an
+  // older version, with no older box writing them (`immediate` then says so).
+  bool schema_held(const std::string& name, const std::string& except_box = "", std::string* immediate = nullptr) const;
+  bool schema_held(const db::Schema& s, const std::string& except_box = "", std::string* immediate = nullptr) const;
+  // For each schema a manifest names, each database it opens for the tenants the box serves:
+  // applied there, or pending (it applies on the first call that opens the database, or now
+  // with schema_apply). What version_promote, a live upload, and box_enable answer.
+  boost::json::array schemas_report(const manifest::Manifest& m) const;
   // Upgrade boxes (041 § 7): upgrade_dry_run and upgrade_start (upgrade_tools.cpp).
   void register_upgrade_tools();
   bool check_calls(const manifest::Manifest& m, std::string* error) const;

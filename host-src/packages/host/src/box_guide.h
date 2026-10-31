@@ -375,8 +375,23 @@ through the mail service. Failures are retried in order, then given up after 8 t
   orders2 first (they wait for the upgrade) or disable them. upgrade_dry_run runs it on copies
   of every database and names each failing row; upgrade_start runs it for real, with a
   snapshot of each database first.
+- A forced step needs no person where nothing can break: every forced table is empty in every
+  database on an older version and no active box on an older version writes it (schema_check
+  answers held: false and immediate, saying so). Each database is checked again as the step
+  applies; one holding rows by then waits for a person.
+- Annotations change nothing stored ("not-a-reference"): the step lists them as kind annotation.
 - A primary key never changes, not even forced. A rename is a drop and an add, which loses the
-  data: add the new column, move the data with a job, and drop the old one in a later version.
+  data (design/human/420.Migration.md: to the host a rename is a contraction and an expansion):
+  add the new column, move the data with a job, and drop the old one in a later version.
+- When a schema applies: lazily, on the first call (a request, a tool, a timer, a job) that
+  opens the database for a box naming it, not at promote. A database nothing calls stays where
+  it was: version_promote (and a live version_upload, and box_enable) answers schemas, each
+  "applied" or "pending" per database. To apply now, with no traffic and no box at all:
+  schema_apply {tenant, database, schema, dry_run: true} shows every step it would take, then
+  schema_apply without dry_run applies them. Naming orders4 on a database at orders1 applies
+  orders2, orders3, and orders4 in one transaction (the database ends at orders4 or stays at
+  orders1), with a snapshot first when a step drops or rewrites data. db_describe shows the
+  schemas applied.
 
 ## Jobs: moving data, once (routes.job)
 

@@ -240,6 +240,11 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                                        std::string* error) {
     return take_snapshot(tenant, database, note, "host", true, error).has_value();
   });
+  // A forced step applies without a person only where nothing older writes its tables (041 § 6.1).
+  databases_->set_old_writers([this](const std::string& from, const std::string& table) {
+    // Before the boxes load nothing is known, so assume an older writer.
+    return boxes_ ? older_writers(from, table) : std::vector<std::string>{"(boxes not loaded yet)"};
+  });
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check(

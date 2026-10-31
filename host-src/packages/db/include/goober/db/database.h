@@ -56,6 +56,11 @@ class Databases {
   using BeforeChange = std::function<bool(const std::string& tenant, const std::string& database,
                                           const std::string& note, std::string* error)>;
   void set_before_change(BeforeChange f) { before_change_ = std::move(f); }
+  // The boxes running on schema `from` (or a version before it) that write `table`, by name: a
+  // forced step applies without a person only where its tables are empty and this is empty
+  // (041 § 6.1). Unset, a forced step always waits for a person.
+  using OldWriters = std::function<std::vector<std::string>(const std::string& from, const std::string& table)>;
+  void set_old_writers(OldWriters f) { old_writers_ = std::move(f); }
 
   std::filesystem::path file(std::string_view tenant, std::string_view database) const;
   bool exists(std::string_view tenant, std::string_view database) const;
@@ -66,9 +71,20 @@ class Databases {
   std::unique_ptr<sqlite::Db> open(std::string_view tenant, std::string_view database, const Schema* schema,
                                    std::string* error);
 
+  // Applies `schema` to a database now, creating it if needed, rather than on the first open by a
+  // call: the line of versions it follows, from whatever is applied, in one transaction, with the
+  // snapshot (`before`, or the host's before_change) taken before a step drops or rewrites data.
+  // A dry run changes nothing and takes no snapshot. `notes` says why a step needed no person.
+  bool apply_now(std::string_view tenant, std::string_view database, const Schema& schema, bool dry_run,
+                 const BeforeChange& before, std::vector<std::string>* notes, std::string* error);
+
   // Checks that `schema` would apply to an existing database without changing it.
-  // A database that doesn't exist yet always passes.
-  bool check(std::string_view tenant, std::string_view database, const Schema& schema, std::string* error) const;
+  // A database that doesn't exist yet always passes. `old_writers` replaces the host's, as when
+  // the box being checked is the one that will stop writing on the older version.
+  bool check(std::string_view tenant, std::string_view database, const Schema& schema, std::string* error,
+             const OldWriters* old_writers = nullptr) const;
+  // Rows in a table of a database; -1 when the database or the table doesn't exist.
+  int64_t row_count(std::string_view tenant, std::string_view database, std::string_view table) const;
 
   // Whether `schemas` can all apply to one database, as when boxes share it: each is
   // applied in turn to an empty one, and the first that would change another is named.
@@ -118,6 +134,7 @@ class Databases {
   std::function<int64_t()> ids_;
   const SchemaStore* store_ = nullptr;
   BeforeChange before_change_;
+  OldWriters old_writers_;
   struct Watcher {
     sqlite3* db = nullptr;  // closed by the destructor, or when it is dropped from watchers_
     int64_t used = 0;

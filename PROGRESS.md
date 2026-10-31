@@ -726,6 +726,14 @@ The human, 2026-10-31: "Let's do schema changes next."
       a fixed seed), `upgrade_dry_run` on copies naming failing rows, `upgrade_start` after a
       passed dry run and the approval, snapshot first, refused while a box pinned to the old
       version uses the table; the box guide's "Changing a schema"; tests.
+- [x] A data engineer's gaps, 2026-10-31: `schema_apply` applies a stored schema's line to one
+      database now (dry run first; snapshot first; each step reported), since schemas apply
+      lazily on the first call that opens a database; `version_promote`, a live upload, and
+      `box_enable` answer `schemas` (applied or pending per database); annotation-only changes
+      show as kind `annotation`; a forced step on tables empty everywhere, with no older box
+      writing them, needs no person (041 § 6.1); a walk of several versions snapshots before
+      a later step's rewrite too (it didn't); `count(*)` and other column-less reads work
+      under any read grant; tests.
 - [ ] 041 § 10's decisions: `follows`, tombstones (physical removal of columns not built),
       approvals for drops, `writes`/`reads` handlers (waiting for named writes), forced
       defaults and unique indexes, upgrades run like jobs.

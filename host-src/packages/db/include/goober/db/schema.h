@@ -63,7 +63,7 @@ struct Schema {
 
 // One change between a schema and the one it follows (041 § 3).
 struct Change {
-  std::string kind;  // expansion, contraction, indexing, emulated, forced, or refused
+  std::string kind;  // expansion, contraction, indexing, emulated, forced, refused, or annotation
   std::string table, column, index;  // column and index empty when the change is the table's
   std::string says;  // the sentence a person reads
 };
