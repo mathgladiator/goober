@@ -158,6 +158,9 @@ just deploy you@server --without-rust  # skip Rust (on by default, so agents can
 just deploy you@server --without-mail  # skip Stalwart (on by default: mail in on port 25)
 just deploy server --user customer   # ssh in as customer (the same as customer@server)
 just deploy you@server --run-as acme # the host runs as the system user acme, in /srv/acme/host
+just deploy you@server --add-tenant bobs.example   # and launch one more site: a wizard for its tenant
+just deploy you@server --add-tenant bobs.example --tenant-name bobs --tenant-owner bob@bobs.example \
+  --tenant-postal "2 Pipe Rd, Springfield" --tenant-www   # the same answers, without a terminal
 ```
 
 It builds the `server` preset here (a release binary with libstdc++ linked in, needing only

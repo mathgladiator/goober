@@ -5,10 +5,13 @@
 #   - installs /usr/local/bin/goober-host;
 #   - first time: runs setup.sh as that user (interactive), then installs the systemd units,
 #     the nightly backup timer, and the Caddyfile;
-#   - later times: restarts the host on the new binary.
+#   - later times: restarts the host on the new binary;
+#   - with --add-tenant: adds one more site (a tenant and its domain) to host.json and Caddy.
 set -euo pipefail
 
 #   server-bootstrap.sh [DIR] [--user NAME] [--with-rust] [--public DOMAIN] [--build COMMIT]
+#                       [--add-tenant [--tenant-domain D] [--tenant-name T] [--tenant-owner E]
+#                        [--tenant-postal ADDRESS] [--tenant-www]]
 #   (deploy.sh passes --with-rust unless --without-rust, and the domain and build it deployed)
 DIR=""
 PUBLIC=""
@@ -16,6 +19,7 @@ BUILD=""
 RUN_AS="goober"
 WITH_RUST=""
 WITHOUT_MAIL=""
+ADD_TENANT="" T_DOMAIN="" T_NAME="" T_OWNER="" T_POSTAL="" T_WWW=""
 while (($#)); do
   case "$1" in
     --with-rust) WITH_RUST=--with-rust ;;
@@ -23,6 +27,12 @@ while (($#)); do
     --user) RUN_AS="${2:-}"; shift ;;
     --public) PUBLIC="${2:-}"; shift ;;
     --build) BUILD="${2:-}"; shift ;;
+    --add-tenant) ADD_TENANT=1 ;;
+    --tenant-domain) T_DOMAIN="${2:-}"; shift ;;
+    --tenant-name) T_NAME="${2:-}"; shift ;;
+    --tenant-owner) T_OWNER="${2:-}"; shift ;;
+    --tenant-postal) T_POSTAL="${2:-}"; shift ;;
+    --tenant-www) T_WWW=1 ;;
     -*) echo "✗ unknown option $1" >&2; exit 2 ;;
     *) DIR="$1" ;;
   esac
@@ -303,6 +313,200 @@ os.replace(p + ".tmp", p)
 fi
 
 PORT="$(host_json | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["listen"].get("port", 8080)))')"
+# What went wrong along the way; the final checks add theirs, and the deploy fails if any did.
+FAILED=()
+
+# A change to host.json and the Caddyfile, both already checked, proved by a restart: the host
+# ready within a minute, then Caddy reloaded. Otherwise UNDO_FN puts both back and the deploy fails.
+#   prove_change NAME UNDO_FN
+prove_change() {
+  local d="$1" undo_fn="$2" up=""
+  systemctl restart goober-host || true
+  for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
+  if [[ -z "$up" ]]; then
+    "$undo_fn" "the host wasn't ready with $d set"
+    systemctl restart goober-host || true
+    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
+    return 1
+  fi
+  if ! systemctl reload caddy; then
+    "$undo_fn" "Caddy wouldn't reload with $d"
+    systemctl restart goober-host || true
+    systemctl reload caddy || true
+    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
+    return 1
+  fi
+}
+
+# A new tenant (deploy.sh --add-tenant): one more site on this host, from a wizard or from the
+# flags, added to host.json and to Caddy as a site block of its own. It runs before mail in, so
+# Stalwart relays for the new domain in this same deploy.
+TENANT_PY="$SRC/tenant_edit.py"
+# tenant_edit.py on host.json runs as the host's user (DIR is theirs), the script fed on stdin.
+tenant_json() { sudo -u "$RUN_AS" python3 -I - "$@" < "$TENANT_PY"; }
+tenant_put_back() {
+  if sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json.before-tenant" "$DIR/host.json" &&
+     cp -p /etc/caddy/Caddyfile.before-tenant /etc/caddy/Caddyfile; then
+    echo "   $1; host.json and the Caddyfile are as they were"
+  else
+    echo "   $1, and putting the files back failed: restore $DIR/host.json.before-tenant and"
+    echo "   /etc/caddy/Caddyfile.before-tenant by hand"
+    FAILED+=("putting host.json and the Caddyfile back after adding a tenant")
+  fi
+}
+#   add_tenant DOMAIN TENANT OWNER POSTAL TERMS PRIVACY WWW (empty for none; WWW non-empty for yes)
+add_tenant() {
+  local d="$1" t="$2" owner="$3" postal="$4" terms="$5" privacy="$6" www="$7"
+  local flags=(--domain "$d" --tenant "$t") caddy_flags=(--domain "$d")
+  if [[ -n "$owner" ]]; then flags+=(--owner "$owner"); fi
+  if [[ -n "$postal" ]]; then flags+=(--postal "$postal"); fi
+  if [[ -n "$terms" ]]; then flags+=(--terms "$terms"); fi
+  if [[ -n "$privacy" ]]; then flags+=(--privacy "$privacy"); fi
+  if [[ -n "$www" ]]; then flags+=(--www); caddy_flags+=(--www); fi
+  sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-tenant" ||
+    { echo "   couldn't copy host.json aside; nothing changed"; FAILED+=("adding $d"); return 1; }
+  cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.before-tenant ||
+    { echo "   couldn't copy the Caddyfile aside; nothing changed"; FAILED+=("adding $d"); return 1; }
+  local said
+  if ! said="$(tenant_json host-json "$DIR/host.json" "${flags[@]}" 2>&1)"; then
+    tenant_put_back "host.json refused it: $said"; FAILED+=("adding $d"); return 1
+  fi
+  echo "   $said"
+  if ! said="$(sudo -u "$RUN_AS" "$BIN" check --config "$DIR/host.json" 2>&1)"; then
+    printf '%s\n' "$said" | tail -n 5 | sed 's/^/     /'
+    tenant_put_back "the host refused the new host.json"; FAILED+=("adding $d"); return 1
+  fi
+  if ! python3 -I "$TENANT_PY" caddy /etc/caddy/Caddyfile "${caddy_flags[@]}" >"$ROOT_TMP/tenant" 2>&1; then
+    tenant_put_back "the Caddyfile: $(tail -n 1 "$ROOT_TMP/tenant")"; FAILED+=("adding $d"); return 1
+  fi
+  if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$ROOT_TMP/tenant" 2>&1; then
+    tail -n 5 "$ROOT_TMP/tenant" | sed 's/^/     /'
+    tenant_put_back "Caddy refused the new site block"; FAILED+=("adding $d"); return 1
+  fi
+  rm -f "$ROOT_TMP/tenant"
+  prove_change "$d" tenant_put_back || return 1
+  echo "   added to host.json and /etc/caddy/Caddyfile (the old ones are *.before-tenant)"
+  # Through Caddy, as people reach it: the certificate comes with the first request, if DNS is here.
+  local body=""
+  for _ in $(seq 1 30); do
+    body="$(curl -fsS -m 10 "https://$d/goober/health" 2>/dev/null || true)"
+    [[ "$body" == *'"ok":true'* ]] && break
+    sleep 2
+  done
+  if [[ "$body" == *'"ok":true'* ]]; then
+    echo "   ✓ https://$d/ answers"
+  else
+    echo "   ! https://$d/ doesn't answer yet: Caddy gets its certificate once DNS points here (the records above)"
+  fi
+}
+
+# The answers, from a terminal: each asked until it is valid, Enter taking the default shown.
+tenant_wizard() {
+  local tin=/dev/tty answer info ok problem suggested tenants www_ok dns_json
+  ask() {  # ask PROMPT DEFAULT -> answer
+    local a=""
+    read -r -p "   $1${2:+ [$2]}: " a <"$tin" || a=""
+    answer="${a:-$2}"
+  }
+  for _ in 1 2 3; do
+    ask "The new site's domain, like example.com" "$T_DOMAIN"
+    answer="${answer,,}"; answer="${answer%.}"
+    info="$(tenant_json inspect "$DIR/host.json" "$answer" 2>/dev/null || echo '{}')"
+    # Fields split on a separator that isn't whitespace, so an empty one stays in its place.
+    IFS=$'\x1f' read -r ok problem suggested tenants www_ok < <(python3 -I -c '
+import json, sys
+i = json.loads(sys.argv[1] or "{}")
+print("\x1f".join([str(i.get("ok", False)), i.get("problem") or "is unchecked: host.json was unreadable",
+                   i.get("suggested", ""), " ".join(i.get("tenants", [])), str(i.get("www", False))]))' "$info")
+    if [[ "$ok" == True ]]; then T_DOMAIN="$answer"; break; fi
+    echo "     $answer $problem"
+    T_DOMAIN=""
+  done
+  [[ -n "$T_DOMAIN" ]] || { echo "   no domain; nothing added"; return 1; }
+  if [[ -n "$tenants" ]]; then echo "     tenants here now: $tenants"; fi
+  for _ in 1 2 3; do
+    ask "Its tenant (its own accounts, data, and pages): a name like ${suggested}" "${T_NAME:-$suggested}"
+    if [[ ! "$answer" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then echo "     lowercase letters, digits, and _, starting with a letter"; continue; fi
+    if [[ " $tenants " == *" $answer "* ]]; then
+      # One name per tenant is the rule (015); a second domain is usually a redirect instead.
+      local join=""
+      read -r -p "   $answer is a tenant here already: serve $T_DOMAIN as a second domain of it, sharing its accounts and data? [y/N]: " join <"$tin" || join=""
+      [[ "$join" =~ ^(y|Y|yes)$ ]] || continue
+    fi
+    T_NAME="$answer"; break
+  done
+  [[ -n "$T_NAME" ]] || { echo "   no tenant; nothing added"; return 1; }
+  for _ in 1 2 3; do
+    ask "Its first owner's email (granted owner at first sign-in; Enter for none)" "$T_OWNER"
+    if [[ -z "$answer" || "$answer" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then T_OWNER="$answer"; break; fi
+    echo "     an email address, like you@$T_DOMAIN"
+  done
+  for _ in 1 2 3; do
+    ask "Its postal address, one line, for the footer of its mail (Enter: ask later)" "$T_POSTAL"
+    if [[ -z "$answer" || ( ${#answer} -ge 5 && ${#answer} -le 200 ) ]]; then T_POSTAL="$answer"; break; fi
+    echo "     5 to 200 characters"
+  done
+  for page in terms privacy; do
+    for _ in 1 2 3; do
+      ask "Its $page page, a path on the site like /$page (Enter for none)" ""
+      if [[ -z "$answer" || "$answer" =~ ^/[A-Za-z0-9._~/-]{0,200}$ ]]; then
+        if [[ "$page" == terms ]]; then T_TERMS="$answer"; else T_PRIVACY="$answer"; fi
+        break
+      fi
+      echo "     a path, like /$page"
+    done
+  done
+  if [[ "$www_ok" == True ]]; then
+    answer=""
+    read -r -p "   Also redirect www.$T_DOMAIN to $T_DOMAIN? [Y/n]: " answer <"$tin" || answer=""
+    if [[ "$answer" =~ ^(n|N|no)$ ]]; then T_WWW=""; else T_WWW=1; fi
+  else
+    T_WWW=""
+  fi
+  # What DNS must say, and whether it does yet (MX too, when this deploy runs mail in).
+  local mail_on=""
+  if [[ -z "$WITHOUT_MAIL" ]]; then mail_on=mail; fi
+  dns_json="$(python3 -I "$TENANT_PY" dns "$T_DOMAIN" "${PUBLIC:-$PLATFORM_NAME}" 2>/dev/null || echo '{}')"
+  python3 -I -c '
+import json, sys
+j, d, www, mx, mail = json.loads(sys.argv[1] or "{}"), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+ours = j.get("addresses", [])
+print("   DNS for " + d + (" (this server is " + ", ".join(ours) + ")" if ours else "") + ":")
+for n in [d] + (["www." + d] if www else []):
+    rec = "; ".join(("AAAA " if ":" in a else "A ") + n + " -> " + a for a in ours) or "an A record for " + n + " -> this server"
+    state = j.get(n, {}).get("dns", "unknown")
+    print("     " + {"ready": "✓", "missing": "✗", "elsewhere": "!"}.get(state, "?") + " " + rec +
+          {"ready": "", "missing": " (not there yet)", "elsewhere": " (it points elsewhere now)"}.get(state, ""))
+if mail and mx:
+    print("     · " + d + ".  MX  10 " + mx + ".  (mail to the site)")
+' "$dns_json" "$T_DOMAIN" "$T_WWW" "$PLATFORM_NAME" "$mail_on"
+  read -r -p "   Add $T_DOMAIN for tenant $T_NAME now? [y/N]: " answer <"$tin" || answer=""
+  [[ "$answer" =~ ^(y|Y|yes)$ ]] || { echo "   nothing added"; return 1; }
+}
+
+T_TERMS="" T_PRIVACY=""
+if [[ -n "$ADD_TENANT" ]]; then
+  echo "── a new tenant (--add-tenant)"
+  PLATFORM_NAME="$(host_json | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("platform-domain", ""))' 2>/dev/null || true)"
+  [[ "$PLATFORM_NAME" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || PLATFORM_NAME=""
+  if [[ -z "$RESTARTED" ]]; then
+    echo "   skipped: this was the first install, and setup just asked for the domains"
+  elif [[ ! -f /etc/caddy/Caddyfile ]]; then
+    echo "   ✗ no /etc/caddy/Caddyfile to add the site to"
+    FAILED+=("adding a tenant (no Caddyfile)")
+  elif [[ -t 0 ]]; then
+    if tenant_wizard; then
+      add_tenant "$T_DOMAIN" "$T_NAME" "$T_OWNER" "$T_POSTAL" "$T_TERMS" "$T_PRIVACY" "$T_WWW" || true
+    fi
+  elif [[ -n "$T_DOMAIN" && -n "$T_NAME" ]]; then
+    # No terminal: the flags are the answers, checked by tenant_edit.py and goober-host.
+    add_tenant "${T_DOMAIN,,}" "$T_NAME" "$T_OWNER" "$T_POSTAL" "" "" "$T_WWW" || true
+  else
+    echo "   ✗ --add-tenant needs a terminal, or the domain and --tenant-name"
+    FAILED+=("adding a tenant (no terminal to ask in)")
+  fi
+fi
+
 MAIL_DNS=""
 if [[ -z "$WITHOUT_MAIL" && -f "$DIR/host.json" ]]; then
   echo "── mail in: Stalwart on port 25, handing every message to goober (024.MailIn.md)"
@@ -509,7 +713,7 @@ if [[ -z "$WITHOUT_MAIL" && -x /srv/stalwart/bin/stalwart ]]; then
 fi
 
 echo "── checking everything this host needs"
-FAILED=()
+# (FAILED is declared before the new tenant's step, which may add to it.)
 check() {
   local what="$1"; shift
   if "$@" >"$ROOT_TMP/check" 2>&1; then
@@ -695,22 +899,7 @@ PY
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || { undo "Caddy refused the new site line"; return 1; }
   # The checks above have run, so this restart must prove itself: ready within a minute, or
   # everything goes back and the deploy fails.
-  systemctl restart goober-host || true
-  local up=""
-  for _ in $(seq 1 120); do curl -fsS -m 5 "http://127.0.0.1:$PORT/goober/ready" >/dev/null 2>&1 && { up=1; break; }; sleep 0.5; done
-  if [[ -z "$up" ]]; then
-    undo "the host wasn't ready with $d set"
-    systemctl restart goober-host || true
-    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
-    return 1
-  fi
-  if ! systemctl reload caddy; then
-    undo "Caddy wouldn't reload with $d on the site line"
-    systemctl restart goober-host || true
-    systemctl reload caddy || true
-    FAILED+=("adding $d (host.json and the Caddyfile were put back)")
-    return 1
-  fi
+  prove_change "$d" undo || return 1
   # Caddy gets the certificate on the first request; a minute is plenty.
   local got="" code=""
   for _ in $(seq 1 30); do

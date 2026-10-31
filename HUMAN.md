@@ -145,6 +145,20 @@ silence any check, add its id to host.json: `"audit": {"quiet": ["backup"]}`. Th
 audit any time: `sudo -u goober goober-host audit --config /srv/goober/host/host.json
 --caddyfile /etc/caddy/Caddyfile`.
 
+**Launch another site** on the same server, with its own tenant (accounts, data, pages):
+
+```sh
+just deploy kcmeatup.com --user customer --add-tenant newsite.com
+```
+
+`── a new tenant` asks for just that site: its tenant name (Enter takes the one shown), its
+first owner's email, its postal address, its terms and privacy pages (Enter skips each), and
+whether to redirect www.newsite.com too. It prints the DNS records to add (an A record to this
+server; MX if mail comes in) and whether they're there yet, then asks before changing anything.
+`y` adds it to host.json and gives it a Caddy site of its own; if the host or Caddy refuses,
+both files are put back. Before DNS points here the site is added but has no certificate yet;
+deploy again once it does, or just wait: Caddy gets one on the first visit.
+
 If any step fails partway, the deploy says which line, starts Stalwart again if it had
 stopped it, and puts the previous build back unless the new one is up and ready. A new build
 that isn't ready within a minute is rolled back on its own: the deploy prints the
