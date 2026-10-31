@@ -352,7 +352,8 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] The panel's stores never stop the host from starting; it serves without them and says so.
 - [x] The server keeps the previous build; a new one not ready within a minute is rolled
       back, with its log printed. `tools/readiness.py` then checks from outside (pages,
-      discovery, MCP, boxes), with per-site lists in `tools/readiness.d/`.
+      discovery, MCP, boxes), with per-site lists in `~/.config/goober/readiness.d/` on the deploying machine
+      (`tools/readiness.d/` holds a template).
 - [x] The server runs readiness.py on itself after each deploy and publishes it at
       `/goober/deploy` (and `deploy` in `/goober/ready`), for bots' post-deploy checks.
 - [x] Caddy holds requests through a restart (`lb_try_duration 15s`) and answers a retryable

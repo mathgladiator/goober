@@ -2,8 +2,8 @@
 
 A one-page check for the human, while Grok runs the host. Paths assume the defaults:
 the host runs as `goober` in `/srv/goober/host`, at example.com. **example.com stands for your
-site's domain**: put yours in every command (the readiness pages are in
-`host-src/tools/readiness.d/` under your domain's name). Run the server commands over ssh; they
+site's domain**: put yours in every command (the pages a deploy checks are listed in
+`~/.config/goober/readiness.d/` under your domain's name, on the machine you deploy from). Run the server commands over ssh; they
 need sudo.
 
 ## 1. Is it up? (from your laptop, 10 seconds)
@@ -172,7 +172,7 @@ stopped it, and puts the previous build back unless the new one is up and ready.
 that isn't ready within a minute is rolled back on its own: the deploy prints the
 host's last 60 log lines (the reason), puts the previous build back, and fails. Then the
 server checks itself through its public name, as people and agents reach it
-(`host-src/tools/readiness.d/example.com` lists the pages), and publishes the result at
+(`~/.config/goober/readiness.d/example.com` lists the pages), and publishes the result at
 https://example.com/goober/deploy, summed up in `/goober/ready` as `deploy`. While the host
 restarts, Caddy holds requests up to 15 seconds; if it's down, Caddy answers a JSON 503 with
 Retry-After, so clients retry rather than remember a failure. The same check by hand, with an
@@ -180,7 +180,7 @@ operator token for the boxes:
 
 ```sh
 GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://example.com \
-  $(grep -v '^#' host-src/tools/readiness.d/example.com)
+  $(grep -v '^#' ~/.config/goober/readiness.d/example.com)
 ```
 
 To check signing in and refreshing for real (what Grok's and Cursor's connectors do), keep one

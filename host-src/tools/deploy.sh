@@ -111,8 +111,14 @@ PUBLIC_ARG=""
 BUILD="$(cd "$HOST_SRC" && git log -1 --format=%h --abbrev=12)"
 cp "$HERE/readiness.py" "$HERE/tenant_edit.py" "$STAGE/"
 FILES+=("$STAGE/readiness.py" "$STAGE/tenant_edit.py")
-if [[ -f "$HERE/readiness.d/$SERVER" ]]; then
-  cp "$HERE/readiness.d/$SERVER" "$STAGE/readiness.args"
+# A site's list is kept on the deploying machine, out of the repo:
+# ${GOOBER_READINESS_DIR:-~/.config/goober/readiness.d}/$SERVER, or the repo's readiness.d/ (templates).
+READINESS_LIST=""
+for d in "${GOOBER_READINESS_DIR:-$HOME/.config/goober/readiness.d}" "$HERE/readiness.d"; do
+  if [[ -f "$d/$SERVER" ]]; then READINESS_LIST="$d/$SERVER"; break; fi
+done
+if [[ -n "$READINESS_LIST" ]]; then
+  cp "$READINESS_LIST" "$STAGE/readiness.args"
   FILES+=("$STAGE/readiness.args")
 fi
 
@@ -146,7 +152,7 @@ echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
 
 echo "── installing on $TARGET"
 # The server checks itself after the gate, through its public name (readiness.py, with the
-# site's list from tools/readiness.d/$server), and publishes the result at /goober/deploy.
+# site's list from ~/.config/goober/readiness.d/$server), and publishes the result at /goober/deploy.
 # A new tenant's answers given here travel quoted, as words the server's shell won't reinterpret.
 TENANT_REMOTE=""
 if [[ -n "$ADD_TENANT" ]]; then
