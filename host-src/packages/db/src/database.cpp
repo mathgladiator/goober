@@ -601,6 +601,7 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
     std::lock_guard lock(mu_);
     if (!applied_.count(key)) {
       if (!apply_schema(*db, *schema, false, error)) return nullptr;
+      bump(path);
       applied_.insert(key);
     }
   }
@@ -667,7 +668,80 @@ std::vector<std::string> Databases::databases(std::string_view tenant) const {
   return out;
 }
 
+Databases::~Databases() {
+  for (auto& [f, w] : watchers_) sqlite3_close(w.db);
+}
+
+namespace {
+int64_t now_us() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
+int64_t Databases::version(const std::filesystem::path& f) const {
+  std::lock_guard lock(versions_mu_);
+  auto [it, fresh] = versions_.try_emplace(f.string(), 0);
+  if (fresh) it->second = now_us();
+  return it->second;
+}
+
+void Databases::bump(const std::filesystem::path& f) const {
+  int64_t now = now_us();
+  std::lock_guard lock(versions_mu_);
+  auto& v = versions_[f.string()];
+  v = std::max(v + 1, now);
+}
+
+std::optional<int64_t> Databases::data_version(const std::filesystem::path& f) const {
+  std::lock_guard lock(versions_mu_);
+  std::string key = f.string();
+  auto it = watchers_.find(key);
+  if (it == watchers_.end()) {
+    std::error_code ec;
+    if (!std::filesystem::exists(f, ec)) return std::nullopt;
+    Watcher w;
+    if (sqlite3_open_v2(key.c_str(), &w.db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+      sqlite3_close(w.db);
+      return std::nullopt;
+    }
+    if (watchers_.size() >= 512) {
+      auto oldest = std::min_element(watchers_.begin(), watchers_.end(),
+                                     [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
+      sqlite3_close(oldest->second.db);
+      watchers_.erase(oldest);
+    }
+    it = watchers_.emplace(key, w).first;
+  }
+  it->second.used = ++watcher_clock_;
+  sqlite3_stmt* s = nullptr;
+  std::optional<int64_t> out;
+  if (sqlite3_prepare_v2(it->second.db, "PRAGMA data_version", -1, &s, nullptr) == SQLITE_OK &&
+      sqlite3_step(s) == SQLITE_ROW) {
+    out = sqlite3_column_int64(s, 0);
+  }
+  sqlite3_finalize(s);
+  if (!out) {
+    sqlite3_close(it->second.db);
+    watchers_.erase(it);
+  }
+  return out;
+}
+
 void Databases::forget(std::string_view tenant, std::string_view database) {
+  {
+    // Dropped or changed underneath: every cached answer that read it is stale, and its watcher
+    // must not hold the old file open.
+    auto f = file(tenant, database);
+    {
+      std::lock_guard lock(versions_mu_);
+      if (auto it = watchers_.find(f.string()); it != watchers_.end()) {
+        sqlite3_close(it->second.db);
+        watchers_.erase(it);
+      }
+    }
+    bump(f);
+  }
   std::string prefix = file(tenant, database).string() + "|";
   std::lock_guard lock(mu_);
   for (auto it = applied_.begin(); it != applied_.end();) {
@@ -792,6 +866,7 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
     return std::string();
   });
   if (auto* e = result.if_contains("error")) return *error = std::string(e->get_string()), std::nullopt;
+  if (write && sqlite3_total_changes64(db.raw()) > 0) bump(file(tenant, database));  // 037 § 3
   return result;
 }
 
@@ -946,6 +1021,11 @@ bool Session::commit(std::string* error) {
     char* msg = nullptr;
     if (ok && sqlite3_exec(open->db->raw(), "COMMIT", nullptr, nullptr, &msg) == SQLITE_OK) {
       open->in_transaction = false;
+      // A connection opened for this request changed something: its database's version moves (037 § 3).
+      if (sqlite3_total_changes64(open->db->raw()) > 0) {
+        auto slash = name->find('/');
+        dbs_.bump(dbs_.file(name->substr(0, slash), name->substr(slash + 1)));
+      }
       continue;
     }
     if (ok) *error = "committing database " + *name + ": " + (msg ? msg : "failed");

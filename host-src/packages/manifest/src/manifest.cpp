@@ -246,6 +246,52 @@ bool parse_flags(const bj::value& flags, Manifest* m, std::string* error) {
   return true;
 }
 
+bool valid_topic(std::string_view t, std::string* why);
+
+// A GET route's "cache" (design/machine/037.Caching.md § 4), with § 4.5's refusals.
+bool parse_cache(const bj::value& v, const std::string& verb, const std::string& where, HttpRoute::Cache* c,
+                 std::string* error) {
+  std::string w = where + ".cache";
+  if (verb != "get") return *error = w + ": only a get route is cached (a HEAD shares its entry)", false;
+  if (!v.is_object()) return *error = w + " is an object, like {\"by\": \"data\", \"fresh-ms\": 60000}", false;
+  const auto& o = v.as_object();
+  for (const auto& f : o) {
+    std::string k(f.key());
+    if (k != "by" && k != "wake" && k != "fresh-ms" && k != "browser-ms" && k != "check-percent") {
+      return *error = w + ": unknown field \"" + k + "\" (by, wake, fresh-ms, browser-ms, check-percent)", false;
+    }
+  }
+  std::string err;
+  c->on = true;
+  c->by = get_string(o, "by", &err).value_or("data");
+  if (c->by != "data" && c->by != "wake") return *error = w + ".by is \"data\" or \"wake\"", false;
+  const auto* wake = o.if_contains("wake");
+  if (c->by == "wake") {
+    if (!wake || !wake->is_array() || wake->as_array().empty() || wake->as_array().size() > 8) {
+      return *error = w + ": by \"wake\" needs wake, a list of 1 to 8 topics, like [\"menu\"]", false;
+    }
+    for (const auto& t : wake->as_array()) {
+      std::string why;
+      if (!t.is_string() || !valid_topic(t.as_string(), &why)) return *error = w + ".wake: " + why, false;
+      c->wake.emplace_back(t.as_string());
+    }
+  } else if (wake) {
+    return *error = w + ".wake is only for by \"wake\"; by \"data\" goes stale on any write to what it read", false;
+  }
+  auto ranged = [&](const char* key, int64_t lo, int64_t hi, int64_t fallback, int64_t* out) {
+    if (!o.contains(key)) return *out = fallback, true;
+    auto n = get_int(o, key, &err);
+    if (!n || *n < lo || *n > hi) {
+      *error = w + "." + key + " is " + std::to_string(lo) + " to " + std::to_string(hi);
+      return false;
+    }
+    return *out = *n, true;
+  };
+  return ranged("fresh-ms", 1000, 86400000, 60000, &c->fresh_ms) &&
+         ranged("browser-ms", 0, 31536000000, 0, &c->browser_ms) &&
+         ranged("check-percent", 0, 100, 1, &c->check_percent);
+}
+
 // routes.job.$key (design/machine/038.Ids.md § 7): one-time work, like moving data between
 // databases, that only an operator starts, in batches. No address: only the host calls it.
 bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m, std::string* error) {
@@ -1608,11 +1654,11 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             std::string key(f.key());
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
-                key == "response" || key == "cors" || key == "includes") {
+                key == "response" || key == "cors" || key == "includes" || key == "cache") {
               // A subscription answers its own page's EventSource: no body, no template or
               // partials (the events are the box's bytes), and no cross-origin readers.
               if (sse && (key == "body" || key == "max-body-bytes" || key == "template" || key == "includes" ||
-                          key == "cors")) {
+                          key == "cors" || key == "cache")) {
                 return *error = where + "." + key + " doesn't apply to a subscription", std::nullopt;
               }
               continue;
@@ -1658,6 +1704,9 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             if (route.coalesce_ms < 50 || route.coalesce_ms > 60000) return *error = where + ".coalesce-ms is 50 to 60000", std::nullopt;
             if (route.refresh_ms < 1000 || route.refresh_ms > 3600000) return *error = where + ".refresh-ms is 1000 to 3600000", std::nullopt;
           }
+          if (const auto* c = def.if_contains("cache")) {
+            if (!parse_cache(*c, v, where, &route.cache, error)) return std::nullopt;
+          }
           // The box's own text/html gets the tenant's partials (design/machine/027.Partials.md).
           route.includes = goober::json::get_bool(def, "includes", &err).value_or(false);
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
@@ -1678,6 +1727,12 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             for (const auto& t : route.wake) {
               if (t.find("{!user_id}") != std::string::npos) {
                 return *error = where + ": a public subscription has no {!user_id} to wake on", std::nullopt;
+              }
+            }
+            for (const auto& t : route.cache.wake) {
+              if (t.find("{!user_id}") != std::string::npos) {
+                return *error = where + ".cache.wake: a public route has one entry for everyone, so no {!user_id} to wake on",
+                       std::nullopt;
               }
             }
           } else {

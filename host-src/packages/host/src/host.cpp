@@ -26,6 +26,7 @@
 #include "builder.h"
 #include "flags.h"
 #include "jobs.h"
+#include "route_cache.h"
 #include "grant_usage.h"
 #include "mailer.h"
 #include "network.h"
@@ -292,6 +293,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_web_tools();
   register_source_tools();
   register_job_tools();
+  register_cache_tools();
   register_flag_tools();
   register_db_admin_tools();
   backups_->set_source(source_.get());
@@ -1408,7 +1410,9 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     }
     extra["outbox"] = int64_t(net.pending.size());
   }
-  return BoxCall{std::move(result), std::move(extra)};
+  int64_t calls_out = 0;
+  for (const auto& [k, n] : net.calls) calls_out += n;
+  return BoxCall{std::move(result), std::move(extra), calls_out};
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
@@ -1532,7 +1536,14 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // begin deferred and never wait on the write lock, and its calls out must be reads.
   CallOptions options;
   options.read_only = req.method == "get" || req.method == "head";
-  auto call = call_box(ref, doc, tenant, request_id, who, options);
+  // A route that declares "cache" (037 § 4) answers from its entry when it is still good; a
+  // miss runs the box and stores what it may.
+  auto cached = cache_lookup(ref, doc, tenant, who, req.method);
+  BoxCall call = cached.hit ? std::move(*cached.hit) : call_box(ref, doc, tenant, request_id, who, options);
+  if (cached.on) {
+    cache_store(cached, route, call);
+    call.extra["cache"] = cached.outcome;
+  }
   auto& result = call.result;
   auto& extra = call.extra;
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
@@ -1667,6 +1678,14 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // never hand one caller's representation to another. One Vary header, the box's own names
   // kept (case-insensitive, no repeats).
   merge_vary(res.headers, !ref.route->template_name.empty() ? std::vector<std::string>{"accept"} : std::vector<std::string>{});
+  if (cached.on && !res.host_error && (res.status == 200 || res.status == 204 || res.status == 304)) {
+    cache_headers(route, who, res);
+    if (res.status == 304 && cached.outcome == "hit") {
+      route_cache_->count(tenant, m.box, route.name, "304");
+      extra["cache"] = "304";
+      extra_text = json::dump(extra);
+    }
+  }
   finish(std::move(res), std::move(extra_text));
 }
 

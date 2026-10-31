@@ -426,6 +426,30 @@ results); "sealed" can't use base "*". "base": "*" with "any-public": true on a 
 takes the whole https URL from the call's url (Webmention, Micropub, a person's Mastodon).
 Effects: an op that is a GET is sent now; others go through the outbox unless "effect" says.
 
+## Caching a GET route (opt-in)
+
+A route that declares "cache" is answered from the box's last answer while nothing it depends on
+changed: the box doesn't wake.
+   "/menu": {"get": {"name": "menu", "public": true, "response": "json",
+     "cache": {"by": "data", "fresh-ms": 60000, "check-percent": 1}}}
+- The promise you make: the answer depends only on the route's signature (path, query, the
+  request headers you declare, who asks) and on your databases, never on the clock, randomness,
+  or the request id. A cached route's box sees no other headers, no client_key, and on a public
+  route no user (one entry serves everyone; the template still greets each person).
+- by "data" (the default): stale when any database the box can read changes. Correct whatever
+  you read; any write to those databases refreshes it.
+- by "wake" with "wake": ["menu"]: stale only when one of those topics moves (a strategy's
+  "publish"). Narrower, and right only if every write that changes the answer publishes one.
+- fresh-ms (1000 to 86400000, default 60000): the longest an answer is kept, whatever happens.
+- browser-ms (default 0): what browsers may keep. 0 sends no-cache with an ETag; a matching
+  If-None-Match gets a 304 without waking the box.
+- check-percent (default 1): that share of hits also run the box off the request's path and
+  compare. A different answer is counted as a mismatch in cache_status, written to your log, and
+  replaces the entry. A mismatch means the answer depends on more than you declared.
+- Not kept: answers other than 200 or 204, over 1 MiB, or from a call that made any
+  goober_call (the web, another box, a service). Flags you read are part of the entry.
+- Operators see hits and mismatches with cache_status, and drop entries with cache_clear.
+
 ## Real time: publish and subscribe
 
 design/machine/036.Bus.md. The bus carries signals, never data: the database is the truth.

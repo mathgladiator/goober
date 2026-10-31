@@ -51,6 +51,9 @@ inline constexpr uint64_t kBrowserAttachmentMaxBytes = 1ull << 20;
 // Room for a multipart form's boundaries and fields around the file.
 inline constexpr uint64_t kMultipartOverheadBytes = 64ull << 10;
 
+struct CacheEntry;
+class RouteCache;
+
 // A signed-in caller: a tenant identity in the domain's realm, or a host identity
 // whose roles come from identity.operators in the config.
 struct SignedIn {
@@ -232,6 +235,7 @@ class Host {
   struct BoxCall {
     runtime::wasm::CallResult result;
     boost::json::object extra;  // fields for the access log
+    int64_t calls_out = 0;      // calls through goober_call (web, mail, other boxes, APIs)
   };
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
@@ -251,6 +255,25 @@ class Host {
                    const std::string& request_id, const std::optional<SignedIn>& who) {
     return call_box(ref, doc, tenant, request_id, who, CallOptions());
   }
+  // Route caching (design/machine/037.Caching.md § 4, § 5; cache_routes.cpp).
+  struct CacheLookup {
+    bool on = false;                     // the route is cached and this request may use the cache
+    std::string key;                     // the signature
+    std::string outcome;                 // "hit", "miss", or "stale"
+    std::shared_ptr<CacheEntry> pending;  // on a miss: what the answer depends on, read before the box runs
+    std::optional<BoxCall> hit;          // on a hit: the entry's answer
+  };
+  // Makes doc what a cached route's box sees, keys it, and answers from the cache when it can.
+  CacheLookup cache_lookup(const boxes::RouteRef& ref, boost::json::object& doc, const std::string& tenant,
+                           const std::optional<SignedIn>& who, const std::string& method);
+  std::optional<std::string> cache_stale(const CacheEntry& e, const manifest::Manifest& m, const std::string& tenant);
+  std::optional<CacheEntry> cache_entry(const CacheLookup& lookup, const manifest::HttpRoute& route, const BoxCall& call);
+  void cache_store(const CacheLookup& lookup, const manifest::HttpRoute& route, const BoxCall& call);
+  void cache_check(const boxes::RouteRef& ref, const std::string& key, CacheEntry entry);
+  static void cache_headers(const manifest::HttpRoute& route, const std::optional<SignedIn>& who,
+                            server::http::Response& res);
+  void register_cache_tools();
+  std::unique_ptr<RouteCache> route_cache_;
   // /mcp on every domain: box tools for agents and people with bearer tokens (mcp_routes.cpp).
   void handle_tenant_mcp(const server::http::Request& req, const Finish& finish, const std::string& domain,
                          const std::string& tenant);

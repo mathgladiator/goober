@@ -189,7 +189,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants", "audit"},
+                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants", "audit", "cache"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -530,6 +530,13 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   }
   // What `goober-host audit` (a deploy's operations audit) stops suggesting: a check's id, or
   // a check's id and the one name it stops suggesting, like "redirect:www.example.com".
+  if (const auto* cache = get_object(root, "cache", &err)) {
+    if (!check_keys(*cache, {"bytes"}, "cache", &err)) return *error = err, nullptr;
+    if (auto v = get_int(*cache, "bytes", &err)) {
+      if (*v < 0 || *v > (int64_t(64) << 30)) return *error = "cache.bytes is 0 (off) to 68719476736 (64 GiB)", nullptr;
+      cfg->cache_bytes = *v;
+    }
+  }
   if (const auto* audit = get_object(root, "audit", &err)) {
     if (!check_keys(*audit, {"quiet"}, "audit", &err)) return *error = err, nullptr;
     if (const auto* quiet = get_array(*audit, "quiet", &err)) {
