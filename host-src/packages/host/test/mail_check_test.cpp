@@ -221,6 +221,51 @@ TEST_F(MailCheckTest, HealthSaysWhetherTheListenerAnswers) {
   EXPECT_TRUE(down.as_object().contains("error"));
 }
 
+// Moving a mail route (and its route name) from one box to another, with a quick rollback: the
+// new box is stored dark first (its conflict with the live box is a warning), then the cutover
+// is box_disable on the old box and version_promote on the new; rollback is the reverse.
+TEST_F(MailCheckTest, AMailRouteMovesBetweenBoxesAndBack) {
+  const char* kAgentWat = R"wat((module
+    (memory (export "memory") 1)
+    (func (export "goober_route_support_inbox") (result i32) (i32.const 0))))wat";
+  bj::object agent_manifest{
+      {"box", "agent"},
+      {"domains", bj::array{"shop.test"}},
+      {"routes", bj::object{{"mail", bj::object{{"support@", bj::object{{"receive", bj::object{
+                                                                 {"name", "support_inbox"}, {"public", true}}}}}}}}}};
+  // While desk is live, agent can't go live: the name and the address are desk's.
+  auto live = tool("version_upload", {{"manifest", agent_manifest}, {"wat", kAgentWat}});
+  ASSERT_TRUE(live.as_object().contains("error"));
+  EXPECT_NE(std::string(live.at("error").as_string()).find("already used by box desk"), std::string::npos);
+  // Stored dark, with the conflict as a warning.
+  auto dark = tool("version_upload", {{"manifest", agent_manifest}, {"wat", kAgentWat}, {"activate", false}});
+  ASSERT_FALSE(dark.as_object().contains("error")) << json::dump(dark);
+  EXPECT_NE(json::dump(dark.at("warnings")).find("box_disable the other box first"), std::string::npos) << json::dump(dark);
+  std::string v(dark.at("version").as_string());
+  EXPECT_EQ(tool("mail_route_check", {{"domain", "shop.test"}, {"address", "support"}}).at("box"), "desk");
+  // Promoting it while desk holds the address is refused, saying by whom.
+  EXPECT_TRUE(tool("version_promote", {{"box", "agent"}, {"version", v}}).as_object().contains("error"));
+
+  // The cutover: two calls. A disabled box holds no names or addresses.
+  ASSERT_FALSE(tool("box_disable", {{"box", "desk"}, {"why", "support@ moves to agent"}}).as_object().contains("error"));
+  auto promoted = tool("version_promote", {{"box", "agent"}, {"version", v}});
+  ASSERT_FALSE(promoted.as_object().contains("error")) << json::dump(promoted);
+  auto now = tool("mail_route_check", {{"domain", "shop.test"}, {"address", "support"}});
+  EXPECT_EQ(now.at("box"), "agent");
+  EXPECT_EQ(now.at("route"), "support_inbox");
+
+  // desk can't come back while agent holds them, and the refusal says how to roll back.
+  auto blocked = tool("box_enable", {{"box", "desk"}});
+  ASSERT_TRUE(blocked.as_object().contains("error"));
+  EXPECT_NE(std::string(blocked.at("error").as_string()).find("box_disable that box first"), std::string::npos)
+      << json::dump(blocked);
+  // Rollback: two calls the other way.
+  ASSERT_FALSE(tool("box_disable", {{"box", "agent"}, {"why", "rollback"}}).as_object().contains("error"));
+  ASSERT_FALSE(tool("box_enable", {{"box", "desk"}}).as_object().contains("error"));
+  EXPECT_EQ(tool("mail_route_check", {{"domain", "shop.test"}, {"address", "support"}}).at("box"), "desk");
+  EXPECT_EQ(tool("mail_route_check", {{"domain", "shop.test"}, {"address", "sales"}}).at("route"), "inbox_all");
+}
+
 TEST_F(MailCheckTest, RouteCheckSaysWhoTakesAnAddress) {
   auto support = tool("mail_route_check", {{"domain", "shop.test"}, {"address", "Support"}});
   EXPECT_EQ(support.at("taken"), true) << json::dump(support);

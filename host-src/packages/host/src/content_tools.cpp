@@ -869,7 +869,9 @@ void Host::register_content_tools() {
       {"box_render",
        "Previews a box route's page: its template, the layout the template's front matter names (layout: base), "
        "and shared partials, over JSON you give in place of the box's answer. The box doesn't run and nothing is "
-       "stored. Name the route by path (a GET route with a template, on the tenant's domain) or by box and template. "
+       "stored. There is no request, so the route's gate (public, requirements) isn't applied: a people-only route "
+       "renders whatever data you pass, user or not; the real route answers 401 or the sign-in redirect before any "
+       "template. Name the route by path (a GET route with a template, on the tenant's domain) or by box and template. "
        "Unsaved templates, the box's or the site's (like base), are used first, so a template change or a new "
        "layout can be tried before version_upload or template_put.",
        object_schema({{"tenant", tenant_prop},

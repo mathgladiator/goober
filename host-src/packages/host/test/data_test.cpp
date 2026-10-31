@@ -125,6 +125,39 @@ TEST_F(DataRoutesTest, BoxGuideDescribesTheBoundary) {
   }
 }
 
+// A dry run can check a manifest against schemas that aren't stored yet: they are checked as
+// schema_check checks them and used as if stored, and nothing is stored.
+TEST_F(DataRoutesTest, DryRunsTakeUnstoredSchemas) {
+  bj::object notes1{{"schema", "notes1"},
+                    {"tables", bj::object{{"notes", bj::object{{"columns", bj::object{{"text", bj::object{{"type", "string"}}}}}}}}}};
+  auto without = tool("version_upload", {{"manifest", kNotesManifest}, {"wat", kNotesWat}, {"dry_run", true}});
+  ASSERT_TRUE(without.as_object().contains("error"));
+  EXPECT_NE(std::string(without.at("error").as_string()).find("isn't stored"), std::string::npos) << json::dump(without);
+  auto with = tool("version_upload", {{"manifest", kNotesManifest}, {"wat", kNotesWat}, {"dry_run", true},
+                                      {"schemas", bj::array{notes1}}});
+  ASSERT_FALSE(with.as_object().contains("error")) << json::dump(with);
+  EXPECT_EQ(with.at("stored"), false);
+  EXPECT_EQ(json::dump(with.at("schemas_checked")), R"(["notes1"])");
+  EXPECT_NE(json::dump(with.at("schema_warnings")).find("names no primary key"), std::string::npos) << json::dump(with);
+  // Nothing was stored: the schema and the box are still unknown.
+  EXPECT_TRUE(tool("schema_get", {{"name", "notes1"}}).as_object().contains("error"));
+  EXPECT_TRUE(tool("version_list", {{"box", "notes"}}).as_array().empty());
+  // A grant on a table the unstored schema doesn't have is still refused.
+  bj::object other{{"schema", "notes1"},
+                   {"tables", bj::object{{"other", bj::object{{"columns", bj::object{{"text", bj::object{{"type", "string"}}}}}}}}}};
+  auto wrong = tool("version_upload", {{"manifest", kNotesManifest}, {"wat", kNotesWat}, {"dry_run", true},
+                                       {"schemas", bj::array{other}}});
+  EXPECT_TRUE(wrong.as_object().contains("error")) << json::dump(wrong);
+  // Only with a dry run; and a broken schema says why.
+  auto real = tool("version_upload", {{"manifest", kNotesManifest}, {"wat", kNotesWat}, {"schemas", bj::array{notes1}}});
+  ASSERT_TRUE(real.as_object().contains("error"));
+  EXPECT_NE(std::string(real.at("error").as_string()).find("schema_put"), std::string::npos);
+  auto broken = tool("version_upload", {{"manifest", kNotesManifest}, {"wat", kNotesWat}, {"dry_run", true},
+                                        {"schemas", bj::array{"{\"schema\": \"x1\"}"}}});
+  ASSERT_TRUE(broken.as_object().contains("error"));
+  EXPECT_NE(std::string(broken.at("error").as_string()).find("schemas:"), std::string::npos);
+}
+
 TEST_F(DataRoutesTest, BoxesWriteInATransactionAndOperatorsPoke) {
   std::string err;
   // A manifest naming a schema the host doesn't have is refused.

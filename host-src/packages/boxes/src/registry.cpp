@@ -296,9 +296,20 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
   if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
   UploadResult result{version, m->warnings};
   auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled, *t});
-  // Every mode checks the candidate against the active boxes as if it went live now.
+  // Every mode checks the candidate against the active boxes as if it went live now. A version
+  // stored dark may conflict with a live box, because it is to take over that box's route
+  // names or mail addresses once that box is disabled: it is stored anyway, the conflict is a
+  // warning, and version_promote checks again when it goes live.
+  if (mode == Mode::kStore) {
+    std::string conflict;
+    if (!activate(candidate, bundle, &conflict, true)) {
+      result.warnings.push_back("not live-able while the active boxes are as they are: " + conflict +
+                                "; version_promote checks again (box_disable the other box first)");
+    }
+    if (!wal_.commit(bundle, error)) return std::nullopt;
+    return result;
+  }
   if (!activate(candidate, bundle, error, mode != Mode::kActivate)) return std::nullopt;
-  if (mode == Mode::kStore && !wal_.commit(bundle, error)) return std::nullopt;
   return result;
 }
 
