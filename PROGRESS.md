@@ -746,6 +746,23 @@ the icicle, and give the panel one view of errors from outside and one of how bo
       failed, by class and group (call, sql, outbox, internal, answer), with the latest
       messages; from `storage/operations/failures.db`; tests.
 
+### Phase 38: engineers' gaps after the schema work (2026-10-31)
+From the data engineers and a site's engineers, the items outside schemas:
+- [x] `job_dry_run {version}` runs a stored dark or older version on copies, counted as a try;
+      `job_start` stays on the live version; tests.
+- [x] `box_failures` keeps failed tries and dry runs apart under `tries`, never in the rates;
+      `job_failed` for a batch the host couldn't take; the panel lists them; tests.
+- [x] `version_get` answers `module_sha256` and `module_bytes`; `version_upload` answers
+      `module_sha256`; tests.
+- [x] `route_try {internal, caller, arguments}` calls an internal route as its caller would,
+      through the same request checks (`internal_request`), on copies; internal routes shadow
+      no site path; documented in box_guide and 016 § 3.1; tests.
+- [x] A deep link's `#fragment` through every return= flow: `/goober/keep-fragment.js` and the
+      built-in `keep-fragment` partial in the base template; site_guide "Deep links"; tests
+      (the script itself checked against a stub DOM by hand).
+- [x] `operator_scope` names the operator every log records, and tells a holder of the shared
+      `operations.token` to get its own; HUMAN.md says to mint one token per agent; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
