@@ -72,7 +72,8 @@ struct Result {
 // The URL of a page file ("blog/index.md" is "/blog"), or nullopt when the path isn't a page.
 std::optional<std::string> page_url(std::string_view content_path);
 
-// True when any segment of a content path starts with "_": never served.
+// True when any segment of a content path starts with "_", or the path is under the root's
+// error-message/ (the host's error pages, served only as errors): never served, never listed.
 bool is_private_path(std::string_view content_path);
 
 // The kind of a file in the tree, from its extension and, for HTML, its front matter.

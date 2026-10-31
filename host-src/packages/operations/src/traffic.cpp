@@ -77,10 +77,25 @@ struct EdgeSums {
 using RowKey = std::tuple<int64_t, std::string, std::string, std::string>;  // t, tenant, box, route
 using EdgeKey = std::tuple<int64_t, std::string, std::string, std::string, std::string>;
 
+// t, tenant, status, place, box, route, error_by, ref
+using ErrorKey = std::tuple<int64_t, std::string, int64_t, std::string, std::string, std::string, std::string, std::string>;
+
 struct Batch {
   std::map<RowKey, Sums> rows;
   std::map<EdgeKey, EdgeSums> edges;
+  std::map<ErrorKey, int64_t> errors;
 };
+
+// Where an error happened, in as few names as the site has places (028 § 4.2).
+std::string error_place(const bj::object& line, const LineKey& key, int64_t status) {
+  if (!key.box.empty()) return "";
+  if (status == 404 && !line.contains("file")) return "(not found)";
+  std::string path = text(line, "path");
+  // A page that exists (a gate refused it, or it failed to render): its path.
+  if (line.contains("file") && path.size() <= 200) return path;
+  if (key.route != "page" && key.route != "unknown") return key.route;
+  return "(other)";
+}
 
 void add_access(Batch& b, const bj::object& line, const TenantOf& tenant_of) {
   auto key = key_line(line, tenant_of);
@@ -98,8 +113,20 @@ void add_access(Batch& b, const bj::object& line, const TenantOf& tenant_of) {
   int64_t hour = key->at_ms / kHourMs * kHourMs;
   b.rows[{minute, key->tenant, key->box, key->route}].merge(s);
   b.rows[{-hour - 1, key->tenant, key->box, key->route}].merge(s);  // negative: an hour row
-  // A box-to-box call: "a -> b" (039).
+  // An error from outside; a box-to-box call's is the calling box's business (box_failures).
+  int64_t status = number(line, "status");
   std::string internal = text(line, "internal");
+  if (status >= 400 && internal.empty()) {
+    std::string by = text(line, "error_by");
+    if (by.empty()) by = line.contains("outcome") ? (status >= 500 ? "box_failed" : "box") : "host";
+    std::string ref = text(line, "ref");
+    if (ref != "same" && ref != "other") ref = "none";
+    std::string place = error_place(line, *key, status);
+    std::string route = key->box.empty() ? "" : key->route;
+    b.errors[{minute, key->tenant, status, place, key->box, route, by, ref}] += 1;
+    b.errors[{-hour - 1, key->tenant, status, place, key->box, route, by, ref}] += 1;
+  }
+  // A box-to-box call: "a -> b" (039).
   if (auto arrow = internal.find(" -> "); arrow != std::string::npos) {
     EdgeSums e{1, number(line, "status") >= 500 ? 1 : 0, us, 0, 0};
     std::string from = internal.substr(0, arrow), to = internal.substr(arrow + 4);
@@ -296,6 +323,12 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
               " bytes_out INTEGER NOT NULL, bytes_in INTEGER NOT NULL,"
               " PRIMARY KEY (t, tenant, from_box, to_kind, to_name))");
   }
+  for (const char* table : {"error_minutes", "error_hours"}) {
+    db_->exec(std::string("CREATE TABLE IF NOT EXISTS ") + table +
+              " (t INTEGER NOT NULL, tenant TEXT NOT NULL, status INTEGER NOT NULL, place TEXT NOT NULL,"
+              " box TEXT NOT NULL, route TEXT NOT NULL, error_by TEXT NOT NULL, ref TEXT NOT NULL, n INTEGER NOT NULL,"
+              " PRIMARY KEY (t, tenant, status, place, box, route, error_by, ref))");
+  }
   db_->exec(
       "CREATE TABLE IF NOT EXISTS cursors (name TEXT PRIMARY KEY, inode INTEGER NOT NULL, offset INTEGER NOT NULL)");
 }
@@ -410,6 +443,15 @@ size_t Traffic::tail(const std::string& name, int64_t) {
           w.bind(7, e.errors).bind(8, e.us).bind(9, e.bytes_out).bind(10, e.bytes_in);
           w.run();
         }
+        for (const auto& [k, n] : batch.errors) {
+          auto [t, tenant, status, place, box, route, by, ref] = k;
+          sqlite::Stmt w(*db_, std::string("INSERT INTO ") + (t < 0 ? "error_hours" : "error_minutes") +
+                                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (t, tenant, status, place, box, route, "
+                                   "error_by, ref) DO UPDATE SET n = n + excluded.n");
+          w.bind(1, t < 0 ? -t - 1 : t).bind(2, tenant).bind(3, status).bind(4, place).bind(5, box).bind(6, route);
+          w.bind(7, by).bind(8, ref).bind(9, n);
+          w.run();
+        }
         sqlite::Stmt c(*db_, "INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)");
         c.bind(1, name).bind(2, int64_t(id->first)).bind(3, int64_t(next));
         c.run();
@@ -428,7 +470,8 @@ size_t Traffic::tail(const std::string& name, int64_t) {
 void Traffic::drop_old(int64_t now_ms) {
   last_drop_ms_ = now_ms;
   for (auto [table, keep] : {std::pair{"minutes", kMinutesKeptMs}, std::pair{"edge_minutes", kMinutesKeptMs},
-                             std::pair{"hours", kHoursKeptMs}, std::pair{"edge_hours", kHoursKeptMs}}) {
+                             std::pair{"error_minutes", kMinutesKeptMs}, std::pair{"hours", kHoursKeptMs},
+                             std::pair{"edge_hours", kHoursKeptMs}, std::pair{"error_hours", kHoursKeptMs}}) {
     sqlite::Stmt s(*db_, std::string("DELETE FROM ") + table + " WHERE t < ?");
     s.bind(1, now_ms - keep);
     s.run();
@@ -439,11 +482,12 @@ struct Traffic::Window {
   const char* table;
   const char* edge_table;
   int64_t span_ms, step_ms;
+  const char* error_table;
   static std::optional<Window> of(std::string_view w) {
-    if (w == "1h") return Window{"minutes", "edge_minutes", kHourMs, kMinuteMs};
-    if (w == "12h") return Window{"minutes", "edge_minutes", 12 * kHourMs, 10 * kMinuteMs};
-    if (w == "7d") return Window{"hours", "edge_hours", 7 * 24 * kHourMs, kHourMs};
-    if (w == "30d") return Window{"hours", "edge_hours", 30 * 24 * kHourMs, 6 * kHourMs};
+    if (w == "1h") return Window{"minutes", "edge_minutes", kHourMs, kMinuteMs, "error_minutes"};
+    if (w == "12h") return Window{"minutes", "edge_minutes", 12 * kHourMs, 10 * kMinuteMs, "error_minutes"};
+    if (w == "7d") return Window{"hours", "edge_hours", 7 * 24 * kHourMs, kHourMs, "error_hours"};
+    if (w == "30d") return Window{"hours", "edge_hours", 30 * 24 * kHourMs, 6 * kHourMs, "error_hours"};
     return std::nullopt;
   }
   // The window's last point ends at the step after now.
@@ -569,6 +613,86 @@ bj::array Traffic::edges(std::string_view window, const std::string& box, int64_
                              {"bytes_in", s.int64(8)}});
   }
   return out;
+}
+
+bj::object Traffic::errors(std::string_view window, const std::string& tenant, int64_t now_ms) {
+  auto w = Window::of(window).value_or(*Window::of("12h"));
+  std::lock_guard lock(mu_);
+  int64_t from = w.from(now_ms), to = w.to(now_ms);
+  size_t count = size_t(w.span_ms / w.step_ms);
+  struct Point {
+    int64_t n = 0, n4 = 0, n5 = 0, host = 0, box = 0, box_failed = 0;
+  };
+  std::vector<Point> points(count);
+  Point totals;
+  {
+    sqlite::Stmt s(*db_, std::string("SELECT t, SUM(n) FROM ") + w.table +
+                             " WHERE t >= ? AND t < ? AND (? = '' OR tenant = ?) GROUP BY t");
+    s.bind(1, from).bind(2, to).bind(3, tenant).bind(4, tenant);
+    while (s.step()) {
+      size_t i = size_t((s.int64(0) - from) / w.step_ms);
+      if (i < count) points[i].n += s.int64(1);
+      totals.n += s.int64(1);
+    }
+  }
+  std::map<int64_t, Point> statuses;
+  struct Place {
+    int64_t n = 0, same = 0, other = 0, none = 0;
+  };
+  using PlaceKey = std::tuple<std::string, std::string, std::string, std::string, int64_t, std::string>;
+  std::map<PlaceKey, Place> places;
+  int64_t same = 0, other = 0, none = 0;
+  sqlite::Stmt s(*db_, std::string("SELECT t, tenant, status, place, box, route, error_by, ref, n FROM ") + w.error_table +
+                           " WHERE t >= ? AND t < ? AND (? = '' OR tenant = ?)");
+  s.bind(1, from).bind(2, to).bind(3, tenant).bind(4, tenant);
+  while (s.step()) {
+    int64_t status = s.int64(2), n = s.int64(8);
+    std::string by = s.text(6), ref = s.text(7);
+    auto add = [&](Point& p) {
+      (status >= 500 ? p.n5 : p.n4) += n;
+      (by == "box" ? p.box : by == "box_failed" ? p.box_failed : p.host) += n;
+    };
+    size_t i = size_t((s.int64(0) - from) / w.step_ms);
+    if (i < count) add(points[i]);
+    add(totals);
+    auto& st = statuses[status];
+    st.n += n;
+    add(st);
+    auto& pl = places[{s.text(1), s.text(3), s.text(4), s.text(5), status, by}];
+    pl.n += n;
+    (ref == "same" ? pl.same : ref == "other" ? pl.other : pl.none) += n;
+    (ref == "same" ? same : ref == "other" ? other : none) += n;
+  }
+  bj::array pts;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& p = points[i];
+    pts.push_back(bj::object{{"t", from + int64_t(i) * w.step_ms}, {"n", p.n}, {"n4", p.n4}, {"n5", p.n5},
+                             {"host", p.host}, {"box", p.box}, {"box_failed", p.box_failed}});
+  }
+  bj::array sts;
+  for (const auto& [status, p] : statuses) {
+    sts.push_back(bj::object{{"status", status}, {"n", p.n4 + p.n5}, {"host", p.host}, {"box", p.box},
+                             {"box_failed", p.box_failed}});
+  }
+  std::vector<std::pair<PlaceKey, Place>> list(places.begin(), places.end());
+  std::stable_sort(list.begin(), list.end(), [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
+  if (list.size() > 200) list.resize(200);
+  bj::array pls;
+  for (const auto& [k, p] : list) {
+    pls.push_back(bj::object{{"tenant", std::get<0>(k)}, {"place", std::get<1>(k)}, {"box", std::get<2>(k)},
+                             {"route", std::get<3>(k)}, {"status", std::get<4>(k)}, {"error_by", std::get<5>(k)},
+                             {"n", p.n}, {"same", p.same}, {"other", p.other}, {"none", p.none}});
+  }
+  return bj::object{{"window", std::string(window)},
+                    {"step_ms", w.step_ms},
+                    {"from_ms", from},
+                    {"to_ms", to},
+                    {"totals", bj::object{{"n", totals.n}, {"n4", totals.n4}, {"n5", totals.n5}, {"host", totals.host},
+                                          {"box", totals.box}, {"box_failed", totals.box_failed}}},
+                    {"points", std::move(pts)},
+                    {"statuses", std::move(sts)},
+                    {"places", std::move(pls)},
+                    {"referred", bj::object{{"same", same}, {"other", other}, {"none", none}}}};
 }
 
 }  // namespace goober::operations

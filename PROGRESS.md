@@ -730,6 +730,22 @@ The human, 2026-10-31: "Let's do schema changes next."
       approvals for drops, `writes`/`reads` handlers (waiting for named writes), forced
       defaults and unique indexes, upgrades run like jobs.
 
+### Phase 37: errors, as visitors see them and as boxes cause them (007 § 13, 028 § 4.1 to § 4.3)
+Asked for on 2026-10-31: make custom 404 and 403 pages clear to the engineers, keep errors out of
+the icicle, and give the panel one view of errors from outside and one of how boxes fail.
+- [x] Error pages are templates in the site's layout (front matter, partials, `{{status}}`),
+      rendered for nobody; `error-message/` is never a page of its own; `page_put` refuses it;
+      a box's empty 4xx gets the site's page; documented in site_guide, box_guide, and
+      `content_put`; tests.
+- [x] The icicle (`uri_tree`) keeps errors the host answered before any box ran out
+      (`(refused)`, `(not found)`), and box-to-box calls; a box route's own 404 stays on it;
+      tests.
+- [x] `error_report` and the panel's Errors view: 4xx and 5xx by status, place, maker
+      (`error_by`), and referral, from rollups beside the traffic ones; tests.
+- [x] `box_failures` and the panel's Box failures view: every box call and each way it
+      failed, by class and group (call, sql, outbox, internal, answer), with the latest
+      messages; from `storage/operations/failures.db`; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

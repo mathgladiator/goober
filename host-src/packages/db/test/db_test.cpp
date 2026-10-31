@@ -571,6 +571,13 @@ TEST_F(DbTest, BoxSqlHasNoClock) {
   }
   // A bound 'now' is the clock too.
   EXPECT_TRUE(J(s.run("book", "SELECT date(?)", R"(["now"])")).as_object().contains("error"));
+  // The session counts them for the panel's box failures (028 § 4.3), with the last one's text.
+  EXPECT_EQ(s.errors().no_clock, 7);
+  EXPECT_EQ(s.errors().sql, 7);
+  J(s.run("book", "SELECT nme FROM entries", ""));
+  EXPECT_EQ(s.errors().sql, 8);
+  EXPECT_EQ(s.errors().no_clock, 7);
+  EXPECT_NE(s.errors().last.find("nme"), std::string::npos) << s.errors().last;
   // A write that asks for the time is undone whole.
   auto w = J(s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('x', date('now'), 1)", ""));
   ASSERT_TRUE(w.as_object().contains("error")) << json::dump(w);

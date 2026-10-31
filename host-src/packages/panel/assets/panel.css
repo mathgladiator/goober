@@ -84,6 +84,7 @@ svg { display: block; max-width: 100%; }
 svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
 svg .axis { stroke: var(--line); }
 svg .s2 { fill: var(--ok); } svg .s3 { fill: var(--redirect); } svg .s4 { fill: var(--client); } svg .s5 { fill: var(--server); }
+svg .fp { fill: var(--p99); }
 svg .l50 { stroke: var(--p50); fill: none; stroke-width: 1.6; }
 svg .l99 { stroke: var(--p99); fill: none; stroke-width: 1.6; }
 svg .hover { fill: transparent; }
@@ -93,6 +94,7 @@ svg .hover:hover { fill: var(--line); opacity: .45; }
 .legend .s2 { background: var(--ok); } .legend .s3 { background: var(--redirect); }
 .legend .s4 { background: var(--client); } .legend .s5 { background: var(--server); }
 .legend .l50 { background: var(--p50); } .legend .l99 { background: var(--p99); }
+.legend .fp { background: var(--p99); }
 
 .heat { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
 .tile { border-radius: 8px; padding: 8px 10px; border: 1px solid var(--line); color: var(--fg); display: block; min-width: 0; }

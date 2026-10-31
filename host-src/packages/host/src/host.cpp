@@ -191,6 +191,11 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   } catch (const std::exception& e) {
     startup_notes_.push_back(std::string("traffic rollups off: ") + e.what());
   }
+  try {
+    failures_ = std::make_unique<operations::Failures>(config->storage / "operations" / "failures.db");
+  } catch (const std::exception& e) {
+    startup_notes_.push_back(std::string("box failures off: ") + e.what());
+  }
   const auto& rec = wal_->recovery();
   for (const auto& f : rec.failed) startup_notes_.push_back("host WAL: set aside " + f + " (see wal/failed/)");
   if (rec.replayed_bundles || rec.discarded_bundles || rec.torn_tail) {
@@ -534,6 +539,12 @@ void Host::stop() {
     panel_server_->stop();
     panel_server_.reset();
   }
+  // What boxes did since the traffic loop's last pass, kept across the restart.
+  try {
+    if (failures_) failures_->flush(base::now_unix_ms());
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: box failures: " << e.what() << "\n";
+  }
 }
 
 std::string Host::reload() {
@@ -650,7 +661,7 @@ void Host::write_dev_mail(const identity::Mail& mail) {
 }
 
 void Host::access_log(const Request& req, int status, int64_t started_us, const std::string& domain,
-                      const std::string& extra) {
+                      const std::string& extra, bool host_error) {
   bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())},
                   {"request_id", req.header("goober-request-id")},
                   {"domain", domain},
@@ -667,6 +678,12 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
       }
     }
   }
+  if (host_error) line["host_error"] = true;
+  // Who made an error (028 § 4.2): "box" when a box answered it, "box_failed" when a box ran and
+  // failed (a trap, a timeout, a bad answer), and "host" when no box ran (no such page, a gate,
+  // a refused input, a rate limit).
+  bool box_ran = line.contains("outcome");
+  if (status >= 400) line["error_by"] = !box_ran ? "host" : status >= 500 ? "box_failed" : "box";
   // Live statistics (032 § 6): per tenant and path, with the route, and where the visitor came
   // from on the same site.
   if (!domain.empty()) {
@@ -683,7 +700,13 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
         }
         return st == 404 ? std::string("(not found)") : p;
       };
-      std::string path = stat_path(req.path.substr(0, req.path.find('?')), status);
+      // A box's own 404 (no such place) stays on its route's path; the host's 404s are counted
+      // together.
+      std::string path = stat_path(req.path.substr(0, req.path.find('?')), box_ran ? 200 : status);
+      // An error the host answered before any box ran is counted together too, as "(refused)":
+      // gates, refused inputs, and limits aren't the site's traffic, so they stay out of the
+      // sitemap's icicle (uri_tree), as "(not found)" does. A box route's own errors stay on it.
+      if (status >= 400 && !box_ran && path != "(not found)" && !path.ends_with("*")) path = "(refused)";
       if (auto* lp = line.if_contains("path"); lp && lp->is_string() && std::string(lp->as_string()) != path && path.ends_with("*")) {
         line["path"] = path;
       }
@@ -693,6 +716,8 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
         std::string rest = ref.substr(at + 3);
         auto slash = rest.find('/');
         std::string host = base::to_lower(rest.substr(0, slash));
+        // Whether the visitor followed a link (028 § 4.2): from this site, or another; never which.
+        line["ref"] = host.substr(0, host.find(':')) == base::to_lower(domain) ? "same" : "other";
         if (host.substr(0, host.find(':')) == base::to_lower(domain) && slash != std::string::npos) {
           from = rest.substr(slash);
           from = from.substr(0, from.find_first_of("?#"));
@@ -725,7 +750,26 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
   res.headers.emplace_back("cache-control", "no-store");
   res.headers.emplace_back("x-content-type-options", "nosniff");
   if (page) {
-    res.body = std::move(page->data);
+    // The page is a template (design/machine/007.Content.md § 13): {{status}}, {{reason}}, and
+    // {{request_id}}, the site's data, front matter like "layout: base" for the site's own
+    // header and footer, and shared partials. It's rendered as a visitor with no session, so an
+    // error page never shows who asked, whatever the request carried.
+    std::string err;
+    std::map<std::string, std::string> inline_templates{{"goober-error-page", page->data}};
+    bj::object data{{"status", status},
+                    {"reason", reason(status)},
+                    {"title", std::to_string(status) + " " + reason(status)},
+                    {"request_id", request_id}};
+    auto html = site_->render_named(tenant.empty() ? std::string(content::kHostTree) : tenant, "goober-error-page",
+                                    std::move(data), &inline_templates, &err);
+    if (!html) {
+      std::cerr << "goober-host: error page " << file << " for " << tenant << ": " << err << "\n";
+      res.body = std::move(page->data);
+    } else if (!tenant.empty()) {
+      res.body = site::expand_includes(*content_, tenant, *html, "", false).html;
+    } else {
+      res.body = std::move(*html);
+    }
   } else if (status == 401) {
     res.body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Uh Oh!</title>"
                "<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem}"
@@ -790,7 +834,7 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
       res.headers.emplace_back("content-type", "application/json");
       res.body = json::dump(bj::object{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}});
     }
-    access_log(req, res.status, started, domain, extra);
+    access_log(req, res.status, started, domain, extra, res.host_error);
     respond(std::move(res));
   };
 
@@ -1471,7 +1515,52 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   }
   int64_t calls_out = 0;
   for (const auto& [k, n] : net.calls) calls_out += n;
-  return BoxCall{std::move(result), std::move(extra), std::move(perf), calls_out, std::move(used)};
+  // How it failed (028 § 4.3): the outcome the access log names, or a 5xx the box answered.
+  std::string failure, failure_message;
+  if (result.outcome != runtime::wasm::CallResult::Outcome::kOk && !quiet_return) {
+    auto* o = extra.if_contains("outcome");
+    failure = o && o->is_string() ? std::string(o->as_string()) : outcome_name(result.outcome);
+    failure_message = result.error;
+  } else if (result.outcome == runtime::wasm::CallResult::Outcome::kOk && result.status >= 500) {
+    failure = "bad_status";
+    failure_message = "the box answered " + std::to_string(result.status) + "; 5xx belongs to the host";
+  }
+  db::Session::Errors sql_errors;
+  if (session) sql_errors = session->errors();
+  BoxCall out{std::move(result), std::move(extra), std::move(perf), calls_out, std::move(used), std::move(failure),
+              std::move(failure_message), std::move(sql_errors)};
+  if (!options.perf_by_caller && !options.dry_run) record_box_call(out, tenant, request_id, input.now_ms);
+  return out;
+}
+
+void Host::record_box_call(const BoxCall& call, const std::string& tenant, const std::string& request_id,
+                           int64_t now_ms) {
+  if (!failures_) return;
+  const auto& p = call.perf;
+  // A cache hit ran no box.
+  if (p.cache == "hit") return;
+  failures_->call(now_ms, tenant, p.box, p.route, p.verb);
+  auto version = call.extra.if_contains("version");
+  auto record = [&](const std::string& cls, const std::string& message, int64_t n) {
+    if (n <= 0) return;
+    operations::Failures::Event e;
+    e.at_ms = now_ms;
+    e.tenant = tenant;
+    e.box = p.box;
+    e.version = version && version->is_string() ? std::string(version->as_string()) : "";
+    e.route = p.route;
+    e.kind = p.verb;
+    e.cls = cls;
+    e.message = message;
+    e.request_id = request_id;
+    e.n = n;
+    failures_->failure(std::move(e));
+  };
+  if (!call.failure.empty()) record(call.failure, call.failure_message, 1);
+  record("sql_error", call.sql_errors.last, call.sql_errors.sql - call.sql_errors.no_clock);
+  record("no_clock", "box SQL has no clock: pass the call's now_ms instead", call.sql_errors.no_clock);
+  record("refused_write", "a read changes nothing (a GET, a HEAD, or a subscription): a statement wrote",
+         p.refused_writes);
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
@@ -1655,6 +1744,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                                                        {"level", "host"},
                                                        {"text", why}}));
       result.outcome = runtime::wasm::CallResult::Outcome::kHostError;
+      call.failure = "bad_status";
+      call.failure_message = why;
+      extra["outcome"] = "bad_status";
     } else if (ref.route->response == "empty" && result.status >= 200 && result.status < 300) {
       result.status = 204;
       result.body.clear();
@@ -1709,6 +1801,9 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
                                                          {"level", "host"},
                                                          {"text", "template " + ref.route->template_name + ": " + err}}));
         res = error_page(tenant, 500, request_id);
+        call.failure = "render_failed";
+        call.failure_message = "template " + ref.route->template_name + ": " + err;
+        extra["outcome"] = "render_failed";
       }
     }
     // Shared partials (design/machine/027.Partials.md): always in what the host rendered, and in
@@ -1746,6 +1841,22 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   } else {
     int status = result.outcome == runtime::wasm::CallResult::Outcome::kTimeout ? 504 : 500;
     res = error_page(tenant, status, request_id);
+  }
+  // A box's 4xx with an empty body gets the site's error page (007 § 13): a box answers
+  // {"status": 404} and the visitor sees the site's 404, an API caller the host's JSON error.
+  // The box's own headers stay, its cache-control included.
+  if (!res.host_error && res.status >= 400 && res.body.empty()) {
+    auto page = error_page(tenant, res.status, request_id);
+    bool box_cache_control = false;
+    std::erase_if(res.headers, [&](const auto& h) {
+      box_cache_control |= h.first == "cache-control";
+      return h.first == "content-type" || h.first == "x-content-type-options";
+    });
+    for (auto& h : page.headers) {
+      if (h.first != "cache-control" || !box_cache_control) res.headers.push_back(std::move(h));
+    }
+    res.body = std::move(page.body);
+    res.host_error = true;
   }
   // Conditional GETs (037): an ETag from the answer's bytes, and a 304 when the caller has
   // them already. The box still runs; the bytes don't travel.
@@ -1796,6 +1907,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     if (auto c = extra.if_contains("cache"); c && c->is_string()) p.cache = std::string(c->as_string());
     // A try isn't traffic: its numbers stay out of the performance report.
     if (!trying) perf_->record_call(p, base::now_unix_ms());
+    if (!trying) record_box_call(call, tenant, request_id, now_ms);
     extra["perf"] = p.to_json();
     extra_text = json::dump(extra);
   }

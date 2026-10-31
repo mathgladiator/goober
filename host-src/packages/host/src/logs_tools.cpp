@@ -405,6 +405,10 @@ void Host::register_log_tools() {
            }
          }
          for (const auto& r : live_.stats(base::now_unix_ms(), minutes, tenant, "")) {
+           // Only the site's own paths: "(not found)" and "(refused)" (errors the host answered
+           // before any box ran) and box-to-box calls ("internal:...") are no part of it. The
+           // Errors view (error_report) has them.
+           if (!r.path.starts_with("/")) continue;
            auto& node = at(r.path);
            if (node.kind == "dir") node.kind = r.path.starts_with("/goober") || r.path.starts_with("/identity") ? "host" : r.box.empty() ? "unknown" : "box:" + r.box;
            node.n += r.n;

@@ -454,9 +454,12 @@ void Host::register_tools() {
        "but a tool-call layer may change text on its way here (CRLF becoming LF): when the exact bytes matter, give "
        "sha256 and the write is refused unless what arrived matches. Returns path, bytes, sha256, content_type, and "
        "file_etag (the stored file's; etag is the same value). Pass if_etag (content_get's or list_etags' file_etag, "
-       "or \"none\" for a new file) so you never overwrite a teammate's change made since you read it.",
+       "or \"none\" for a new file) so you never overwrite a teammate's change made since you read it. A site's "
+       "error pages are files here: error-message/404.html (or 403, 500, ...) is a template the host shows when it "
+       "answers that status, in the site's layout with \"layout: base\" front matter (site_guide, Error pages).",
        object_schema({{"tenant", tenant_prop},
-                      {"path", string_property("A relative path, like index.html.")},
+                      {"path", string_property("A relative path, like index.html, or error-message/404.html for the "
+                                               "site's 404 page.")},
                       {"text", string_property("The file's contents as text.")},
                       {"base64", string_property("The file's contents as base64, for binary files.")},
                       {"sha256", string_property("The SHA-256 (hex) the bytes must have, or nothing is written.")},

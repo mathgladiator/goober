@@ -66,6 +66,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     for (const char* t : {"cache_status", "cache_clear"}) m[t] = Rule::kTenant;
     for (const char* t : {"change_get", "source_job", "job_status"}) m[t] = Rule::kResult;
     for (const char* t : {"perf_report", "perf_statements"}) m[t] = Rule::kTenant;
+    for (const char* t : {"error_report", "box_failures"}) m[t] = Rule::kTenant;
     for (const char* t : {"domain_list", "box_list", "source_list", "timers_list", "outbox_dead_letters", "uri_stats",
                           "grant_usage"}) {
       m[t] = Rule::kFiltered;

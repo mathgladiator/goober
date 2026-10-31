@@ -18,7 +18,7 @@
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
 | 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
 | 7. An agent people reach by email | **Yes** | Mail from the site's own address, in the person's thread, with unsubscribe and consent; model calls through the outbox with result routes. `design/machine/026.CaseStudy.md` § 3 is the recipe. |
-| 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
+| 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: traffic, errors, box failures, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). |
 | 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
 | 10. A community that meets by mail (one digest, one reply a day) | **Yes, to build** | Markdown digests, reply-token replies cut to the person's words, calendar invites with RSVPs, attachments (`design/machine/783.ThesisCommunity.md` § 4 is the recipe). |
 | 12. Invites, and mail that follows the law | **Yes, once the postal address is set** | The host invites (roles, terms, lists, accept by code, decline for good), every box mail has a category with its rule, lists need a confirmed opt-in, and a person lifts a block (`design/machine/029.Invites.md`). The next deploy asks for it. |
@@ -205,6 +205,8 @@ each ranch's site weekly.
 
 - **What works.** The operator panel, a web page of its own:
   - traffic over 1 hour to 30 days, with p50 and p99;
+  - errors visitors got, by status, place, and who made them, and how boxes fail, by class,
+    with the latest messages (the Errors and Box failures views);
   - boxes as a heat map, and each box's routes, versions, logs, and manifest;
   - the data flow as a graph, from tenants to boxes to databases and services;
   - the change log, with line diffs for pages and partials, and manifest diffs for deploys;
