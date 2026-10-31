@@ -23,7 +23,7 @@ bool ends_ci(std::string_view s, std::string_view p) {
   return s.size() >= p.size() && base::to_lower(s.substr(s.size() - p.size())) == p;
 }
 
-// "On Tue, Oct 29, 2026 at 6:00 AM The KC Thesis <thesis@kcmeatup.com> wrote:", in the
+// "On Tue, Oct 29, 2026 at 6:00 AM The Example Club <thesis@example.com> wrote:", in the
 // languages mail clients ship most, sometimes wrapped onto a second line.
 bool quote_header(std::string_view line) {
   static const std::pair<const char*, const char*> kHeaders[] = {

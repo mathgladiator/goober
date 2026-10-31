@@ -628,7 +628,7 @@ void Host::register_tools() {
        "(\"*\" covers all of them) shares one route table there: the same verb and shape (literals, with every "
        "parameter as {}) in two boxes is refused at upload, and otherwise a literal segment beats a parameter at the "
        "first place two patterns differ, across boxes.",
-       object_schema({{"domain", string_property("A domain from the host config, like kcmeatup.com.")},
+       object_schema({{"domain", string_property("A domain from the host config, like example.com.")},
                       {"path", string_property("The request path, like /places/joes; a ?query is set aside and reported.")},
                       {"verb", string_property("get (the default), post, put, patch, or delete.")}},
                      {"domain", "path"}),
@@ -758,7 +758,7 @@ void Host::register_tools() {
        "typed input, and, for a person (email), whether they see it and why not. Use it when an MCP client shows "
        "tools that don't match a deploy: /mcp builds its list from the active versions on every request, so a "
        "different list means a different domain, a person whose roles hide the tool, or the client's own copy.",
-       object_schema({{"domain", string_property("A domain from the host config, like kcmeatup.com.")},
+       object_schema({{"domain", string_property("A domain from the host config, like example.com.")},
                       {"email", string_property("A person of that domain's realm, to see the list as they do.")}},
                      {"domain"}),
        [this](const bj::object& args) {

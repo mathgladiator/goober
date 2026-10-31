@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Checks a deployed goober host from the outside, the way people and agents reach it.
 
-  readiness.py https://kcmeatup.com \
+  readiness.py https://example.com \
       --expect /places/rye-leawood text/html \
       --expect /sitemap.xml application/xml \
       --expect /calculate/meat-macros.csv text/csv \
-      --box kc_locations --box kc_access
+      --box locations --box accounts
 
 Always checked: /goober/ready (build and every subsystem), /, OAuth and identity discovery,
 and that /mcp asks for OAuth the way MCP clients expect. With GOOBER_TOKEN (an operator
@@ -66,7 +66,7 @@ def call(url, token, tool, arguments=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("base", help="like https://kcmeatup.com")
+    ap.add_argument("base", help="like https://example.com")
     ap.add_argument("--expect", nargs=2, action="append", default=[], metavar=("PATH", "TYPE"),
                     help="a path that must answer 200 with a content type starting with TYPE")
     ap.add_argument("--box", action="append", default=[], help="a box that must be loaded: name or name@version")

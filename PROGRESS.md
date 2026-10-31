@@ -369,7 +369,7 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Tools `traffic`, `hot_boxes`, `box_graph`, `changes`, `change_get`, `operator_actions`; the
       read-tool set, which is all `host:observer` may call over MCP.
 - [x] Views: overview, traffic, data flow, boxes, one box, change log with diffs, database.
-- [ ] On kcmeatup.com: an `A` record and Caddy line for `ops.kcmeatup.com`, and
+- [ ] On example.com: an `A` record and Caddy line for `ops.example.com`, and
       `operations.domain` in host.json (the human's step).
 - [ ] Approvals (305), tuning, counters, traces, and cost.
 

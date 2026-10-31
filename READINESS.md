@@ -3,7 +3,7 @@
 > How ready goober is for the human's experiments, as of 2026-10-29. Short on
 > purpose: `PROGRESS.md` has the full account, and each line here names where the proof lives.
 > "Tested" means automated checks pass against a running host on this machine, with stand-ins
-> for AWS. kcmeatup.com is live on a real server, and Grok deploys to it over OAuth; real mail
+> for AWS. example.com is live on a real server, and Grok deploys to it over OAuth; real mail
 > in, real S3, and a real ad haven't happened yet.
 
 | question | ready? | in one line |
@@ -164,7 +164,7 @@ each ranch's site weekly.
 
 - **What the host gives a box:**
   - mail in on addresses it declares, with reply tokens;
-  - mail out from its own address (`"mail": {"from": "hello@kcmeatup.com"}`), threaded with
+  - mail out from its own address (`"mail": {"from": "hello@example.com"}`), threaded with
     `in_reply_to` and `references`;
   - a one-click unsubscribe the host enforces for every box of the tenant;
   - model calls with `effect` outbox, up to two minutes, whose answer comes back on a result
@@ -174,7 +174,7 @@ each ranch's site weekly.
   `MailTest.RepliesInAThreadThePersonStartedGetMoreRoom`,
   `NetworkTest.ResultRoutesHearHowADeliveryWent`, and `just mail-e2e` with the real Stalwart.
 - **Watch for.**
-  - SES must have kcmeatup.com verified as a domain, or mail from `hello@` dies.
+  - SES must have example.com verified as a domain, or mail from `hello@` dies.
   - Senders aren't verified (Q39), so a mail's From is only a claim.
   - Bounces and complaints don't reach the box yet.
   - The host has no spend cap on model calls: the box must count its own.
@@ -206,11 +206,11 @@ each ranch's site weekly.
   - a database explorer with a read-only SQL box.
 
   It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`).
-- **To turn it on at kcmeatup.com.** Deploy: the operations audit offers to set it up once
-  `ops.kcmeatup.com` resolves to the server (it does today). By hand:
-  - Add an `A` record for `ops.kcmeatup.com`.
+- **To turn it on at example.com.** Deploy: the operations audit offers to set it up once
+  `ops.example.com` resolves to the server (it does today). By hand:
+  - Add an `A` record for `ops.example.com`.
   - Add the name to the site line of `/etc/caddy/Caddyfile`, then reload Caddy.
-  - Set `"operations": {"domain": "ops.kcmeatup.com"}` in host.json, and restart.
+  - Set `"operations": {"domain": "ops.example.com"}` in host.json, and restart.
 
   Then sign in with your operator address. Locally it is `http://ops.localhost:8080/`.
 - **Watch for.**

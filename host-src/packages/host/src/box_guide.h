@@ -355,10 +355,10 @@ A box sends mail through the host's own mailer (SES or SMTP, set by the operator
 goober_call("mail", "send", {"to": "person@example.org", "subject": "Confirm your spot",
   "text": "...", "reply_to": "owner@example.com"}) answers {"accepted": true, "key"}: the mail
 leaves only if the request commits, through the outbox, retried for a day. It comes from the
-host's address with your from-name, or from your own: "mail": {"from-name": "KC Meat Up",
-"from": "hello@kcmeatup.com"} (a domain of your tenant; declare a mail route for it, so replies
+host's address with your from-name, or from your own: "mail": {"from-name": "Example Co",
+"from": "hello@example.com"} (a domain of your tenant; declare a mail route for it, so replies
 reach you). To send from two addresses, declare two mail services, like "mail" for notices
-from the host's address and "agent_mail" with "from": "agent@kcmeatup.com", and call the one
+from the host's address and "agent_mail" with "from": "agent@example.com", and call the one
 you mean. SES must have the domain verified (mail_domain_check), not only one address. To answer someone in their thread, pass the Message-IDs from the mail you got:
 "in_reply_to": its message_id, "references": its references plus its message_id.
 Every mail has a "category", which says who it may go to (the host checks when you call and
@@ -381,7 +381,7 @@ address until they allow mail again themselves (signed in) or an operator lifts 
 Keep a row saying so. goober_call("mail", "preferences", {"email"}) answers {blocked, lists:
 {digest: in | out | none}, relationship: account | wrote_in | none, outreach: {state: allowed |
 used | opted_out}}: ask before you write.
-Lists: declare them on the mail service, "mail": {"from-name": "KC Meat Up", "lists": {"digest":
+Lists: declare them on the mail service, "mail": {"from-name": "Example Co", "lists": {"digest":
 {"title": "The daily digest", "about": "One email a day at 7am."}}}. A box can't record consent:
 goober_call("mail", "subscribe", {"email", "list"}) has the host mail a confirmation (one per
 address and list in 30 days); the person clicks Yes, and only then is list mail allowed. People

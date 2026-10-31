@@ -44,7 +44,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 BIN=/usr/local/bin/goober-host
 
 die() { echo "✗ $*" >&2; exit 1; }
-[[ -z "$PUBLIC" || "$PUBLIC" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "--public is a domain, like kcmeatup.com"
+[[ -z "$PUBLIC" || "$PUBLIC" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "--public is a domain, like example.com"
 [[ -z "$BUILD" || "$BUILD" =~ ^[0-9a-f]{7,40}$ ]] || die "--build is a commit, like 4f575dadb5d7"
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$RUN_AS" != root ]] ||

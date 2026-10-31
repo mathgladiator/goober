@@ -1,14 +1,16 @@
 # HUMAN.md: is it working?
 
 A one-page check for the human, while Grok runs the host. Paths assume the defaults:
-the host runs as `goober` in `/srv/goober/host`, at kcmeatup.com. Run the server commands
-over ssh; they need sudo.
+the host runs as `goober` in `/srv/goober/host`, at example.com. **example.com stands for your
+site's domain**: put yours in every command (the readiness pages are in
+`host-src/tools/readiness.d/` under your domain's name). Run the server commands over ssh; they
+need sudo.
 
 ## 1. Is it up? (from your laptop, 10 seconds)
 
 ```sh
-curl -s https://kcmeatup.com/goober/health        # {"ok":true,"build":"a2906b65012c"}
-curl -s https://kcmeatup.com/goober/ready         # storage, identity, boxes, stores, loops, mcp, queue
+curl -s https://example.com/goober/health        # {"ok":true,"build":"a2906b65012c"}
+curl -s https://example.com/goober/ready         # storage, identity, boxes, stores, loops, mcp, queue
 ```
 
 An empty 503 from Caddy (no body, `server: Caddy`) means the host isn't answering at all: go
@@ -31,7 +33,7 @@ server say the same.
 
 ## 2. What has Grok done? (on the server)
 
-Easiest: open the panel, https://ops.kcmeatup.com/ (once it is set up: READINESS.md § 8).
+Easiest: open the panel, https://ops.example.com/ (once it is set up: READINESS.md § 8).
 Changes shows every deploy, page, partial, and schema write, with diffs and who made it, and
 Changes → actions shows every tool Grok called. Without the panel:
 
@@ -75,7 +77,7 @@ backup bucket under `logs/`, sealed, for 400 days.
 print an `event: update` at once and a `: ping` every 15 seconds, not hang silent:
 
 ```sh
-curl -sN -H 'Accept: text/event-stream' https://kcmeatup.com/<the subscription's path> | head -n 8
+curl -sN -H 'Accept: text/event-stream' https://example.com/<the subscription's path> | head -n 8
 ```
 
 **Is the kernel patched, and is multipath TCP off?** Deploys turn MPTCP off (the kernel's MPTCP
@@ -96,16 +98,16 @@ sudo tail -n 5 /srv/goober/host/storage/logs/mail.log                       # ma
 ```
 
 Or ask Grok to run `host_health`, which reports backups, how mail leaves, and startup notes,
-and `mail_activity` with the tenant (kcmeatup), which lists the site's mail in and out and
+and `mail_activity` with the tenant (example), which lists the site's mail in and out and
 what happened to each (a `mail_template_send_test` shows as `test`). `mail_domain_check` with
-kcmeatup.com checks the mail DNS (MX, SPF, DMARC, SES's DKIM) and says which records to add;
+example.com checks the mail DNS (MX, SPF, DMARC, SES's DKIM) and says which records to add;
 `host_health`'s `smtp_listener` says whether Stalwart answers on port 25.
 **Mail needs your postal address.** Outreach, lists, and invites are refused until the host
 config names it (CAN-SPAM). `host_health` lists `tenants_without_postal_address`. On the server,
 edit `/srv/goober/host/host.json` and add, next to `domains`:
 
 ```json
-"tenants": {"kcmeatup": {"postal-address": "KC Meat Up, 123 Main St, Kansas City, MO 64105",
+"tenants": {"example": {"postal-address": "Example Co, 123 Main St, Springfield, IL 62701",
                          "terms": "/terms", "privacy": "/privacy",
                          "invites": {"roles": ["member"]}}}
 ```
@@ -120,7 +122,7 @@ blocked until they allow mail on their account page, or you lift it in the panel
 by the host. Copy the vault key beside the backup key:
 `sudo -u goober goober-host vault key --config /srv/goober/host/host.json`. Without it, everyone
 must connect again. For an OAuth provider (Strava, X), register an app with the redirect URI
-`https://kcmeatup.com/goober/connect/callback`, then have Grok `key_set` its client id and secret
+`https://example.com/goober/connect/callback`, then have Grok `key_set` its client id and secret
 (hosts: the provider's token host).
 
 Is the backup key copied somewhere safe? Without it no backup can be read
@@ -129,7 +131,7 @@ Is the backup key copied somewhere safe? Without it no backup can be read
 ## 5. Fix it by deploying again
 
 ```sh
-just deploy kcmeatup.com --user customer
+just deploy example.com --user customer
 ```
 
 It upgrades everything and ends with `── checking everything this host needs`. The last line
@@ -137,8 +139,8 @@ must be `✓ every check passed`. Any `✗` line says what is wrong.
 
 Before that last line, `── operations audit` says how the host is run: `✓` fine, `!` worth
 fixing, `?` a suggestion with its steps, `·` one you silenced. It never fails the deploy. It
-offers to set up the panel at ops.kcmeatup.com (answer `y`), or `v` to never ask again, and
-then to redirect www.kcmeatup.com to kcmeatup.com the same way (once www has a DNS record
+offers to set up the panel at ops.example.com (answer `y`), or `v` to never ask again, and
+then to redirect www.example.com to example.com the same way (once www has a DNS record
 pointing at the server; `v` never asks again about that name). Then
 `── settings` asks for anything missing (the postal address, the mail's from address, the
 backup bucket, AWS keys, an operator): `y` and type each value (Enter skips one), `n` for
@@ -150,7 +152,7 @@ audit any time: `sudo -u goober goober-host audit --config /srv/goober/host/host
 **Launch another site** on the same server, with its own tenant (accounts, data, pages):
 
 ```sh
-just deploy kcmeatup.com --user customer --add-tenant newsite.com
+just deploy example.com --user customer --add-tenant newsite.com
 ```
 
 `── a new tenant` asks for just that site: its tenant name (Enter takes the one shown), its
@@ -170,28 +172,28 @@ stopped it, and puts the previous build back unless the new one is up and ready.
 that isn't ready within a minute is rolled back on its own: the deploy prints the
 host's last 60 log lines (the reason), puts the previous build back, and fails. Then the
 server checks itself through its public name, as people and agents reach it
-(`host-src/tools/readiness.d/kcmeatup.com` lists the pages), and publishes the result at
-https://kcmeatup.com/goober/deploy, summed up in `/goober/ready` as `deploy`. While the host
+(`host-src/tools/readiness.d/example.com` lists the pages), and publishes the result at
+https://example.com/goober/deploy, summed up in `/goober/ready` as `deploy`. While the host
 restarts, Caddy holds requests up to 15 seconds; if it's down, Caddy answers a JSON 503 with
 Retry-After, so clients retry rather than remember a failure. The same check by hand, with an
 operator token for the boxes:
 
 ```sh
-GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://kcmeatup.com \
-  $(grep -v '^#' host-src/tools/readiness.d/kcmeatup.com)
+GOOBER_TOKEN=... python3 host-src/tools/readiness.py https://example.com \
+  $(grep -v '^#' host-src/tools/readiness.d/example.com)
 ```
 
 To check signing in and refreshing for real (what Grok's and Cursor's connectors do), keep one
 client for it: a file holding {"client_id", "refresh_token"}, which each run refreshes and
-rewrites. Add `--refresh-file ~/.goober/kcmeatup-refresh.json` to the command above.
+rewrites. Add `--refresh-file ~/.goober/example-refresh.json` to the command above.
 
 If the host is down and you want its reason now:
 
 ```sh
-ssh customer@kcmeatup.com 'sudo journalctl -u goober-host -n 60 --no-pager'
-ssh customer@kcmeatup.com 'sudo -u goober goober-host check --config /srv/goober/host/host.json'
+ssh customer@example.com 'sudo journalctl -u goober-host -n 60 --no-pager'
+ssh customer@example.com 'sudo -u goober goober-host check --config /srv/goober/host/host.json'
 # Back to the build before the last deploy:
-ssh customer@kcmeatup.com 'sudo cp -p /usr/local/bin/goober-host.prev /usr/local/bin/goober-host && sudo systemctl restart goober-host'
+ssh customer@example.com 'sudo cp -p /usr/local/bin/goober-host.prev /usr/local/bin/goober-host && sudo systemctl restart goober-host'
 ```
 
 ## 6. Stop Grok
@@ -217,7 +219,7 @@ To let Grok back in, connect it again; it signs you in by email code.
 **Keep Grok on one site** without stopping it: in the panel, **Operators**, uncheck "all" on
 your row and check the one tenant. Every agent signed in as you is then held to it, and so are
 you in the panel, until you check "all" again. A minted token can start that way:
-`goober-host token create --name grok --tenants kcmeatup`. Grok can ask `operator_scope`
+`goober-host token create --name grok --tenants example`. Grok can ask `operator_scope`
 where it stands, but no tool can change it.
 
 **Grok doesn't see a tool that exists** (after a deploy added it): Grok keeps the tool list
@@ -259,7 +261,7 @@ the grant (two parties holding one grant), and Grok must sign in again.
 - **A box:** every upload is a version. Ask Grok to `version_list` the box and
   `version_promote` the one before; or do it yourself with a token
   (`goober-host token create --name me`, then from the repo:
-  `GOOBER_URL=https://kcmeatup.com GOOBER_TOKEN=… host-src/tools/goober.py call version_promote box=NAME version=ID`).
+  `GOOBER_URL=https://example.com GOOBER_TOKEN=… host-src/tools/goober.py call version_promote box=NAME version=ID`).
 - **Source:** `source_log` and `source_revert` on the project. The panel's **Source** view shows
   every revision's diff, its files, and each build's log; a box's page says which revision
   each version came from.

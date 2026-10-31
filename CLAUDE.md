@@ -157,7 +157,7 @@ Read these before doing design work:
   - `design/machine/030.OperatorScope.md`: focusing an operator (a person, a token, and every agent
     signed in as them) on some tenants: a scope rule per tool, deny by default, changed only by a
     person in the panel.
-  - `design/machine/031.ContentKit.md`: kcmeatup's engineers' requests: platform sitemap.xml and
+  - `design/machine/031.ContentKit.md`: a site's engineers' requests: platform sitemap.xml and
     llms.txt, markdown posts with a built-in post template and BlogPosting, content_deploy with
     checks before and after, url_check, page_lint, compact output, and stable tool schemas.
   - `design/machine/032.Logs.md`: logs with an envelope and a hash chain, daily rotation, sealed

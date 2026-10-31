@@ -619,10 +619,10 @@ Library make_ics() {
                        {"method", str("REQUEST (default) or CANCEL.")}},
                       {"event", "organizer", "attendees"}),
                schema({{"ics", str("")}, {"event", any("The event as receivers will read it.")}}, {"ics"}),
-               bj::array{bj::object{{"in", bj::object{{"event", bj::object{{"uid", "meetup-7@kcmeatup.com"}, {"summary", "Brisket night"},
+               bj::array{bj::object{{"in", bj::object{{"event", bj::object{{"uid", "meetup-7@example.com"}, {"summary", "Brisket night"},
                                                                          {"start", bj::object{{"local", "2026-11-05T18:00:00"}, {"zone", "America/Chicago"}}},
                                                                          {"end", bj::object{{"local", "2026-11-05T20:00:00"}, {"zone", "America/Chicago"}}}}},
-                                                      {"organizer", bj::object{{"email", "thesis@kcmeatup.com"}, {"name", "The KC Thesis"}}},
+                                                      {"organizer", bj::object{{"email", "thesis@example.com"}, {"name", "The Example Club"}}},
                                                       {"attendees", bj::array{bj::object{{"email", "ada@example.org"}}}}}},
                                     {"out", "{ics: BEGIN:VCALENDAR ... METHOD:REQUEST ..., event}"}}},
                [](const bj::object& in, Context& ctx) { return ics_invite(in, ctx); }});

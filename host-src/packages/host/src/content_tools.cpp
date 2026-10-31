@@ -38,7 +38,7 @@ persisted to disk through the host WAL, and live at once. tenant may be left out
 when the host serves one tenant (or you're focused on one).
 
 ## A blog in three calls (posts, an index, a feed, the sitemap)
-1. _data/site.json once: content_put {path: "_data/site.json", text: "{\"title\": \"KC Meat Up\",
+1. _data/site.json once: content_put {path: "_data/site.json", text: "{\"title\": \"Example Co\",
    \"description\": \"...\", \"author\": \"Jeffrey M. Barber\"}"}.
 2. The index once: page_put {path: "/updates", format: "markdown", title: "Updates", body: "News.",
    fields: {list: "updates", "list-template": "post", "per-page": 10}}.
@@ -1507,7 +1507,7 @@ void Host::register_content_kit_tools() {
        "Fetches URLs on this host's sites, signed out, as a visitor gets them, and answers for each: status, content "
        "type, bytes, sha256, and for HTML the counts a deploy checks (ld+json, unrendered {{, empty <p>, http: links, "
        "raw markdown links, title, description length) with the problems found. Replaces hand-written curl checks.",
-       object_schema({{"urls", list_of("Up to 50: https://kcmeatup.com/updates, or a path with tenant.")},
+       object_schema({{"urls", list_of("Up to 50: https://example.com/updates, or a path with tenant.")},
                       {"tenant", string_property("For paths without a host.")},
                       {"strict", boolean_property("Also title 50-60, description 120-160, exactly one ld+json.")}},
                      {"urls"}),
