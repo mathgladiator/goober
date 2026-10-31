@@ -6,6 +6,8 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- route_try {timer, at_ms?, row?} fires a stored version's timer route once, dark versions too, as the scheduler would, on copies: at_ms is the fire's now (the box's now_ms); a by_timer source fires the named row or the row due first, and a fired at-field row is turned off in the copies. Answers due, row, ok, and the changes and would-be deliveries, like any try on copies.
+- version_promote answers tried (each route_try kind by tenant, a job_dry_run, or "live" for a version that ran live before) and, for a version nothing tried, a warning. It never refuses: try, promote, then version_health.
 - route_try reaches MCP tools ({tool, arguments, as: {email}}) and mail routes ({mail: {to, from, subject, text, headers?}}, answered with the SMTP reply), always on copies; a try's mail sender is never verified. Observers and the panel may try HTTP GETs and HEADs only.
 - version_health reads every access-log file still on the machine (7 days) for its window, not only the newest two, and leaves out route_try's calls.
 - partial_put, partial_delete, and content_put take if_etag (the file_etag you read, or "none" for a new one): no write lands over a teammate's change made since you read it. Every content write now can.

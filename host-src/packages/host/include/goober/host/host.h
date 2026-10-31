@@ -258,6 +258,9 @@ class Host {
     // The caller adds what it alone knows (queue time, rendering, bytes) and records the call
     // in perf_ itself (serve_box); otherwise call_box records it (037 § 7.1).
     bool perf_by_caller = false;
+    // The call's now_ms, when it isn't the wall clock: a timer fire is given its tick's time, so
+    // a simulated clock (tests, route_try's at_ms) reaches the box too.
+    std::optional<int64_t> now_ms;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -407,6 +410,11 @@ class Host {
   bool timers_stopping_ = false;
   void run_timers();
   sqlite::Db& timer_progress(const std::string& tenant);
+  // A by_timer source's active rows (at most kMaxRows) from these databases, and its key column.
+  std::optional<std::vector<boost::json::object>> timer_source_rows(const manifest::DataStrategy& source,
+                                                                    const std::string& tenant, db::Databases& dbs,
+                                                                    size_t limit, std::string* error);
+  std::string timer_source_key(const manifest::DataStrategy& source);
   std::function<bool(db::Session&, std::string*)> disable_fired_row(const manifest::DataStrategy* source,
                                                                     const manifest::HttpRoute& t,
                                                                     const boost::json::object& row);

@@ -12,6 +12,7 @@
 #include "goober/base/random.h"
 #include "goober/base/time.h"
 #include "build_id.h"
+#include "jobs.h"
 #include "goober/host/host.h"
 #include "goober/site/includes.h"
 #include "goober/host/operator_tokens.h"
@@ -657,8 +658,16 @@ void Host::register_tools() {
          // The review is against the version that was live before this one: taken first.
          bj::object reviewed;
          attach_review(reviewed);
+         // The live version this one replaces ran live: going back to it later counts as tried.
+         std::string box_name, replaced, perr;
+         if (auto m = json::parse(manifest, &perr); m && m->is_object() && m->as_object().contains("box") &&
+                                                    m->as_object().at("box").is_string()) {
+           box_name = std::string(m->as_object().at("box").as_string());
+         }
+         if (auto live = boxes_->active(); live->boxes.count(box_name)) replaced = live->boxes.at(box_name)->version;
          auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
+         if (activate && job_runs_) job_runs_->replaced(box_name, replaced, result->version, current_operator(), base::now_unix_ms());
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
          bj::object out{{"version", result->version}, {"active", activate}, {"warnings", warnings}};
@@ -771,16 +780,34 @@ void Host::register_tools() {
   mcp_->add_tool({"version_promote",
                   "Changing tool. Makes a stored version of a box go live at once, replacing its live version: a "
                   "version stored dark (activate: false), or an older one, which is how a box rolls back. Checked "
-                  "against the live boxes like an upload; a disabled box comes back with it. Returns box and active.",
+                  "against the live boxes like an upload; a disabled box comes back with it. Returns box, active, "
+                  "tried (what touched this version before: route_try calls by kind and tenant, a job_dry_run, or "
+                  "having run live before), and warnings: a version nothing tried still goes live, with a warning "
+                  "saying so. Try first (route_try, job_dry_run), then promote, then version_health.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
                     auto version = arg(args, "version");
                     if (!box || !version) return ToolResult::fail("box and version are required");
+                    std::string replaced;
+                    if (auto active = boxes_->active(); active->boxes.count(*box)) replaced = active->boxes.at(*box)->version;
                     std::string err;
                     if (!boxes_->promote(*box, *version, &err)) return ToolResult::fail(err);
-                    return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
+                    bj::object out{{"box", *box}, {"active", *version}};
+                    if (job_runs_) {
+                      // The version it replaced ran live, so going back to it later counts as tried.
+                      job_runs_->replaced(*box, replaced, *version, current_operator(), base::now_unix_ms());
+                      auto tried = job_runs_->tries(*box, *version);
+                      if (tried.empty() && replaced != *version) {
+                        out["warnings"] = bj::array{
+                            "version " + *version + " of " + *box + " went live untried: no route_try, no job_dry_run, "
+                            "and it never ran live before. Watch version_health now, and next time try a version "
+                            "(route_try on it while it's stored dark) before promoting it."};
+                      }
+                      out["tried"] = std::move(tried);
+                    }
+                    return ToolResult::ok(std::move(out));
                   }});
 
   mcp_->add_tool(

@@ -319,3 +319,109 @@ TEST_F(RouteTryTest, ToolsAndMailRoutesAreTriedOnCopies) {
   EXPECT_TRUE(tool_marked);
   EXPECT_TRUE(mail_marked);
 }
+
+namespace {
+
+// clock: beat writes a tick; remind writes one for the reminder row it's given.
+const char* kClockWat = R"wat((module
+  (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "w")
+  (data (i32.const 16) "INSERT INTO ticks (what) VALUES (?)")
+  (data (i32.const 64) "[\22beat\22]")
+  (data (i32.const 96) "[\22remind\22]")
+  (func $tick (param $p i32) (param $n i32)
+    (drop (call $sql (i32.const 0) (i32.const 1) (i32.const 16) (i32.const 35) (local.get $p) (local.get $n))))
+  (func (export "goober_route_beat") (result i32) (call $tick (i32.const 64) (i32.const 8)) (i32.const 0))
+  (func (export "goober_route_remind") (result i32) (call $tick (i32.const 96) (i32.const 10)) (i32.const 0))
+))wat";
+const char* kClockSchema = R"({"schema":"clock2","tables":{
+  "ticks":{"columns":{"what":{"type":"string","max-length":40}}},
+  "reminders":{"columns":{"remind_at":{"type":"int64"},"on":{"type":"boolean","default":true}}}}})";
+const char* kClockManifest = R"({"box":"clock","domains":["*"],
+  "data":{"sqlite3":{
+    "w":{"schema":"clock2","database":"clock","pattern":"sql","tables":{"ticks":{"read":true,"insert":true}}},
+    "remind_t":{"schema":"clock2","database":"clock","pattern":"by_timer","table":"reminders","active-field":"on"}}},
+  "routes":{"timer":{
+    "beat":{"name":"beat","every-ms":60000},
+    "remind":{"name":"remind","source":"remind_t","at-field":"remind_at"}}}})";
+
+}  // namespace
+
+TEST_F(RouteTryTest, TimersFireOnceOnCopiesAtTheGivenTime) {
+  auto put = tool("schema_put", {{"schema", kClockSchema}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  auto dark = host->boxes().store(kClockManifest, kClockWat, "", &err);
+  ASSERT_TRUE(dark) << err;
+  auto schema = host->schemas().get("clock2");
+  ASSERT_TRUE(host->databases().open("playground", "clock", &*schema, &err)) << err;
+  ASSERT_TRUE(host->databases().operate("playground", "clock",
+                                        "INSERT INTO reminders (remind_at) VALUES (2000000000000), (1900000000000)",
+                                        nullptr, 10, true, &err))
+      << err;
+  auto real = [&](const std::string& sql) {
+    auto r = host->databases().operate("playground", "clock", sql, nullptr, 10, false, &err);
+    return r ? r->at("rows").at(0).at(0) : bj::value(nullptr);
+  };
+
+  // A plain timer of a version stored dark: fired once, on copies.
+  auto beat = try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "beat"}, {"at_ms", "1950000000000"}});
+  ASSERT_FALSE(beat.as_object().contains("error")) << json::dump(beat);
+  EXPECT_EQ(beat.at("ok"), true);
+  EXPECT_EQ(beat.at("at"), beat.at("due"));
+  EXPECT_EQ(beat.at("changes").at("clock/ticks").at("rows_after"), 1);
+  EXPECT_EQ(real("SELECT count(*) FROM ticks"), 0);
+
+  // The row due first fires, and is turned off in the copies only.
+  auto remind = try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "remind"}, {"at_ms", 1950000000000}});
+  ASSERT_FALSE(remind.as_object().contains("error")) << json::dump(remind);
+  EXPECT_EQ(remind.at("due"), "2030-03-17T17:46:40.000Z");
+  EXPECT_FALSE(remind.as_object().contains("due_note"));
+  EXPECT_EQ(remind.at("ok"), true);
+  EXPECT_EQ(real("SELECT count(*) FROM reminders WHERE \"on\" = 1"), 2);
+
+  // A named row, not due yet at at_ms: fired anyway, and said so.
+  auto id = real("SELECT id FROM reminders WHERE remind_at = 2000000000000");
+  std::string later = id.is_string() ? std::string(id.as_string()) : json::dump(id);
+  auto named = try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "remind"}, {"row", later},
+                          {"at_ms", 1950000000000}});
+  ASSERT_FALSE(named.as_object().contains("error")) << json::dump(named);
+  EXPECT_EQ(named.at("row").as_string(), later);
+  EXPECT_TRUE(named.as_object().contains("due_note"));
+
+  // A timer fires as nobody; an unknown timer or row is refused.
+  EXPECT_TRUE(try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "beat"},
+                         {"as", bj::object{{"email", "a@example.com"}}}}).as_object().contains("error"));
+  EXPECT_TRUE(try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "nope"}}).as_object().contains("error"));
+  EXPECT_TRUE(try_route({{"box", "clock"}, {"version", dark->version}, {"timer", "remind"}, {"row", "nope"}})
+                  .as_object().contains("error"));
+}
+
+TEST_F(RouteTryTest, PromotingAnUntriedVersionWarnsButGoesLive) {
+  tool("schema_put", {{"schema", R"({"schema":"tries1","tables":{"notes":{"columns":{"text":{"type":"string"}}}}})"}});
+  std::string err;
+  auto one = host->boxes().upload(kNotesManifest, notes_wat("one"), &err);
+  ASSERT_TRUE(one) << err;
+  auto two = host->boxes().store(kNotesManifest, notes_wat("two"), "", &err);
+  auto three = host->boxes().store(kNotesManifest, notes_wat("three"), "", &err);
+  ASSERT_TRUE(two && three) << err;
+
+  auto promoted = tool("version_promote", {{"box", "notes"}, {"version", two->version}});
+  ASSERT_FALSE(promoted.as_object().contains("error")) << json::dump(promoted);
+  EXPECT_EQ(promoted.at("active").as_string(), two->version);  // never refused
+  ASSERT_TRUE(promoted.as_object().contains("warnings"));
+  EXPECT_NE(std::string(promoted.at("warnings").at(0).as_string()).find("untried"), std::string::npos);
+
+  // Going back to a version that ran live is a rollback, not an untried version.
+  auto back = tool("version_promote", {{"box", "notes"}, {"version", one->version}});
+  EXPECT_FALSE(back.as_object().contains("warnings")) << json::dump(back);
+  EXPECT_EQ(back.at("tried").at(0).at("kind"), "live");
+
+  // A version tried first goes live quietly, and says what tried it.
+  ASSERT_EQ(try_route({{"version", three->version}, {"path", "/hello"}}).at("status"), 200);
+  auto tried = tool("version_promote", {{"box", "notes"}, {"version", three->version}});
+  EXPECT_FALSE(tried.as_object().contains("warnings")) << json::dump(tried);
+  EXPECT_EQ(tried.at("tried").at(0).at("kind"), "http");
+  EXPECT_EQ(tried.at("tried").at(0).at("tenant"), "playground");
+}

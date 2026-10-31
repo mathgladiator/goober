@@ -50,6 +50,18 @@ class JobRuns {
   bool dry_run_passed(const std::string& box, const std::string& version, const std::string& job, const std::string& tenant);
   // A real run of this version, job, and tenant that finished.
   bool done(const std::string& box, const std::string& version, const std::string& job, const std::string& tenant);
+  // What touched a stored version before it went live (040 § 5, decision 4): a route_try
+  // (kind http, tool, mail, or timer), or the version having run live before ("live", kept when
+  // version_promote replaces it). The newest per tenant and kind is kept.
+  void record_try(const std::string& box, const std::string& version, const std::string& tenant,
+                  const std::string& kind, const std::string& by, int64_t at_ms);
+  // A version replaced by another going live ran live: recorded as kind "live".
+  void replaced(const std::string& box, const std::string& old_version, const std::string& new_version,
+                const std::string& by, int64_t at_ms) {
+    if (!old_version.empty() && old_version != new_version) record_try(box, old_version, "", "live", by, at_ms);
+  }
+  // Each {tenant, kind, by, at}, with a job dry run of the version as kind "job_dry_run".
+  boost::json::array tries(const std::string& box, const std::string& version);
 
  private:
   std::optional<JobRun> read(sqlite::Stmt& s);

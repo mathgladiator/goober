@@ -1,5 +1,5 @@
 // route_try: try a box version before it's live (design/machine/005.FirstVersion.md, "Trying a
-// version"). One call, as someone or as nobody, to an HTTP route, an MCP tool, or a mail route of
+// version"). One call, as someone or as nobody, to an HTTP route, an MCP tool, a mail route, or a timer of
 // any stored version of a box, dark ones included, through the same checks a real call gets. It
 // reaches no one: an HTTP GET or HEAD runs read-only, as every GET does; anything else runs on
 // copies of the tenant's databases, as a job's dry run does, and the copies are thrown away.
@@ -16,6 +16,8 @@
 #include "goober/host/host.h"
 #include "goober/mail_inbound/mime.h"
 #include "goober/router/table.h"
+#include "goober/timers/cron.h"
+#include "jobs.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -27,6 +29,7 @@ using server::http::Response;
 namespace {
 
 constexpr size_t kMaxBody = 256 * 1024;
+constexpr size_t kMaxTimerRows = 10'000;  // as the scheduler reads a source (scheduler.cpp)
 
 std::optional<std::string> text_arg(const bj::object& args, const char* key) {
   const auto* v = args.if_contains(key);
@@ -113,16 +116,20 @@ void Host::register_try_tools() {
        "gate's 401 or 303, the declared inputs, the template by Accept, partials, ETag, Vary), tool (an MCP tool, with "
        "arguments checked against its input type, exactly as the site's /mcp would), or mail (a mail route: {to, from, "
        "subject, text, headers?}, built into the message the MTA hook would hand over, and answered with the SMTP "
-       "reply the sender would get). as is \"signed_out\" (nobody; the default, and the only way mail arrives) or "
+       "reply the sender would get), or timer (a timer route, fired once as the scheduler fires it, as nobody: "
+       "at_ms is the fire's now, default the present; for a by_timer source, row names the row by its key, or the "
+       "row due first from at_ms fires: the earliest at-field, or the next cron time in each row's zone; a fired "
+       "at-field row is turned off in the copies, as for real). as is \"signed_out\" (nobody; the default, and the only way mail arrives) or "
        "{\"email\": ...}, an account in the realm, looked up and never signed in, whose roles meet the requirements "
        "exactly as for a real call; a tool always acts for somebody. A try's mail sender is never verified: verifying "
        "takes a real DKIM signature, so from_user_id is null and sender_why says why. It reaches no one and changes no "
        "real data: an HTTP GET or HEAD runs read-only against live data, as every GET does; anything else (writes, "
-       "tools, mail) runs on copies of the tenant's databases, thrown away after (calls to other boxes refused, "
+       "tools, mail, timers) runs on copies of the tenant's databases, thrown away after (calls to other boxes refused, "
        "deliveries kept in the copies, nothing published). Nothing is cached, it isn't counted as traffic, and the "
        "access log marks it \"try\". Answers the status (or the tool's result, or the SMTP reply), the box's log "
        "lines, the statements run, what each table's grant was used for, and for a run on copies the rows each table "
        "held before and after and what would have been queued for delivery (service, method, where to; no secrets). "
+       "Each try is kept against the version, and version_promote warns about a version nothing tried. "
        "One try at a time per operator. Observers, and the panel (look-only), may try HTTP GETs and HEADs only; a try "
        "never waits for approval, since it changes nothing real. Then version_promote to make the version live.",
        mcp::object_schema(
@@ -140,6 +147,11 @@ void Host::register_try_tools() {
             {"mail", mcp::any_property("A mail route, instead of path: {\"to\": \"support@example.com\", \"from\": "
                                        "\"Ada <ada@example.org>\", \"subject\": \"...\", \"text\": \"...\", "
                                        "\"headers\"?: {\"In-Reply-To\": \"<...>\"}}.")},
+            {"timer", mcp::string_property("A timer route's name (routes.timer), instead of path.")},
+            {"at_ms", mcp::any_property("For timer: the fire's now, in milliseconds since 1970 (a number or a string "
+                                        "of digits); default the present. It's the now_ms the box sees.")},
+            {"row", mcp::string_property("For a timer with a by_timer source: the row's key, as timers_due names "
+                                         "it; default the row due first from at_ms.")},
             {"as", mcp::any_property("\"signed_out\" (the default), or {\"email\": \"ada@example.com\"}.")}},
            {"domain", "box"}),
        [this](const bj::object& args) {
@@ -158,8 +170,10 @@ void Host::register_try_tools() {
          } done{this, op};
 
          bool http_try = args.contains("path"), tool_try = args.contains("tool"), mail_try = args.contains("mail");
-         if (int(http_try) + int(tool_try) + int(mail_try) != 1) {
-           return ToolResult::fail("give exactly one of path (an HTTP route), tool (an MCP tool), or mail (a mail route)");
+         bool timer_try = args.contains("timer");
+         if (int(http_try) + int(tool_try) + int(mail_try) + int(timer_try) != 1) {
+           return ToolResult::fail("give exactly one of path (an HTTP route), tool (an MCP tool), mail (a mail route), or "
+                                   "timer (a timer route)");
          }
          std::string method = base::to_lower(text_arg(args, "method").value_or("get"));
          static const std::set<std::string> kMethods = {"get", "head", "post", "put", "patch", "delete"};
@@ -205,6 +219,7 @@ void Host::register_try_tools() {
            const auto* email = as->is_object() ? as->as_object().if_contains("email") : nullptr;
            if (!email || !email->is_string()) return ToolResult::fail("as is \"signed_out\" or {\"email\": \"...\"}");
            if (mail_try) return ToolResult::fail("mail always arrives as nobody: a mail route's caller is the sender, not an account");
+           if (timer_try) return ToolResult::fail("a timer fires as nobody: leave out as");
            auto user = identity_->active_user(tenant, std::string(email->as_string()));
            if (!user) return ToolResult::fail("no active account " + std::string(email->as_string()) + " in " + tenant + "'s realm");
            run.who = SignedIn{*user, false, user->roles};
@@ -284,8 +299,7 @@ void Host::register_try_tools() {
          // A tool's or a mail route's call, run on the copies, as a dry run runs: no calls to other
          // boxes, nothing published, nothing delivered, and kept out of the statistics.
          auto call_on_copies = [&](const boxes::RouteRef& ref, const bj::object& doc, std::optional<int64_t> timeout_ms,
-                                   bool no_response_ok) {
-           CallOptions options;
+                                   bool no_response_ok, CallOptions options = {}) {
            options.timeout_ms = timeout_ms;
            options.no_response_ok = no_response_ok;
            options.databases = copies.get();
@@ -300,13 +314,141 @@ void Host::register_try_tools() {
          auto log_try = [&](const std::string& what, int status, int64_t started, bj::object line) {
            server::http::Request logged;
            logged.method = what;
-           logged.path = what + ":" + text_arg(args, what == "tool" ? "tool" : "box").value_or("");
+           logged.path = what + ":" + text_arg(args, what == "tool" ? "tool" : what == "timer" ? "timer" : "box").value_or("");
            logged.headers.emplace_back("goober-request-id", request_id);
            line["try"] = true;
            line["operator"] = op;
            if (!active_version) line["try_version"] = box->version;
            access_log(logged, status, started, domain, json::dump(line));
          };
+         // The version was tried: version_promote reads these (040 § 5, decision 4).
+         auto mark = [&](const char* kind) {
+           if (job_runs_) job_runs_->record_try(box_name, box->version, tenant, kind, op, base::now_unix_ms());
+         };
+
+         if (timer_try) {
+           std::string name = text_arg(args, "timer").value_or("");
+           const manifest::HttpRoute* route = nullptr;
+           for (const auto& t : box->manifest.timers) {
+             if (t.name == name) route = &t;
+           }
+           if (!route) return ToolResult::fail("version " + box->version + " has no timer " + name + " (routes.timer)");
+           const auto& t = *route;
+           int64_t at_ms = base::now_unix_ms();
+           if (const auto* a = args.if_contains("at_ms"); a && !a->is_null()) {
+             if (a->is_int64()) {
+               at_ms = a->as_int64();
+             } else if (a->is_string() && !a->as_string().empty() &&
+                        std::all_of(a->as_string().begin(), a->as_string().end(), [](char c) { return c >= '0' && c <= '9'; }) &&
+                        a->as_string().size() <= 15) {
+               at_ms = std::stoll(std::string(a->as_string()));
+             } else {
+               return ToolResult::fail("at_ms is milliseconds since 1970, a number or a string of digits");
+             }
+           }
+           bj::object out{{"box", box_name}, {"version", box->version}, {"timer", name}, {"at", base::format_utc_ms(at_ms)}};
+           // A source's rows come from the copies, so the try sees the data a fire would.
+           bj::value row = nullptr;
+           std::string row_key;
+           int64_t due = at_ms;
+           const manifest::DataStrategy* source = nullptr;
+           std::string fire_tenant = tenant;
+           if (!t.source.empty()) {
+             for (const auto& d : box->manifest.data) {
+               if (d.name == t.source && d.pattern == "by_timer") source = &d;
+             }
+             if (!source) return ToolResult::fail("timer " + name + " has no by_timer source");
+             fire_tenant = source->tenant_for(tenant);
+             std::string err;
+             auto rows = timer_source_rows(*source, fire_tenant, *copies, kMaxTimerRows, &err);
+             if (!rows) return ToolResult::fail("reading " + source->name + ": " + err);
+             std::string pk = timer_source_key(*source);
+             std::optional<timers::Cron> cron;
+             if (!t.cron.empty()) cron = timers::Cron::parse(t.cron, &err);
+             auto key_of = [&](const bj::object& r) {
+               const bj::value* v = r.if_contains(pk);
+               return !v ? std::string() : v->is_string() ? std::string(v->as_string()) : json::dump(*v);
+             };
+             // When each row is due, as the scheduler plans it; a row that never fires has none.
+             auto due_of = [&](const bj::object& r) -> std::optional<int64_t> {
+               if (!t.at_field.empty()) {
+                 const bj::value* at = r.if_contains(t.at_field);
+                 if (at && at->is_int64()) return at->as_int64();
+                 if (at && at->is_string()) return timers::parse_instant_ms(at->as_string());
+                 return std::nullopt;
+               }
+               const std::chrono::time_zone* zone = timers::host_zone();
+               if (!source->timezone_field.empty()) {
+                 const bj::value* tz = r.if_contains(source->timezone_field);
+                 zone = tz && tz->is_string() ? timers::find_zone(tz->as_string()) : nullptr;
+               }
+               if (!zone || !cron) return std::nullopt;
+               return cron->next(at_ms - 1, zone);
+             };
+             const bj::object* chosen = nullptr;
+             std::optional<int64_t> chosen_due;
+             if (auto wanted = text_arg(args, "row")) {
+               for (const auto& r : *rows) {
+                 if (key_of(r) == *wanted) chosen = &r;
+               }
+               if (!chosen) {
+                 return ToolResult::fail("no active row " + *wanted + " in " + source->table + " (a row turned off by " +
+                                         (source->active_field.empty() ? std::string("its active-field") : source->active_field) +
+                                         " never fires)");
+               }
+               chosen_due = due_of(*chosen);
+               if (!chosen_due) {
+                 out["note"] = "row " + *wanted + " would never fire: no at-field time, or no real zone";
+                 return ToolResult::ok(std::move(out));
+               }
+             } else {
+               for (const auto& r : *rows) {
+                 auto d = due_of(r);
+                 if (d && (!chosen_due || *d < *chosen_due)) chosen = &r, chosen_due = d;
+               }
+               if (!chosen) {
+                 out["note"] = "no row in " + source->table + " is due ever: nothing would fire";
+                 return ToolResult::ok(std::move(out));
+               }
+             }
+             row = *chosen;
+             row_key = key_of(*chosen);
+             due = *chosen_due;
+             out["row"] = row_key;
+           }
+           out["due"] = base::format_utc_ms(due);
+           if (due > at_ms) {
+             out["due_note"] = "not due yet at at_ms: the scheduler would fire it at due; the try fires it now anyway";
+           }
+           std::string domain_for = domain;
+           bj::object doc{{"request_id", request_id}, {"method", "timer"},     {"path", "timer:" + name},
+                          {"params", bj::object{}},   {"query", bj::object{}}, {"headers", bj::object{}},
+                          {"body", row.is_null() ? std::string() : json::dump(row)},
+                          {"domain", domain_for},     {"tenant", fire_tenant}, {"user", nullptr}};
+           CallOptions options;
+           options.now_ms = at_ms;
+           if (!t.at_field.empty() && source && row.is_object()) {
+             options.before_commit = disable_fired_row(source, t, row.as_object());
+           }
+           mark("timer");
+           int64_t started = base::monotonic_us();
+           auto call = call_on_copies(boxes::RouteRef{box, route}, doc, t.timeout_ms, true, options);
+           const auto& r = call.result;
+           bool ok = (r.outcome == runtime::wasm::CallResult::Outcome::kOk && r.status < 500) ||
+                     r.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
+           out["outcome"] = runtime::wasm::outcome_name(r.outcome);
+           out["ok"] = ok;
+           if (r.status) out["status"] = r.status;
+           if (!ok) {
+             out["note_failed"] = t.at_field.empty() ? "the fire failed: its writes rolled back"
+                                                    : "the fire failed: its writes rolled back, and the scheduler would "
+                                                      "try this row again in a minute";
+           }
+           log_try("timer", ok ? (r.status ? r.status : 204) : 500, started,
+                   bj::object{{"timer", name}, {"box", box_name}, {"due", base::format_utc_ms(due)}});
+           details(out);
+           return ToolResult::ok(std::move(out));
+         }
 
          if (tool_try) {
            std::string name = text_arg(args, "tool").value_or("");
@@ -347,6 +489,7 @@ void Host::register_try_tools() {
                           {"params", bj::object{}},   {"query", bj::object{}}, {"headers", bj::object{}},
                           {"body", json::dump(input)}, {"domain", domain},    {"tenant", tenant},
                           {"user", user_json(run.who)}};
+           mark("tool");
            int64_t started = base::monotonic_us();
            auto call = call_on_copies(boxes::RouteRef{box, route}, doc, route->timeout_ms, false);
            const auto& r = call.result;
@@ -451,6 +594,7 @@ void Host::register_try_tools() {
            }
            bj::object log;
            auto doc = mail_route_doc(*match, headers, body, message, envelope, size, automatic, bj::array{}, request_id, &log);
+           mark("mail");
            int64_t started = base::monotonic_us();
            auto call = call_on_copies(match->ref, doc, route.timeout_ms, true);
            std::string outcome;
@@ -507,6 +651,7 @@ void Host::register_try_tools() {
            }
          }
 
+         mark("http");
          int64_t started = base::monotonic_us();
          Response res;
          std::string extra_text;

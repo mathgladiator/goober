@@ -1215,7 +1215,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   auto cfg = config_.get();
   const auto& m = ref.box->manifest;
   const auto& route = *ref.route;
-  runtime::wasm::CallInput input{json::dump(doc), base::now_unix_ms(), base::os_random_u64(), {}};
+  runtime::wasm::CallInput input{json::dump(doc), options.now_ms.value_or(base::now_unix_ms()), base::os_random_u64(), {}};
   // A box's random bytes come from the seed and a key the logs don't hold (the host's reply key),
   // so reading the access log's seed predicts nothing; a replay on this host repeats them.
   input.random_key = base::hmac_sha256(reply_key(), "goober-box-random");

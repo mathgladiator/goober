@@ -4,6 +4,7 @@
 #include <set>
 
 #include "builder.h"
+#include "jobs.h"
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -692,7 +693,10 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
     job.log += "stored schema " + s->name + "\n";
   }
   for (const auto& b : built.boxes) {
+    std::string replaced;
+    if (auto live = boxes_->active(); live->boxes.count(b.box)) replaced = live->boxes.at(b.box)->version;
     auto r = boxes_->upload(b.manifest, b.module, b.types, &err);
+    if (r && job_runs_) job_runs_->replaced(b.box, replaced, r->version, job.author, base::now_unix_ms());
     if (!r) {
       job.log += "✗ box " + b.box + ": " + err + "\n";
       job.state = "failed";
