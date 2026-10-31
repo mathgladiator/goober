@@ -357,7 +357,9 @@ goober_call("mail", "send", {"to": "person@example.org", "subject": "Confirm you
 leaves only if the request commits, through the outbox, retried for a day. It comes from the
 host's address with your from-name, or from your own: "mail": {"from-name": "KC Meat Up",
 "from": "hello@kcmeatup.com"} (a domain of your tenant; declare a mail route for it, so replies
-reach you). To answer someone in their thread, pass the Message-IDs from the mail you got:
+reach you). To send from two addresses, declare two mail services, like "mail" for notices
+from the host's address and "agent_mail" with "from": "agent@kcmeatup.com", and call the one
+you mean. SES must have the domain verified (mail_domain_check), not only one address. To answer someone in their thread, pass the Message-IDs from the mail you got:
 "in_reply_to": its message_id, "references": its references plus its message_id.
 Every mail has a "category", which says who it may go to (the host checks when you call and
 again when it goes; left out, it's inferred strictly: reply, else transactional, else outreach):
