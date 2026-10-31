@@ -1158,6 +1158,11 @@ async function approvalsCard() {
         return h('pre', { class: 'small' }, s.length > 20000 ? s.slice(0, 20000) + '\n… and ' + (s.length - 20000) +
           ' more characters not shown: deny it, or ask the agent to split it' : s);
       } },
+      // A held upload says what it would widen against the live version (version_diff's review).
+      { label: 'Widens', get: (r) => !r.review ? (r.review_error ? h('span', { class: 'err small' }, r.review_error) : '')
+        : (r.widens || []).length
+          ? h('ul', { class: 'findings small' }, r.widens.map((w) => h('li', { class: 'warn' }, w)))
+          : h('span', { class: 'muted small' }, r.review.new_box ? 'a new box that reaches nothing' : 'nothing widens') },
       { label: '', get: (r) => h('span', {}, decide(r, 'approve'), ' ', decide(r, 'deny')) },
     ], a.pending) : h('p', { class: 'muted' }, 'Nothing waiting.'),
     a.recent.length ? [h('h3', {}, 'Recent'), table([

@@ -763,6 +763,11 @@ class Host {
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();
+  // Reviewing changes to boxes (review_tools.cpp): version_diff, version_health, and the review
+  // of an upload (against the box's live version), which version_upload answers and a held
+  // upload shows the person approving it.
+  void register_review_tools();
+  std::optional<boost::json::object> review_upload(const boost::json::object& args, std::string* error);
   // Operators and databases (db_admin.cpp): snapshots, restoring to a new database, db_create,
   // db_unbound.
   void register_db_admin_tools();

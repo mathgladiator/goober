@@ -550,7 +550,11 @@ void Host::register_tools() {
        "version_promote the new; roll back with box_disable the new, box_enable the old); (3) dry_run: true checks "
        "everything and stores nothing, changes nothing (activate is ignored); schemas lets it use schemas not stored "
        "yet. Returns version, active, and warnings; a dry run returns dry_run, ok, stored: false, active: false, and "
-       "schemas_checked and schema_warnings when schemas were given.",
+       "schemas_checked and schema_warnings when schemas were given. Every mode also returns review (what this "
+       "version changes from the box's live version, as version_diff gives it, each change classed widens, narrows, "
+       "or neutral) and widens: the changes that give the box more reach, as sentences (\"strategy s may now delete "
+       "from members\", \"route GET /x is now public\"). Read widens before going live; a person approving a held "
+       "upload sees it too. After it goes live, version_health compares it with the version it replaced.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
                       {"schemas", mcp::any_property("With dry_run: schemas the manifest uses that aren't stored yet "
@@ -602,6 +606,15 @@ void Host::register_tools() {
              pending[checked->name] = *checked;
            }
          }
+         // What this version changes from the live one, for whoever reads the answer (and the
+         // person approving it, when it is held): version_diff's review, against the live version.
+         auto attach_review = [&](bj::object& out) {
+           std::string rerr;
+           if (auto r = review_upload(args, &rerr)) {
+             out["widens"] = r->at("widens");
+             out["review"] = std::move(*r);
+           }
+         };
          if (dry_run) {
            pending_schemas_ = pending.empty() ? nullptr : &pending;
            struct Clear {
@@ -609,6 +622,7 @@ void Host::register_tools() {
            } clear;
            if (!boxes_->check(manifest, module, types, &err)) return ToolResult::fail(err);
            bj::object out{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}};
+           attach_review(out);
            if (!pending.empty()) {
              bj::array names;
              for (const auto& [name, _] : pending) names.push_back(bj::value(name));
@@ -620,20 +634,26 @@ void Host::register_tools() {
          // activate: false stores a version dark: every check runs, and version_promote makes it live.
          bool activate = true;
          if (auto a = args.find("activate"); a != args.end() && a->value().is_bool()) activate = a->value().get_bool();
+         // The review is against the version that was live before this one: taken first.
+         bj::object reviewed;
+         attach_review(reviewed);
          auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
          bj::object out{{"version", result->version}, {"active", activate}, {"warnings", warnings}};
+         for (auto& kv : reviewed) out[kv.key()] = std::move(kv.value());
+         if (auto* r = out.if_contains("review"); r && r->is_object()) r->as_object()["to"] = result->version;
          if (!activate) out["next"] = "stored, not live: version_promote {box, version} makes it active";
          return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool({"version_list",
-                  "Read tool. A box's stored versions, each {version, active}: active is true for the one live now, "
-                  "false for older versions and versions stored dark (activate: false). A box taken out by box_disable "
-                  "marks the version it had with disabled and why. source {project, rev, job} names the source deploy "
-                  "that uploaded a version.",
+                  "Read tool. A box's stored versions, each {version, active, stored_at}: active is true for the one "
+                  "live now, false for older versions and versions stored dark (activate: false); versions are named "
+                  "by hash, so stored_at says which is newest. A box taken out by box_disable marks the version it had "
+                  "with disabled and why. source {project, rev, job} names the source deploy that uploaded a version. "
+                  "version_diff compares two of them.",
                   object_schema({{"box", string_property("The box name.")}}, {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
@@ -642,6 +662,8 @@ void Host::register_tools() {
                     auto disabled = boxes_->disabled(*box);
                     for (const auto& v : boxes_->versions(*box)) {
                       bj::object o{{"version", v.version}, {"active", v.active}};
+                      // Versions are named by hash; when each was stored says which is newest.
+                      if (v.stored_ms) o["stored_at"] = base::format_utc_ms(v.stored_ms);
                       if (disabled && disabled->version == v.version) {
                         o["disabled"] = true;  // box_disable took it out; box_enable puts it back
                         if (!disabled->why.empty()) o["why"] = disabled->why;

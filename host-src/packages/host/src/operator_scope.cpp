@@ -43,6 +43,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
           "job_list", "job_dry_run", "job_start", "job_stop"}) {
       m[t] = Rule::kTenant;
     }
+    for (const char* t : {"version_diff", "version_health"}) m[t] = Rule::kBox;
     for (const char* t : {"box_graph", "box_logs", "version_get", "version_list", "version_promote", "source_box_history"}) {
       m[t] = Rule::kBox;
     }

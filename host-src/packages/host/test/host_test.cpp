@@ -603,3 +603,74 @@ TEST(HostFlags, OperatorsFlipFlagsBoxesReadThem) {
   auto port = again.start();
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/frozen").body, "true");
 }
+
+// Reviewing changes (design/machine/005.FirstVersion.md § 9.1): an upload says what widens
+// against the live version, version_diff compares stored versions, and version_health sees a
+// version that broke a route, with the rollback, after it went live.
+TEST_F(HostTest, ChangesAreReviewedAndWatched) {
+  auto wat = [](int status) {
+    return std::string(R"w((module
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "text/plain")
+  (func (export "goober_route_ping") (result i32)
+    (drop (call $respond (i32.const )w") + std::to_string(status) + R"w() (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 2)))
+    (i32.const 0))
+  (func (export "goober_route_admin") (result i32)
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 2)))
+    (i32.const 0)))
+)w";
+  };
+  auto manifest = [](bool open) {
+    bj::object admin = open ? bj::object{{"name", "admin"}, {"public", true}}
+                            : bj::object{{"name", "admin"}, {"requirements", bj::array{bj::array{"admin"}}}};
+    return bj::object{{"box", "pinger"},
+                      {"domains", bj::array{"*"}},
+                      {"routes", bj::object{{"http", bj::object{
+                          {"/ping", bj::object{{"get", bj::object{{"name", "ping"}, {"public", true}}}}},
+                          {"/admin", bj::object{{"get", admin}}}}}}}};
+  };
+  auto result = [&](const char* name, bj::object args) { return tool(name, std::move(args)).at("result"); };
+
+  // A new box: its routes are new reach.
+  auto first = result("version_upload", {{"manifest", manifest(false)}, {"wat", wat(200)}});
+  ASSERT_EQ(first.at("isError"), false) << json::dump(first);
+  const auto& f = first.at("structuredContent");
+  EXPECT_EQ(f.at("review").at("new_box"), true);
+  EXPECT_NE(json::dump(f.at("widens")).find("new route GET /ping (public)"), std::string::npos) << json::dump(f.at("widens"));
+  std::string v1(f.at("version").as_string());
+  for (int i = 0; i < 25; ++i) ASSERT_EQ(fetch(port, bhttp::verb::get, "/ping").status, 200);
+
+  // A dry run of a wider version says so, and changes nothing.
+  auto dry = result("version_upload", {{"manifest", manifest(true)}, {"wat", wat(500)}, {"dry_run", true}});
+  ASSERT_EQ(dry.at("isError"), false) << json::dump(dry);
+  const auto& d = dry.at("structuredContent");
+  EXPECT_EQ(d.at("stored"), false);
+  EXPECT_EQ(json::dump(d.at("widens")), R"(["route GET /admin is now public"])");
+  EXPECT_EQ(d.at("review").at("from").as_string(), v1);
+
+  // Stored dark, then compared with version_diff's defaults (the live one against the newest).
+  auto dark = result("version_upload", {{"manifest", manifest(true)}, {"wat", wat(500)}, {"activate", false}});
+  ASSERT_EQ(dark.at("isError"), false) << json::dump(dark);
+  std::string v2(dark.at("structuredContent").at("version").as_string());
+  EXPECT_EQ(dark.at("structuredContent").at("review").at("to").as_string(), v2);
+  auto diff = result("version_diff", {{"box", "pinger"}});
+  ASSERT_EQ(diff.at("isError"), false) << json::dump(diff);
+  EXPECT_EQ(diff.at("structuredContent").at("from").as_string(), v1);
+  EXPECT_EQ(diff.at("structuredContent").at("to").as_string(), v2);
+  EXPECT_NE(json::dump(diff.at("structuredContent").at("changes")).find("the module changed"), std::string::npos);
+
+  // Live: /ping now fails, and version_health says so, with the rollback.
+  ASSERT_EQ(result("version_promote", {{"box", "pinger"}, {"version", v2}}).at("isError"), false);
+  for (int i = 0; i < 25; ++i) EXPECT_GE(fetch(port, bhttp::verb::get, "/ping").status, 500);
+  auto health = result("version_health", {{"box", "pinger"}, {"minutes", 10}});
+  ASSERT_EQ(health.at("isError"), false) << json::dump(health);
+  const auto& hc = health.at("structuredContent");
+  EXPECT_EQ(hc.at("previous").as_string(), v1);
+  std::string findings = json::dump(hc.at("findings"));
+  EXPECT_NE(findings.find("route ping: failures rose from 0.0% to 100.0%"), std::string::npos) << json::dump(hc);
+  EXPECT_NE(findings.find("version_promote {box: \\\"pinger\\\", version: \\\"" + v1 + "\\\"} rolls back"), std::string::npos)
+      << findings;
+  // It never rolls back by itself.
+  EXPECT_GE(fetch(port, bhttp::verb::get, "/ping").status, 500);
+}

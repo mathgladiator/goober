@@ -43,6 +43,23 @@ box new, with a quick rollback:
    on old while new holds the names is refused, naming new.
 A route name moves with its export: the new box must export goober_route_$name for it.
 
+## Reviewing a change
+
+Every version_upload (live, activate: false, or dry_run) answers review: what the version
+changes from the box's live version, each change classed widens (more reach), narrows, or
+neutral, and widens: the widenings as sentences, like "strategy s may now delete from
+members", "route GET /admin is now public", "may now reach mail from agent@example.com".
+Read widens before a version goes live: each line is reach the box didn't have, and should
+be on purpose. Grant less where you can. When an agent's approvals are on, the person
+approving a held upload sees the same widens in the panel.
+- version_diff {box, from?, to?} compares two stored versions (default: the live one against
+  the newest stored; version_list's stored_at says which is newest).
+- The safe order: dry_run, read widens; activate: false; version_diff; version_promote.
+- After it goes live, version_health {box, minutes?} compares each route's calls, failures,
+  and p50/p99 with the version it replaced, over the same minutes before and after, and says
+  which route got worse. It never rolls back by itself: version_promote {box, version: the
+  previous} does, at once.
+
 ## The boundary (goober-abi@1)
 
 Import only from module "goober":

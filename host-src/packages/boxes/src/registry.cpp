@@ -2,6 +2,7 @@
 #include "goober/mail_inbound/address.h"
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 
 #include "goober/base/files.h"
@@ -383,7 +384,15 @@ std::vector<VersionInfo> BoxRegistry::versions(const std::string& box) const {
   std::error_code ec;
   for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes" / box / "versions", ec)) {
     std::string v = entry.path().filename().string();
-    out.push_back(VersionInfo{v, v == active});
+    int64_t stored = 0;
+    std::error_code tec;
+    auto t = fs::last_write_time(entry.path() / "manifest.json", tec);
+    if (!tec) {
+      stored = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch())
+                   .count();
+    }
+    out.push_back(VersionInfo{v, v == active, stored});
   }
   std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.version < b.version; });
   return out;
@@ -395,6 +404,15 @@ std::optional<std::string> BoxRegistry::manifest_text(const std::string& box, co
     return std::nullopt;
   }
   return base::read_file(wal_.root() / "boxes" / box / "versions" / version / "manifest.json");
+}
+
+std::optional<VersionFiles> BoxRegistry::files(const std::string& box, const std::string& version) const {
+  auto manifest = manifest_text(box, version);
+  if (!manifest) return std::nullopt;
+  fs::path dir = wal_.root() / "boxes" / box / "versions" / version;
+  auto wasm = base::read_file(dir / "box.wasm");
+  if (!wasm) return std::nullopt;
+  return VersionFiles{version, *manifest, *wasm, base::read_file(dir / "types.json").value_or("")};
 }
 
 std::optional<std::string> BoxRegistry::types_text(const std::string& box, const std::string& version) const {

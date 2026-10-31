@@ -634,6 +634,19 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] SPF isn't evaluated: mail authenticated only by SPF stays unverified. Untried against
       real providers' mail through Stalwart.
 
+### Reviewing changes to boxes (005 § 9.1)
+- [x] `version_diff {box, from?, to?}`: two stored versions compared in one pass (routes of
+      every kind, grants per table, column, and operation, services and methods, domains,
+      flags, libraries, templates, limits, module and types hashes), each change classed
+      widens, narrows, or neutral; `version_list` shows `stored_at`; tests.
+- [x] Every `version_upload` (live, dark, dry run) answers `review` and `widens` against the
+      live version; a held upload shows its widens in the panel's Approvals card; tests.
+- [x] `version_health {box, minutes?}`: each route of the live version against the one it
+      replaced (calls, failures, p50/p99, from the access log), with findings and the
+      rollback; never rolls back by itself; tests.
+- [ ] `version_health` reads `access.log` and `access.log.1` only, the last 200,000 lines of
+      each: a long window on a busy host sees only what they hold.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

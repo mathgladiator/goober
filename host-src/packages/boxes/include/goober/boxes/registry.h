@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "goober/boxes/review.h"
 #include "goober/manifest/manifest.h"
 #include "goober/router/table.h"
 #include "goober/runtime_wasm/engine.h"
@@ -58,6 +59,7 @@ struct UploadResult {
 struct VersionInfo {
   std::string version;
   bool active = false;
+  int64_t stored_ms = 0;  // when it was stored (its manifest's time on disk); versions are named by hash
 };
 
 // Box versions on disk (storage/boxes/$box/...), and which one is active.
@@ -114,6 +116,8 @@ class BoxRegistry {
   std::vector<VersionInfo> versions(const std::string& box) const;
   std::optional<std::string> manifest_text(const std::string& box, const std::string& version) const;
   std::optional<std::string> types_text(const std::string& box, const std::string& version) const;
+  // A stored version's files, for reviewing it against another (review.h).
+  std::optional<VersionFiles> files(const std::string& box, const std::string& version) const;
 
  private:
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;

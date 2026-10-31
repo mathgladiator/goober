@@ -307,6 +307,13 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   EXPECT_NE(audit.find("approval.approved"), std::string::npos);
   EXPECT_NE(audit.find("approval.denied"), std::string::npos);
   EXPECT_NE(audit.find("\"approved_by\":\"panel:boss@example.com\""), std::string::npos);
+  // A held upload shows the person what it would widen against the live version.
+  auto upload = call("version_upload", R"j({"manifest":{"box":"held","domains":["kc.example.com"],
+      "routes":{"http":{"/held":{"get":{"name":"held_route","public":true}}}}},
+      "wat":"(module (memory (export \"memory\") 1) (func (export \"goober_route_held_route\") (result i32) (i32.const 0)))"})j");
+  EXPECT_NE(std::string(upload.at("text").as_string()).find("pending_approval"), std::string::npos);
+  auto shown = api(boss, "approvals");
+  EXPECT_NE(shown.body.find("new route GET /held (public)"), std::string::npos) << shown.body;
   // Off again: calls run at once.
   ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":false,"confirm":true})").status, 200);
   EXPECT_FALSE(call("content_put", R"({"tenant":"kc","path":"a.txt","text":"four"})").at("isError").as_bool());

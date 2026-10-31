@@ -1,6 +1,6 @@
 goober_package(
   NAME boxes
-  SOURCES src/registry.cpp
+  SOURCES src/registry.cpp src/review.cpp
   DEPS goober_base goober_json goober_wal goober_types goober_manifest goober_mail_inbound goober_router goober_runtime_wasm
-  TESTS test/registry_test.cpp
+  TESTS test/registry_test.cpp test/review_test.cpp
 )
