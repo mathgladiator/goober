@@ -137,8 +137,21 @@ then fetches each URL signed out and answers one line each: status, type, file_e
 body_etag (and the same in items, per URL), ld+json count,
 and any problem (unrendered {{, more than one or an unparseable ld+json, empty <p>, http: links,
 raw markdown links; strict: true adds title 50-60 and description 120-160 characters and exactly
-one ld+json). url_check does the fetching for any of this host's URLs; page_lint runs the
-checks over every listed page. The host serves /sitemap.xml and /llms.txt from the pages' front
+one ld+json). Characters are Unicode code points: "·" or an emoji counts one, not its bytes.
+A gated page's item says what a signed-out visitor should get: expect_status: 303 and
+expect_location: "/identity/sign-in" (the Location must start with it); the default is 200.
+Files under _ (templates, partials, data) aren't fetched: pages use them.
+dry_run: true runs every check, then renders each URL signed out from the would-be files
+(templates and partials in the same call included) and lints it: the status, body_etag, and
+problems each would have, with nothing stored and no approval to wait for.
+Too many files for one call (a connector that attaches a few files a call)? Stage them:
+content_stage {tenant, pages?, files?} adds to your own draft for the tenant (remove: [paths]
+drops some, discard: true all), kept an hour after its last change and visible to no one; then
+content_deploy {tenant, stage: true} (dry_run: true first) deploys the whole draft at once.
+url_check does the fetching for any of this host's URLs; page_lint runs the checks over every
+listed page, or over one unsaved page: page_lint {tenant, path, format, body, strict: true}.
+page_render {as: "signed_out"} renders as a visitor with no session: a gated page answers the
+303 to sign-in they'd get (accept: application/json gets the 401). The host serves /sitemap.xml and /llms.txt from the pages' front
 matter unless a file or a box route claims them; a page with noindex: true or sitemap: false is
 left out. A box's own sitemap joins by naming it in _data/site.json: "sitemaps":
 ["/places/sitemap.xml"] makes /sitemap.xml an index of it and /sitemap-pages.xml.
@@ -362,6 +375,14 @@ bj::object attachment_json(const attachments::Attachment& a, const std::vector<s
 
 namespace {
 
+// Characters as people count them: Unicode code points, not UTF-8 bytes ("·" and "é" are one
+// each, an emoji one). Titles and descriptions are measured this way everywhere.
+int64_t chars_of(std::string_view s) {
+  int64_t n = 0;
+  for (unsigned char c : s) n += (c & 0xC0) != 0x80;
+  return n;
+}
+
 // What a served HTML page holds that a deploy should check.
 struct Inspection {
   int ld_json = 0, ld_json_bad = 0, mustache = 0, empty_p = 0, http_links = 0, markdown_links = 0;
@@ -369,7 +390,7 @@ struct Inspection {
   bj::object to_json() const {
     return bj::object{{"ld_json", ld_json}, {"ld_json_unparseable", ld_json_bad}, {"mustache", mustache},
                       {"empty_p", empty_p}, {"http_links", http_links}, {"markdown_links", markdown_links},
-                      {"title", title}, {"description_chars", int64_t(description.size())}};
+                      {"title", title}, {"title_chars", chars_of(title)}, {"description_chars", chars_of(description)}};
   }
 };
 
@@ -435,7 +456,7 @@ bj::array problems_of(const Inspection& in, bool html, bool strict) {
   if (in.markdown_links) out.push_back(bj::value(std::to_string(in.markdown_links) + " raw markdown links"));
   if (strict) {
     if (in.ld_json == 0) out.push_back(bj::value("no ld+json"));
-    size_t t = in.title.size(), d = in.description.size();
+    int64_t t = chars_of(in.title), d = chars_of(in.description);
     if (t < 50 || t > 60) out.push_back(bj::value("title is " + std::to_string(t) + " characters (50 to 60)"));
     if (d < 120 || d > 160) out.push_back(bj::value("description is " + std::to_string(d) + " characters (120 to 160)"));
   }
@@ -751,7 +772,9 @@ void Host::register_content_tools() {
   mcp_->add_tool(
       {"page_render",
        "Renders a page URL as a visitor gets it (status, kind, and the HTML with verbose), except that a page's "
-       "requirements pass as for a host operator, so restricted pages render too. With drafts, drafts render; "
+       "requirements pass as for a host operator, so restricted pages render too; with as: \"signed_out\", it "
+       "renders as a visitor with no session instead, so a gated page answers what they get: 303 with location "
+       "/identity/sign-in?return=... (or 401 when accept is application/json). With drafts, drafts render; "
        "use it to preview before telling someone it's done. A dry run when given unsaved pages (each shaped like "
        "page_put's arguments), templates, partials, or files: the render sees them as if written, and nothing is "
        "stored. With feed, a listing's /feed.xml is rendered too. body_etag (also etag) is the served body's, after "
@@ -770,6 +793,10 @@ void Host::register_content_tools() {
                       {"partials", object_property("Unsaved partials by name, like {\"nav\": \"<nav>...</nav>\"}.")},
                       {"files", object_property("Other unsaved files by path, like {\"_data/site.json\": \"{...}\"}.")},
                       {"feed", boolean_property("Also render the listing's feed, path/feed.xml.")},
+                      {"as", string_property("operator (the default: requirements pass) or signed_out (a visitor with no "
+                                             "session: a gated page answers its 303 to sign-in).")},
+                      {"accept", string_property("With as signed_out: the visitor's Accept; text/html (the default) gets "
+                                                 "the 303, application/json the 401.")},
                       {"verbose", boolean_property("Include the HTML (and the feed's XML). Without it: status, hashes, and "
                                                    "the checks a deploy makes.")}},
                      {"tenant", "path"}),
@@ -835,10 +862,39 @@ void Host::register_content_tools() {
            if (e.tenant == *tenant && d.find('.') != std::string::npos) v.origin = "https://" + d;
          }
          v.accept = "text/html";
-         v.authorize = [](const bj::value&) { return 200; };
+         // As an operator (requirements pass), or as a signed-out visitor: a gated page then
+         // answers what a visitor gets, the 303 to sign-in (or 401 for an API caller).
+         std::string as = arg(args, "as").value_or("operator");
+         if (as != "operator" && as != "signed_out") return ToolResult::fail("as is operator (the default) or signed_out");
+         bool signed_out = as == "signed_out";
+         if (signed_out) {
+           std::string t = *tenant;
+           v.authorize = [t](const bj::value& requirements) { return authorize(requirements, std::nullopt, t); };
+         } else {
+           v.authorize = [](const bj::value&) { return 200; };
+         }
          auto r = site_->visit(v);
+         if (signed_out && r.status == 401) {
+           server::http::Request rq;
+           rq.method = "get";
+           rq.path = normal->path;
+           for (const auto& [k, val] : v.query) rq.query += (rq.query.empty() ? "" : "&") + base::percent_encode(k) + "=" + base::percent_encode(val);
+           rq.headers.emplace_back("accept", arg(args, "accept").value_or("text/html"));
+           auto res = sign_in_or_401(rq, *tenant);
+           bj::object gated{{"status", res.status}, {"as", "signed_out"}, {"kind", site::kind_name(r.kind)}, {"file", r.file},
+                            {"note", "a page with requirements: a signed-out visitor gets this, not the page"}};
+           for (const auto& [k, val] : res.headers) {
+             if (k == "location") gated["location"] = val;
+           }
+           if (!previewed.empty()) {
+             gated["previewed"] = std::move(previewed);
+             gated["stored"] = false;
+           }
+           return ToolResult::ok(std::move(gated));
+         }
          bj::object out{{"status", r.status}, {"kind", site::kind_name(r.kind)}, {"file", r.file},
                         {"content_type", r.content_type}};
+         if (signed_out) out["as"] = "signed_out";
          if (!previewed.empty()) {
            out["previewed"] = std::move(previewed);
            out["stored"] = false;
@@ -1419,8 +1475,11 @@ void Host::register_content_kit_tools() {
   auto list_of = [](const char* what) {
     return bj::value(bj::object{{"type", "array"}, {"items", bj::object{{"type", "string"}}}, {"description", what}});
   };
-  // A served URL checked as a visitor gets it.
-  auto check_path = [this](const std::string& domain, const std::string& path, bool strict) {
+  // A served URL checked as a visitor gets it, signed out: the status it should answer (200
+  // unless the caller expects another, like a gated page's 303 to sign-in), and where a
+  // redirect should go (the Location must start with expect_location).
+  auto check_path = [this](const std::string& domain, const std::string& path, bool strict, int64_t expect = 200,
+                           const std::string& expect_location = "") {
     auto r = fetch_self(domain, path);
     bool html = r.content_type.find("text/html") != std::string::npos;
     auto in = inspect_html(html ? r.body : "");
@@ -1438,9 +1497,75 @@ void Host::register_content_kit_tools() {
       }
     }
     if (!r.error.empty()) o["error"] = r.error;
+    std::string location = r.header("location");
+    if (!location.empty()) o["location"] = location;
     if (html) o["checks"] = in.to_json();
     auto problems = problems_of(in, html, strict);
-    if (r.status != 200) problems.push_back(bj::value(r.status == 0 && !r.error.empty() ? r.error : "status " + std::to_string(r.status)));
+    if (r.status != expect) {
+      problems.push_back(bj::value(r.status == 0 && !r.error.empty()
+                                       ? r.error
+                                       : "status " + std::to_string(r.status) +
+                                             (expect != 200 ? " (expected " + std::to_string(expect) + ")" : "")));
+    }
+    if (!expect_location.empty() && !location.starts_with(expect_location)) {
+      problems.push_back(bj::value("Location is \"" + location + "\" (expected one starting with \"" + expect_location + "\")"));
+    }
+    o["problems"] = std::move(problems);
+    return o;
+  };
+  // A page as a visitor would get it after a write that hasn't happened: the would-be files in
+  // `overlay` (nothing stored), rendered signed out. A gated page is the visitor's 303 to
+  // sign-in. Status, body_etag, location, the checks, and the problems.
+  auto preview_path = [this](const std::string& tenant, const std::string& url, const content::Overlay* overlay,
+                             bool strict, int64_t expect = 200, const std::string& expect_location = "") {
+    bj::object o{{"url", url}};
+    auto normal = router::normalize_path(url);
+    if (!normal) {
+      o["problems"] = bj::array{bj::value("not a valid URL path")};
+      return o;
+    }
+    content::ContentStore::Preview preview(overlay && !overlay->files.empty() ? overlay : nullptr);
+    site::Visit v;
+    v.tenant = tenant;
+    v.path = normal->path;
+    v.accept = "text/html";
+    // The origin serve_content gives a visitor of the tenant's site (as fetch_self asks for it),
+    // so links, canonical URLs, and so the body_etag come out the same as when served.
+    v.origin = std::string(config_.get()->identity.cookie_secure ? "https://" : "http://") + site_of(tenant);
+    v.authorize = [&](const bj::value& requirements) { return authorize(requirements, std::nullopt, tenant); };
+    auto r = site_->visit(v);
+    int64_t status = r.status;
+    std::string location = r.location;
+    if (status == 401) {
+      server::http::Request rq;
+      rq.method = "get";
+      rq.path = normal->path;
+      rq.headers.emplace_back("accept", "text/html");
+      auto res = sign_in_or_401(rq, tenant);
+      status = res.status;
+      for (const auto& [k, val] : res.headers) {
+        if (k == "location") location = val;
+      }
+    }
+    bool html = status == 200 && r.content_type.find("text/html") != std::string::npos;
+    o["status"] = status;
+    o["content_type"] = r.content_type;
+    if (status == 200) {
+      o["bytes"] = int64_t(r.body.size());
+      o["sha256"] = base::sha256_hex(r.body);
+      o["body_etag"] = r.etag;
+    }
+    if (!location.empty()) o["location"] = location;
+    auto in = inspect_html(html ? r.body : "");
+    if (html) o["checks"] = in.to_json();
+    auto problems = problems_of(in, html, strict);
+    if (status != expect) {
+      problems.push_back(bj::value("status " + std::to_string(status) +
+                                   (expect != 200 ? " (expected " + std::to_string(expect) + ")" : "")));
+    }
+    if (!expect_location.empty() && !location.starts_with(expect_location)) {
+      problems.push_back(bj::value("Location is \"" + location + "\" (expected one starting with \"" + expect_location + "\")"));
+    }
     o["problems"] = std::move(problems);
     return o;
   };
@@ -1474,30 +1599,58 @@ void Host::register_content_kit_tools() {
        "Deploys many pages and files in one call, checked before and after (031 § 4). Before: each item's sha256 "
        "(of its body or bytes, as you sent them) must match what arrived, and its if_etag (from list_etags; \"none\" "
        "for a new one) must match what's there; if any item fails, nothing is written. Then everything is written, "
-       "and each URL is fetched signed out, as a visitor gets it: status, content type, and for HTML no unrendered "
-       "{{, at most one parseable ld+json, no empty <p>, no http: links, no raw markdown links (strict adds title and "
-       "description lengths and exactly one ld+json). Answers one line per item, ok, and items: each URL's file, "
-       "file_etag (the stored file's, for the next if_etag), and body_etag (the served body's), plus change_ids. "
-       "Goes live at once. ok: false with \"nothing was written\" means a check before failed; ok: false after "
-       "writing means a written URL serves a problem (its line says which), and the files stay written. A "
-       "changing tool: waits for approval when your approvals are on.",
+       "and each URL is fetched signed out, as a visitor gets it: status (200, or the item's expect_status, like 303 "
+       "for a gated page, with expect_location for where it should send people), content type, and for HTML no "
+       "unrendered {{, at most one parseable ld+json, no empty <p>, no http: links, no raw markdown links (strict adds "
+       "title and description lengths, in characters, and exactly one ld+json). Files under _ (templates, partials, "
+       "data) aren't fetched: pages use them. Answers one line per item, ok, and items: each URL's file, file_etag "
+       "(the stored file's, for the next if_etag), and body_etag (the served body's), plus change_ids. Goes live at "
+       "once. ok: false with \"nothing was written\" means a check before failed; ok: false after writing means a "
+       "written URL serves a problem (its line says which), and the files stay written. With dry_run: true it is a "
+       "dry run: the same checks before, then each URL rendered signed out from the would-be files (templates and "
+       "partials in the same call included) and linted, answering what each would serve (status, body_etag, "
+       "problems); nothing is stored and nothing waits for approval. With stage: true it deploys your staged draft "
+       "for the tenant (content_stage) plus any items given here, all at once; the draft is dropped once written. "
+       "A changing tool (except a dry run): waits for approval when your approvals are on, and the approval shows "
+       "every staged item.",
        object_schema({{"tenant", tenant_prop},
                       {"pages", bj::object{{"type", "array"},
                                            {"items", bj::object{{"type", "object"}}},
                                            {"description", "page_put's arguments each ({path, format, body, title?, template?, "
-                                                           "fields?}), plus sha256? of body and if_etag?."}}},
+                                                           "fields?}), plus sha256? of body, if_etag?, expect_status? (default "
+                                                           "200), and expect_location? (the start the Location must have)."}}},
                       {"files", bj::object{{"type", "array"},
                                            {"items", bj::object{{"type", "object"}}},
-                                           {"description", "Files: {path, text | base64, sha256?, if_etag?}."}}},
+                                           {"description", "Files: {path, text | base64, sha256?, if_etag?, expect_status?, "
+                                                           "expect_location?}."}}},
                       {"verify", boolean_property("Fetch each URL after writing (default true).")},
-                      {"strict", boolean_property("Also title 50-60, description 120-160, exactly one ld+json.")}},
+                      {"strict", boolean_property("Also title 50-60 characters, description 120-160, exactly one ld+json.")},
+                      {"dry_run", boolean_property("Check and render everything as it would be after the deploy; store "
+                                                   "nothing.")},
+                      {"stage", boolean_property("Deploy the draft content_stage built for this tenant (yours), with any "
+                                                 "items given here on top.")}},
                      {"tenant"}),
-       [this, known_tenant, check_path](const bj::object& args) {
+       [this, known_tenant, check_path, preview_path](const bj::object& given) {
+         bj::object args = given;
          auto tenant = arg(args, "tenant");
          if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         // A staged draft (content_stage): its items, then the ones given here (a path given here
+         // wins). The operator's MCP policy expands it before an approval hold, so a person
+         // approves exactly the items; a call that wasn't expanded yet is expanded here.
+         int64_t stage_version = -1;
+         if (bool_arg(args, "stage")) {
+           std::string err;
+           if (!args.contains("stage_version") && !expand_content_stage(current_operator(), args, &err)) {
+             return ToolResult::fail(err);
+           }
+           if (auto* v = args.if_contains("stage_version"); v && v->is_int64()) stage_version = v->as_int64();
+         }
+         bool dry_run = bool_arg(args, "dry_run");
          struct Item {
            std::string kind, path, file, data, url;
            std::vector<std::string> others;
+           int64_t expect = 200;
+           std::string expect_location;
          };
          std::vector<Item> items;
          bj::array lines;
@@ -1525,6 +1678,24 @@ void Host::register_content_kit_tools() {
            *why = "sha256 " + got + " arrived, not " + std::string(want->as_string());
            return false;
          };
+         // What a visitor should get at the item's URL after the deploy: 200 unless it says.
+         auto expectations = [](const bj::object& o, Item& it, std::string* why) {
+           if (auto* e = o.if_contains("expect_status")) {
+             if (!e->is_int64() || e->as_int64() < 100 || e->as_int64() > 599) {
+               *why = "expect_status is an HTTP status, like 303";
+               return false;
+             }
+             it.expect = e->as_int64();
+           }
+           if (auto* l = o.if_contains("expect_location")) {
+             if (!l->is_string()) {
+               *why = "expect_location is the start of a Location, like /identity/sign-in";
+               return false;
+             }
+             it.expect_location = std::string(l->as_string());
+           }
+           return true;
+         };
          if (auto* pages = args.if_contains("pages")) {
            if (!pages->is_array() || pages->as_array().size() > 100) return ToolResult::fail("pages is a list of up to 100");
            for (const auto& pv : pages->as_array()) {
@@ -1536,9 +1707,16 @@ void Host::register_content_kit_tools() {
              std::vector<std::string> answering = built ? built->others : std::vector<std::string>{};
              if (built) answering.insert(answering.begin(), built->file);
              std::string why = err;
-             if (built && sha_check(po, body, &why) && etag_check(po, answering, &why)) {
+             Item it;
+             if (built && sha_check(po, body, &why) && etag_check(po, answering, &why) && expectations(po, it, &why)) {
                auto url = site::page_url(built->file);
-               items.push_back({"page", path, built->file, built->text, url ? *url : path, built->others});
+               it.kind = "page";
+               it.path = path;
+               it.file = built->file;
+               it.data = built->text;
+               it.url = url ? *url : path;
+               it.others = built->others;
+               items.push_back(std::move(it));
                continue;
              }
              ok = false;
@@ -1564,8 +1742,14 @@ void Host::register_content_kit_tools() {
              } else {
                why = "base64 is not valid";
              }
-             if (why.empty() && sha_check(fo, data, &why) && etag_check(fo, {path}, &why)) {
-               items.push_back({"file", path, path, std::move(data), "/" + path, {}});
+             Item it;
+             if (why.empty() && sha_check(fo, data, &why) && etag_check(fo, {path}, &why) && expectations(fo, it, &why)) {
+               it.kind = "file";
+               it.path = path;
+               it.file = path;
+               it.data = std::move(data);
+               it.url = "/" + path;
+               items.push_back(std::move(it));
                continue;
              }
              ok = false;
@@ -1573,10 +1757,57 @@ void Host::register_content_kit_tools() {
            }
          }
          if (!ok) {
-           lines.push_back(bj::value("nothing was written"));
-           return ToolResult::ok(bj::object{{"ok", false}, {"lines", std::move(lines)}});
+           lines.push_back(bj::value(dry_run ? "nothing would be written" : "nothing was written"));
+           bj::object out{{"ok", false}, {"lines", std::move(lines)}};
+           if (dry_run) {
+             out["dry_run"] = true;
+             out["stored"] = false;
+           }
+           return ToolResult::ok(std::move(out));
          }
-         if (items.empty()) return ToolResult::fail("give pages or files");
+         if (items.empty()) return ToolResult::fail(stage_version >= 0 ? "the staged draft is empty" : "give pages or files");
+         auto sb = args.if_contains("strict");
+         bool strict = sb && sb->is_bool() && sb->as_bool();
+         // A file under _ (templates, partials, data) isn't served at its own URL: pages use it.
+         auto served = [](const Item& it) { return !it.file.starts_with("_"); };
+
+         // A dry run: every check above, then each URL rendered as a visitor would get it after
+         // the deploy, from the would-be files, and linted. Nothing is stored or logged.
+         if (dry_run) {
+           content::Overlay overlay{*tenant, {}};
+           for (const auto& it : items) {
+             for (const auto& o : it.others) overlay.files[o] = std::nullopt;
+             overlay.files[it.file] = it.data;
+           }
+           bj::array would;
+           for (const auto& it : items) {
+             bj::object item{{"url", it.url}, {"file", it.file}};
+             if (!served(it)) {
+               item["served"] = false;
+               lines.push_back(bj::value("✓ " + it.file + " would be written (not served at its own URL: pages use it)"));
+               would.push_back(std::move(item));
+               continue;
+             }
+             auto c = preview_path(*tenant, it.url == "/index.html" ? "/" : it.url, &overlay, strict, it.expect,
+                                   it.expect_location);
+             for (const char* k : {"status", "body_etag", "location", "checks"}) {
+               if (auto* v = c.if_contains(k)) item[k] = *v;
+             }
+             const auto& problems = c.at("problems").as_array();
+             item["problems"] = problems;
+             std::string line = (problems.empty() ? "✓ " : "✗ ") + it.url + " would answer " +
+                                std::to_string(c.at("status").as_int64());
+             if (auto* b = c.if_contains("body_etag"); b && b->is_string()) line += " body_etag " + std::string(b->as_string());
+             if (auto* l = c.if_contains("location"); l && l->is_string()) line += " -> " + std::string(l->as_string());
+             for (const auto& p : problems) line += "; " + std::string(p.as_string());
+             if (!problems.empty()) ok = false;
+             lines.push_back(bj::value(line));
+             would.push_back(std::move(item));
+           }
+           return ToolResult::ok(bj::object{{"ok", ok}, {"dry_run", true}, {"stored", false}, {"lines", std::move(lines)},
+                                            {"items", std::move(would)}});
+         }
+
          for (const auto& it : items) {
            std::string err;
            if (!content_->put(*tenant, it.file, it.data, &err)) {
@@ -1588,27 +1819,30 @@ void Host::register_content_kit_tools() {
              if (content_->get(*tenant, o)) content_->remove(*tenant, o, &err);
            }
          }
+         // Deployed: the draft it came from is done, unless it changed since it was read.
+         if (stage_version >= 0) drop_content_stage(current_operator(), *tenant, stage_version);
          auto vb = args.if_contains("verify");
          bool verify = !(vb && vb->is_bool() && !vb->as_bool());
          bj::array written;
-         auto sb = args.if_contains("strict");
-         bool strict = sb && sb->is_bool() && sb->as_bool();
          std::string domain = site_of(*tenant);
          for (const auto& it : items) {
            auto f = content_->get(*tenant, it.file);
            std::string etag = f ? f->etag : "";
            bj::object item{{"url", it.url}, {"file", it.file}, {"file_etag", etag}};
-           if (!verify) {
-             lines.push_back(bj::value("✓ " + it.url + " written, file_etag " + etag));
+           if (!verify || !served(it)) {
+             if (!served(it)) item["served"] = false;
+             lines.push_back(bj::value("✓ " + (served(it) ? it.url : it.file) + " written, file_etag " + etag));
              written.push_back(std::move(item));
              continue;
            }
-           auto c = check_path(domain, it.url == "/index.html" ? "/" : it.url, strict);
+           auto c = check_path(domain, it.url == "/index.html" ? "/" : it.url, strict, it.expect, it.expect_location);
            if (auto* b = c.if_contains("body_etag")) item["body_etag"] = *b;
+           if (auto* l = c.if_contains("location")) item["location"] = *l;
            item["status"] = c.at("status");
            written.push_back(std::move(item));
            const auto& problems = c.at("problems").as_array();
-           if (it.kind == "file" && c.at("status").as_int64() == 200 && f && std::string(c.at("sha256").as_string()) != base::sha256_hex(f->data)) {
+           if (it.kind == "file" && it.expect == 200 && c.at("status").as_int64() == 200 && f &&
+               std::string(c.at("sha256").as_string()) != base::sha256_hex(f->data)) {
              ok = false;
              lines.push_back(bj::value("✗ " + it.url + " served bytes differ from what was written"));
              continue;
@@ -1616,6 +1850,7 @@ void Host::register_content_kit_tools() {
            std::string line = (problems.empty() ? "✓ " : "✗ ") + it.url + " " + std::to_string(c.at("status").as_int64()) +
                               " " + std::string(c.at("content_type").as_string()) + " file_etag " + etag;
            if (auto* b = c.if_contains("body_etag"); b && b->is_string()) line += " body_etag " + std::string(b->as_string());
+           if (auto* l = c.if_contains("location"); l && l->is_string()) line += " -> " + std::string(l->as_string());
            if (auto* ch = c.if_contains("checks")) line += " ld=" + std::to_string(ch->at("ld_json").as_int64());
            for (const auto& p : problems) line += "; " + std::string(p.as_string());
            if (!problems.empty()) ok = false;
@@ -1680,14 +1915,43 @@ void Host::register_content_kit_tools() {
       {"page_lint",
        "Lints a tenant's pages as served (signed out): no unrendered {{, at most one parseable ld+json, no empty "
        "<p>, no http: links, no raw markdown links; strict adds a title of 50 to 60 characters, a description of 120 "
-       "to 160, and exactly one ld+json. Every listed page by default (sitemap's set), or the paths given; at most "
-       "300 are checked. Answers checked, clean, and only the pages with problems. A read tool.",
+       "to 160 (characters are Unicode code points: \"·\" and an emoji count one each), and exactly one ld+json. "
+       "Every listed page by default (sitemap's set), or the paths given; at most 300 are checked. Or lint one unsaved "
+       "page: give body (with path, format, title?, template?, fields?, as page_put takes them) and it is rendered "
+       "signed out as it would be served, and linted; nothing is stored. Answers checked, clean, and only the pages "
+       "with problems. A read tool.",
        object_schema({{"tenant", tenant_prop}, {"paths", list_of("URLs to lint; default every listed page.")},
-                      {"strict", boolean_property("The search checks too.")}},
+                      {"strict", boolean_property("The search checks too.")},
+                      {"path", string_property("With body: the URL the unsaved page would have, like /health/sleep.")},
+                      {"body", string_property("An unsaved page's body to lint, as page_put takes it.")},
+                      {"format", string_property("With body: markdown, fragment, or document, as page_put takes it.")},
+                      {"title", string_property("With body: its title, as page_put takes it.")},
+                      {"template", string_property("With body: its template, as page_put takes it.")},
+                      {"fields", mcp::object_property("With body: its fields, as page_put takes them.")}},
                      {"tenant"}),
-       [this, known_tenant, check_path](const bj::object& args) {
+       [this, known_tenant, check_path, preview_path](const bj::object& args) {
          auto tenant = arg(args, "tenant");
          if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         auto sb = args.if_contains("strict");
+         bool strict = sb && sb->is_bool() && sb->as_bool();
+         // One unsaved page, rendered from the would-be file and linted (Engineer D, 2026-10-30).
+         if (args.contains("body")) {
+           std::string err;
+           auto built = build_page(*site_, *tenant, args, &err);
+           if (!built) return ToolResult::fail(err);
+           content::Overlay overlay{*tenant, {}};
+           for (const auto& o : built->others) overlay.files[o] = std::nullopt;
+           overlay.files[built->file] = built->text;
+           auto url = site::page_url(built->file);
+           auto c = preview_path(*tenant, url ? *url : arg(args, "path").value_or("/"), &overlay, strict);
+           const auto& problems = c.at("problems").as_array();
+           bj::array pages;
+           if (!problems.empty()) pages.push_back(bj::object{{"url", c.at("url")}, {"problems", problems}});
+           bj::object out{{"checked", 1}, {"clean", problems.empty() ? 1 : 0}, {"pages", std::move(pages)},
+                          {"stored", false}, {"url", c.at("url")}, {"status", c.at("status")}};
+           if (auto* ch = c.if_contains("checks")) out["checks"] = *ch;
+           return ToolResult::ok(std::move(out));
+         }
          std::vector<std::string> paths;
          if (auto* p = args.if_contains("paths"); p && p->is_array()) {
            for (const auto& v : p->as_array()) {
@@ -1697,8 +1961,6 @@ void Host::register_content_kit_tools() {
            for (const auto& page : site_->listed_pages(*tenant)) paths.push_back(page.url);
          }
          if (paths.size() > 300) paths.resize(300);
-         auto sb = args.if_contains("strict");
-         bool strict = sb && sb->is_bool() && sb->as_bool();
          std::string domain = site_of(*tenant);
          bj::array out;
          int clean = 0;
@@ -1713,12 +1975,185 @@ void Host::register_content_kit_tools() {
          return ToolResult::ok(bj::object{{"checked", int64_t(paths.size())}, {"clean", clean}, {"pages", std::move(out)}});
        }});
 
+  // A content deploy built over several calls (Engineer D: a connector that attaches four files
+  // a call made an eleven-file deploy three separate ones). The draft is the operator's own, per
+  // tenant; nothing in it is live or visible until content_deploy {stage: true} writes it all.
+  mcp_->add_tool(
+      {"content_stage",
+       "Builds one content_deploy over several calls: adds pages and files (each as content_deploy takes them, sha256 "
+       "and if_etag included, checked again when deployed) to your draft for the tenant, replacing an item with the "
+       "same path. remove drops paths from it; discard drops the whole draft. The draft is yours (per operator and "
+       "tenant), kept an hour after its last change, at most 100 pages, 200 files, and 32 MiB. Nothing is written to "
+       "the site and nothing is live: content_deploy {tenant, stage: true} (dry_run first, if you like) deploys it "
+       "all at once. Answers the draft's pages, files, version, and when it expires. Stores only the draft, so it "
+       "never waits for approval; the content_deploy that writes it does.",
+       object_schema({{"tenant", tenant_prop},
+                      {"pages", bj::object{{"type", "array"},
+                                           {"items", bj::object{{"type", "object"}}},
+                                           {"description", "Pages to add, as content_deploy's pages."}}},
+                      {"files", bj::object{{"type", "array"},
+                                           {"items", bj::object{{"type", "object"}}},
+                                           {"description", "Files to add, as content_deploy's files."}}},
+                      {"remove", list_of("Paths to drop from the draft (a page's path or a file's path).")},
+                      {"discard", boolean_property("Drop the whole draft.")}},
+                     {"tenant"}),
+       [this, known_tenant](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");
+         std::string op = current_operator();
+         std::lock_guard lock(content_stage_mu_);
+         auto file = content_stage_file(op, *tenant);
+         if (bool_arg(args, "discard")) {
+           std::error_code ec;
+           bool had = std::filesystem::remove(file, ec);
+           return ToolResult::ok(bj::object{{"tenant", *tenant}, {"discarded", had}});
+         }
+         auto draft = load_content_stage(op, *tenant).value_or(
+             bj::object{{"tenant", *tenant}, {"version", 0}, {"pages", bj::object{}}, {"files", bj::object{}}});
+         auto& pages = draft["pages"].as_object();
+         auto& files = draft["files"].as_object();
+         auto text_of = [](const bj::object& o, const char* k) {
+           auto* v = o.if_contains(k);
+           return v && v->is_string() ? std::string(v->as_string()) : std::string();
+         };
+         if (auto* p = args.if_contains("pages")) {
+           if (!p->is_array()) return ToolResult::fail("pages is a list, as content_deploy takes it");
+           for (const auto& pv : p->as_array()) {
+             if (!pv.is_object()) return ToolResult::fail("each page is an object of page_put's arguments");
+             std::string err;
+             if (!build_page(*site_, *tenant, pv.as_object(), &err)) return ToolResult::fail("pages: " + err + "; nothing was staged");
+             pages[text_of(pv.as_object(), "path")] = pv;
+           }
+         }
+         if (auto* f = args.if_contains("files")) {
+           if (!f->is_array()) return ToolResult::fail("files is a list, as content_deploy takes it");
+           for (const auto& fv : f->as_array()) {
+             if (!fv.is_object()) return ToolResult::fail("each file is {path, text | base64, sha256?, if_etag?}");
+             const auto& fo = fv.as_object();
+             std::string path = text_of(fo, "path");
+             while (!path.empty() && path.front() == '/') path.erase(path.begin());
+             bool has_text = fo.contains("text") && fo.at("text").is_string();
+             bool has_b64 = fo.contains("base64") && fo.at("base64").is_string();
+             if (path.empty() || has_text == has_b64 || !base::is_safe_relative_path(path)) {
+               return ToolResult::fail("a file is {path, text | base64} with a safe relative path; nothing was staged");
+             }
+             if (has_b64 && !base::base64_decode(text_of(fo, "base64"))) return ToolResult::fail(path + ": base64 is not valid; nothing was staged");
+             files[path] = fv;
+           }
+         }
+         if (auto* r = args.if_contains("remove"); r && r->is_array()) {
+           for (const auto& v : r->as_array()) {
+             if (!v.is_string()) continue;
+             std::string path(v.as_string());
+             pages.erase(path);
+             while (!path.empty() && path.front() == '/') path.erase(path.begin());
+             files.erase(path);
+           }
+         }
+         int64_t bytes = 0;
+         for (const auto& [k, v] : pages) bytes += int64_t(text_of(v.as_object(), "body").size());
+         for (const auto& [k, v] : files) bytes += int64_t(text_of(v.as_object(), "text").size() + text_of(v.as_object(), "base64").size());
+         if (pages.size() > 100 || files.size() > 200 || bytes > (int64_t(32) << 20)) {
+           return ToolResult::fail("a draft holds at most 100 pages, 200 files, and 32 MiB; nothing was staged");
+         }
+         bj::array page_paths, file_paths;
+         for (const auto& [k, v] : pages) page_paths.push_back(bj::value(k));
+         for (const auto& [k, v] : files) file_paths.push_back(bj::value(k));
+         // (pages and files refer into draft: nothing is added to it above this line.)
+         int64_t now = base::now_unix_ms();
+         int64_t version = draft["version"].as_int64() + 1;
+         draft["version"] = version;
+         draft["updated_ms"] = now;
+         std::error_code ec;
+         std::filesystem::create_directories(file.parent_path(), ec);
+         if (!base::write_file_durable(file, json::dump(draft))) return ToolResult::fail("couldn't save the draft");
+         return ToolResult::ok(bj::object{{"tenant", *tenant},
+                                          {"version", version},
+                                          {"pages", std::move(page_paths)},
+                                          {"files", std::move(file_paths)},
+                                          {"bytes", bytes},
+                                          {"expires_at", base::format_utc_ms(now + kContentStageMs)},
+                                          {"live", false},
+                                          {"next", "content_deploy {tenant, stage: true} deploys it all at once "
+                                                   "(dry_run: true first to see what each URL would serve)"}});
+       }});
+
   mcp_->add_tool({"tool_schemas",
                   "Each operator tool's schema version (a hash of its input schema, also in tools/list _meta) and the "
                   "old argument names it still accepts. Compare with what you cached: a changed hash means re-read "
                   "tools/list. Arguments a tool doesn't know are named in its answer's ignored_arguments.",
                   object_schema({}, {}),
                   [this](const bj::object&) { return ToolResult::ok(bj::object{{"tools", mcp_->schemas()}}); }});
+}
+
+// ---- Staged content deploys (content_stage; 031 § 4) ----
+
+std::filesystem::path Host::content_stage_file(const std::string& op, const std::string& tenant) const {
+  return config_.get()->storage / "operations" / "content-stage" / (base::sha256_hex(op).substr(0, 16) + "-" + tenant + ".json");
+}
+
+std::optional<bj::object> Host::load_content_stage(const std::string& op, const std::string& tenant) {
+  auto file = content_stage_file(op, tenant);
+  auto text = base::read_file(file);
+  if (!text) return std::nullopt;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  if (!v || !v->is_object()) return std::nullopt;
+  auto& o = v->as_object();
+  // An hour after its last change, a draft is gone.
+  auto* at = o.if_contains("updated_ms");
+  if (!at || !at->is_int64() || base::now_unix_ms() - at->as_int64() > kContentStageMs) {
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+    return std::nullopt;
+  }
+  return std::move(o);
+}
+
+bool Host::expand_content_stage(const std::string& op, bj::object& args, std::string* error) {
+  auto* t = args.if_contains("tenant");
+  if (!t || !t->is_string()) return *error = "tenant is required", false;
+  std::string tenant(t->as_string());
+  std::optional<bj::object> draft;
+  {
+    std::lock_guard lock(content_stage_mu_);
+    draft = load_content_stage(op, tenant);
+  }
+  if (!draft) {
+    return *error = "no staged draft for " + tenant + " (content_stage builds one; it lasts an hour after its last change)",
+           false;
+  }
+  // The draft's items first; an item given in this call replaces the staged one at its path.
+  auto merge = [&](const char* key, bool file_paths) {
+    bj::object by_path = draft->at(key).as_object();
+    if (auto* given = args.if_contains(key); given && given->is_array()) {
+      for (const auto& v : given->as_array()) {
+        if (!v.is_object()) continue;
+        auto* p = v.as_object().if_contains("path");
+        std::string path = p && p->is_string() ? std::string(p->as_string()) : "";
+        while (file_paths && !path.empty() && path.front() == '/') path.erase(path.begin());
+        by_path[path] = v;
+      }
+    }
+    bj::array all;
+    for (const auto& [k, v] : by_path) all.push_back(v);
+    args[key] = std::move(all);
+  };
+  merge("pages", false);
+  merge("files", true);
+  args["stage_version"] = draft->at("version");
+  return true;
+}
+
+void Host::drop_content_stage(const std::string& op, const std::string& tenant, int64_t version) {
+  std::lock_guard lock(content_stage_mu_);
+  auto draft = load_content_stage(op, tenant);
+  if (!draft) return;
+  auto* v = draft->if_contains("version");
+  // Staged again since it was read: the newer items stay for the next deploy.
+  if (!v || !v->is_int64() || v->as_int64() != version) return;
+  std::error_code ec;
+  std::filesystem::remove(content_stage_file(op, tenant), ec);
 }
 
 }  // namespace goober::host
