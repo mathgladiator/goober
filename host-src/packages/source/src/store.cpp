@@ -7,6 +7,7 @@
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
+#include "goober/base/random.h"
 #include "goober/source/source.h"
 #include "goober/sqlite/sqlite.h"
 
@@ -44,6 +45,13 @@ CREATE INDEX IF NOT EXISTS deploys_by_project ON deploys (project, job);
 CREATE TABLE IF NOT EXISTS deploy_boxes (
   job INTEGER NOT NULL, box TEXT NOT NULL, version TEXT NOT NULL, PRIMARY KEY (job, box)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS deploy_boxes_by_box ON deploy_boxes (box, version);
+-- Commits being built over several calls (020 § 13): one draft per project and operator.
+CREATE TABLE IF NOT EXISTS drafts (
+  project TEXT NOT NULL, operator TEXT NOT NULL, id TEXT NOT NULL, base_rev INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+  PRIMARY KEY (project, operator)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS draft_files (
+  project TEXT NOT NULL, operator TEXT NOT NULL, path TEXT NOT NULL, content BLOB,
+  PRIMARY KEY (project, operator, path)) WITHOUT ROWID;
 -- What the source mirror has put in the bucket (020 § 10).
 CREATE TABLE IF NOT EXISTS mirrored (
   project TEXT NOT NULL, rev INTEGER NOT NULL, kind TEXT NOT NULL, at_ms INTEGER NOT NULL,
@@ -513,6 +521,115 @@ MirrorState Store::mirror_state(const std::string& project) {
   p.step();
   m.pending = p.int64(0) - m.patches - m.snapshots;
   return m;
+}
+
+namespace {
+
+void drop_draft(sqlite::Db& db, const std::string& name, const std::string& op) {
+  sqlite::Stmt f(db, "DELETE FROM draft_files WHERE project = ? AND operator = ?");
+  f.bind(1, name).bind(2, op).run();
+  sqlite::Stmt d(db, "DELETE FROM drafts WHERE project = ? AND operator = ?");
+  d.bind(1, name).bind(2, op).run();
+}
+
+// Drafts an hour without a change are gone.
+void expire_drafts(sqlite::Db& db, int64_t now_ms) {
+  std::vector<std::pair<std::string, std::string>> old;
+  {
+    sqlite::Stmt q(db, "SELECT project, operator FROM drafts WHERE updated_ms < ?");
+    q.bind(1, now_ms - kDraftTtlMs);
+    while (q.step()) old.emplace_back(q.text(0), q.text(1));
+  }
+  for (const auto& [p, o] : old) drop_draft(db, p, o);
+}
+
+std::optional<Draft> load_draft(sqlite::Db& db, const std::string& name, const std::string& op) {
+  sqlite::Stmt d(db, "SELECT id, base_rev, updated_ms FROM drafts WHERE project = ? AND operator = ?");
+  d.bind(1, name).bind(2, op);
+  if (!d.step()) return std::nullopt;
+  Draft out{d.text(0), d.int64(1), d.int64(2), {}};
+  sqlite::Stmt f(db, "SELECT path, content FROM draft_files WHERE project = ? AND operator = ? ORDER BY path");
+  f.bind(1, name).bind(2, op);
+  while (f.step()) {
+    Change c{f.text(0), std::nullopt};
+    if (!f.is_null(1)) c.content = f.blob(1);
+    out.changes.push_back(std::move(c));
+  }
+  return out;
+}
+
+}  // namespace
+
+std::optional<Draft> Store::stage(const std::string& name, const std::string& op, int64_t base_rev,
+                                  const std::vector<Change>& changes, int64_t now_ms, std::string* error) {
+  for (const auto& c : changes) {
+    if (!valid_path(c.path)) return *error = "not a path a project can hold: " + c.path, std::nullopt;
+    if (c.content && c.content->size() > kMaxFileBytes) {
+      return *error = c.path + " is larger than " + std::to_string(kMaxFileBytes >> 20) + " MiB", std::nullopt;
+    }
+  }
+  std::lock_guard lock(mu_);
+  Txn txn(*db_);
+  expire_drafts(*db_, now_ms);
+  auto base = resolve(name, base_rev, error);
+  if (!base) return std::nullopt;
+  if (base_rev == 0) base_rev = *base;
+  auto existing = load_draft(*db_, name, op);
+  if (existing && existing->base_rev != base_rev) {
+    return *error = "your draft on " + name + " started from revision " + std::to_string(existing->base_rev) +
+                    ": stage on that base_rev, commit it, or discard it",
+           std::nullopt;
+  }
+  std::string id;
+  if (existing) {
+    id = existing->id;
+  } else {
+    uint8_t rnd[12];
+    base::os_random_fill(rnd);
+    id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
+  }
+  {
+    sqlite::Stmt d(*db_, "INSERT OR REPLACE INTO drafts (project, operator, id, base_rev, updated_ms) VALUES (?, ?, ?, ?, ?)");
+    d.bind(1, name).bind(2, op).bind(3, id).bind(4, base_rev).bind(5, now_ms).run();
+  }
+  for (const auto& c : changes) {
+    sqlite::Stmt f(*db_, "INSERT OR REPLACE INTO draft_files (project, operator, path, content) VALUES (?, ?, ?, ?)");
+    f.bind(1, name).bind(2, op).bind(3, c.path);
+    if (c.content) f.bind_blob(4, *c.content);
+    else f.bind_null(4);
+    f.run();
+  }
+  auto out = load_draft(*db_, name, op);
+  size_t bytes = 0;
+  for (const auto& c : out->changes) bytes += c.content ? c.content->size() : 0;
+  if (out->changes.size() > kMaxCommitChanges) {
+    return *error = "a commit holds at most " + std::to_string(kMaxCommitChanges) + " changes, and the draft would hold " +
+                    std::to_string(out->changes.size()) + "; nothing was staged",
+           std::nullopt;
+  }
+  if (bytes > kMaxProjectBytes) {
+    return *error = "the draft would hold more than " + std::to_string(kMaxProjectBytes >> 20) + " MiB; nothing was staged",
+           std::nullopt;
+  }
+  txn.commit();
+  return out;
+}
+
+std::optional<Draft> Store::draft(const std::string& name, const std::string& op, int64_t now_ms) {
+  std::lock_guard lock(mu_);
+  auto d = load_draft(*db_, name, op);
+  if (d && d->updated_ms < now_ms - kDraftTtlMs) {
+    drop_draft(*db_, name, op);
+    return std::nullopt;
+  }
+  return d;
+}
+
+void Store::discard(const std::string& name, const std::string& op) {
+  std::lock_guard lock(mu_);
+  Txn txn(*db_);
+  drop_draft(*db_, name, op);
+  txn.commit();
 }
 
 }  // namespace goober::source

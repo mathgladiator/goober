@@ -146,6 +146,7 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
   std::lock_guard lock(mu_);
   // A box's files in one bundle are one deploy (or upload) row.
   std::map<std::string, std::pair<std::optional<std::string>, std::string>> boxes;  // box -> (new active, uploaded version)
+  std::set<std::string> disabled;  // boxes whose active version was taken away (box_disable)
   db_->exec("BEGIN IMMEDIATE");
   try {
     for (const auto& change : bundle) {
@@ -155,6 +156,7 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
       if (k.kind == "box") {
         auto& b = boxes[k.target];
         if (k.active && !del) b.first = trim(change.data);
+        if (k.active && del) disabled.insert(k.target);
         if (!k.version.empty()) b.second = k.version;
         continue;
       }
@@ -193,6 +195,14 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
         detail["version"] = b.second;
         insert(now_ms, "upload", "write", "", box, actor, request_id, std::nullopt, std::nullopt, false, detail);
       }
+    }
+    for (const auto& box : disabled) {
+      uint64_t size = 0;
+      auto previous = read_old("boxes/" + box + "/active", &size);
+      bj::object detail;
+      if (previous) detail["version"] = trim(*previous);
+      insert(now_ms, "deploy", "disable", "", box, actor, request_id,
+             previous ? std::optional<std::string>(trim(*previous)) : std::nullopt, std::nullopt, false, detail);
     }
     if (now_ms - last_trim_ms_ > 3600 * 1000) {
       last_trim_ms_ = now_ms;

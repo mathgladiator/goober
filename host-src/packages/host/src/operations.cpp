@@ -472,12 +472,15 @@ void Host::register_tools() {
       {"version_upload",
        "Uploads a box: a manifest (object or JSON text) and its module, as WAT text or base64 WASM. The host checks "
        "the manifest, the module's imports (only goober-abi@1), and one export goober_route_$name per route, then "
-       "stores the version and makes it active (the v1 dev policy: no approval step). When the manifest names a "
+       "stores the version and makes it active (the v1 dev policy: no approval step), or, with activate: false, "
+       "stores it dark for version_promote to make live later. When the manifest names a "
        "types document (\"types\": \"x.openapi.json\"), pass that document as types: the OpenAPI components.schemas "
        "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset. With "
        "dry_run, every check runs (conflicts with the active boxes included) and nothing is stored or changed.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
+                      {"activate", mcp::boolean_property("false stores the version without making it active (every "
+                                                         "check still runs); version_promote makes it live. Default true.")},
                       {"wat", string_property("The module as WebAssembly text.")},
                       {"wasm_base64", string_property("The module as base64 binary WASM.")},
                       {"types", mcp::any_property("The types document (OpenAPI 3.x), as a JSON object or text.")}},
@@ -507,11 +510,16 @@ void Host::register_tools() {
            if (!boxes_->check(manifest, module, types, &err)) return ToolResult::fail(err);
            return ToolResult::ok(bj::object{{"dry_run", true}, {"ok", true}, {"stored", false}, {"active", false}});
          }
-         auto result = boxes_->upload(manifest, module, types, &err);
+         // activate: false stores a version dark: every check runs, and version_promote makes it live.
+         bool activate = true;
+         if (auto a = args.find("activate"); a != args.end() && a->value().is_bool()) activate = a->value().get_bool();
+         auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
-         return ToolResult::ok(bj::object{{"version", result->version}, {"active", true}, {"warnings", warnings}});
+         bj::object out{{"version", result->version}, {"active", activate}, {"warnings", warnings}};
+         if (!activate) out["next"] = "stored, not live: version_promote {box, version} makes it active";
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool({"version_list",
@@ -522,8 +530,13 @@ void Host::register_tools() {
                     auto box = arg(args, "box");
                     if (!box) return ToolResult::fail("box is required");
                     bj::array out;
+                    auto disabled = boxes_->disabled(*box);
                     for (const auto& v : boxes_->versions(*box)) {
                       bj::object o{{"version", v.version}, {"active", v.active}};
+                      if (disabled && disabled->version == v.version) {
+                        o["disabled"] = true;  // box_disable took it out; box_enable puts it back
+                        if (!disabled->why.empty()) o["why"] = disabled->why;
+                      }
                       if (source_) {
                         if (auto d = source_->deploy_of_version(*box, v.version)) {
                           o["source"] = bj::object{{"project", d->project}, {"rev", d->rev}, {"job", d->job}};
@@ -548,6 +561,48 @@ void Host::register_tools() {
                     return ToolResult::ok(bj::object{{"box", *box}, {"version", *version},
                                                      {"manifest", v ? *v : bj::value(*text)}});
                   }});
+
+  mcp_->add_tool(
+      {"box_disable",
+       "Takes a box out of service: none of its routes, tools, timers, mail routes, or jobs answer (a page's path "
+       "falls through to the site's content, or 404). Its versions and data stay. box_enable puts it back. To take "
+       "out one route, deploy a version without it instead.",
+       object_schema({{"box", string_property("The box name.")},
+                      {"why", string_property("Why, in a sentence: kept with the box and shown by version_list.")}},
+                     {"box", "why"}),
+       [this](const bj::object& args) {
+         auto box = arg(args, "box");
+         auto why = arg(args, "why").value_or("");
+         if (!box) return ToolResult::fail("box is required");
+         if (why.empty()) return ToolResult::fail("why is required: say why the box is out of service");
+         std::string err;
+         auto version = boxes_->disable(*box, why, &err);
+         if (!version) return ToolResult::fail(err);
+         return ToolResult::ok(bj::object{{"box", *box}, {"disabled", true}, {"version", *version}, {"why", why},
+                                          {"next", "box_enable {box} serves this version again"}});
+       }});
+  mcp_->add_tool(
+      {"box_enable",
+       "Puts a disabled box back in service: the version it had (or the version given), checked against the active "
+       "boxes again as any promotion is.",
+       object_schema({{"box", string_property("The box name.")},
+                      {"version", string_property("A version to serve instead of the one it had.")}},
+                     {"box"}),
+       [this](const bj::object& args) {
+         auto box = arg(args, "box");
+         if (!box) return ToolResult::fail("box is required");
+         auto disabled = boxes_->disabled(*box);
+         auto version = arg(args, "version");
+         if (!version) {
+           if (!disabled || disabled->version.empty()) {
+             return ToolResult::fail("box " + *box + " isn't disabled; version_promote {box, version} picks a version");
+           }
+           version = disabled->version;
+         }
+         std::string err;
+         if (!boxes_->promote(*box, *version, &err)) return ToolResult::fail(err);
+         return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
+       }});
 
   mcp_->add_tool({"version_promote", "Makes an existing version active, which is how v1 rolls back.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},

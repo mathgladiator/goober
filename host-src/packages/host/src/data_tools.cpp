@@ -188,7 +188,13 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
     if (!st.applies_schema()) continue;
     std::string where = "data.sqlite3." + st.name;
     auto schema = schema_named(st.schema);
-    if (!schema) return *error = where + ": schema " + st.schema + " isn't stored on this host; store it with schema_put first", false;
+    if (!schema) {
+      return *error = where + ": schema " + st.schema +
+                      " isn't stored on this host. From a source project, list its file under \"schemas\" in "
+                      "goober.project.json: a build checks it in place, storing nothing, and a deploy stores it. "
+                      "Otherwise try it with schema_check, then store it with schema_put",
+             false;
+    }
     if (st.pattern == "by_timer") {
       // The scheduler reads these columns as they are (045), so they must exist.
       const auto* t = schema->table(st.table);
@@ -413,7 +419,9 @@ void Host::register_data_tools() {
        "Stores a database schema: {\"schema\": \"name1\", \"tables\": {\"t\": {\"columns\": {\"c\": {\"type\": "
        "\"string\"}}, \"indexes\": {...}}}}. Types are id, int32, int64, double, float, boolean, and string; columns "
        "take nullable, default, max-length, and primary-key. Key every table with \"id\": {\"type\": \"id\", "
-       "\"primary-key\": true}: the host stamps it from its id service, and a box never names one. A column that "
+       "\"primary-key\": true}: the host stamps it from its id service, and a box never names one. The primary key "
+       "is never a natural key (a string like address|day): make that a unique index on its own columns, and insert "
+       "with ON CONFLICT on it. Try a schema with schema_check first: it stores nothing. A column that "
        "refers to a user or a row, in any database, is {\"type\": \"id\"}; never text, never an email. Ids read "
        "back as strings. A schema is a version: its name can't be reused with different content, and databases only "
        "ever grow by the schemas applied to them. The answer's warnings name keys and references that aren't ids.",
@@ -431,6 +439,33 @@ void Host::register_data_tools() {
          bj::object out{{"schema", s->name}, {"tables", std::move(tables)}};
          if (!warnings.empty()) out["warnings"] = std::move(warnings);
          return ToolResult::ok(std::move(out));
+       }});
+
+  mcp_->add_tool(
+      {"schema_check",
+       "Checks a schema exactly as schema_put would (its shape, the types and keys, that its name is free or holds the "
+       "same content) and answers the warnings, without storing anything: a schema name is never reused, so try it "
+       "here first. A source build checks a project's own schemas the same way when goober.project.json lists them "
+       "under \"schemas\".",
+       object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
+       [this](const bj::object& args) {
+         auto it = args.find("schema");
+         if (it == args.end()) return ToolResult::fail("schema is required");
+         std::string text = it->value().is_string() ? std::string(it->value().get_string()) : json::dump(it->value());
+         std::string err;
+         auto s = schemas_->check(text, &err);
+         if (!s) return ToolResult::fail(err);
+         bj::array tables, warnings;
+         for (const auto& t : s->tables) tables.push_back(bj::value(t.name));
+         for (const auto& w : s->warnings) warnings.push_back(bj::value(w));
+         bool stored = schemas_->get(s->name).has_value();
+         return ToolResult::ok(bj::object{{"schema", s->name},
+                                          {"ok", true},
+                                          {"stored", stored},
+                                          {"note", stored ? "already stored with this same content: schema_put is a no-op"
+                                                          : "not stored: schema_put stores it, for good, under this name"},
+                                          {"tables", std::move(tables)},
+                                          {"warnings", std::move(warnings)}});
        }});
 
   mcp_->add_tool({"schema_get", "Returns a stored schema.", object_schema({{"name", string_property("The schema's name.")}}, {"name"}),

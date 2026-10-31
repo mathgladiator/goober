@@ -29,6 +29,30 @@ int64_t int_arg(const bj::object& args, const char* key, int64_t fallback) {
   return fallback;
 }
 
+// A commit's or a stage's changes: each {path, text}, {path, base64}, or {path, delete: true}.
+bool parse_changes(const bj::array& list, std::vector<source::Change>* out, std::string* error) {
+  for (const auto& c : list) {
+    const auto* o = c.if_object();
+    auto path = o ? arg(*o, "path") : std::nullopt;
+    if (!path) return *error = "each change has a path", false;
+    source::Change change{*path, std::nullopt};
+    auto text = arg(*o, "text");
+    auto b64 = arg(*o, "base64");
+    bool del = o->contains("delete") && o->at("delete").is_bool() && o->at("delete").as_bool();
+    if (int(bool(text)) + int(bool(b64)) + int(del) != 1) {
+      return *error = *path + ": give exactly one of text, base64, or delete: true", false;
+    }
+    if (text) change.content = *text;
+    if (b64) {
+      auto bytes = base::base64_decode(*b64);
+      if (!bytes) return *error = *path + ": base64 isn't valid", false;
+      change.content = std::move(*bytes);
+    }
+    out->push_back(std::move(change));
+  }
+  return true;
+}
+
 // A file for an agent: text as text, anything else as base64.
 bj::object file_json(const std::string& path, const std::string& bytes) {
   bj::object o{{"path", path}, {"size", int64_t(bytes.size())}};
@@ -271,11 +295,60 @@ void Host::register_source_tools() {
                   }});
 
   mcp_->add_tool(
+      {"source_stage",
+       "Builds one commit over several calls, when a client can't send every file in one: adds changes (each {path, "
+       "text}, {path, base64}, or {path, delete: true}; a later one for a path replaces an earlier) to your draft on a "
+       "project, made from base_rev. Nothing is a revision until source_commit with the stage id commits it all at "
+       "once, so no half-done revision exists. A draft is yours (your operator sign-in), holds up to 500 changes, and "
+       "is dropped by a commit, by discard: true, or after an hour without a change.",
+       mcp::object_schema({{"project", project_prop},
+                           {"base_rev", mcp::integer_property("The revision the draft starts from (from source_checkout).")},
+                           {"changes", bj::value(bj::object{{"type", "array"},
+                                                            {"items", bj::object{{"type", "object"}}},
+                                                            {"description", "Up to 500 changes."}})},
+                           {"discard", mcp::boolean_property("Drop your draft on this project.")}},
+                          {"project"}),
+       [this](const bj::object& args) {
+         std::string name = arg(args, "project").value_or("");
+         if (!source_->get(name)) return ToolResult::fail("no project named " + name);
+         std::string op = current_operator();
+         auto discard = args.if_contains("discard");
+         if (discard && discard->is_bool() && discard->as_bool()) {
+           bool had = source_->draft(name, op, base::now_unix_ms()).has_value();
+           source_->discard(name, op);
+           return ToolResult::ok(bj::object{{"project", name}, {"discarded", had}});
+         }
+         auto* list = args.if_contains("changes");
+         if (!list || !list->is_array() || list->as_array().empty() || list->as_array().size() > 500) {
+           return ToolResult::fail("changes is a list of 1 to 500 changes");
+         }
+         if (!args.contains("base_rev")) return ToolResult::fail("base_rev is the revision the draft starts from");
+         std::vector<source::Change> changes;
+         std::string err;
+         if (!parse_changes(list->as_array(), &changes, &err)) return ToolResult::fail(err);
+         auto draft = source_->stage(name, op, int_arg(args, "base_rev", -1), changes, base::now_unix_ms(), &err);
+         if (!draft) return ToolResult::fail(err);
+         bj::array files;
+         for (const auto& c : draft->changes) {
+           files.push_back(c.content ? bj::object{{"path", c.path}, {"bytes", int64_t(c.content->size())}}
+                                     : bj::object{{"path", c.path}, {"delete", true}});
+         }
+         return ToolResult::ok(bj::object{
+             {"project", name},
+             {"stage", draft->id},
+             {"base_rev", draft->base_rev},
+             {"files", std::move(files)},
+             {"expires_at", base::format_utc_ms(draft->updated_ms + source::kDraftTtlMs)},
+             {"next", "stage more, or source_commit {project, base_rev: " + std::to_string(draft->base_rev) +
+                          ", message, stage: \"" + draft->id + "\"}"}});
+       }});
+
+  mcp_->add_tool(
       {"source_commit",
        "Changes files in a project, as a new revision. base_rev is the revision you read (from source_checkout). If "
        "someone committed since, your commit still lands when it touches none of their files; otherwise it's refused "
        "with the conflicting paths, and you read them again. Each change is {path, text} or {path, base64} to write, or "
-       "{path, delete: true}.",
+       "{path, delete: true}. Too many files for one call? source_stage them, then commit with the stage id.",
        mcp::object_schema({{"project", project_prop},
                            {"base_rev", mcp::integer_property("The revision these changes start from.")},
                            {"message", mcp::string_property("What changed and why, in a sentence or two.")},
@@ -283,33 +356,42 @@ void Host::register_source_tools() {
                                                           "beside the operator you signed in as, as said, unchecked.")},
                            {"changes", bj::value(bj::object{{"type", "array"},
                                                             {"items", bj::object{{"type", "object"}}},
-                                                            {"description", "Up to 500 changes."}})}},
-                          {"project", "base_rev", "message", "changes"}),
+                                                            {"description", "Up to 500 changes."}})},
+                           {"stage", mcp::string_property("A draft from source_stage: its changes commit whole, with any "
+                                                          "changes given here on top.")}},
+                          {"project", "base_rev", "message"}),
        [this](const bj::object& args) {
          std::string name = arg(args, "project").value_or("");
+         // A staged draft (source_stage) commits whole, with any changes here on top of it.
+         std::optional<source::Draft> draft;
+         if (auto stage = arg(args, "stage"); stage && !stage->empty()) {
+           draft = source_->draft(name, current_operator(), base::now_unix_ms());
+           if (!draft || draft->id != *stage) {
+             return ToolResult::fail("no draft " + *stage + " of yours on " + name +
+                                     ": it was committed, discarded, or an hour passed without a change; stage again");
+           }
+           if (draft->base_rev != int_arg(args, "base_rev", -1)) {
+             return ToolResult::fail("the draft started from revision " + std::to_string(draft->base_rev) +
+                                     "; commit it with that base_rev");
+           }
+         }
          auto* list = args.if_contains("changes");
-         if (!list || !list->is_array() || list->as_array().empty() || list->as_array().size() > 500) {
-           return ToolResult::fail("changes is a list of 1 to 500 changes");
+         bool none = !list || (list->is_array() && list->as_array().empty());
+         if ((none && !draft) || (list && (!list->is_array() || list->as_array().size() > 500))) {
+           return ToolResult::fail("changes is a list of 1 to 500 changes (or give a stage from source_stage)");
          }
          std::vector<source::Change> changes;
-         for (const auto& c : list->as_array()) {
-           const auto* o = c.if_object();
-           auto path = o ? arg(*o, "path") : std::nullopt;
-           if (!path) return ToolResult::fail("each change has a path");
-           source::Change change{*path, std::nullopt};
-           auto text = arg(*o, "text");
-           auto b64 = arg(*o, "base64");
-           bool del = o->contains("delete") && o->at("delete").is_bool() && o->at("delete").as_bool();
-           if (int(bool(text)) + int(bool(b64)) + int(del) != 1) {
-             return ToolResult::fail(*path + ": give exactly one of text, base64, or delete: true");
-           }
-           if (text) change.content = *text;
-           if (b64) {
-             auto bytes = base::base64_decode(*b64);
-             if (!bytes) return ToolResult::fail(*path + ": base64 isn't valid");
-             change.content = std::move(*bytes);
-           }
-           changes.push_back(std::move(change));
+         if (!none) {
+           std::string why;
+           if (!parse_changes(list->as_array(), &changes, &why)) return ToolResult::fail(why);
+         }
+         if (draft) {
+           std::map<std::string, source::Change> merged;
+           for (auto& c : draft->changes) merged[c.path] = c;
+           for (auto& c : changes) merged[c.path] = std::move(c);
+           changes.clear();
+           for (auto& [path, c] : merged) changes.push_back(std::move(c));
+           if (changes.size() > source::kMaxCommitChanges) return ToolResult::fail("a commit holds at most 500 changes");
          }
          // Agents sharing one operator sign-in name themselves; the name is theirs to say, so the
          // log shows it as said, after the operator the host checked.
@@ -330,8 +412,11 @@ void Host::register_source_tools() {
            if (conflicts.empty()) return ToolResult::fail(err);
            bj::array paths;
            for (const auto& p : conflicts) paths.push_back(bj::value(p));
-           return ToolResult::ok(bj::object{{"committed", false}, {"error", err}, {"conflicts", paths}});
+           bj::object out{{"committed", false}, {"error", err}, {"conflicts", paths}};
+           if (draft) out["stage"] = draft->id;  // kept: read the conflicting files, stage them again, commit
+           return ToolResult::ok(std::move(out));
          }
+         if (draft) source_->discard(name, current_operator());
          return ToolResult::ok(bj::object{{"committed", true}, {"rev", r->rev}, {"rebased", r->rebased}});
        }});
 

@@ -91,8 +91,23 @@ class BoxRegistry {
   // with the active boxes), without storing or activating anything.
   bool check(std::string_view manifest_text, std::string_view module, std::string_view types_text, std::string* error);
 
-  // Makes an existing version active.
+  // Every upload check (conflicts with the active boxes included), then stores the version
+  // without making it active: promote makes it live later.
+  std::optional<UploadResult> store(std::string_view manifest_text, std::string_view module,
+                                    std::string_view types_text, std::string* error);
+
+  // Makes an existing version active (and a disabled box enabled again).
   bool promote(const std::string& box, const std::string& version, std::string* error);
+
+  // Takes a box out of the active set: none of its routes, tools, timers, mail routes, or jobs
+  // answer. Its versions stay, and boxes/$box/disabled remembers the version and why, for
+  // enabling it again. Returns the version that was active.
+  std::optional<std::string> disable(const std::string& box, const std::string& why, std::string* error);
+  struct Disabled {
+    std::string version, why;
+  };
+  // A disabled box's last active version and why it was disabled, or nullopt.
+  std::optional<Disabled> disabled(const std::string& box) const;
 
   std::shared_ptr<const ActiveSet> active() const;
   std::vector<std::string> box_names() const;
@@ -105,8 +120,9 @@ class BoxRegistry {
   // Checks the candidate against every other active box, then swaps it in.
   bool activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
                 bool dry_run = false);
+  enum class Mode { kActivate, kCheck, kStore };
   std::optional<UploadResult> upload_or_check(std::string_view manifest_text, std::string_view module,
-                                              std::string_view types_text, bool dry_run, std::string* error);
+                                              std::string_view types_text, Mode mode, std::string* error);
 
   wal::HostWal& wal_;
   runtime::wasm::Engine& engine_;

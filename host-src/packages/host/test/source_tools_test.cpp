@@ -402,3 +402,50 @@ TEST_F(SourceToolsTest, JobsAndDeploysAreKeptAndLeadBackToSource) {
   auto again = tool("source_build", {{"project", "greeter"}});
   EXPECT_GT(again.at("job").as_int64(), deploy_job + 1);
 }
+
+// Staged commits (020 § 13): a client that sends a few files a call builds one commit over
+// several calls, and no half-done revision ever exists.
+TEST_F(SourceToolsTest, StagedChangesCommitAsOneRevision) {
+  ASSERT_FALSE(tool("source_create", {{"project", "staged"}, {"template", "empty"}}).as_object().contains("error"));
+  auto file = [](const std::string& path, const std::string& text) { return bj::object{{"path", path}, {"text", text}}; };
+  auto s1 = tool("source_stage", {{"project", "staged"}, {"base_rev", 0},
+                                  {"changes", bj::array{file("a.txt", "a"), file("b.txt", "b"), file("c.txt", "old c")}}});
+  ASSERT_FALSE(s1.as_object().contains("error")) << json::dump(s1);
+  std::string stage(s1.at("stage").as_string());
+  auto s2 = tool("source_stage", {{"project", "staged"}, {"base_rev", 0},
+                                  {"changes", bj::array{file("c.txt", "c"), file("d.txt", "d"),
+                                                        bj::object{{"path", "b.txt"}, {"delete", true}}}}});
+  EXPECT_EQ(s2.at("stage").as_string(), stage);
+  EXPECT_EQ(s2.at("files").as_array().size(), 4u);  // a, b (deleted), c (replaced), d
+  // Nothing is a revision yet.
+  EXPECT_EQ(tool("source_list", {}).at(0).at("head"), 0);
+  // A draft made from one revision can't grow from another.
+  auto other = tool("source_stage", {{"project", "staged"}, {"base_rev", 1}, {"changes", bj::array{file("e.txt", "e")}}});
+  EXPECT_TRUE(other.as_object().contains("error"));
+
+  // The commit takes the draft whole, with one more change on top.
+  auto c = tool("source_commit", {{"project", "staged"}, {"base_rev", 0}, {"message", "all at once"}, {"stage", stage},
+                                  {"changes", bj::array{file("e.txt", "e")}}});
+  ASSERT_EQ(c.at("committed"), true) << json::dump(c);
+  EXPECT_EQ(c.at("rev"), 1);
+  auto co = tool("source_checkout", {{"project", "staged"}});
+  std::map<std::string, std::string> got;
+  for (const auto& f : co.at("files").as_array()) got[std::string(f.at("path").as_string())] = std::string(f.at("text").as_string());
+  EXPECT_EQ(got, (std::map<std::string, std::string>{{"a.txt", "a"}, {"c.txt", "c"}, {"d.txt", "d"}, {"e.txt", "e"}}));
+  // The draft is gone once committed.
+  auto again = tool("source_commit", {{"project", "staged"}, {"base_rev", 1}, {"message", "again"}, {"stage", stage}});
+  EXPECT_TRUE(again.as_object().contains("error"));
+
+  // On a conflict the draft stays, to stage the files again on top of the head.
+  auto d1 = tool("source_stage", {{"project", "staged"}, {"base_rev", 1}, {"changes", bj::array{file("a.txt", "mine")}}});
+  ASSERT_EQ(tool("source_commit", {{"project", "staged"}, {"base_rev", 1}, {"message", "theirs"},
+                                   {"changes", bj::array{file("a.txt", "theirs")}}}).at("rev"), 2);
+  auto clash = tool("source_commit", {{"project", "staged"}, {"base_rev", 1}, {"message", "mine"}, {"stage", d1.at("stage")}});
+  EXPECT_EQ(clash.at("committed"), false) << json::dump(clash);
+  EXPECT_EQ(clash.at("stage"), d1.at("stage"));
+  EXPECT_EQ(tool("source_stage", {{"project", "staged"}, {"discard", true}}).at("discarded"), true);
+  EXPECT_EQ(tool("source_stage", {{"project", "staged"}, {"discard", true}}).at("discarded"), false);
+  // A bad path is refused before anything is staged.
+  EXPECT_TRUE(tool("source_stage", {{"project", "staged"}, {"base_rev", 2}, {"changes", bj::array{file("../x", "x")}}})
+                  .as_object().contains("error"));
+}
