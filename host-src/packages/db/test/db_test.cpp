@@ -1021,3 +1021,57 @@ TEST_F(DbTest, AFreshDatabaseTakesEveryStep) {
   EXPECT_TRUE(db::Databases::compatible({&*g1, &*g3}, &err, schemas.get())) << err;
   EXPECT_FALSE(db::Databases::compatible({&*g3}, &err));  // no store: what it follows can't be found
 }
+
+// A box undoes part of its call with named savepoints and still commits the rest: a job step
+// that fails rolls its writes back to the savepoint, then records a FAILED marker (2026-10-31).
+TEST_F(DbTest, SavepointsUndoPartOfACall) {
+  manifest::TableGrant g;
+  g.read_all = true;
+  g.insert = true;
+  std::vector<manifest::DataStrategy> strategies{strategy(g)};
+  {
+    db::Session s(*dbs, "playground", strategies, *schemas);
+    auto ok = [&](const char* sql) {
+      auto r = J(s.run("book", sql, ""));
+      EXPECT_FALSE(r.as_object().contains("error")) << sql << ": " << json::dump(r);
+    };
+    ok("SAVEPOINT step");
+    ok("INSERT INTO entries (name, message, created_ms) VALUES ('half', 'of a step', 1)");
+    ok("SAVEPOINT inner");
+    ok("INSERT INTO entries (name, message, created_ms) VALUES ('deeper', 'x', 2)");
+    ok("ROLLBACK TO step");  // both inserts undone; step stays open, inner is gone
+    auto inner = J(s.run("book", "RELEASE inner", ""));
+    EXPECT_NE(std::string(inner.at("error").as_string()).find("names no savepoint"), std::string::npos) << json::dump(inner);
+    ok("RELEASE step");
+    ok("INSERT INTO entries (name, message, created_ms) VALUES ('FAILED', 'step 1', 3)");
+    ok("SAVEPOINT left_open");  // released by the commit
+    ok("INSERT INTO entries (name, message, created_ms) VALUES ('kept', 'x', 4)");
+    std::string err;
+    ASSERT_TRUE(s.commit(&err)) << err;
+  }
+  db::Session s(*dbs, "playground", strategies, *schemas);
+  auto all = J(s.run("book", "SELECT json_group_array(name) FROM (SELECT name FROM entries ORDER BY created_ms)", ""));
+  EXPECT_EQ(json::dump(all.at("rows")), R"([["[\"FAILED\",\"kept\"]"]])");
+
+  auto denied = [&](const char* sql, const char* why) {
+    auto r = J(s.run("book", sql, ""));
+    ASSERT_TRUE(r.as_object().contains("error")) << sql;
+    EXPECT_NE(std::string(r.at("error").as_string()).find(why), std::string::npos) << json::dump(r);
+  };
+  denied("SAVEPOINT goober_x", "belong to the host");
+  denied("SAVEPOINT Goober_X", "belong to the host");
+  denied("ROLLBACK TO never_opened", "names no savepoint");
+  denied("RELEASE never_opened", "names no savepoint");
+  denied("ROLLBACK", "transactions belong to the host");
+  denied("COMMIT", "transactions belong to the host");
+  denied("END", "transactions belong to the host");
+  denied("BEGIN", "SAVEPOINT x");
+  s.rollback();
+  // A session that ends without a commit forgets its savepoints: the next call starts with none.
+  {
+    db::Session t(*dbs, "playground", strategies, *schemas);
+    EXPECT_FALSE(J(t.run("book", "SAVEPOINT a", "")).as_object().contains("error"));
+  }
+  db::Session u(*dbs, "playground", strategies, *schemas);
+  EXPECT_TRUE(J(u.run("book", "RELEASE a", "")).as_object().contains("error"));
+}

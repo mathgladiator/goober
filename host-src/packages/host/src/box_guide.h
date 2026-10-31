@@ -310,9 +310,13 @@ through the mail service. Failures are retried in order, then given up after 8 t
    into a table keyed by id also answers "ids" (every row's new id, as strings, in order) and
    "id" (the last). Use those, not last_insert_id, which is SQLite's rowid. Let SQLite
    build your JSON: SELECT json_object(...), json_group_array(...) answers in one statement.
-   One statement per call; no PRAGMA, ATTACH, DDL, transactions, or REPLACE (use
+   One statement per call; no PRAGMA, ATTACH, DDL, BEGIN/COMMIT/ROLLBACK, or REPLACE (use
    INSERT ... ON CONFLICT DO UPDATE); pure functions only; 2 s, 4 MiB per value, 8 MiB per
-   result. All of a request's writes commit together if the box answers below 500.
+   result. All of a request's writes commit together if the box answers below 500. To undo
+   part of a call and keep the rest (a job step that failed, then a FAILED marker), use named
+   savepoints inside the host's transaction: SAVEPOINT step, ROLLBACK TO step, RELEASE step.
+   Names starting goober_ are the host's; RELEASE and ROLLBACK TO name a savepoint this call
+   opened in that database; one left open is committed with the call.
    The functions a box's SQL may call, and no others:
    - JSON: json, json_array, json_array_length, json_extract, json_insert, json_object,
      json_patch, json_quote, json_remove, json_replace, json_set, json_type, json_valid,

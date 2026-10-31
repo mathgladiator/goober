@@ -652,3 +652,57 @@ TEST(PerfStats, IndexColumnsReadsWhereAndOrderBy) {
   EXPECT_EQ(table, "t");
   EXPECT_EQ(host::PerfStats::normalize_sql("  SELECT  1\n FROM\tt  "), "SELECT 1 FROM t");
 }
+
+// A job step that fails undoes its own writes with ROLLBACK TO and still commits a FAILED
+// marker in the same call, with no delete grant (2026-10-31).
+const char* kUndoWat = R"wat((module
+  (import "goober" "goober_sql" (func $sql (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 32) "s")
+  (data (i32.const 64) "INSERT INTO legacy (name) VALUES ('a'), ('b')")
+  (data (i32.const 560) "[]")
+  (data (i32.const 1024) "SAVEPOINT step")
+  (data (i32.const 1152) "INSERT INTO members (old_id, name) SELECT id, name FROM legacy")
+  (data (i32.const 1280) "ROLLBACK TO step")
+  (data (i32.const 1408) "RELEASE step")
+  (data (i32.const 1536) "INSERT INTO legacy (name) VALUES ('FAILED step 1')")
+  (data (i32.const 1664) "{\"cursor\":\"1\",\"done\":true}")
+  (func (export "goober_route_seed_legacy") (result i32)
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 64) (i32.const 45) (i32.const 560) (i32.const 2)))
+    (drop (call $respond (i32.const 204) (i32.const 0) (i32.const 16) (i32.const 0) (i32.const 0)))
+    (i32.const 0))
+  (func (export "goober_route_undo_step") (result i32)
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 1024) (i32.const 14) (i32.const 560) (i32.const 2)))
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 1152) (i32.const 62) (i32.const 560) (i32.const 2)))
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 1280) (i32.const 16) (i32.const 560) (i32.const 2)))
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 1408) (i32.const 12) (i32.const 560) (i32.const 2)))
+    (drop (call $sql (i32.const 32) (i32.const 1) (i32.const 1536) (i32.const 50) (i32.const 560) (i32.const 2)))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 1664) (i32.const 26)))
+    (i32.const 0))
+))wat";
+
+TEST_F(DataRoutesTest, AJobStepUndoesItsWritesWithASavepoint) {
+  auto put = tool("schema_put", {{"schema", R"({"schema":"undo1","tables":{
+      "legacy":{"columns":{"name":{"type":"string"}}},
+      "members":{"columns":{"id":{"type":"id","primary-key":true},"old_id":{"type":"int64"},"name":{"type":"string"}}}}})"}});
+  ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"undoer","domains":["*"],
+    "data":{"sqlite3":{"s":{"schema":"undo1","database":"main","pattern":"sql",
+      "tables":{"legacy":{"read":true,"insert":true},"members":{"read":true,"insert":true}}}}},
+    "routes":{"http":{"/seed":{"post":{"name":"seed_legacy","public":true}}},
+              "job":{"undo":{"name":"undo_step"}}}})", kUndoWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/seed").status, 204);
+  bj::object args{{"box", "undoer"}, {"job", "undo_step"}, {"tenant", "playground"}};
+  auto dry = tool("job_dry_run", args);
+  ASSERT_EQ(dry.at("state"), "passed") << json::dump(dry);
+  auto run = tool("job_start", args);
+  ASSERT_EQ(run.at("state"), "done") << json::dump(run);
+  auto q = [&](const char* sql) {
+    return json::dump(tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", sql}}).at("rows"));
+  };
+  EXPECT_EQ(q("SELECT count(*) FROM members"), "[[0]]");
+  EXPECT_EQ(q("SELECT name FROM legacy ORDER BY rowid"), R"([["a"],["b"],["FAILED step 1"]])");
+}

@@ -193,6 +193,11 @@ struct Auth {
   std::set<std::string> tables;                      // the database's real tables; anything else read is a CTE
   std::string denied;
   std::map<std::string, TableUse> uses;              // what the statement was allowed to do, by table
+  // A box's named savepoints in its request's transaction on this database, oldest first, in
+  // lower case; null where savepoints aren't the caller's (operators' db_query). `savepoint`
+  // is what this statement does to them: {"BEGIN" | "RELEASE" | "ROLLBACK", name}.
+  std::vector<std::string>* savepoints = nullptr;
+  std::pair<std::string, std::string> savepoint;
   // What the statement cost, once it ran to its end (037 § 7.1).
   struct Cost {
     bool ran = false;
@@ -349,9 +354,25 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
     case SQLITE_ATTACH:
     case SQLITE_DETACH:
       return deny("ATTACH and DETACH are refused: a statement stays in its database");
+    case SQLITE_SAVEPOINT: {
+      // Named savepoints inside the host's request transaction: SAVEPOINT x, ROLLBACK TO x,
+      // RELEASE x. The host's own savepoints, if it ever takes any, are named goober_*.
+      if (!auth.strategy || !auth.savepoints) return deny("transactions belong to the host: one per request");
+      std::string name = base::to_lower(c);
+      if (name.starts_with("goober_")) return deny("savepoint names starting goober_ belong to the host");
+      if (t != "BEGIN") {
+        bool open = std::find(auth.savepoints->begin(), auth.savepoints->end(), name) != auth.savepoints->end();
+        if (!open) {
+          return deny(std::string(t == "RELEASE" ? "RELEASE" : "ROLLBACK TO") + " " + c +
+                      " names no savepoint this call opened; SAVEPOINT " + c + " first");
+        }
+      }
+      auth.savepoint = {t, name};
+      return SQLITE_OK;
+    }
     case SQLITE_TRANSACTION:
-    case SQLITE_SAVEPOINT:
-      return deny("transactions belong to the host: one per request");
+      return deny("transactions belong to the host: one per request; use SAVEPOINT x, ROLLBACK TO x, and RELEASE x "
+                  "to undo part of a call's writes");
     default:
       return deny("schema changes go through schemas (schema_put and a box's manifest)");
   }
@@ -1750,6 +1771,7 @@ std::string Session::run_one(std::string_view strategy, std::string_view sql, st
   auto& open = *opened;
   Auth auth;
   auth.strategy = st;
+  auth.savepoints = &open.savepoints;
   sqlite3* raw = open.db->raw();
   if (!broken_.empty()) return fail(broken_);
   // A strategy that may write takes the write lock with its first statement, read or not: a
@@ -1788,6 +1810,18 @@ std::string Session::run_one(std::string_view strategy, std::string_view sql, st
     open.in_transaction = false;
     broken_ = "the request's transaction on " + database + " was rolled back, so nothing more can be written";
     return fail(broken_);
+  }
+  if (!result.contains("error") && !auth.savepoint.first.empty()) {
+    // SQLite's rules: SAVEPOINT pushes; RELEASE x pops x and every newer one; ROLLBACK TO x
+    // pops the newer ones and keeps x open. A repeated name means its newest.
+    auto& sp = open.savepoints;
+    const auto& [op, name] = auth.savepoint;
+    if (op == "BEGIN") {
+      sp.push_back(name);
+    } else {
+      auto it = std::find(sp.rbegin(), sp.rend(), name);
+      if (it != sp.rend()) sp.erase(op == "RELEASE" ? std::prev(it.base()) : it.base(), sp.end());
+    }
   }
   if (wrote && !result.contains("error")) {
     wrote_.insert(st->name);
@@ -1836,8 +1870,10 @@ bool Session::commit(std::string* error) {
   for (auto [name, open] : order) {
     if (!open->in_transaction) continue;
     char* msg = nullptr;
+    // COMMIT releases any savepoint the box left open, with everything inside it.
     if (ok && sqlite3_exec(open->db->raw(), "COMMIT", nullptr, nullptr, &msg) == SQLITE_OK) {
       open->in_transaction = false;
+      open->savepoints.clear();
       // A connection opened for this request changed something: its database's version moves (037 § 3).
       if (sqlite3_total_changes64(open->db->raw()) > 0) {
         auto slash = name->find('/');
@@ -1858,6 +1894,7 @@ void Session::rollback() {
     if (!open.in_transaction) continue;
     sqlite3_exec(open.db->raw(), "ROLLBACK", nullptr, nullptr, nullptr);
     open.in_transaction = false;
+    open.savepoints.clear();
   }
 }
 

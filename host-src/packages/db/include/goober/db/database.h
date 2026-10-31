@@ -234,6 +234,7 @@ class Session {
   struct Open {
     std::unique_ptr<sqlite::Db> db;
     bool in_transaction = false;
+    std::vector<std::string> savepoints;  // the box's open savepoints, oldest first
   };
   Databases& dbs_;
   std::string tenant_;
