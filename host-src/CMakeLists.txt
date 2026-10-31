@@ -16,3 +16,13 @@ foreach(pkg base bus json calendar aws backup web types timers render mail_templ
     add_subdirectory(packages/${pkg})
   endif()
 endforeach()
+
+# The deploy's own edits of host.json and the Caddyfile for a new tenant (tools/tenant_edit.py),
+# each edited host.json checked by the host itself.
+if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME tools.tenant_edit
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tools/tenant_edit_test.py $<TARGET_FILE:goober-host>)
+  endif()
+endif()

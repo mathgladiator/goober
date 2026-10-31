@@ -3,6 +3,8 @@
 # tools/server-bootstrap.sh there (Caddy, a goober user, setup, systemd units, backups).
 #
 #   tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail]
+#                   [--add-tenant [DOMAIN]] [--tenant-name NAME] [--tenant-owner EMAIL]
+#                   [--tenant-postal ADDRESS] [--tenant-www]
 #
 # --user LOGIN is who ssh logs in as on the server (the same as LOGIN@server; without
 # either, ssh uses your local name). That account needs sudo.
@@ -16,6 +18,11 @@
 # Mail in is part of every deploy too (design/machine/024.MailIn.md): Stalwart, installed or
 # upgraded to the pinned version, on port 25, handing every message to the host's MTA hook.
 # --without-mail skips it.
+# --add-tenant launches one more site on this host during the deploy: a wizard for just the new
+# tenant (its domain, name, first owner, postal address, pages, www.), which adds it to
+# host.json and to Caddy as a site of its own, checked and put back if refused. It needs a
+# terminal, unless the domain and --tenant-name are given; then --tenant-owner, --tenant-postal,
+# and --tenant-www are the rest of the answers.
 # DIR is the host directory on the server (default /srv/NAME/host). The first run walks
 # through setup interactively on the server; later runs replace the binary and restart.
 # The server needs Ubuntu 24.04 or newer, or Debian 13 or newer (glibc 2.38), x86_64, and
@@ -27,13 +34,16 @@ set -euo pipefail
 # rest of the run read from the middle of a line.
 main() {
 
-USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail]"
+USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail]
+       [--add-tenant [DOMAIN]] [--tenant-name NAME] [--tenant-owner EMAIL] [--tenant-postal ADDRESS] [--tenant-www]"
 TARGET="${1:?$USAGE}"
 DIR=""
 LOGIN=""
 RUN_AS="goober"
 WITH_RUST="--with-rust"
 WITHOUT_MAIL=""
+ADD_TENANT=""
+TENANT_ARGS=()
 shift
 while (($#)); do
   case "$1" in
@@ -44,6 +54,13 @@ while (($#)); do
     --user=*) LOGIN="${1#--user=}" ;;
     --run-as) RUN_AS="${2:?$USAGE}"; shift ;;
     --run-as=*) RUN_AS="${1#--run-as=}" ;;
+    --add-tenant=*) ADD_TENANT=1; TENANT_ARGS+=(--tenant-domain "${1#--add-tenant=}") ;;
+    --add-tenant)
+      ADD_TENANT=1
+      # The domain may follow it; DIR, the other bare word, is a path.
+      if (($# > 1)) && [[ "$2" != -* && "$2" != */* ]]; then TENANT_ARGS+=(--tenant-domain "$2"); shift; fi ;;
+    --tenant-name|--tenant-owner|--tenant-postal) TENANT_ARGS+=("$1" "${2:?$USAGE}"); shift ;;
+    --tenant-www) TENANT_ARGS+=(--tenant-www) ;;
     -*) echo "unknown option $1; $USAGE" >&2; exit 2 ;;
     *) DIR="$1" ;;
   esac
@@ -59,6 +76,16 @@ fi
 [[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$RUN_AS" != root ]] ||
   { echo "--run-as must be a lowercase user name other than root, like goober" >&2; exit 2; }
 DIR="${DIR:-/srv/$RUN_AS/host}"
+if ((${#TENANT_ARGS[@]})) && [[ -z "$ADD_TENANT" ]]; then
+  echo "--tenant-name, --tenant-owner, --tenant-postal, and --tenant-www go with --add-tenant" >&2; exit 2
+fi
+# Without a terminal the wizard can't ask, so the domain and the name must be given; checked
+# before anything is built or copied.
+if [[ -n "$ADD_TENANT" && ! -t 0 ]] &&
+   ! [[ " ${TENANT_ARGS[*]} " == *" --tenant-domain "* && " ${TENANT_ARGS[*]} " == *" --tenant-name "* ]]; then
+  echo "--add-tenant asks its questions in a terminal: deploy from one, or give the domain and --tenant-name" >&2
+  exit 2
+fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST_SRC="$(dirname "$HERE")"
 
@@ -78,8 +105,8 @@ SERVER="${TARGET#*@}"
 PUBLIC_ARG=""
 [[ "$SERVER" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z][a-z0-9-]*$ ]] && PUBLIC_ARG="--public $SERVER"
 BUILD="$(cd "$HOST_SRC" && git log -1 --format=%h --abbrev=12)"
-cp "$HERE/readiness.py" "$STAGE/"
-FILES+=("$STAGE/readiness.py")
+cp "$HERE/readiness.py" "$HERE/tenant_edit.py" "$STAGE/"
+FILES+=("$STAGE/readiness.py" "$STAGE/tenant_edit.py")
 if [[ -f "$HERE/readiness.d/$SERVER" ]]; then
   cp "$HERE/readiness.d/$SERVER" "$STAGE/readiness.args"
   FILES+=("$STAGE/readiness.args")
@@ -116,7 +143,13 @@ echo "   uploaded $(numfmt --to=iec-i --suffix=B "$TOTAL") in ${ELAPSED}s" \
 echo "── installing on $TARGET"
 # The server checks itself after the gate, through its public name (readiness.py, with the
 # site's list from tools/readiness.d/$server), and publishes the result at /goober/deploy.
-ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL $PUBLIC_ARG --build $BUILD; rm -rf $REMOTE"
+# A new tenant's answers given here travel quoted, as words the server's shell won't reinterpret.
+TENANT_REMOTE=""
+if [[ -n "$ADD_TENANT" ]]; then
+  TENANT_REMOTE="--add-tenant"
+  ((${#TENANT_ARGS[@]})) && TENANT_REMOTE+=" $(printf '%q ' "${TENANT_ARGS[@]}")"
+fi
+ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL $PUBLIC_ARG --build $BUILD $TENANT_REMOTE; rm -rf $REMOTE"
 
 }
 

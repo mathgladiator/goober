@@ -479,6 +479,10 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] Redirect domains (`{"redirect-to": ...}` in `domains`, a 301 or 308 from the host); the
       audit suggests `www.` for a site, and the deploy offers it (yes, not now, never) and adds
       it to Caddy's site line, checked and put back if refused; tests.
+- [x] `just deploy ... --add-tenant [DOMAIN]`: a wizard for one new site (domain, tenant, owner,
+      postal address, terms and privacy, www.), shown the DNS it needs, added to host.json and
+      to Caddy as a site block of its own, checked, proved by a restart, put back if refused;
+      flags for the answers without a terminal; `tools/tenant_edit.py`, tested in CTest.
 - [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
       vault key copied off the machine.
 
