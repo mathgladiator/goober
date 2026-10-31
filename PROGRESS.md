@@ -671,6 +671,18 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] `version_health` reads `access.log` and `access.log.1` only, the last 200,000 lines of
       each: a long window on a busy host sees only what they hold.
 
+### Phase 34: engineering practice (040)
+- [x] `route_try`: a stored version's HTTP route through the real request path, as a visitor
+      or an account; GETs read-only, writes on copies; tests.
+- [x] Upload reviews (`review`, `widens`), `version_diff`, `version_health`; tests.
+- [x] A snapshot before every real job run; `if_etag` on every content write; integer
+      arguments accept digit strings; `whats_new` from `host-src/CHANGES.md`; tests.
+- [ ] Decisions in 040 § 5: widening uploads waiting for a person, change sets, automatic
+      rollback (recommended no), a warning when promoting an untried version, 420's schema
+      evolution, deploy cadence.
+- [ ] Tries for MCP tools, mail routes, and timers; `version_health` over archived logs;
+      a test of route_try's observer rule.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
