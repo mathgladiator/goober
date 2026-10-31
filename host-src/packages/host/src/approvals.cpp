@@ -254,7 +254,23 @@ bj::object Host::panel_approvals(const SignedIn& who) {
                        "FROM requests WHERE state = 'pending' AND (? OR agent LIKE ? ESCAPE '\\') ORDER BY id LIMIT 200");
     std::string like = "oauth:" + like_escape(who.user.email) + ":%";
     s.bind(1, int64_t(owner)).bind(2, like);
-    while (s.step()) pending.push_back(approval_json(s, true));
+    while (s.step()) {
+      auto o = approval_json(s, true);
+      // A held upload says what it would change from the live version, worked out when the
+      // person looks (against what is live then), so they approve knowing what widens.
+      if (o.at("tool") == "version_upload") {
+        std::string err;
+        auto held = json::parse(s.text(4), &err);
+        std::string rerr;
+        if (auto r = held && held->is_object() ? review_upload(held->as_object(), &rerr) : std::nullopt) {
+          o["widens"] = r->at("widens");
+          o["review"] = std::move(*r);
+        } else {
+          o["review_error"] = rerr.empty() ? "unreadable" : rerr;
+        }
+      }
+      pending.push_back(std::move(o));
+    }
   }
   {
     sqlite::Stmt s(db, "SELECT id, at_ms, agent, tool, args, request_id, state, decided_by, decided_ms, result, is_error "
