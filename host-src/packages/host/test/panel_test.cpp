@@ -366,3 +366,114 @@ TEST(PanelStartup, AHostWhoseChangeLogCantOpenStillServes) {
   ASSERT_TRUE(host->content().put("playground", "x.md", "# x", &text)) << text;
   EXPECT_EQ(fetch(port, "localhost", bhttp::verb::get, "/x").status, 200);
 }
+
+// Databases (008 § 11): operators make one from stored schemas, snapshot it, and restore a
+// snapshot to a new name over MCP; only a person drops anything, in the panel, after the host
+// took a snapshot, and never while a box binds it.
+TEST_F(PanelTest, OperatorsSnapshotAndCreateOnlyAPersonDrops) {
+  std::string token = "0123456789abcdef0123";
+  auto call = [&](const std::string& tool, const std::string& args) {
+    auto r = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":")" + tool +
+                            R"(","arguments":)" + args + "}}");
+    EXPECT_EQ(r.status, 200) << r.body;
+    auto result = parse(r.body)["result"].as_object();
+    std::string text(result.at("content").at(0).at("text").as_string());
+    if (result.at("isError").as_bool()) return bj::value(bj::object{{"error", text}});
+    std::string err;
+    auto v = json::parse(text, &err);
+    return v ? *v : bj::value(text);
+  };
+  auto error_of = [](const bj::value& v) {
+    return v.is_object() && v.as_object().contains("error") ? std::string(v.at("error").as_string()) : std::string();
+  };
+  ASSERT_EQ(error_of(call("schema_put", R"({"schema":{"schema":"shop1","tables":{"orders":{"columns":{
+      "id":{"type":"id","primary-key":true},"paid":{"type":"boolean","default":false}}}}}})")), "");
+  ASSERT_EQ(error_of(call("schema_put", R"({"schema":{"schema":"soak1","tables":{"soak_journal":{"columns":{
+      "id":{"type":"id","primary-key":true},"note":{"type":"string"}}}}}})")), "");
+
+  // A database made before any box binds it, empty.
+  auto made = call("db_create", R"({"tenant":"playground","database":"shop","schemas":["shop1","soak1"]})");
+  ASSERT_EQ(error_of(made), "") << json::dump(made);
+  EXPECT_EQ(made.at("tables").as_array().size(), 2u);
+  EXPECT_EQ(made.at("tables").at(0).at("rows"), 0);
+  EXPECT_NE(error_of(call("db_create", R"({"tenant":"playground","database":"shop","schemas":["shop1"]})")).find("already"),
+            std::string::npos);
+  EXPECT_NE(error_of(call("db_create", R"({"tenant":"playground","database":"other","schemas":["nope1"]})")).find("isn't stored"),
+            std::string::npos);
+
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"shop","domains":["*"],
+      "data":{"sqlite3":{"db":{"schema":"shop1","database":"shop","pattern":"sql","tables":{"orders":{"read":true}}}}},
+      "routes":{"http":{"/x":{"get":{"name":"x","public":true}}}}})",
+                                   R"((module (memory (export "memory") 1) (func (export "goober_route_x") (result i32) (i32.const 0))))",
+                                   &err))
+      << err;
+  auto unbound = call("db_unbound", R"({"tenant":"playground"})");
+  ASSERT_EQ(unbound.at("databases").as_array().size(), 1u) << json::dump(unbound);
+  EXPECT_EQ(unbound.at("databases").at(0).at("bound_by").at(0).at("box"), "shop");
+  EXPECT_EQ(unbound.at("databases").at(0).at("unbound_tables").at(0).at("table"), "soak_journal");
+  EXPECT_EQ(unbound.at("unnamed_schemas").at(0), "soak1");
+
+  // A snapshot, and a new database from it; never over an existing one.
+  auto snap = call("db_snapshot", R"({"tenant":"playground","database":"shop","note":"before the move"})");
+  ASSERT_EQ(error_of(snap), "") << json::dump(snap);
+  std::string id(snap.at("snapshot").as_string());
+  EXPECT_TRUE(id.starts_with("shop/")) << id;
+  EXPECT_EQ(snap.at("sha256").as_string().size(), 64u);
+  EXPECT_EQ(call("db_snapshots", R"({"tenant":"playground"})").at("snapshots").at(0).at("note"), "before the move");
+  auto restored = call("db_restore_to_new", R"({"tenant":"playground","snapshot":")" + id + R"(","database":"shop_copy"})");
+  ASSERT_EQ(error_of(restored), "") << json::dump(restored);
+  EXPECT_EQ(restored.at("tables").as_array().size(), 2u);
+  EXPECT_NE(error_of(call("db_restore_to_new", R"({"tenant":"playground","snapshot":")" + id + R"(","database":"shop"})"))
+                .find("already has"),
+            std::string::npos);
+  EXPECT_NE(error_of(call("db_restore_to_new", R"({"tenant":"playground","snapshot":"shop/../../x","database":"y"})"))
+                .find("no snapshot"),
+            std::string::npos);
+  // No tool drops anything.
+  auto list = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").body;
+  for (const char* t : {"db_drop", "table_drop", "schema_retire"}) EXPECT_EQ(list.find(t), std::string::npos) << t;
+
+  // The panel: an observer can't; the owner types the name; bound things stay.
+  std::string watcher = sign_in("watcher@example.com");
+  EXPECT_EQ(api(watcher, "write/drop", R"({"kind":"database","tenant":"playground","database":"shop_copy","confirm":"shop_copy"})").status,
+            403);
+  std::string boss = sign_in("boss@example.com");
+  ASSERT_FALSE(boss.empty());
+  auto wrong = api(boss, "write/drop", R"({"kind":"table","tenant":"playground","database":"shop","table":"soak_journal","confirm":"soak_journal"})");
+  EXPECT_EQ(wrong.status, 400) << wrong.body;
+  auto table = api(boss, "write/drop",
+                   R"({"kind":"table","tenant":"playground","database":"shop","table":"soak_journal","confirm":"shop.soak_journal","why":"the soak is over"})");
+  ASSERT_EQ(table.status, 200) << table.body;
+  auto before = std::string(parse(table.body)["result"].at("snapshot").as_string());
+  EXPECT_EQ(call("db_describe", R"({"tenant":"playground","database":"shop"})").at("tables").as_array().size(), 1u);
+  bool kept = false;
+  auto shop_snaps = call("db_snapshots", R"({"tenant":"playground","database":"shop"})");
+  for (const auto& s : shop_snaps.at("snapshots").as_array()) {
+    kept |= s.at("snapshot").as_string() == before && s.as_object().contains("before_drop");
+  }
+  EXPECT_TRUE(kept) << before;
+  auto bound = api(boss, "write/drop", R"({"kind":"database","tenant":"playground","database":"shop","confirm":"shop"})");
+  EXPECT_EQ(bound.status, 409) << bound.body;
+  EXPECT_NE(bound.body.find("shop.db"), std::string::npos) << bound.body;
+  ASSERT_EQ(api(boss, "write/drop", R"({"kind":"database","tenant":"playground","database":"shop_copy","confirm":"shop_copy"})").status,
+            200);
+  EXPECT_EQ(call("db_describe", R"({"tenant":"playground","database":"shop_copy"})").at("exists"), false);
+
+  // Retiring: refused while a box names the schema; a retired one can't be named again.
+  EXPECT_EQ(api(boss, "write/drop", R"({"kind":"schema","schema":"shop1","confirm":"shop1"})").status, 409);
+  ASSERT_EQ(api(boss, "write/drop", R"({"kind":"schema","schema":"soak1","confirm":"soak1"})").status, 200);
+  EXPECT_FALSE(host->boxes().upload(R"({"box":"soak","domains":["*"],
+      "data":{"sqlite3":{"db":{"schema":"soak1","database":"soak","pattern":"sql","tables":{"soak_journal":{"read":true}}}}},
+      "routes":{"http":{"/y":{"get":{"name":"y","public":true}}}}})",
+                                    R"((module (memory (export "memory") 1) (func (export "goober_route_y") (result i32) (i32.const 0))))",
+                                    &err));
+  EXPECT_NE(err.find("retired"), std::string::npos) << err;
+
+  // A snapshot goes only when a person deletes it.
+  ASSERT_EQ(api(boss, "write/drop", R"({"kind":"snapshot","tenant":"playground","snapshot":")" + id + R"(","confirm":")" + id + R"("})")
+                .status,
+            200);
+  auto remaining = call("db_snapshots", R"({"tenant":"playground"})");
+  for (const auto& s : remaining.at("snapshots").as_array()) EXPECT_NE(std::string(s.at("snapshot").as_string()), id);
+}

@@ -667,6 +667,62 @@ std::vector<std::string> Databases::databases(std::string_view tenant) const {
   return out;
 }
 
+void Databases::forget(std::string_view tenant, std::string_view database) {
+  std::string prefix = file(tenant, database).string() + "|";
+  std::lock_guard lock(mu_);
+  for (auto it = applied_.begin(); it != applied_.end();) {
+    it = it->starts_with(prefix) ? applied_.erase(it) : std::next(it);
+  }
+}
+
+bool Databases::drop_database(std::string_view tenant, std::string_view database, std::string* error) {
+  if (!exists(tenant, database)) return *error = "tenant " + std::string(tenant) + " has no database " + std::string(database), false;
+  auto path = file(tenant, database);
+  std::error_code ec;
+  for (const char* extra : {"-wal", "-shm", "-journal"}) std::filesystem::remove(path.string() + extra, ec);
+  if (!std::filesystem::remove(path, ec) || ec) return *error = "removing " + path.string() + ": " + ec.message(), false;
+  forget(tenant, database);
+  return true;
+}
+
+bool Databases::drop_table(std::string_view tenant, std::string_view database, std::string_view table,
+                           std::string* error) {
+  if (!exists(tenant, database)) return *error = "tenant " + std::string(tenant) + " has no database " + std::string(database), false;
+  if (!is_valid_sql_name(table)) return *error = "not a table name: " + std::string(table), false;
+  sqlite::Db db(file(tenant, database));
+  db.exec(kHostTables);
+  {
+    sqlite::Stmt q(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    q.bind(1, table);
+    if (!q.step()) return *error = "database " + std::string(database) + " has no table " + std::string(table), false;
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // The schemas that declared the table are no longer whole here: applying one again makes it.
+    std::set<std::string> schemas;
+    {
+      sqlite::Stmt q(db, "SELECT DISTINCT schema FROM goober_columns WHERE table_name = ?");
+      q.bind(1, table);
+      while (q.step()) schemas.insert(q.text(0));
+    }
+    db.exec("DROP TABLE \"" + std::string(table) + "\"");
+    for (const char* sql : {"DELETE FROM goober_columns WHERE table_name = ?", "DELETE FROM goober_indexes WHERE table_name = ?"}) {
+      sqlite::Stmt d(db, sql);
+      d.bind(1, table).run();
+    }
+    for (const auto& s : schemas) {
+      sqlite::Stmt d(db, "DELETE FROM goober_schemas WHERE name = ?");
+      d.bind(1, s).run();
+    }
+    db.exec("COMMIT");
+  } catch (const std::exception& e) {
+    db.exec("ROLLBACK");
+    return *error = e.what(), false;
+  }
+  forget(tenant, database);
+  return true;
+}
+
 bj::object Databases::describe(std::string_view tenant, std::string_view database) const {
   bj::object out{{"tenant", std::string(tenant)}, {"database", std::string(database)}};
   if (!exists(tenant, database)) {

@@ -990,9 +990,62 @@ const views = {
       right.push(card('Query', h('div', { class: 'bar' }, h('label', {}, 'Database '), dbPick,
         h('button', { type: 'button', class: 'run', onclick: run }, 'Run'), h('span', { class: 'muted small' }, 'read-only · Ctrl+Enter')), sqlBox, sqlOut));
     }
+    if (tenant) {
+      const [unbound, snaps] = await Promise.all([api('db_unbound', { tenant }).catch(() => null),
+        api('db_snapshots', { tenant }).catch(() => ({ snapshots: [] }))]);
+      if (unbound) right.push(dropsCard(tenant, unbound, snaps.snapshots || []));
+    }
     return [h('h1', {}, 'Database'), h('div', { class: 'cols' }, side, h('div', {}, right.length ? right : h('p', { class: 'muted' }, 'Pick a table.')))];
   },
 };
+
+// What no box binds, the snapshots, and the drops only a person makes (008 § 11). Each drop
+// asks for the name typed out; the host refuses while a box binds it and snapshots first.
+function dropsCard(tenant, unbound, snapshots) {
+  const owner = (state.me.roles || []).includes('host:owner');
+  const out = h('p', { class: 'muted small' });
+  const ask = (args, target, what) => async () => {
+    const typed = prompt(`${what} ${target}?\nThe host takes a snapshot first. Type ${target} to go ahead.`);
+    if (typed === null) return;
+    const why = prompt('Why? (kept in the change log)') || '';
+    try {
+      const r = await api('write/drop', Object.assign({ tenant, confirm: typed, why }, args));
+      out.textContent = r.retired ? `Retired ${r.retired}.` : r.deleted ? `Deleted ${r.deleted}.`
+        : `Dropped ${r.dropped}. Its snapshot: ${r.snapshot}.`;
+      render(true);
+    } catch (e) { out.textContent = e.message; }
+  };
+  const button = (label, onclick) => owner ? h('button', { type: 'button', class: 'small', onclick }, label) : null;
+  const rows = [];
+  for (const d of unbound.databases || []) {
+    if (!d.bound) rows.push({ what: 'database', name: d.database, rows: '', act: button('Drop', ask({ kind: 'database', database: d.database }, d.database, 'Drop database')) });
+    for (const t of d.unbound_tables || []) {
+      const target = d.database + '.' + t.table;
+      rows.push({ what: 'table', name: target, rows: fmt.n(t.rows), act: button('Drop', ask({ kind: 'table', database: d.database, table: t.table }, target, 'Drop table')) });
+    }
+  }
+  for (const s of unbound.unnamed_schemas || []) {
+    rows.push({ what: 'schema', name: s, rows: '', act: button('Retire', ask({ kind: 'schema', schema: s }, s, 'Retire schema')) });
+  }
+  return card('Unbound, and snapshots',
+    h('p', { class: 'muted small' }, 'What no box binds (active or disabled), which a person may drop or retire here, and the database snapshots. ' +
+      'Agents can only point at these (db_unbound); dropping is yours. ' + (owner ? '' : 'Only host:owner drops.')),
+    rows.length ? table([
+      { label: 'Kind', get: (r) => r.what, cls: () => 'muted' },
+      { label: 'Name', get: (r) => r.name, cls: () => 'mono' },
+      { label: 'Rows', num: true, get: (r) => r.rows },
+      { label: '', get: (r) => r.act || '' },
+    ], rows) : h('p', { class: 'muted small' }, 'Every database and table is bound by a box.'),
+    snapshots.length ? h('details', {}, h('summary', {}, `Snapshots (${snapshots.length})`), table([
+      { label: 'Snapshot', get: (s) => s.snapshot, cls: () => 'mono' },
+      { label: 'By', get: (s) => s.by, cls: () => 'muted' },
+      { label: 'Note', get: (s) => clip(s.note || '', 80) },
+      { label: 'Size', num: true, get: (s) => fmt.bytes(s.bytes) },
+      { label: '', get: (s) => s.before_drop ? 'before a drop' : '', cls: () => 'muted' },
+      { label: '', get: (s) => button('Delete', ask({ kind: 'snapshot', snapshot: s.snapshot }, s.snapshot, 'Delete snapshot')) || '' },
+    ], snapshots)) : null,
+    out);
+}
 
 function stat(v, label) { return h('div', { class: 'stat' }, h('b', {}, String(v ?? '–')), h('span', {}, label)); }
 

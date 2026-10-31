@@ -97,7 +97,8 @@ Read these before doing design work:
   - `design/machine/008.Databases.md`: tenant databases: JSON schemas that only expand,
     `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
     the operator's db tools and CLI, and grants as a box's whole reach with `grant_usage`
-    (§ 4.1).
+    (§ 4.1); snapshots, restoring to a new database, `db_create`, and drops only a person
+    makes in the panel (§ 11).
   - `design/machine/009.OAuth.md`: OAuth 2.1 for the terminal and agents: person and agent
     clients, PKCE codes with consent, rotating refresh tokens, the device flow, bearer tokens,
     and `"agents": true`.

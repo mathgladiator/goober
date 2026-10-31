@@ -48,7 +48,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
     "deletions",
-    "schema_check"};
+    "schema_check",
+    "db_snapshots", "db_unbound"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -259,6 +260,13 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       audit(tool == "write/scope" ? "panel.scope_set" : "panel.block_lift", me,
             tool == "write/scope" ? arg_text(args, "operator") : arg_text(args, "tenant"), status == 200 ? "ok" : "refused",
             bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
+      return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
+    // Dropping a database, a table, or a snapshot, or retiring a schema (008 § 11): a person's act.
+    if (tool == "write/drop") {
+      auto [status, body] = panel_drop(*who, args, request_id);
+      audit("panel.drop", me, arg_text(args, "kind") + ":" + arg_text(args, "tenant") + "/" + arg_text(args, "confirm"),
+            status == 200 ? "ok" : "refused", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
     if (!is_read_tool(tool)) {

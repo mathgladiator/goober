@@ -280,6 +280,14 @@ A deployed revision's files, with the box versions and build log, are in
 - **Pages, data, everything:** restore a backup onto your laptop to look first
   (`just rehydrate ~/copy`), then decide.
 
+## Drop an old database or table
+
+The panel's **Database** view lists, under "Unbound, and snapshots", the databases, tables,
+and schemas no box uses. Signed in as host:owner, press **Drop** (or **Retire** for a schema),
+type its name, and say why. The host refuses while any box uses it, and snapshots it first
+(the answer names the snapshot; `db_snapshots` lists them). Grok can't drop anything; it can
+list what could go (`db_unbound`) and ask you.
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone

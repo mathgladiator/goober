@@ -47,7 +47,8 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   c->name = name;
   for (const auto& f : o) {
     std::string k(f.key());
-    if (k != "type" && k != "primary-key" && k != "nullable" && k != "default" && k != "max-length") {
+    if (k != "type" && k != "primary-key" && k != "nullable" && k != "default" && k != "max-length" &&
+        k != "not-a-reference") {
       return fail(error, where + ": unknown field \"" + k + "\"");
     }
   }
@@ -60,6 +61,8 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   c->primary_key = json::get_bool(o, "primary-key", &err).value_or(false);
   c->nullable = json::get_bool(o, "nullable", &err).value_or(false);
   c->max_length = json::get_int(o, "max-length", &err);
+  // Says the name only looks like a reference (an RFC Message-ID, a host event id): no warning.
+  c->not_a_reference = json::get_bool(o, "not-a-reference", &err).value_or(false);
   if (!err.empty()) return fail(error, where + ": " + err);
   if (c->primary_key && ((c->type != "id" && c->type != "int64") || c->nullable)) {
     return fail(error, where + ": a primary key is a non-nullable id, which the host stamps (or, as tables were keyed "
@@ -180,10 +183,11 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
       if (col.primary_key && col.type == "int64") {
         s.warnings.push_back(where + " is an int64 primary key: new rows get this database's rowids, not host ids; "
                              "declare {\"type\": \"id\", \"primary-key\": true} (design/machine/038.Ids.md)");
-      } else if (!col.primary_key && looks_like_reference(col.name) &&
+      } else if (!col.primary_key && !col.not_a_reference && looks_like_reference(col.name) &&
                  (col.type == "string" || col.type == "int32" || col.type == "int64")) {
         s.warnings.push_back(where + " looks like a reference to a user or a row, but is " + col.type +
-                             ": a reference is {\"type\": \"id\"}; ids are never text and never emails");
+                             ": a reference is {\"type\": \"id\"}; ids are never text and never emails. If it isn't "
+                             "one (an RFC Message-ID, a host event id), say so: \"not-a-reference\": true");
       }
       table.columns.push_back(std::move(col));
     }
@@ -266,6 +270,17 @@ std::optional<Schema> SchemaStore::get(std::string_view name) const {
   if (!text) return std::nullopt;
   std::string err;
   return parse_schema(*text, &err);
+}
+
+bool SchemaStore::retire(std::string_view name, const std::string& record, std::string* error) {
+  if (!get(name)) return *error = "no schema named " + std::string(name), false;
+  if (retired(name)) return *error = "schema " + std::string(name) + " is already retired", false;
+  return wal_.commit({{wal::FileChange::Kind::kWrite, "schemas/" + std::string(name) + ".retired", record}}, error);
+}
+
+std::optional<std::string> SchemaStore::retired(std::string_view name) const {
+  if (!is_valid_sql_name(name)) return std::nullopt;
+  return base::read_file(wal_.root() / "schemas" / (std::string(name) + ".retired"));
 }
 
 std::vector<std::string> SchemaStore::list() const {

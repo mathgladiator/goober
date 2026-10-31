@@ -566,6 +566,18 @@ class Host {
                                                       const std::string& request_id);
   std::pair<int, boost::json::object> panel_unblock(const SignedIn& who, const boost::json::object& args,
                                                     const std::string& request_id);
+  // The panel's drops (design/machine/008.Databases.md § 11; db_admin.cpp): a database, a
+  // table, a snapshot, or retiring a schema. A person's act alone; snapshot first.
+  std::pair<int, boost::json::object> panel_drop(const SignedIn& who, const boost::json::object& args,
+                                                 const std::string& request_id);
+  // Which boxes' strategies (active or disabled) bind a tenant's database, and the tables each
+  // names (its grants, its schema's tables).
+  struct DbBinding {
+    std::string box, version, strategy, schema;
+    bool disabled = false;
+    std::set<std::string> tables;
+  };
+  std::vector<DbBinding> db_bindings(const std::string& tenant, const std::string& database);
 
  private:
   std::mutex upload_tickets_mu_;
@@ -709,6 +721,16 @@ class Host {
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();
+  // Operators and databases (db_admin.cpp): snapshots, restoring to a new database, db_create,
+  // db_unbound.
+  void register_db_admin_tools();
+  std::filesystem::path snapshots_dir(const std::string& tenant) const;
+  std::optional<boost::json::object> take_snapshot(const std::string& tenant, const std::string& database,
+                                                   const std::string& note, const std::string& by, bool for_drop,
+                                                   std::string* error);
+  std::vector<boost::json::object> list_snapshots(const std::string& tenant, const std::string& database);
+  std::optional<std::pair<std::filesystem::path, boost::json::object>> find_snapshot(const std::string& tenant,
+                                                                                     const std::string& id);
   void run_source_job(struct BuildJob& job, bool deploy);
   std::unique_ptr<class BackupService> backups_;
   std::thread backup_thread_;

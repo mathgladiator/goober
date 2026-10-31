@@ -195,6 +195,11 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
                       "Otherwise try it with schema_check, then store it with schema_put",
              false;
     }
+    if (schemas_->retired(st.schema)) {
+      return *error = where + ": schema " + st.schema + " is retired (a person retired it in the panel, 008 § 11); "
+                      "name a schema in service",
+             false;
+    }
     if (st.pattern == "by_timer") {
       // The scheduler reads these columns as they are (045), so they must exist.
       const auto* t = schema->table(st.table);

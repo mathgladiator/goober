@@ -78,7 +78,7 @@ TEST(Types, RefusesAnythingOutsideTheSubset) {
   refuse(R"({"type":"array","items":{"type":"boolean"}})", "maxItems");
   refuse(R"({"oneOf":[{"type":"boolean"}]})", "outside goober's subset");
   refuse(R"({"type":["string","null"]})", "one type");
-  refuse(R"({"type":"string","pattern":"a+"})", "outside goober's subset");
+  refuse(R"({"type":"string","pattern":"a+"})", "linear time");
   refuse(R"({"type":"string","maximum":3})", "doesn't apply");
   refuse(R"({"type":"string","format":"token"})", "token");
   refuse(R"({"$ref":"https://evil.test/x.json"})", "same document");
@@ -129,4 +129,35 @@ TEST(Types, RefusesDocumentsThatExpandEnormously) {
   EXPECT_FALSE(Types::parse(R"({"openapi":"3.1.0","components":{"schemas":{)" + schemas + "}}}", &err));
   EXPECT_NE(err.find("expands"), std::string::npos) << err;
   EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+}
+
+// const (011 § 2): one exact value, for a string, boolean, integer, or number; an int64's is
+// compared as its string of digits, as int64 values reach the box.
+TEST(Types, ConstAllowsOneValue) {
+  std::string err;
+  auto t = Types::parse(R"({"openapi":"3.1.0","components":{"schemas":{"Event":{
+      "type":"object","additionalProperties":false,"required":["kind"],
+      "properties":{"kind":{"type":"string","const":"signup"},
+                    "version":{"type":"integer","format":"int32","const":2},
+                    "box":{"type":"integer","format":"int64","const":"4294967296"},
+                    "on":{"type":"boolean","const":true},
+                    "rate":{"type":"number","format":"double","const":1.5}}}}}})", &err);
+  ASSERT_TRUE(t) << err;
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"signup","version":2,"box":4294967296,"on":true,"rate":1.5})"), "");
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"signup","box":"4294967296"})"), "");
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"login"})"), R"($.kind: must be "signup")");
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"signup","version":3})"), "$.version: must be 2");
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"signup","box":"7"})"), R"($.box: must be "4294967296")");
+  EXPECT_EQ(error_of(*t, "Event", R"({"kind":"signup","on":false})"), "$.on: must be true");
+  EXPECT_EQ(json::dump(t->json_schema("Event").at("properties").at("kind").at("const")), R"("signup")");
+  auto refuse = [](const std::string& schema, const char* why) {
+    std::string e;
+    std::string doc = R"({"openapi":"3.1.0","components":{"schemas":{"T":)" + schema + "}}}";
+    EXPECT_FALSE(Types::parse(doc, &e)) << schema;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refuse(R"({"type":"string","const":3})", "own type");
+  refuse(R"({"type":"integer","format":"int32","const":"3"})", "own type");
+  refuse(R"({"type":"array","maxItems":2,"items":{"type":"boolean"},"const":[true]})", "string, boolean, integer, or number");
+  refuse(R"({"type":"string","pattern":"^[a-z]+$"})", "isn't supported yet");
 }

@@ -572,6 +572,18 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [x] schema_put, the key refusal, and `box_guide` say a natural key is a unique index, not the
       primary key.
 
+### Databases for migrations, and drops only a person makes (008 § 11; 011)
+- [x] `db_create` (stored schemas, before any box binds it), `db_snapshot`/`db_snapshots`
+      (online backup, SHA-256, row counts; 100 files and 2 GiB a tenant), `db_restore_to_new`
+      (never over an existing database), `db_unbound`; tests.
+- [x] Drops in the panel only, by host:owner, the name typed: a database, a table, a
+      snapshot, or retiring a schema; refused while any box (active or disabled) binds it;
+      snapshot first; audit log and change log; retired schemas refused at upload; tests.
+- [x] A column's `"not-a-reference": true` silences the reference warning; tests.
+- [x] Types: `const` accepted; `pattern` refused until the host has a linear-time regex
+      engine, with that reason in the error and `box_guide`; tests.
+- [ ] A linear-time regex engine, so `pattern` can be accepted.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
