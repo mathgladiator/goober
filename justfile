@@ -119,6 +119,11 @@ fuzz iters="20000":
     cmake --preset asan >/dev/null && cmake --build --preset asan
     ASAN_OPTIONS=detect_leaks=0 GOOBER_FUZZ_ITERS={{iters}} {{host_src}}/build/asan/packages/fuzz/goober_fuzz_test
 
+# The real timer driver on the real clock for some minutes (ctest simulates time instead);
+# logs each fire's drift to temporal-logs/. Daily: host-src/tools/temporal-daily.sh install
+temporal minutes="3":
+    GOOBER_TEMPORAL_MINUTES={{minutes}} {{host_src}}/tools/temporal-daily.sh
+
 # Check DIR/host.json without starting anything.
 check dir=dir: build
     @{{bin}} check --config {{trim_start_match(dir, "dir=")}}/host.json

@@ -684,7 +684,14 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       a try's sender never verified); `version_health` over every local access-log file by
       the window, within a budget; route_try's observer rule tested, and enforced for the panel
       too (a try is a look only as an HTTP GET or HEAD).
-- [ ] Tries for timers.
+- [x] Tries for timers (`route_try {timer, at_ms?, row?}`, on copies; 014 § 7); box calls
+      take the tick's time as `now_ms`, so the blocking timer tests run on a simulated clock
+      with nothing reading the wall clock; tests.
+- [x] `version_promote` answers `tried` and warns, never refuses, about a version nothing
+      tried (040 § 5 decision 4, decided); tries kept in `jobs.db`; tests.
+- [x] The real driver on the real clock, apart from ctest: `goober-temporal`, `just temporal`,
+      and a daily systemd user timer (`host-src/tools/temporal-daily.sh install`) logging each
+      fire's drift to `temporal-logs/` (014 § 8).
 
 ### Phase 35: change sets (042)
 - [x] `changeset_create`, `changeset_add` (schemas, versions stored or uploaded dark, content

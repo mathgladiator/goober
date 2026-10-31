@@ -102,6 +102,13 @@ and `mail_activity` with the tenant (example), which lists the site's mail in an
 what happened to each (a `mail_template_send_test` shows as `test`). `mail_domain_check` with
 example.com checks the mail DNS (MX, SPF, DMARC, SES's DKIM) and says which records to add;
 `host_health`'s `smtp_listener` says whether Stalwart answers on port 25.
+
+**Do timers keep real time?** The tests fake the clock, so a daily run checks the real one, on
+the machine that holds this repo (your laptop or a dev box, not the server). Once:
+`host-src/tools/temporal-daily.sh install`. Then each day's verdict is the newest line of
+`temporal-logs/summary.jsonl` (`"pass": true`); a failing day's `temporal-*.jsonl` names each
+late, missed, or doubled fire. Run one by hand with `just temporal`; remove the daily run with
+`host-src/tools/temporal-daily.sh uninstall`.
 **Mail needs your postal address.** Outreach, lists, and invites are refused until the host
 config names it (CAN-SPAM). `host_health` lists `tenants_without_postal_address`. On the server,
 edit `/srv/goober/host/host.json` and add, next to `domains`:

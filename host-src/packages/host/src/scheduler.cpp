@@ -74,13 +74,7 @@ std::string rows_cache_key(const std::string& tenant, const std::string& box, co
 std::function<bool(db::Session&, std::string*)> Host::disable_fired_row(const manifest::DataStrategy* source,
                                                                         const manifest::HttpRoute& t,
                                                                         const bj::object& row) {
-  auto schema = schemas_->get(source->schema);
-  std::string pk = "id";
-  if (auto* table = schema ? schema->table(source->table) : nullptr) {
-    for (const auto& c : table->columns) {
-      if (c.primary_key) pk = c.name;
-    }
-  }
+  std::string pk = timer_source_key(*source);
   const bj::value* key = row.if_contains(pk);
   const bj::value* at = row.if_contains(t.at_field);
   bj::array params{key ? *key : bj::value(nullptr), at ? *at : bj::value(nullptr)};
@@ -89,6 +83,37 @@ std::function<bool(db::Session&, std::string*)> Host::disable_fired_row(const ma
   return [source, sql, params](db::Session& session, std::string* error) {
     return session.host_exec(*source, sql, params, error);
   };
+}
+
+std::string Host::timer_source_key(const manifest::DataStrategy& source) {
+  auto schema = schemas_->get(source.schema);
+  std::string pk = "id";
+  if (auto* table = schema ? schema->table(source.table) : nullptr) {
+    for (const auto& c : table->columns) {
+      if (c.primary_key) pk = c.name;
+    }
+  }
+  return pk;
+}
+
+std::optional<std::vector<bj::object>> Host::timer_source_rows(const manifest::DataStrategy& source,
+                                                               const std::string& tenant, db::Databases& dbs,
+                                                               size_t limit, std::string* error) {
+  std::vector<bj::object> out;
+  std::string database = source.database_for(tenant);
+  if (!dbs.exists(tenant, database)) return out;
+  std::string sql = "SELECT * FROM " + sql_name(source.table) +
+                    (source.active_field.empty() ? "" : " WHERE " + sql_name(source.active_field) + " = 1") +
+                    " LIMIT " + std::to_string(limit);
+  auto r = dbs.operate(tenant, database, sql, nullptr, int(limit), false, error);
+  if (!r) return std::nullopt;
+  const auto& cols = r->at("columns").as_array();
+  for (const auto& row : r->at("rows").as_array()) {
+    bj::object o;
+    for (size_t i = 0; i < cols.size(); ++i) o[cols[i].as_string()] = row.as_array()[i];
+    out.push_back(std::move(o));
+  }
+  return out;
 }
 
 void Host::timer_tick(int64_t now_ms) {
@@ -207,34 +232,16 @@ void Host::timer_tick(int64_t now_ms) {
             if (cache.read_at == 0 || now_ms - cache.read_at >= kRowsRefreshMs) {
               cache.read_at = now_ms;
               cache.rows.clear();
-              std::string database = source->database_for(tenant);
-              if (databases_->exists(tenant, database)) {
-                std::string sql = "SELECT * FROM " + sql_name(source->table) +
-                                  (source->active_field.empty() ? "" : " WHERE " + sql_name(source->active_field) + " = 1") +
-                                  " LIMIT " + std::to_string(kMaxRows + 1);
-                std::string err;
-                auto r = databases_->operate(tenant, database, sql, nullptr, kMaxRows + 1, false, &err);
-                if (!r) {
-                  std::cerr << "goober-host: timer source " << source->name << " for " << tenant << ": " << err << "\n";
-                } else {
-                  const auto& cols = r->at("columns").as_array();
-                  for (const auto& row : r->at("rows").as_array()) {
-                    if (cache.rows.size() >= size_t(kMaxRows)) break;
-                    bj::object o;
-                    for (size_t i = 0; i < cols.size(); ++i) o[cols[i].as_string()] = row.as_array()[i];
-                    cache.rows.push_back(std::move(o));
-                  }
-                }
+              std::string err;
+              auto rows = timer_source_rows(*source, tenant, *databases_, kMaxRows + 1, &err);
+              if (!rows) {
+                std::cerr << "goober-host: timer source " << source->name << " for " << tenant << ": " << err << "\n";
+              } else {
+                if (rows->size() > size_t(kMaxRows)) rows->resize(kMaxRows);
+                cache.rows = std::move(*rows);
               }
             }
-            auto schema = schemas_->get(source->schema);
-            const db::Table* table = schema ? schema->table(source->table) : nullptr;
-            std::string pk = "id";
-            if (table) {
-              for (const auto& c : table->columns) {
-                if (c.primary_key) pk = c.name;
-              }
-            }
+            std::string pk = timer_source_key(*source);
             for (const auto& row : cache.rows) {
               const bj::value* key_value = row.if_contains(pk);
               if (!key_value) continue;
@@ -282,7 +289,7 @@ void Host::timer_tick(int64_t now_ms) {
   }
 
   for (auto& d : due) {
-    auto job = [this, d, cfg]() mutable {
+    auto job = [this, d, cfg, now_ms]() mutable {
       // However the fire ends, even by throwing, its key stops being "running", or the timer
       // would never fire again for that row.
       struct Release {
@@ -306,6 +313,7 @@ void Host::timer_tick(int64_t now_ms) {
       CallOptions options;
       options.timeout_ms = t.timeout_ms;
       options.no_response_ok = true;
+      options.now_ms = now_ms;  // the tick's clock, simulated in tests, is the fire's now
       if (!t.at_field.empty() && d.source) options.before_commit = disable_fired_row(d.source, t, d.row.as_object());
       auto call = call_box(d.ref, doc, d.tenant, request_id, std::nullopt, options);
       bool ok = (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk && call.result.status < 500) ||
@@ -332,7 +340,7 @@ void Host::timer_tick(int64_t now_ms) {
           timers_->retry_after.erase(d.key);
           timers_->rows.erase(rows_cache_key(d.tenant, d.ref.box->manifest.box, d.source->name));  // read again: the row is off now
         } else {
-          timers_->retry_after[d.key] = base::now_unix_ms() + kRetryMs;
+          timers_->retry_after[d.key] = now_ms + kRetryMs;
         }
       }
     };
@@ -396,19 +404,10 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
           if (d.name == t.source) source = d.pattern == "by_timer" ? &d : nullptr;
         }
         if (!source) return *error = "timer " + name + " has no by_timer source", std::nullopt;
-        std::string database = source->database_for(tenant);
-        if (!databases_->exists(tenant, database)) return 0;
-        std::string sql = "SELECT * FROM " + sql_name(source->table) +
-                          (source->active_field.empty() ? "" : " WHERE " + sql_name(source->active_field) + " = 1") +
-                          " LIMIT " + std::to_string(kMaxRows);
-        auto r = databases_->operate(tenant, database, sql, nullptr, kMaxRows, false, error);
-        if (!r) return std::nullopt;
-        const auto& cols = r->at("columns").as_array();
-        for (const auto& row : r->at("rows").as_array()) {
-          bj::object o;
-          for (size_t i = 0; i < cols.size(); ++i) o[cols[i].as_string()] = row.as_array()[i];
-          rows.push_back(std::move(o));
-        }
+        auto read = timer_source_rows(*source, tenant, *databases_, kMaxRows, error);
+        if (!read) return std::nullopt;
+        if (read->empty()) return 0;
+        for (auto& o : *read) rows.push_back(std::move(o));
       }
       // The keys this fire holds, so the scheduler doesn't fire the same rows meanwhile.
       std::vector<std::string> keys;
@@ -417,14 +416,7 @@ std::optional<int> Host::run_timer_now(const std::string& name, const std::strin
       for (const auto& d : box->manifest.data) {
         if (d.name == t.source && d.pattern == "by_timer") source = &d;
       }
-      if (source) {
-        auto schema = schemas_->get(source->schema);
-        if (auto* table = schema ? schema->table(source->table) : nullptr) {
-          for (const auto& c : table->columns) {
-            if (c.primary_key) pk = c.name;
-          }
-        }
-      }
+      if (source) pk = timer_source_key(*source);
       for (const auto& row : rows) {
         std::string row_key;
         if (const bj::value* v = row.is_object() ? row.as_object().if_contains(pk) : nullptr) {

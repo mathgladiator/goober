@@ -62,8 +62,13 @@
   edit, and push the same project from a terminal with `goober.py source`.
 - **For Rust on the server:** every `just deploy` installs the toolchain and vendors the crates
   (serde, serde_json) on the server; `--without-rust` skips it. WAT boxes and sites need nothing.
-- **Proof.** `source_tools_test`. A Rust template was built, deployed, and serving on the demo
-  host.
+- **Before going live.** Grok can store a version dark (`version_upload {activate: false}`),
+  try its HTTP routes, tools, mail routes, and timers with `route_try` (on copies; nothing real
+  changes), then `version_promote`, which warns about a version nothing tried. Timers are
+  tested on a simulated clock; the real clock is checked daily with `just temporal`'s
+  `temporal-daily.sh install`.
+- **Proof.** `source_tools_test`, `route_try_test`. A Rust template was built, deployed, and
+  serving on the demo host.
 - **Watch for.**
   - The operator token is host owner: give it only to an agent you trust like yourself.
   - Every deploy goes live at once: there are no approvals yet.

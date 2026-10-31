@@ -112,7 +112,9 @@ Read these before doing design work:
   - `design/machine/013.SecurityReview.md`: the first internal security review: every
     finding, its fix and test, what isn't fixed and why, and what was checked and sound.
   - `design/machine/014.Time.md`: timers: every-ms and cron routes, `by_timer` sources firing
-    per row in each row's zone or once at an at-field, catch-up, and the desk's 6am briefing.
+    per row in each row's zone or once at an at-field, catch-up, and the desk's 6am briefing;
+    tests on a simulated clock, `route_try {timer}` (§ 7), and the real clock checked daily by
+    `goober-temporal` (§ 8).
   - `design/machine/015.Network.md`: `external` services through `goober_call`, the outbox
     committed with the request, delivery with retries and idempotency keys, and the key store.
   - `design/machine/016.Internal.md`: internal routes with callers, synchronous box-to-box calls

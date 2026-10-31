@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS runs (
   failures_in_row INTEGER NOT NULL, last_error TEXT NOT NULL, by TEXT NOT NULL, started_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL, finished_ms INTEGER NOT NULL, errors TEXT NOT NULL, log TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS runs_by_job ON runs (box, job, tenant);
+CREATE TABLE IF NOT EXISTS tries (
+  box TEXT NOT NULL, version TEXT NOT NULL, tenant TEXT NOT NULL, kind TEXT NOT NULL, by TEXT NOT NULL,
+  at_ms INTEGER NOT NULL, PRIMARY KEY (box, version, tenant, kind));
 )sql";
 
 constexpr int kFailuresToStop = 3;
@@ -169,6 +172,28 @@ bool JobRuns::done(const std::string& box, const std::string& version, const std
                        "AND state = 'done'");
   s.bind(1, box).bind(2, version).bind(3, job).bind(4, tenant);
   return s.step();
+}
+
+void JobRuns::record_try(const std::string& box, const std::string& version, const std::string& tenant,
+                         const std::string& kind, const std::string& by, int64_t at_ms) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, "INSERT INTO tries (box, version, tenant, kind, by, at_ms) VALUES (?, ?, ?, ?, ?, ?) "
+                       "ON CONFLICT (box, version, tenant, kind) DO UPDATE SET by = excluded.by, at_ms = excluded.at_ms");
+  s.bind(1, box).bind(2, version).bind(3, tenant).bind(4, kind).bind(5, by).bind(6, at_ms).run();
+}
+
+bj::array JobRuns::tries(const std::string& box, const std::string& version) {
+  std::lock_guard lock(mu_);
+  bj::array out;
+  sqlite::Stmt s(*db_, "SELECT tenant, kind, by, at_ms FROM tries WHERE box = ? AND version = ? "
+                       "UNION ALL SELECT tenant, 'job_dry_run', by, max(started_ms) FROM runs "
+                       "WHERE box = ? AND version = ? AND dry_run = 1 GROUP BY tenant, by ORDER BY 4 DESC");
+  s.bind(1, box).bind(2, version).bind(3, box).bind(4, version);
+  while (s.step()) {
+    out.push_back(bj::object{{"tenant", s.text(0)}, {"kind", s.text(1)}, {"by", s.text(2)},
+                             {"at", base::format_utc_ms(s.int64(3))}});
+  }
+  return out;
 }
 
 // ---- The host's side ----
