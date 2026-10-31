@@ -96,3 +96,17 @@ TEST(Ids, HighestIdReadsKeysAndAutoincrement) {
   EXPECT_EQ(ids::highest_id_under(dir), 41);
   EXPECT_EQ(ids::highest_id(dir / "missing.db"), 0);
 }
+
+// The first id is 2^32 + 1; a counter made when it was 2^32, with nothing minted, moves up.
+TEST(Ids, TheFirstIdIsPastEvery32BitInteger) {
+  EXPECT_EQ(ids::kFirstId, 4294967297);
+  auto dir = fresh("ids_first");
+  {
+    sqlite::Db db(dir / "ids.db");
+    db.exec("CREATE TABLE id_counter (only INTEGER PRIMARY KEY CHECK (only = 1), next_id INTEGER NOT NULL)");
+    db.exec("INSERT INTO id_counter VALUES (1, 4294967296)");
+  }
+  ids::Service s(dir / "ids.db", "test");
+  EXPECT_FALSE(s.created());
+  EXPECT_EQ(s.next(), 4294967297);
+}

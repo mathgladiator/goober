@@ -18,9 +18,10 @@ class Db;
 
 namespace goober::ids {
 
-// Where a fresh service starts: above every SQLite rowid and AUTOINCREMENT value a host
-// made before it, so an old id and a host id are never the same number (038 § 2).
-inline constexpr int64_t kFirstId = int64_t(1) << 32;
+// Where a fresh service starts: 2^32 + 1, above every SQLite rowid and AUTOINCREMENT value a
+// host made before it, so an old id and a host id are never the same number, and past every
+// 32-bit integer, so any code that would truncate an id fails from the first one (038 § 2).
+inline constexpr int64_t kFirstId = (int64_t(1) << 32) + 1;
 // How far past the highest id already stored the counter jumps, at first start and after a
 // restore, so an id written after the last backup is never minted again (021).
 inline constexpr int64_t kMargin = 10'000'000;

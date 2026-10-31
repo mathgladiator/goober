@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <optional>
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
@@ -43,6 +44,89 @@ const std::set<std::string> kBoxFunctions = {
     "first_value", "last_value", "ntile"};
 
 bool host_table(std::string_view t) { return t.starts_with("goober_") || t.starts_with("sqlite_"); }
+
+// ---- No clock for boxes ----
+//
+// A box's only clock is the call's now_ms (its input, logged for replays and caching, 037).
+// SQLite's date functions read the time through the VFS when given 'now' (date('now'),
+// CURRENT_TIMESTAMP, date() with no value), so the package's connections go through a VFS
+// that forwards everything to the default one, except that while a box's statement runs, a
+// request for the time interrupts the statement instead: SQLite undoes it whole, and the box
+// is told why. Operators' statements and the host's own keep the clock.
+thread_local sqlite3* t_clockless = nullptr;  // the box statement's connection, while it runs
+thread_local bool t_clock_asked = false;
+sqlite3_vfs* g_root_vfs = nullptr;
+sqlite3_vfs g_vfs;
+
+int vfs_time_int64(sqlite3_vfs*, sqlite3_int64* out) {
+  if (t_clockless) {
+    t_clock_asked = true;
+    sqlite3_interrupt(t_clockless);
+    *out = 0;
+    return SQLITE_ERROR;
+  }
+  return g_root_vfs->xCurrentTimeInt64(g_root_vfs, out);
+}
+int vfs_time(sqlite3_vfs*, double* out) {
+  if (t_clockless) {
+    t_clock_asked = true;
+    sqlite3_interrupt(t_clockless);
+    *out = 0;
+    return SQLITE_ERROR;
+  }
+  return g_root_vfs->xCurrentTime(g_root_vfs, out);
+}
+int vfs_open(sqlite3_vfs*, const char* name, sqlite3_file* f, int flags, int* out) {
+  return g_root_vfs->xOpen(g_root_vfs, name, f, flags, out);
+}
+int vfs_delete(sqlite3_vfs*, const char* name, int sync) { return g_root_vfs->xDelete(g_root_vfs, name, sync); }
+int vfs_access(sqlite3_vfs*, const char* name, int flags, int* out) {
+  return g_root_vfs->xAccess(g_root_vfs, name, flags, out);
+}
+int vfs_full(sqlite3_vfs*, const char* name, int n, char* out) { return g_root_vfs->xFullPathname(g_root_vfs, name, n, out); }
+void* vfs_dlopen(sqlite3_vfs*, const char* name) { return g_root_vfs->xDlOpen(g_root_vfs, name); }
+void vfs_dlerror(sqlite3_vfs*, int n, char* out) { g_root_vfs->xDlError(g_root_vfs, n, out); }
+void (*vfs_dlsym(sqlite3_vfs*, void* h, const char* sym))(void) { return g_root_vfs->xDlSym(g_root_vfs, h, sym); }
+void vfs_dlclose(sqlite3_vfs*, void* h) { g_root_vfs->xDlClose(g_root_vfs, h); }
+int vfs_random(sqlite3_vfs*, int n, char* out) { return g_root_vfs->xRandomness(g_root_vfs, n, out); }
+int vfs_sleep(sqlite3_vfs*, int us) { return g_root_vfs->xSleep(g_root_vfs, us); }
+int vfs_last_error(sqlite3_vfs*, int n, char* out) {
+  return g_root_vfs->xGetLastError ? g_root_vfs->xGetLastError(g_root_vfs, n, out) : 0;
+}
+int vfs_set_call(sqlite3_vfs*, const char* name, sqlite3_syscall_ptr p) {
+  return g_root_vfs->xSetSystemCall(g_root_vfs, name, p);
+}
+sqlite3_syscall_ptr vfs_get_call(sqlite3_vfs*, const char* name) { return g_root_vfs->xGetSystemCall(g_root_vfs, name); }
+const char* vfs_next_call(sqlite3_vfs*, const char* name) { return g_root_vfs->xNextSystemCall(g_root_vfs, name); }
+
+// Made the default once, before the package opens a connection.
+void install_clockless_vfs() {
+  static const bool installed = [] {
+    g_root_vfs = sqlite3_vfs_find(nullptr);
+    if (!g_root_vfs || g_root_vfs->iVersion < 3) return false;
+    g_vfs = *g_root_vfs;
+    g_vfs.zName = "goober";
+    g_vfs.pNext = nullptr;
+    g_vfs.xOpen = vfs_open;
+    g_vfs.xDelete = vfs_delete;
+    g_vfs.xAccess = vfs_access;
+    g_vfs.xFullPathname = vfs_full;
+    g_vfs.xDlOpen = vfs_dlopen;
+    g_vfs.xDlError = vfs_dlerror;
+    g_vfs.xDlSym = vfs_dlsym;
+    g_vfs.xDlClose = vfs_dlclose;
+    g_vfs.xRandomness = vfs_random;
+    g_vfs.xSleep = vfs_sleep;
+    g_vfs.xCurrentTime = vfs_time;
+    g_vfs.xGetLastError = vfs_last_error;
+    g_vfs.xCurrentTimeInt64 = vfs_time_int64;
+    g_vfs.xSetSystemCall = vfs_set_call;
+    g_vfs.xGetSystemCall = vfs_get_call;
+    g_vfs.xNextSystemCall = vfs_next_call;
+    return sqlite3_vfs_register(&g_vfs, 1) == SQLITE_OK;
+  }();
+  (void)installed;
+}
 
 // ---- Host ids (design/machine/038.Ids.md § 3) ----
 //
@@ -228,6 +312,10 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
     case SQLITE_FUNCTION:
       if (!auth.strategy) return SQLITE_OK;
       if (kBoxFunctions.count(base::to_lower(c))) return SQLITE_OK;
+      if (std::string f = base::to_lower(c); f == "current_timestamp" || f == "current_date" || f == "current_time") {
+        return deny("box SQL has no clock: " + f + " is refused. Pass the call's now_ms as a parameter instead, like "
+                    "datetime(:now_ms / 1000, 'unixepoch')");
+      }
       // The host's id functions: goober_id() anywhere (it only ever hands out a fresh id); the
       // others only inside the host's own id triggers.
       if (base::to_lower(c) == "goober_id") return SQLITE_OK;
@@ -447,6 +535,14 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
   }
   Progress progress{0, step_budget, std::chrono::steady_clock::now() + std::chrono::milliseconds(kStatementMs), false};
   sqlite3_progress_handler(db, kProgressSteps, on_progress, &progress);
+  // A box's statement has no clock: asking for the time interrupts it (see install_clockless_vfs).
+  t_clock_asked = false;
+  struct Clockless {
+    explicit Clockless(sqlite3* db) { t_clockless = db; }
+    ~Clockless() { t_clockless = nullptr; }
+  };
+  std::optional<Clockless> clockless;
+  if (auth.strategy) clockless.emplace(db);
   bj::array columns;
   int ncol = sqlite3_column_count(st.s);
   for (int i = 0; i < ncol; ++i) columns.push_back(bj::value(sqlite3_column_name(st.s, i)));
@@ -471,6 +567,11 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
     rows.push_back(std::move(row));
   }
   sqlite3_progress_handler(db, 0, nullptr, nullptr);
+  clockless.reset();
+  if (rc == SQLITE_INTERRUPT && t_clock_asked) {
+    return fail("box SQL has no clock: date('now'), CURRENT_TIMESTAMP, CURRENT_DATE, and date or time functions with no "
+                "value are refused. Pass the call's now_ms as a parameter instead, like datetime(:now_ms / 1000, 'unixepoch')");
+  }
   if (rc == SQLITE_INTERRUPT && progress.late) {
     return fail("the statement ran longer than " + std::to_string(kStatementMs) + " ms");
   }
@@ -594,6 +695,7 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
   if (!is_valid_sql_name(database)) return *error = "bad database name: " + std::string(database), nullptr;
   auto path = file(tenant, database);
   std::filesystem::create_directories(path.parent_path());
+  install_clockless_vfs();
   auto db = std::make_unique<sqlite::Db>(path);
   install_id_functions(db->raw(), &ids_);
   if (schema) {

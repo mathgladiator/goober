@@ -526,7 +526,7 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 
 ### Phase 32: host ids, and jobs that move data (038)
 - [x] The id service: a counter in `storage/ids/ids.db`, ranges of 10,000 vended durably,
-      a first start past every stored id (and above 2^32), `ids_status`, `goober-host ids
+      a first start past every stored id (and from 2^32 + 1), `ids_status`, `goober-host ids
       bump`, and rehydrate's jump; tests.
 - [x] Users, invites, and uploads take their ids from it.
 - [x] The `id` column type: keys stamped by the host (`DEFAULT (goober_id())`, triggers that
@@ -592,8 +592,9 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       SQL functions (json_each and json_tree included; tested), ids from before the service and
       what an empty `ids_status` means (now with a `note`), calls that may return without
       answering, and that `box_render` runs neither the box nor the gate.
-- [ ] Box SQL's date functions accept 'now', which reads the machine's clock: impure, and
-      unseen by replays and 037's caching. Refusing it would break boxes that use it.
+- [x] Box SQL has no clock (the human's call, 2026-10-31): 'now', CURRENT_TIMESTAMP and its
+      kin, and date functions with no value are refused, and the statement is undone (a VFS
+      that interrupts a box statement asking for the time); operators keep the clock; tests.
 
 ### Box flags (039)
 - [x] `"flags"` in the manifest (a closed set with defaults and optional values), the

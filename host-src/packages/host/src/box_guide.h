@@ -230,10 +230,10 @@ through the mail service. Failures are retried in order, then given up after 8 t
    - Ids are unique, not dense and not a clock: sort by a time column, never by id.
    - Nothing to reserve: every insert (a job's too) gets its id as it happens. ids_status
      shows the counter, and the range in use once the host has minted its first id since it
-     started; a counter of 4294967296 with no ranges means none has been minted yet.
+     started; a counter of 4294967297 with no ranges means none has been minted yet.
    - From before the id service (design/machine/038.Ids.md § 6): people who signed up earlier
      keep their ids, so {!user_id} holds their old, small id (as a string, like "2"), and new
-     people get ids from 4294967296 up; the two never collide. Tables keyed by int64 (or by
+     people get ids from 4294967297 (2^32 + 1) up; the two never collide. Tables keyed by int64 (or by
      nothing) keep SQLite's rowids until a job moves their rows into a table keyed by id. A
      reference column of type id holds old and new ids alike.
    schema_put warns about a key that isn't of type id (a table naming no key gets an old-style
@@ -270,9 +270,12 @@ through the mail service. Failures are retried in order, then given up after 8 t
      json_patch, json_quote, json_remove, json_replace, json_set, json_type, json_valid,
      json_group_array, json_group_object, -> and ->>; and json_each(...) and json_tree(...) as
      tables, over a value or a column you may read ("SELECT value FROM json_each(?)").
-   - Dates: date, time, datetime, julianday, unixepoch, strftime, timediff. They take 'now',
-     which reads the machine's clock when the statement runs; pass the request's now_ms
-     (goober_now_ms) instead, so a request has one time and a replay repeats it.
+   - Dates: date, time, datetime, julianday, unixepoch, strftime, timediff, on values you
+     give them. Box SQL has no clock: 'now' (bound or written), CURRENT_TIMESTAMP,
+     CURRENT_DATE, CURRENT_TIME, and these functions with no value are refused, and the
+     statement is undone. Pass the call's now_ms (goober_now_ms) as a parameter, like
+     datetime(:now_ms / 1000, 'unixepoch'), so a request has one time, a replay repeats it, and
+     a cached answer (037) depends on nothing the host can't see.
    - Text and numbers: abs, ceil, ceiling, char, coalesce, concat, concat_ws, floor, format,
      glob, hex, ifnull, iif, instr, length, like, likely, lower, ltrim, max, min, mod, nullif,
      octet_length, pow, power, printf, quote, replace, round, rtrim, sign, sqrt, substr,

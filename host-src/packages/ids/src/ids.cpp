@@ -37,10 +37,16 @@ Service::Service(const fs::path& file, std::string host, int64_t floor) : host_(
   db_->exec(kSchema);
   db_->exec("BEGIN IMMEDIATE");
   try {
-    if (read_counter(*db_) == 0) {
+    int64_t counter = read_counter(*db_);
+    if (counter == 0) {
       sqlite::Stmt s(*db_, "INSERT INTO id_counter (only, next_id) VALUES (1, ?)");
       s.bind(1, std::max(kFirstId, floor)).run();
       created_ = true;
+    } else if (counter < kFirstId) {
+      // A counter made when the first id was 2^32, before anything was minted from it: it only
+      // moves up, to the first id as it is now.
+      sqlite::Stmt s(*db_, "UPDATE id_counter SET next_id = ? WHERE only = 1");
+      s.bind(1, kFirstId).run();
     }
     db_->exec("COMMIT");
   } catch (...) {

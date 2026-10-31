@@ -460,9 +460,8 @@ TEST_F(DbTest, BoxSqlHasThePureFunctionsAndOperatorsHaveAll) {
   auto dates = ok("SELECT date(0, 'unixepoch'), strftime('%Y', 86400 * 365, 'unixepoch'), unixepoch('1970-01-02')");
   EXPECT_EQ(json::dump(dates.at("rows")), R"([["1970-01-01","1971",86400]])");
   ok("SELECT datetime('2026-10-30 12:00', '+1 day'), julianday('2000-01-01'), timediff('2026-10-30', '2026-10-01')");
-  // 'now' is accepted, and reads the machine's clock when the statement runs (box_guide says to
-  // pass the request's now_ms instead).
-  EXPECT_EQ(ok("SELECT date('now') IS NOT NULL").at("rows").at(0).at(0), 1);
+  // 'now' reads the machine's clock, so it is refused (BoxSqlHasNoClock): pass the call's now_ms.
+  EXPECT_NE(json::dump(J(s.run("book", "SELECT date('now') IS NOT NULL", ""))).find("no clock"), std::string::npos);
   refused("SELECT random()");
   refused("SELECT randomblob(4)");
   refused("SELECT changes()");
@@ -554,4 +553,39 @@ TEST_F(DbTest, IdKeyedTablesDrop) {
   ASSERT_TRUE(dbs->ensure_schema("playground", "keyed", *schema, &err)) << err;
   ASSERT_TRUE(dbs->drop_table("playground", "keyed", "items", &err)) << err;
   EXPECT_EQ(dbs->describe("playground", "keyed").at("tables").as_array().size(), 0u);
+}
+
+// Box SQL has no clock (the call's now_ms is the only one): asking for the time refuses the
+// statement and undoes it; explicit dates work; operators keep the clock.
+TEST_F(DbTest, BoxSqlHasNoClock) {
+  manifest::TableGrant g;
+  g.read_all = true;
+  g.insert = true;
+  std::vector<manifest::DataStrategy> strategies{strategy(g)};
+  db::Session s(*dbs, "playground", strategies, *schemas);
+  for (const char* sql : {"SELECT date('now')", "SELECT CURRENT_TIMESTAMP", "SELECT unixepoch()", "SELECT datetime()",
+                          "SELECT strftime('%s', 'NOW')", "SELECT julianday('now', '+1 day')"}) {
+    auto r = J(s.run("book", sql, ""));
+    ASSERT_TRUE(r.as_object().contains("error")) << sql << " " << json::dump(r);
+    EXPECT_NE(std::string(r.at("error").as_string()).find("no clock"), std::string::npos) << json::dump(r);
+  }
+  // A bound 'now' is the clock too.
+  EXPECT_TRUE(J(s.run("book", "SELECT date(?)", R"(["now"])")).as_object().contains("error"));
+  // A write that asks for the time is undone whole.
+  auto w = J(s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('x', date('now'), 1)", ""));
+  ASSERT_TRUE(w.as_object().contains("error")) << json::dump(w);
+  EXPECT_EQ(J(s.run("book", "SELECT count(*) FROM entries", "")).at("rows").at(0).at(0), 0);
+  // Explicit times work, the call's now_ms among them.
+  auto ok = J(s.run("book", "SELECT date('2026-10-31'), datetime(:now_ms / 1000, 'unixepoch')", R"({"now_ms": 1793404800000})"));
+  ASSERT_FALSE(ok.as_object().contains("error")) << json::dump(ok);
+  EXPECT_EQ(json::dump(ok.at("rows")), R"([["2026-10-31","2026-10-31 00:00:00"]])");
+  // The statement after a refusal runs normally, and the request still commits.
+  auto after = J(s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('y', 'hi', 2)", ""));
+  ASSERT_FALSE(after.as_object().contains("error")) << json::dump(after);
+  std::string err;
+  ASSERT_TRUE(s.commit(&err)) << err;
+  // Operators keep the clock.
+  auto op = dbs->operate("playground", "guestbook", "SELECT date('now') IS NOT NULL", nullptr, 10, false, &err);
+  ASSERT_TRUE(op) << err;
+  EXPECT_EQ(op->at("rows").at(0).at(0), 1);
 }

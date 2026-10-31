@@ -150,14 +150,14 @@ TEST_F(SiteRoutesTest, AttachmentsUploadServeAndReportUse) {
   ASSERT_EQ(up.status, 201) << up.body;
   std::string err;
   auto a = json::parse(up.body, &err);
-  EXPECT_EQ(a->at("url"), "/attachment/4294967296.png");
-  auto img = fetch(port, bhttp::verb::get, "/attachment/4294967296.png");
+  EXPECT_EQ(a->at("url"), "/attachment/4294967297.png");
+  auto img = fetch(port, bhttp::verb::get, "/attachment/4294967297.png");
   EXPECT_EQ(img.status, 200);
   EXPECT_EQ(img.body, kPng);
   EXPECT_EQ(img.headers["content-type"], "image/png");
   EXPECT_NE(img.headers["cache-control"].find("immutable"), std::string::npos);
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967296.jpg").status, 404);
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967297.png").status, 404);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967297.jpg").status, 404);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967298.png").status, 404);
 
   // Uploads and the manager need an editor; HTML is refused whatever it claims to be.
   EXPECT_EQ(fetch(port, bhttp::verb::post, "/attachment/upload", {}, kPng).status, 401);
@@ -176,25 +176,25 @@ TEST_F(SiteRoutesTest, AttachmentsUploadServeAndReportUse) {
                      {"content-type", "multipart/form-data; boundary=XyZ"}},
                     body);
   ASSERT_EQ(form.status, 201) << form.body;
-  auto svg = fetch(port, bhttp::verb::get, "/attachment/4294967297.svg");
+  auto svg = fetch(port, bhttp::verb::get, "/attachment/4294967298.svg");
   EXPECT_EQ(svg.headers["content-disposition"].substr(0, 10), "attachment");
   EXPECT_NE(svg.headers["content-security-policy"].find("sandbox"), std::string::npos);
 
   // Over MCP: base64 in, and the list knows what uses each one.
   auto put = tool("attachment_put", {{"tenant", "playground"}, {"base64", base::base64_encode(kPng)}, {"alt", "dog"}});
   ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
-  EXPECT_EQ(put.at("url"), "/attachment/4294967298.png");
-  EXPECT_EQ(put.at("markdown"), "![dog](/attachment/4294967298.png)");
-  tool("page_put", {{"tenant", "playground"}, {"path", "/pets"}, {"format", "markdown"}, {"body", "![dog](/attachment/4294967298.png)"}});
+  EXPECT_EQ(put.at("url"), "/attachment/4294967299.png");
+  EXPECT_EQ(put.at("markdown"), "![dog](/attachment/4294967299.png)");
+  tool("page_put", {{"tenant", "playground"}, {"path", "/pets"}, {"format", "markdown"}, {"body", "![dog](/attachment/4294967299.png)"}});
   auto unused = tool("attachment_list", {{"tenant", "playground"}, {"unused", true}});
   EXPECT_EQ(unused.as_array().size(), 2u);
   // An id given as a string of digits, as ids are elsewhere in JSON, works too.
-  EXPECT_EQ(tool("attachment_get", {{"tenant", "playground"}, {"id", "4294967298"}}).at("url"), "/attachment/4294967298.png");
+  EXPECT_EQ(tool("attachment_get", {{"tenant", "playground"}, {"id", "4294967299"}}).at("url"), "/attachment/4294967299.png");
   EXPECT_TRUE(tool("attachment_get", {{"tenant", "playground"}, {"id", "12x"}}).as_object().contains("error"));
-  auto refused = tool("attachment_delete", {{"tenant", "playground"}, {"id", "4294967298"}});
+  auto refused = tool("attachment_delete", {{"tenant", "playground"}, {"id", "4294967299"}});
   EXPECT_NE(std::string(refused.at("error").as_string()).find("pets.md"), std::string::npos);
-  EXPECT_EQ(tool("attachment_delete", {{"tenant", "playground"}, {"id", 4294967298}, {"force", true}}).at("deleted"), 4294967298);
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967298.png").status, 404);
+  EXPECT_EQ(tool("attachment_delete", {{"tenant", "playground"}, {"id", 4294967299}, {"force", true}}).at("deleted"), 4294967299);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/attachment/4294967299.png").status, 404);
   EXPECT_TRUE(tool("attachment_put", {{"tenant", "playground"}, {"url", "http://example.com/x.png"}})
                   .as_object()
                   .contains("error"));
