@@ -353,3 +353,97 @@ TEST_F(DbTest, GrantsAreTheWholeReach) {
   EXPECT_TRUE(used.at("tally").read.empty());
   EXPECT_FALSE(used.count("secrets"));
 }
+
+// Keys the host stamps (design/machine/038.Ids.md § 3): an id primary key gets the service's
+// next id, a box can't name one or change one, ids read back as strings, and the answer lists
+// the rows' new ids.
+TEST_F(DbTest, IdKeysAreStampedByTheHost) {
+  int64_t next = int64_t(1) << 32;
+  dbs->set_id_source([&] { return next++; });
+  std::string err;
+  const char* kMembers = R"({"schema": "members1", "tables": {"members": {"columns": {
+      "id": {"type": "id", "primary-key": true},
+      "user_id": {"type": "id"},
+      "name": {"type": "string"}},
+      "indexes": {"members_by_user": {"columns": ["user_id"], "unique": true}}}}})";
+  auto parsed = db::parse_schema(kMembers, &err);
+  ASSERT_TRUE(parsed) << err;
+  EXPECT_TRUE(parsed->warnings.empty());
+  ASSERT_TRUE(schemas->put(kMembers, &err)) << err;
+  manifest::DataStrategy st;
+  st.name = "m";
+  st.schema = "members1";
+  st.database = "members";
+  st.pattern = "sql";
+  st.row_limit = 10;
+  manifest::TableGrant g;
+  g.insert = true;  // insert only: the host's triggers still read the key
+  st.tables["members"] = g;
+  manifest::DataStrategy reader = st;
+  reader.name = "r";
+  reader.tables["members"].read_all = true;
+  reader.tables["members"].update_all = true;
+  std::vector<manifest::DataStrategy> strategies{st, reader};
+
+  db::Session s(*dbs, "playground", strategies, *schemas);
+  auto r = J(s.run("m", "INSERT INTO members (user_id, name) VALUES (?, ?), (?, ?)", R"(["7", "Ada", 8, "Bo"])"));
+  ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+  EXPECT_EQ(json::dump(r.at("ids")), R"(["4294967296","4294967297"])");
+  EXPECT_EQ(r.at("id"), "4294967297");
+  auto q = J(s.run("r", "SELECT id, user_id, name FROM members WHERE user_id = ? ORDER BY id", R"(["7"])"));
+  EXPECT_EQ(json::dump(q.at("rows")), R"([["4294967296","7","Ada"]])");  // ids are strings; computed values aren't
+  EXPECT_EQ(J(s.run("r", "SELECT max(id) FROM members", "")).at("rows").at(0).at(0), 4294967297);
+
+  auto refused = [&](const std::string& strategy, const char* sql, const char* why) {
+    auto e = J(s.run(strategy, sql, ""));
+    ASSERT_TRUE(e.as_object().contains("error")) << sql << " " << json::dump(e);
+    EXPECT_NE(std::string(e.at("error").as_string()).find(why), std::string::npos) << json::dump(e);
+  };
+  refused("m", "INSERT INTO members (id, user_id, name) VALUES (5, 9, 'forged')", "never chooses a primary key");
+  refused("m", "INSERT INTO members (id, user_id, name) VALUES (4294967296, 9, 'taken')", "never chooses a primary key");
+  refused("m", "INSERT INTO members (id, user_id, name) VALUES (NULL, 9, 'null')", "never chooses a primary key");
+  refused("r", "UPDATE members SET id = id + 100", "never changes");
+  refused("m", "SELECT goober_stamped(1)", "pure functions");
+  // An id it minted itself is still the host's: allowed.
+  auto own = J(s.run("m", "INSERT INTO members (id, user_id, name) VALUES (goober_id(), 10, 'own')", ""));
+  ASSERT_FALSE(own.as_object().contains("error")) << json::dump(own);
+  // An upsert on another unique column updates; no row is inserted, so no id is reported.
+  auto up = J(s.run("r", "INSERT INTO members (user_id, name) VALUES (7, 'Ada L') ON CONFLICT (user_id) DO UPDATE SET name = excluded.name", ""));
+  ASSERT_FALSE(up.as_object().contains("error")) << json::dump(up);
+  EXPECT_FALSE(up.as_object().contains("ids"));
+  // Updating other columns is fine.
+  EXPECT_EQ(J(s.run("r", "UPDATE members SET name = 'x' WHERE user_id = 8", "")).at("changes"), 1);
+  ASSERT_TRUE(s.commit(&err)) << err;
+
+  // An operator's db_exec follows the same rule, and reads ids as strings.
+  EXPECT_FALSE(dbs->operate("playground", "members", "INSERT INTO members (id, user_id, name) VALUES (1, 2, 'x')",
+                            nullptr, 10, true, &err));
+  EXPECT_NE(err.find("never chooses"), std::string::npos) << err;
+  auto op = dbs->operate("playground", "members", "INSERT INTO members (user_id, name) VALUES (11, 'op')", nullptr, 10, true, &err);
+  ASSERT_TRUE(op) << err;
+  EXPECT_TRUE(op->contains("id"));
+
+  // No id service: the insert fails rather than numbering rows some other way.
+  dbs->set_id_source(nullptr);
+  db::Session off(*dbs, "playground", strategies, *schemas);
+  auto e = J(off.run("m", "INSERT INTO members (user_id, name) VALUES (12, 'z')", ""));
+  ASSERT_TRUE(e.as_object().contains("error"));
+  EXPECT_NE(std::string(e.at("error").as_string()).find("id service"), std::string::npos) << json::dump(e);
+}
+
+TEST(Schema, WarnsAboutKeysAndReferencesThatArentIds) {
+  std::string err;
+  auto s = db::parse_schema(R"({"schema": "access3", "tables": {
+      "users": {"columns": {"id": {"type": "int64", "primary-key": true}, "user_id": {"type": "string", "max-length": 64}}},
+      "notes": {"columns": {"author_id": {"type": "int64"}, "body": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(s) << err;
+  std::string all;
+  for (const auto& w : s->warnings) all += w + "\n";
+  EXPECT_EQ(s->warnings.size(), 4u) << all;  // users.id, users.user_id, notes (no key), notes.author_id
+  EXPECT_NE(all.find("users.id is an int64 primary key"), std::string::npos) << all;
+  EXPECT_NE(all.find("users.user_id looks like a reference"), std::string::npos) << all;
+  EXPECT_NE(all.find("notes names no primary key"), std::string::npos) << all;
+  EXPECT_NE(all.find("notes.author_id"), std::string::npos) << all;
+  EXPECT_FALSE(db::parse_schema(R"({"schema":"s1","tables":{"t":{"columns":{"id":{"type":"id","primary-key":true,"nullable":true}}}}})", &err));
+  EXPECT_FALSE(db::parse_schema(R"({"schema":"s1","tables":{"t":{"columns":{"k":{"type":"string","primary-key":true}}}}})", &err));
+}

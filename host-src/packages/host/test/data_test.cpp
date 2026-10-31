@@ -134,6 +134,9 @@ TEST_F(DataRoutesTest, BoxesWriteInATransactionAndOperatorsPoke) {
                                                      {"tables", bj::object{{"notes", bj::object{{"columns", bj::object{
                                                          {"text", bj::object{{"type", "string"}}}}}}}}}}}});
   ASSERT_FALSE(s.as_object().contains("error")) << json::dump(s);
+  // Stored, with a warning: a table keyed by its rowid, not by a host id (038 § 5).
+  ASSERT_TRUE(s.as_object().contains("warnings")) << json::dump(s);
+  EXPECT_NE(json::dump(s.at("warnings")).find("names no primary key"), std::string::npos) << json::dump(s);
   ASSERT_TRUE(host->boxes().upload(kNotesManifest, kNotesWat, &err)) << err;
 
   // Before any request the database doesn't exist; db_list says who will use it.

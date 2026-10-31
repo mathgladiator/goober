@@ -77,6 +77,7 @@ constexpr const char* kUsage =
     "       goober-host backup list [--config host.json]\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
+    "       goober-host ids bump [--config host.json]   (after a restore, with the host stopped: no id is minted twice)\n"
     "       goober-host rehydrate DIR [--at MOMENT] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
     "                  [--prefix P]] [--key-file F] [--keep-keys] [--port N]\n"
     "       goober-host source-mirror DIR [--project P] [--from host.json | --bucket B [--region R] [--endpoint URL]\n"
@@ -412,7 +413,9 @@ int run_rehydrate(const std::vector<std::string>& args, const Flags& flags) {
             << (report.increment.empty() ? "" : " and the increment at " + report.increment) << ":\n"
             << "  " << report.databases << " databases (" << report.deltas << " from increments), " << report.assets
             << " attachments" << (report.missing_assets ? " (" + std::to_string(report.missing_assets) + " missing)" : "")
-            << "\n";
+            << "\n"
+            << "  the id counter moved from " << report.ids_from << " to " << report.ids_to
+            << ", past every restored id\n";
   for (const auto& n : report.notes) std::cout << "  note: " << n << "\n";
   std::cout << "It is a sandbox: no mail, calls, deliveries, or backups leave it. Run it with:\n"
             << "  goober-host --config " << (o.dir / "host.json").string() << " --local\n";
@@ -482,6 +485,16 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
   if (!positional.empty() && positional[0] == "source-mirror") return run_source_mirror(positional, flags);
+  // After restoring storage any way but rehydrate (038 § 6), with the host stopped.
+  if (positional.size() == 2 && positional[0] == "ids" && positional[1] == "bump") {
+    std::string err;
+    auto config = goober::config::load_config(config_path, &err);
+    if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+    auto [from, to] = goober::host::move_ids_past_restore(config->storage);
+    std::cout << "the id counter moved from " << from << " to " << to << ", past every id in " << config->storage.string()
+              << "\n";
+    return 0;
+  }
   if (positional.size() == 1 && positional[0] == "audit") return goober::host::run_audit(config_path, caddyfile, json_out);
   if (positional.size() == 1 && positional[0] == "toolchain") return goober::host::run_toolchain_check(config_path);
   if (positional.size() == 3 && positional[0] == "operator" && positional[1] == "revoke") {

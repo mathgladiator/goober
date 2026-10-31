@@ -4,7 +4,10 @@
 #include <boost/beast.hpp>
 
 #include "goober/base/files.h"
+#include "goober/host/backup.h"
 #include "goober/host/host.h"
+#include "goober/ids/ids.h"
+#include "goober/sqlite/sqlite.h"
 #include "goober/json/json.h"
 
 using namespace goober;
@@ -383,4 +386,51 @@ TEST(HostRedirects, ARedirectDomainSendsEverythingToItsPrimary) {
   auto list = tool("domain_list", {}).as_array();
   ASSERT_EQ(list.size(), 2u);
   EXPECT_EQ(list.at(1).at("redirect_to"), "example.com");
+}
+
+// The id service in the host (design/machine/038.Ids.md): its first start jumps past every id
+// already stored, users take their ids from it, and a restore moves it past again.
+TEST(HostIds, NewIdsStartPastStoredOnesAndUsersTakeThem) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "host_ids";
+  fs::remove_all(root);
+  // A database from before, holding a large id.
+  fs::create_directories(root / "storage" / "sqlite3" / "shop" / "databases");
+  {
+    sqlite::Db old(root / "storage" / "sqlite3" / "shop" / "databases" / "main.db");
+    old.exec("CREATE TABLE things (id INTEGER PRIMARY KEY, name TEXT)");
+    old.exec("INSERT INTO things VALUES (" + std::to_string(ids::kFirstId + 500) + ", 'old')");
+  }
+  std::string err;
+  auto cfg = config::parse_config(
+      R"({"listen":{"port":0},"storage":"storage","threads":{"network":1,"boxes":1},
+          "operations":{"token":")" + std::string(kToken) + R"("},"domains":{"localhost":{"tenant":"shop"}}})",
+      root, &err);
+  ASSERT_TRUE(cfg) << err;
+  int64_t past = ids::kFirstId + 500 + ids::kMargin;
+  {
+    host::Host h(cfg);
+    auto port = h.start();
+    auto tool = [&](const std::string& name, bj::object args) {
+      bj::object req{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                     {"params", bj::object{{"name", name}, {"arguments", std::move(args)}}}};
+      auto r = fetch(port, bhttp::verb::post, "/goober-operations-mcp", "localhost", json::dump(req),
+                     std::string("Bearer ") + kToken);
+      std::string e;
+      return json::parse(r.body, &e)->at("result").at("structuredContent");
+    };
+    EXPECT_EQ(tool("ids_status", {}).at("counter").as_string(), std::to_string(past));
+    tool("role_grant", {{"tenant", "shop"}, {"email", "ada@example.com"}, {"role", "member"}});
+    tool("role_grant", {{"tenant", "shop"}, {"email", "bo@example.com"}, {"role", "member"}});
+    auto users = tool("realm_get", {{"tenant", "shop"}}).at("users").as_array();
+    ASSERT_EQ(users.size(), 2u);
+    EXPECT_EQ(users[0].at("user_id").as_string(), std::to_string(past));
+    EXPECT_EQ(users[1].at("user_id").as_string(), std::to_string(past + 1));
+    auto status = tool("ids_status", {});
+    EXPECT_EQ(status.at("counter").as_string(), std::to_string(past + ids::kRangeLength));
+    EXPECT_EQ(status.at("next").as_string(), std::to_string(past + 2));
+  }
+  // A restore: the counter moves past the restored ids and a margin beyond where it was.
+  auto [from, to] = host::move_ids_past_restore(root / "storage");
+  EXPECT_EQ(from, past + ids::kRangeLength);
+  EXPECT_EQ(to, past + ids::kRangeLength + ids::kMargin);
 }

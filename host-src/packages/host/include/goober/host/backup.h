@@ -65,6 +65,7 @@ struct RehydrateOptions {
 struct RehydrateReport {
   std::string night, increment;  // the restore point
   int databases = 0, deltas = 0, files = 0, assets = 0, missing_assets = 0;
+  int64_t ids_from = 0, ids_to = 0;  // the id counter, moved past what was restored
   std::vector<std::string> notes;
 };
 
@@ -75,6 +76,12 @@ std::optional<std::vector<backup::RestorePoint>> list_restore_points(aws::S3& s3
 // files, every stored attachment, each database checked; then a sandbox config (localhost,
 // dev mailer, nothing leaves, no backups).
 bool rehydrate(const RehydrateOptions& options, RehydrateReport* report, std::string* error);
+
+// After a restore (design/machine/038.Ids.md § 6): moves the id counter in `storage` past the
+// highest id any restored database holds, then ids::kMargin further, so no id that left the
+// host after the last backup is minted again. Run with the host stopped. Returns the counter
+// before and after.
+std::pair<int64_t, int64_t> move_ids_past_restore(const std::filesystem::path& storage);
 
 // The source mirror (design/machine/020.Source.md § 10), read back: every sealed patch and
 // snapshot under source/ (or one project's), unsealed into DIR/PROJECT/patches/000042.patch and

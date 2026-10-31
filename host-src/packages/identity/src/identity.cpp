@@ -263,7 +263,7 @@ std::optional<SignIn> Identity::verify_email(std::string_view realm_name, std::s
       tx.commit();
       return *why = kNope, std::nullopt;
     }
-    id = create_user(r.db, email, now_ms);
+    id = create_user(r.db, email, now_ms, ids_ ? ids_() : 0);
     out.created = true;
     audit(r.db, now_ms, *id, "user_created", *id, bj::object{{"email", email}});
   }
@@ -340,7 +340,7 @@ bool Identity::grant(std::string_view realm_name, std::string_view email_in, std
   Transaction tx(r.db);
   auto id = user_id_for(r.db, email);
   if (!id) {
-    id = create_user(r.db, email, now_ms);
+    id = create_user(r.db, email, now_ms, ids_ ? ids_() : 0);
     audit(r.db, now_ms, std::nullopt, "user_created", *id, bj::object{{"email", email}, {"by", by}});
   }
   sqlite::Stmt s(r.db, "INSERT OR IGNORE INTO roles (user_id, role, granted_by, granted_at) VALUES (?, ?, NULL, ?)");

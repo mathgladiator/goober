@@ -147,10 +147,12 @@ std::optional<Attachment> Store::put(std::string_view tenant, std::string_view b
   }
   auto db = open(wal_, tenant);
   sqlite::Stmt ins(*db,
-                   "INSERT INTO uploads (folder, state, host, host_epoch, content_type, ext, size, sha256, name, alt, "
-                   "visibility, created_at) VALUES ('attachments', 'writing', 'local', 0, ?, ?, ?, ?, ?, ?, ?, ?)");
-  ins.bind(1, type->content_type).bind(2, type->ext).bind(3, int64_t(bytes.size())).bind(4, base::sha256_hex(bytes));
-  ins.bind(5, clean_name).bind(6, alt.substr(0, 500)).bind(7, visibility).bind(8, now_ms);
+                   "INSERT INTO uploads (id, folder, state, host, host_epoch, content_type, ext, size, sha256, name, alt, "
+                   "visibility, created_at) VALUES (?, 'attachments', 'writing', 'local', 0, ?, ?, ?, ?, ?, ?, ?, ?)");
+  if (ids_) ins.bind(1, ids_());
+  else ins.bind_null(1);  // AUTOINCREMENT's next
+  ins.bind(2, type->content_type).bind(3, type->ext).bind(4, int64_t(bytes.size())).bind(5, base::sha256_hex(bytes));
+  ins.bind(6, clean_name).bind(7, alt.substr(0, 500)).bind(8, visibility).bind(9, now_ms);
   ins.run();
   int64_t id = db->last_insert_rowid();
   std::string err;

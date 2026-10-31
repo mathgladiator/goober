@@ -11,6 +11,7 @@
 #include "goober/base/process.h"
 #include "goober/base/time.h"
 #include "goober/host/backup.h"
+#include "goober/ids/ids.h"
 #include "goober/json/json.h"
 #include "goober/sqlite/sqlite.h"
 
@@ -190,6 +191,9 @@ bool rehydrate_inner(const RehydrateOptions& o, RehydrateReport* report, std::st
     if (result != "ok") report->notes.push_back(rel + " fails SQLite's check: " + (result.empty() ? "can't open" : result));
   }
 
+  // No id minted here may be one that left the production host after its last backup (021).
+  std::tie(report->ids_from, report->ids_to) = move_ids_past_restore(storage);
+
   // The production key store stays behind unless asked for: a devbox needs none of it.
   if (!o.keep_keys) fs::remove_all(storage / "keys", ec);
   auto original = base::read_file(o.dir / "host.json");
@@ -262,6 +266,15 @@ bool pull_source_mirror(const SourceMirrorOptions& o, SourceMirrorReport* report
   }
   fs::remove_all(work, ec);
   return true;
+}
+
+std::pair<int64_t, int64_t> move_ids_past_restore(const fs::path& storage) {
+  auto file = storage / "ids" / "ids.db";
+  int64_t highest = ids::highest_id_under(storage, file);
+  ids::Service service(file, "restore", highest + ids::kMargin);
+  int64_t before = service.counter();
+  service.move_past(std::max(before, highest + 1) + ids::kMargin);
+  return {before, service.counter()};
 }
 
 }  // namespace goober::host

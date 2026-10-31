@@ -345,6 +345,23 @@ void Host::register_tools() {
                                                      {"startup_notes", std::move(notes)}});
                   }});
 
+  mcp_->add_tool({"ids_status",
+                  "The host's id service (design/machine/038.Ids.md): the first id never handed out, the range in use, "
+                  "and the newest ranges. Every new user, invite, upload, and row keyed by type id takes its id from it.",
+                  object_schema({}, {}), [this](const bj::object&) {
+                    if (!ids_) return ToolResult::fail("the id service is off: see host_health's startup notes");
+                    auto [next, end] = ids_->current();
+                    bj::array ranges;
+                    for (const auto& r : ids_->ranges(10)) {
+                      ranges.push_back(bj::object{{"start", std::to_string(r.start)}, {"length", r.length},
+                                                  {"to", r.vended_to}, {"at", base::format_utc_ms(r.vended_ms)}});
+                    }
+                    return ToolResult::ok(bj::object{{"counter", std::to_string(ids_->counter())},
+                                                     {"next", end ? bj::value(std::to_string(next)) : bj::value(nullptr)},
+                                                     {"range_end", end ? bj::value(std::to_string(end)) : bj::value(nullptr)},
+                                                     {"ranges", std::move(ranges)}});
+                  }});
+
   mcp_->add_tool({"domain_list",
                   "The domains this host answers, and the tenant each one serves; a redirect domain also names the "
                   "domain it redirects to (redirect_to).",

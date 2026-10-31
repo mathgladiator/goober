@@ -191,6 +191,9 @@ class Identity {
  public:
   Identity(std::filesystem::path directory, Mailer mailer);
   ~Identity();
+  // Where new users' and invites' ids come from: the host's id service (038 § 2). Without
+  // one, each realm's AUTOINCREMENT numbers them. Set before the first call.
+  void set_id_source(std::function<int64_t()> ids) { ids_ = std::move(ids); }
   Identity(const Identity&) = delete;
   Identity& operator=(const Identity&) = delete;
 
@@ -333,6 +336,7 @@ class Identity {
 
   std::filesystem::path directory_;
   Mailer mailer_;
+  std::function<int64_t()> ids_;
   std::mutex mu_;
   std::map<std::string, std::unique_ptr<Realm>, std::less<>> realms_;
 };

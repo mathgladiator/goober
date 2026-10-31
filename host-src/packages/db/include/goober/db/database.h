@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,9 @@ namespace goober::db {
 class Databases {
  public:
   explicit Databases(std::filesystem::path storage_root) : root_(std::move(storage_root)) {}
+  // Where stamped keys come from: the host's id service (038 § 2). Set before the first open;
+  // without it, an insert into a table keyed by id fails.
+  void set_id_source(std::function<int64_t()> ids) { ids_ = std::move(ids); }
 
   std::filesystem::path file(std::string_view tenant, std::string_view database) const;
   bool exists(std::string_view tenant, std::string_view database) const;
@@ -53,6 +57,7 @@ class Databases {
 
  private:
   std::filesystem::path root_;
+  std::function<int64_t()> ids_;
   mutable std::mutex mu_;
   std::set<std::string> applied_;  // "$file|$schema", applied in this process
 };

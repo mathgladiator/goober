@@ -159,9 +159,35 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   }
   content_ = std::make_unique<content::ContentStore>(*wal_);
   site_ = std::make_unique<site::Site>(*content_);
+  // The id service (038 § 2). Its first start reads the highest id already stored and starts
+  // past it, so every id kept from before stays one of a kind. It never falls back: without
+  // it, anything that needs a new id fails, which is better than minting one twice.
+  try {
+    auto file = config->storage / "ids" / "ids.db";
+    int64_t floor = 0;
+    if (!std::filesystem::exists(file)) {
+      int64_t highest = ids::highest_id_under(config->storage, file);
+      if (highest > 0) floor = highest + ids::kMargin;
+    }
+    ids_ = std::make_unique<ids::Service>(file, config->platform_domain, floor);
+    if (ids_->created()) {
+      startup_notes_.push_back("ids: the id service started at " + std::to_string(ids_->counter()) +
+                               " (past every id already stored)");
+    }
+  } catch (const std::exception& e) {
+    stores_off_.push_back("ids");
+    startup_notes_.push_back(std::string("ids off: storage/ids/ids.db won't open (") + e.what() +
+                             "); new users, uploads, and rows keyed by id fail until it does");
+  }
+  next_id_ = [this]() -> int64_t {
+    if (!ids_) throw std::runtime_error("the host's id service is off (see host_health)");
+    return ids_->next();
+  };
   attachments_ = std::make_unique<attachments::Store>(*wal_);
+  attachments_->set_id_source(next_id_);
   schemas_ = std::make_unique<db::SchemaStore>(*wal_);
   databases_ = std::make_unique<db::Databases>(config->storage);
+  databases_->set_id_source(next_id_);
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check(
@@ -192,6 +218,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   }
   identity_ = std::make_unique<identity::Identity>(config->storage / "identity",
                                                    [this](const identity::Mail& m) { send_mail(m); });
+  identity_->set_id_source(next_id_);
   backups_ = std::make_unique<BackupService>([this] { return config_.get(); }, *keys_, config_file_);
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(

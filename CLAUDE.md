@@ -175,6 +175,10 @@ Read these before doing design work:
   - `design/machine/037.Caching.md`: reads and caching: GETs change nothing (built); per-database
     versions, a route `cache` field (by data or by wake, fresh-ms, browser-ms, sampled checks),
     304s without the box, and MCP performance reports; decisions open in § 9.
+  - `design/machine/038.Ids.md`: the engineers' report that ids didn't follow 021, and the fix: one id
+    service (ranges, a first id of 2^32, restores jump past), users, invites, uploads, and `id` keys
+    the host stamps (a box never names one), ids as strings, schema warnings; and `routes.job`,
+    operator-started one-time boxes that move data, dry run first, in batches with a kept cursor.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

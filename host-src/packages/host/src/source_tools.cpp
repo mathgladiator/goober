@@ -524,6 +524,7 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
         ok = false;
         continue;
       }
+      for (const auto& w : s->warnings) job.log += "! schema " + file + ": " + w + "\n";
       pending[s->name] = *s;
     }
     pending_schemas_ = &pending;

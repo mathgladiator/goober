@@ -17,6 +17,7 @@
 #include "goober/content/content.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
+#include "goober/ids/ids.h"
 #include "goober/logs/logs.h"
 #include "goober/mail_consent/consent.h"
 #include "goober/mail_inbound/mime.h"
@@ -297,6 +298,9 @@ class Host {
   std::unique_ptr<content::ContentStore> content_;
   std::unique_ptr<site::Site> site_;
   std::unique_ptr<attachments::Store> attachments_;
+  // Every new id (design/machine/038.Ids.md): users, invites, uploads, and keys of type id.
+  std::unique_ptr<ids::Service> ids_;
+  std::function<int64_t()> next_id_;
   std::unique_ptr<db::SchemaStore> schemas_;
   std::unique_ptr<db::Databases> databases_;
   std::unique_ptr<runtime::wasm::Engine> engine_;

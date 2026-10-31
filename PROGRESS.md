@@ -45,7 +45,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 018 Reserved | partial | `{!tenant}`, `{!user_id}` in requirements; `{!email}`, `{!user_id}`, `{!tenant}`, `{!domain}` in `require`; `client_id` for agents and a `caller` block for internal calls in the request document; `!` names refused. | Substituting `!client_id` and the rest in requirements; one-setter enforcement across protocols. |
 | 019 Conflicts | partial | Overlapping routes refused at upload; across boxes a literal beats a parameter; `route_check` names what answers a path and what it shadows. | Traffic decisions, given-up routes, static and rewrite conflicts. |
 | 020 DataFlow | partial | `data.sqlite3.$strategy` with `pattern: "sql"`, `{!tenant}` database names, a fixed `tenant` per strategy so one database spans domains, and boxes sharing databases with their own grants, their schemas checked to fit (008 §4). | `by_id`, `by_index`, named writes, generated row structs, data signatures. |
-| 021 PrimaryKeys | none | SQLite rowids (008 §9). | Host-minted ids, range leases. |
+| 021 PrimaryKeys | partial | One id service (038): ranges vended durably, users, invites, uploads, and keys of type `id` stamped by the host and refused when a box names one; ids as strings; restores jump past. | Other host tables' ids; per-thread slices; a cluster's counter. |
 | 023 Sourcing | none | | Sources, `append`, event routes, cursors. |
 | 025 DataShape | none | A SQLite transaction per database per request (008 §6). | Write sets, bundles, layered reads, leases, worst-case checks. |
 | 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets; grants are a box's whole reach, and `grant_usage` shows what each is used for (008 § 4.1). | `pattern: "query"` iterators, plan checks, pagination cursors. |
@@ -518,8 +518,23 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
 - [ ] Use is kept in memory since start; a long window (kept across restarts) would make
       `unused` mean more for routes that run rarely.
 
+### Phase 32: host ids, and jobs that move data (038)
+- [x] The id service: a counter in `storage/ids/ids.db`, ranges of 10,000 vended durably,
+      a first start past every stored id (and above 2^32), `ids_status`, `goober-host ids
+      bump`, and rehydrate's jump; tests.
+- [x] Users, invites, and uploads take their ids from it.
+- [x] The `id` column type: keys stamped by the host (`DEFAULT (goober_id())`, triggers that
+      refuse a key a box names or changes), `ids` in `goober_sql`'s answer, ids as strings in
+      JSON, warnings for keys and references that aren't ids, `box_guide`; tests.
+- [ ] Jobs (`routes.job`): dry runs on copies, batches with a kept cursor, `job_*` tools,
+      the panel (038 § 7).
+- [ ] The example boxes' schemas moved to `id` keys (new schema versions).
+- [ ] Operator tools take and give ids as strings (attachments, invites, users), as 021 says.
+- [ ] Identity events, the outbox, approvals, and other host tables still number their own
+      rows (038 § 11).
+
 ### Later, not planned yet
-Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),
+Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
 mail routes (038), the upload verb (060), the key vault (064), approvals, deployments,
 bundles, working sets (300 to 320), stability (330), quotas (390), the cluster (400),

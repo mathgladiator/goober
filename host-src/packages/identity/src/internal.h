@@ -91,9 +91,12 @@ inline std::optional<int64_t> user_id_for(sqlite::Db& db, std::string_view email
   return s.int64(0);
 }
 
-inline int64_t create_user(sqlite::Db& db, std::string_view email, int64_t now_ms) {
-  sqlite::Stmt s(db, "INSERT INTO users (email, created_at) VALUES (?, ?)");
-  s.bind(1, email).bind(2, now_ms).run();
+// `id` comes from the host's id service (038 § 2); 0 lets AUTOINCREMENT number the user.
+inline int64_t create_user(sqlite::Db& db, std::string_view email, int64_t now_ms, int64_t id = 0) {
+  sqlite::Stmt s(db, "INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)");
+  if (id > 0) s.bind(1, id);
+  else s.bind_null(1);
+  s.bind(2, email).bind(3, now_ms).run();
   return db.last_insert_rowid();
 }
 

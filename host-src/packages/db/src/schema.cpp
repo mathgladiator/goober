@@ -8,12 +8,20 @@
 namespace goober::db {
 namespace {
 
-const std::set<std::string> kTypes = {"int32", "int64", "double", "float", "boolean", "string"};
+const std::set<std::string> kTypes = {"id", "int32", "int64", "double", "float", "boolean", "string"};
 
 std::string sql_type(const std::string& t) {
   if (t == "string") return "TEXT";
   if (t == "double" || t == "float") return "REAL";
+  // INT, not INTEGER: an id primary key stays an ordinary column, not SQLite's rowid, so its
+  // default (the host's next id) applies; and "INT" is how a read knows to send it as a string.
+  if (t == "id") return "INT";
   return "INTEGER";
+}
+
+// A column that refers to a user or a row, by its name (038 § 5).
+bool looks_like_reference(const std::string& name) {
+  return name == "user_id" || name.ends_with("_id");
 }
 
 std::string quote_literal(const std::string& s) {
@@ -46,15 +54,15 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   std::string err;
   auto type = json::get_string(o, "type", &err);
   if (!type || !kTypes.count(*type)) {
-    return fail(error, where + ": type must be int32, int64, double, float, boolean, or string");
+    return fail(error, where + ": type must be id, int32, int64, double, float, boolean, or string");
   }
   c->type = *type;
   c->primary_key = json::get_bool(o, "primary-key", &err).value_or(false);
   c->nullable = json::get_bool(o, "nullable", &err).value_or(false);
   c->max_length = json::get_int(o, "max-length", &err);
   if (!err.empty()) return fail(error, where + ": " + err);
-  if (c->primary_key && (c->type != "int64" || c->nullable)) {
-    return fail(error, where + ": a primary key is a non-nullable int64");
+  if (c->primary_key && ((c->type != "id" && c->type != "int64") || c->nullable)) {
+    return fail(error, where + ": a primary key is a non-nullable id (or, as tables were keyed before, int64)");
   }
   if (c->max_length && (c->type != "string" || *c->max_length < 1)) {
     return fail(error, where + ": max-length is a positive length for a string");
@@ -62,7 +70,7 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   if (auto it = o.find("default"); it != o.end()) {
     const auto& d = it->value();
     bool ok = (c->type == "string" && d.is_string()) || (c->type == "boolean" && d.is_bool()) ||
-              ((c->type == "int32" || c->type == "int64") && d.is_int64()) ||
+              ((c->type == "int32" || c->type == "int64" || c->type == "id") && d.is_int64()) ||
               ((c->type == "double" || c->type == "float") && (d.is_double() || d.is_int64())) ||
               (c->nullable && d.is_null());
     if (!ok) return fail(error, where + ": the default must be a " + c->type);
@@ -80,6 +88,8 @@ bool is_valid_sql_name(std::string_view name) {
 
 std::string Column::sql() const {
   std::string s = "\"" + name + "\" " + sql_type(type);
+  // The host stamps it: the next id from its service (038 § 3).
+  if (primary_key && type == "id") return s + " PRIMARY KEY NOT NULL DEFAULT (goober_id())";
   if (primary_key) return s + " PRIMARY KEY";
   if (!nullable) s += " NOT NULL";
   if (default_value) {
@@ -114,6 +124,13 @@ std::string Index::signature() const {
 const Column* Table::column(std::string_view n) const {
   for (const auto& c : columns) {
     if (c.name == n) return &c;
+  }
+  return nullptr;
+}
+
+const Column* Schema::stamped_key(const Table& t) {
+  for (const auto& c : t.columns) {
+    if (c.primary_key && c.type == "id") return &c;
   }
   return nullptr;
 }
@@ -157,16 +174,28 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
       Column col;
       if (!parse_column(table.name, std::string(c.key()), c.value(), &col, error)) return std::nullopt;
       keys += col.primary_key ? 1 : 0;
+      std::string where = table.name + "." + col.name;
+      if (col.primary_key && col.type == "int64") {
+        s.warnings.push_back(where + " is an int64 primary key: new rows get this database's rowids, not host ids; "
+                             "declare {\"type\": \"id\", \"primary-key\": true} (design/machine/038.Ids.md)");
+      } else if (!col.primary_key && looks_like_reference(col.name) &&
+                 (col.type == "string" || col.type == "int32" || col.type == "int64")) {
+        s.warnings.push_back(where + " looks like a reference to a user or a row, but is " + col.type +
+                             ": a reference is {\"type\": \"id\"}; ids are never text and never emails");
+      }
       table.columns.push_back(std::move(col));
     }
     if (keys > 1) return *error = table.name + ": only one column can be the primary key", std::nullopt;
     if (keys == 0) {
       if (table.column("id")) return *error = table.name + ": id must be the primary key, or another column must be", std::nullopt;
+      // As before: the table is keyed by its rowid. Kept so stored schemas mean what they meant.
       Column id;
       id.name = "id";
       id.type = "int64";
       id.primary_key = true;
       table.columns.insert(table.columns.begin(), std::move(id));
+      s.warnings.push_back(table.name + " names no primary key, so it gets an int64 id: new rows get this database's "
+                           "rowids, not host ids; declare \"id\": {\"type\": \"id\", \"primary-key\": true}");
     }
     if (const auto* idx = json::get_object(to, "indexes", &err)) {
       for (const auto& i : *idx) {

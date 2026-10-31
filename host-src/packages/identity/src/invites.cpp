@@ -126,7 +126,9 @@ std::optional<Invite> Identity::create_invite(std::string_view realm_name, Invit
   in.reminded_at = in.answered_at = 0;
   sqlite::Stmt s(r.db,
                  "INSERT INTO invites (email, state, roles, lists, note, inviter_name, inviter_email, inviter_kind, box, "
-                 "return_path, created_at, expires_at, terms_sha256) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                 "return_path, created_at, expires_at, terms_sha256, id) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  if (ids_) s.bind(13, ids_());
+  else s.bind_null(13);  // AUTOINCREMENT's next
   s.bind(1, in.email).bind(2, json::dump(to_array(in.roles))).bind(3, json::dump(to_array(in.lists))).bind(4, in.note);
   s.bind(5, in.inviter_name).bind(6, in.inviter_email).bind(7, in.inviter_kind);
   in.box.empty() ? s.bind_null(8) : s.bind(8, in.box);

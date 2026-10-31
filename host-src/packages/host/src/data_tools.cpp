@@ -411,9 +411,12 @@ void Host::register_data_tools() {
   mcp_->add_tool(
       {"schema_put",
        "Stores a database schema: {\"schema\": \"name1\", \"tables\": {\"t\": {\"columns\": {\"c\": {\"type\": "
-       "\"string\"}}, \"indexes\": {...}}}}. Types are int32, int64, double, float, boolean, and string; columns "
-       "take nullable, default, max-length, and primary-key. A schema is a version: its name can't be reused with "
-       "different content, and databases only ever grow by the schemas applied to them.",
+       "\"string\"}}, \"indexes\": {...}}}}. Types are id, int32, int64, double, float, boolean, and string; columns "
+       "take nullable, default, max-length, and primary-key. Key every table with \"id\": {\"type\": \"id\", "
+       "\"primary-key\": true}: the host stamps it from its id service, and a box never names one. A column that "
+       "refers to a user or a row, in any database, is {\"type\": \"id\"}; never text, never an email. Ids read "
+       "back as strings. A schema is a version: its name can't be reused with different content, and databases only "
+       "ever grow by the schemas applied to them. The answer's warnings name keys and references that aren't ids.",
        object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
        [this](const bj::object& args) {
          auto it = args.find("schema");
@@ -422,9 +425,12 @@ void Host::register_data_tools() {
          std::string err;
          auto s = schemas_->put(text, &err);
          if (!s) return ToolResult::fail(err);
-         bj::array tables;
+         bj::array tables, warnings;
          for (const auto& t : s->tables) tables.push_back(bj::value(t.name));
-         return ToolResult::ok(bj::object{{"schema", s->name}, {"tables", std::move(tables)}});
+         for (const auto& w : s->warnings) warnings.push_back(bj::value(w));
+         bj::object out{{"schema", s->name}, {"tables", std::move(tables)}};
+         if (!warnings.empty()) out["warnings"] = std::move(warnings);
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool({"schema_get", "Returns a stored schema.", object_schema({{"name", string_property("The schema's name.")}}, {"name"}),

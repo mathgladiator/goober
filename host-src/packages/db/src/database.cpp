@@ -44,6 +44,62 @@ const std::set<std::string> kBoxFunctions = {
 
 bool host_table(std::string_view t) { return t.starts_with("goober_") || t.starts_with("sqlite_"); }
 
+// ---- Host ids (design/machine/038.Ids.md § 3) ----
+//
+// goober_id() is a stamped key's default: the next id from the host's service. The table's
+// BEFORE INSERT trigger accepts a row only when its key is one goober_id() just minted (so a
+// box never names a key), and its AFTER INSERT trigger records the row's id for the answer.
+// Statements run start to finish on the calling thread, so the tally is per thread, reset
+// before each statement.
+struct IdTally {
+  std::set<int64_t> pending;     // minted by goober_id(), not yet taken by a row
+  std::vector<int64_t> inserted;  // rows inserted with a stamped key, in order
+};
+thread_local IdTally t_ids;
+
+void sql_goober_id(sqlite3_context* ctx, int, sqlite3_value**) {
+  const auto* ids = static_cast<const std::function<int64_t()>*>(sqlite3_user_data(ctx));
+  if (!ids || !*ids) return sqlite3_result_error(ctx, "the host's id service isn't available here", -1);
+  try {
+    int64_t id = (*ids)();
+    t_ids.pending.insert(id);
+    sqlite3_result_int64(ctx, id);
+  } catch (const std::exception& e) {
+    sqlite3_result_error(ctx, (std::string("the host's id service failed: ") + e.what()).c_str(), -1);
+  }
+}
+
+void sql_goober_stamped(sqlite3_context* ctx, int, sqlite3_value** argv) {
+  bool ok = sqlite3_value_type(argv[0]) == SQLITE_INTEGER && t_ids.pending.erase(sqlite3_value_int64(argv[0])) > 0;
+  sqlite3_result_int(ctx, ok ? 1 : 0);
+}
+
+void sql_goober_inserted(sqlite3_context* ctx, int, sqlite3_value** argv) {
+  if (sqlite3_value_type(argv[0]) == SQLITE_INTEGER) t_ids.inserted.push_back(sqlite3_value_int64(argv[0]));
+  sqlite3_result_null(ctx);
+}
+
+// Every connection the package opens gets these; `ids` may be null (nothing is minted then).
+void install_id_functions(sqlite3* db, const std::function<int64_t()>* ids) {
+  sqlite3_create_function(db, "goober_id", 0, SQLITE_UTF8, const_cast<std::function<int64_t()>*>(ids), sql_goober_id,
+                          nullptr, nullptr);
+  sqlite3_create_function(db, "goober_stamped", 1, SQLITE_UTF8, nullptr, sql_goober_stamped, nullptr, nullptr);
+  sqlite3_create_function(db, "goober_inserted", 1, SQLITE_UTF8, nullptr, sql_goober_inserted, nullptr, nullptr);
+}
+
+// The triggers that keep a stamped key the host's, made with its table.
+std::string id_triggers(const Table& table, const Column& key) {
+  std::string t = "\"" + table.name + "\"", k = "NEW.\"" + key.name + "\"";
+  return "CREATE TRIGGER \"goober_ids_" + table.name + "_insert\" BEFORE INSERT ON " + t + " WHEN NOT goober_stamped(" + k +
+         ") BEGIN SELECT RAISE(ABORT, 'a box never chooses a primary key: leave " + key.name +
+         " out of the insert, and the host stamps one'); END;\n"
+         "CREATE TRIGGER \"goober_ids_" + table.name + "_inserted\" AFTER INSERT ON " + t +
+         " BEGIN SELECT goober_inserted(" + k + "); END;\n"
+         "CREATE TRIGGER \"goober_ids_" + table.name + "_update\" BEFORE UPDATE OF \"" + key.name + "\" ON " + t +
+         " WHEN " + k + " IS NOT OLD.\"" + key.name + "\" BEGIN SELECT RAISE(ABORT, 'a primary key never changes: " +
+         key.name + " is the host\'\'s'); END;\n";
+}
+
 struct Auth {
   const manifest::DataStrategy* strategy = nullptr;  // null for an operator
   bool write = false;                                // an operator's db_exec
@@ -120,7 +176,7 @@ std::set<std::string> real_tables(sqlite3* db) {
   return out;
 }
 
-int authorize(void* p, int code, const char* a, const char* b, const char*, const char*) {
+int authorize(void* p, int code, const char* a, const char* b, const char*, const char* inner) {
   auto& auth = *static_cast<Auth*>(p);
   std::string t = a ? a : "", c = b ? b : "";
   auto deny = [&](std::string why) {
@@ -138,6 +194,8 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
       return SQLITE_OK;
     case SQLITE_READ:
       if (!auth.strategy) return SQLITE_OK;
+      // The host's id triggers read the new row's key; nothing they read reaches the box.
+      if (inner && std::string_view(inner).starts_with("goober_ids_")) return SQLITE_OK;
       // A common table expression or subquery: its own reads are checked one by one.
       if (!g && !auth.tables.count(t) && !host_table(t)) return SQLITE_OK;
       if (!g) return deny("strategy " + auth.strategy->name + " can't read table " + t);
@@ -170,6 +228,13 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
     case SQLITE_FUNCTION:
       if (!auth.strategy) return SQLITE_OK;
       if (kBoxFunctions.count(base::to_lower(c))) return SQLITE_OK;
+      // The host's id functions: goober_id() anywhere (it only ever hands out a fresh id); the
+      // others only inside the host's own id triggers.
+      if (base::to_lower(c) == "goober_id") return SQLITE_OK;
+      if (inner && std::string_view(inner).starts_with("goober_ids_") &&
+          (base::to_lower(c) == "goober_stamped" || base::to_lower(c) == "goober_inserted")) {
+        return SQLITE_OK;
+      }
       return deny("function " + c + "() isn't on the host's list of pure functions");
     case SQLITE_PRAGMA:
       return deny("PRAGMA statements are refused");
@@ -265,6 +330,10 @@ bj::value column_value(sqlite3_stmt* s, int i) {
   switch (sqlite3_column_type(s, i)) {
     case SQLITE_INTEGER: {
       int64_t v = sqlite3_column_int64(s, i);
+      // An id column (declared INT, 038 § 4) crosses JSON as a string, so no client rounds it.
+      if (const char* decl = sqlite3_column_decltype(s, i); decl && std::string_view(decl) == "INT") {
+        return bj::value(std::to_string(v));
+      }
       if (v > kMaxSafeInteger || v < -kMaxSafeInteger) return bj::value(std::to_string(v));
       return bj::value(v);
     }
@@ -311,6 +380,7 @@ struct Stmt {
 bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& params, Auth& auth, int64_t row_limit,
                          int64_t step_budget, const std::function<std::string(bool readonly)>& before_step) {
   auto fail = [](std::string why) { return bj::object{{"error", std::move(why)}}; };
+  t_ids = {};
   if (sql.size() > 100000) return fail("the statement is longer than 100000 bytes");
   if (auth.strategy && uses_replace_conflict(sql)) {
     return fail("REPLACE and ROLLBACK conflict resolution are refused (they delete rows behind the grants, or end the "
@@ -408,10 +478,18 @@ bj::object run_statement(sqlite3* db, std::string_view sql, const bj::value& par
     return fail("the statement used more than its step budget of " + std::to_string(step_budget));
   }
   if (rc != SQLITE_DONE) return fail(sqlite3_errmsg(db));
-  return bj::object{{"columns", std::move(columns)},
-                    {"rows", std::move(rows)},
-                    {"changes", readonly ? 0 : sqlite3_changes(db)},
-                    {"last_insert_id", readonly ? 0 : sqlite3_last_insert_rowid(db)}};
+  bj::object out{{"columns", std::move(columns)},
+                 {"rows", std::move(rows)},
+                 {"changes", readonly ? 0 : sqlite3_changes(db)},
+                 {"last_insert_id", readonly ? 0 : sqlite3_last_insert_rowid(db)}};
+  // The ids the host stamped on inserted rows (038 § 3), as strings.
+  if (!t_ids.inserted.empty()) {
+    bj::array ids;
+    for (int64_t id : t_ids.inserted) ids.push_back(bj::value(std::to_string(id)));
+    out["id"] = ids.back();
+    out["ids"] = std::move(ids);
+  }
+  return out;
 }
 
 // Plans (and, unless dry_run, applies) a schema to an open database, expand only.
@@ -441,6 +519,7 @@ bool apply_schema(sqlite::Db& db, const Schema& schema, bool dry_run, std::strin
         std::string sql = "CREATE TABLE \"" + table.name + "\" (";
         for (size_t i = 0; i < table.columns.size(); ++i) sql += (i ? ", " : "") + table.columns[i].sql();
         db.exec(sql + ") STRICT");
+        if (const auto* key = Schema::stamped_key(table)) db.exec(id_triggers(table, *key));
       }
       std::set<std::string> present;
       {
@@ -516,6 +595,7 @@ std::unique_ptr<sqlite::Db> Databases::open(std::string_view tenant, std::string
   auto path = file(tenant, database);
   std::filesystem::create_directories(path.parent_path());
   auto db = std::make_unique<sqlite::Db>(path);
+  install_id_functions(db->raw(), &ids_);
   if (schema) {
     std::string key = path.string() + "|" + schema->name;
     std::lock_guard lock(mu_);
@@ -542,6 +622,7 @@ bool Databases::check(std::string_view tenant, std::string_view database, const 
                       std::string* error) const {
   if (!exists(tenant, database)) return true;
   sqlite::Db db(file(tenant, database));
+  install_id_functions(db.raw(), &ids_);
   std::string why;
   if (apply_schema(db, schema, true, &why)) return true;
   *error = "tenant " + std::string(tenant) + ", database " + std::string(database) + ": " + why;
@@ -550,6 +631,7 @@ bool Databases::check(std::string_view tenant, std::string_view database, const 
 
 bool Databases::compatible(const std::vector<const Schema*>& schemas, std::string* error) {
   sqlite::Db db(":memory:");
+  install_id_functions(db.raw(), nullptr);
   for (const auto* schema : schemas) {
     std::string why;
     if (!apply_schema(db, *schema, false, &why)) {
@@ -643,6 +725,7 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
     return *error = "tenant " + std::string(tenant) + " has no database " + std::string(database), std::nullopt;
   }
   sqlite::Db db(file(tenant, database));
+  install_id_functions(db.raw(), &ids_);
   Auth auth;
   auth.write = write;
   // An operator's statement gets far more room than a box's, but not for ever: a recursive CTE

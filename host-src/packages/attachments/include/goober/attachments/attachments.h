@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -49,6 +50,9 @@ struct Attachment {
 class Store {
  public:
   explicit Store(wal::HostWal& wal) : wal_(wal) {}
+  // Where new attachments' ids come from: the host's id service (038 § 2). Without one, the
+  // ledger's own AUTOINCREMENT numbers them.
+  void set_id_source(std::function<int64_t()> ids) { ids_ = std::move(ids); }
 
   // Stores bytes as a new attachment. The ledger row is written before the bytes, so no
   // file exists that the ledger doesn't know (060.Files.md § The upload ledger).
@@ -63,6 +67,7 @@ class Store {
 
  private:
   wal::HostWal& wal_;
+  std::function<int64_t()> ids_;
 };
 
 // Where each attachment is used: the content paths whose text holds /attachment/$id.

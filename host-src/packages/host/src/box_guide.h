@@ -155,15 +155,30 @@ through the mail service. Failures are retried in order, then given up after 8 t
 ## Data
 
 1. schema_put {"schema": "orders1", "tables": {"orders": {"columns": {
-     "id": {"type": "int64", "primary-key": true},
+     "id": {"type": "id", "primary-key": true},
+     "user_id": {"type": "id"},
      "title": {"type": "string", "max-length": 200},
      "qty": {"type": "int32", "default": 1},
      "paid": {"type": "boolean", "default": false},
      "note": {"type": "string", "nullable": true}},
      "indexes": {"orders_by_title": {"columns": ["title"], "unique": false}}}}}
-   Types: int32, int64, double, float, boolean, string. A table gets "id" if it names no
-   primary key. A schema name is a version: never reused. Later schemas may only add tables,
-   nullable or defaulted columns, and indexes.
+   Types: id, int32, int64, double, float, boolean, string. A schema name is a version: never
+   reused. Later schemas may only add tables, nullable or defaulted columns, and indexes.
+   Ids (design/human/021.PrimaryKeys.md), the rules every box keeps:
+   - Only the host mints ids. Key every table "id": {"type": "id", "primary-key": true} and
+     leave it out of every insert: the host stamps the next id from its service. Naming a key
+     yourself, or changing one, is refused.
+   - An id names exactly one thing anywhere on the host: a user, an upload, a row in any
+     database. So a reference to any of them is a column of type id holding that id:
+     "user_id": {"type": "id"} for {!user_id}, "order_id": {"type": "id"} for an order.
+   - References across databases and boxes use the id, never an email or a name: an address
+     changes, and the same address can be two people on two sites. Keep an address only as
+     what the person typed, until you know their user id.
+   - Ids cross JSON as strings ("4294967311"): rows read back from id columns, the "ids" an
+     insert answers, and {!user_id}. Pass them back as strings; SQLite stores the integer.
+   - Ids are unique, not dense and not a clock: sort by a time column, never by id.
+   schema_put warns about a key that isn't of type id (a table naming no key gets an old-style
+   int64 rowid "id") and about a reference stored as text or int64. Heed the warnings.
 2. In the manifest:
    "data": {"sqlite3": {"db": {"schema": "orders1", "database": "orders", "pattern": "sql",
      "tables": {"orders": {"read": true, "insert": true, "update": ["paid"], "delete": false}},
@@ -184,7 +199,9 @@ through the mail service. Failures are retried in order, then given up after 8 t
    by_timer strategies: {"schema", "database", "pattern": "by_timer", "table",
    "timezone-field"?, "active-field"?} are read only by the scheduler.
 3. goober_sql(strategy, sql, params): params is a JSON array for ? or an object for :name.
-   The result is {"columns", "rows", "changes", "last_insert_id"} or {"error"}. Let SQLite
+   The result is {"columns", "rows", "changes", "last_insert_id"} or {"error"}; an insert
+   into a table keyed by id also answers "ids" (every row's new id, as strings, in order) and
+   "id" (the last). Use those, not last_insert_id, which is SQLite's rowid. Let SQLite
    build your JSON: SELECT json_object(...), json_group_array(...) answers in one statement.
    One statement per call; no PRAGMA, ATTACH, DDL, transactions, or REPLACE (use
    INSERT ... ON CONFLICT DO UPDATE); pure functions only; 2 s, 4 MiB per value, 8 MiB per
