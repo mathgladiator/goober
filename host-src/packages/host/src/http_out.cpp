@@ -185,19 +185,13 @@ bool Host::uses_httpx(const manifest::ExternalService& s, const manifest::Extern
 
 std::optional<vault::Key> Host::vault_tenant_key(const std::string& tenant, std::string* error) {
   std::lock_guard lock(vault_mu_);
-  auto hex = keys_->resolve("keys/system/vault_key", "");
-  vault::Key root{};
-  if (!hex) {
-    // Made once (034 § 4): back it up beside the backup key (goober-host vault key).
-    base::os_random_fill(root);
-    std::string h = base::hex_encode(std::string_view(reinterpret_cast<char*>(root.data()), root.size()));
-    if (!keys_->set("system", "", "vault_key", h, base::now_unix_ms(), error)) return std::nullopt;
-  } else {
-    auto parsed = backup::parse_key(*hex);
-    if (!parsed) return *error = "keys/system/vault_key isn't 64 hex digits", std::nullopt;
-    root = *parsed;
-  }
-  return vault::tenant_key(root, tenant);
+  // Made once (034 § 4): back it up beside the backup key (goober-host vault key).
+  bool created = false;
+  auto hex = keys_->ensure_random_system_key("vault_key", base::now_unix_ms(), &created, error);
+  if (!hex) return std::nullopt;
+  auto root = backup::parse_key(*hex);
+  if (!root) return *error = "keys/system/vault_key isn't 64 hex digits", std::nullopt;
+  return vault::tenant_key(*root, tenant);
 }
 
 std::string Host::seal_secret(const std::string& tenant, const std::string& service, const std::string& owner,

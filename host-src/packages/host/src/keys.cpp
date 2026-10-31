@@ -1,6 +1,7 @@
 #include "keys.h"
 
 #include <fcntl.h>
+#include <cerrno>
 #include <unistd.h>
 
 #include "goober/base/files.h"
@@ -83,6 +84,45 @@ bool KeyStore::set(std::string_view scope, std::string_view tenant, std::string_
     ::close(dir);
   }
   return true;
+}
+
+std::optional<std::string> KeyStore::ensure_random_system_key(std::string_view name, int64_t now_ms, bool* created,
+                                                                std::string* error) {
+  *created = false;
+  std::string credentials = "keys/system/" + std::string(name);
+  if (auto existing = resolve(credentials, "")) return existing;
+  auto f = file("system", "", name);
+  if (!f) return *error = "a system key's name is like vault_key", std::nullopt;
+  uint8_t key[32];
+  base::os_random_fill(key);
+  std::string hex = base::hex_encode(std::string_view(reinterpret_cast<char*>(key), sizeof key));
+  std::error_code ec;
+  fs::create_directories(f->parent_path(), ec);
+  std::string body = json::dump(bj::object{{"value", hex}, {"set_at", now_ms}, {"hosts", bj::array{}}});
+  uint8_t rnd[8];
+  base::os_random_fill(rnd);
+  auto tmp = f->string() + "." + base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd)) + ".tmp";
+  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (fd < 0) return *error = "can't write the key", std::nullopt;
+  bool ok = ::write(fd, body.data(), body.size()) == ssize_t(body.size()) && ::fsync(fd) == 0;
+  ::close(fd);
+  // link() fails when the name exists: whoever links first made the key, and the other reads it.
+  bool linked = ok && ::link(tmp.c_str(), f->c_str()) == 0;
+  int link_errno = errno;
+  fs::remove(tmp, ec);
+  if (!linked) {
+    if (ok && link_errno == EEXIST) {
+      if (auto existing = resolve(credentials, "")) return existing;
+    }
+    return *error = "can't write the key", std::nullopt;
+  }
+  int dir = ::open(f->parent_path().c_str(), O_RDONLY | O_CLOEXEC);
+  if (dir >= 0) {
+    ::fsync(dir);
+    ::close(dir);
+  }
+  *created = true;
+  return hex;
 }
 
 bool KeyStore::remove(std::string_view scope, std::string_view tenant, std::string_view name) {

@@ -73,7 +73,8 @@ constexpr const char* kUsage =
     "       goober-host key set NAME [--hosts H,...] [--tenant T] [--config host.json]   (the value on stdin)\n"
     "       goober-host key list [--config host.json]\n"
     "       goober-host backup key [--confirm] [--config host.json]\n"
-    "       goober-host vault key [--config host.json]   (prints the key that seals people's secrets)\n"
+    "       goober-host vault key [--create] [--config host.json]   (prints the key that seals people's secrets;\n"
+    "                                    --create makes it now if there is none, never replacing one)\n"
     "       goober-host backup list [--config host.json]\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
@@ -254,7 +255,7 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
 
 struct Flags {
   std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts, project;
-  bool confirm = false, keep_keys = false;
+  bool confirm = false, keep_keys = false, create = false;
   uint16_t port = 8080;
 };
 
@@ -453,6 +454,8 @@ int main(int argc, char** argv) {
       claude = true;
     } else if (a == "--confirm") {
       flags.confirm = true;
+    } else if (a == "--create") {
+      flags.create = true;
     } else if (a == "--keep-keys") {
       flags.keep_keys = true;
     } else if ((a == "--hosts" || a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
@@ -517,9 +520,18 @@ int main(int argc, char** argv) {
     auto config = goober::config::load_config(config_path, &err);
     if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
     goober::host::KeyStore keys(config->storage);
-    auto v = keys.resolve("keys/system/vault_key", "");
+    std::optional<std::string> v;
+    if (flags.create) {
+      bool created = false;
+      v = keys.ensure_random_system_key("vault_key", goober::base::now_unix_ms(), &created, &err);
+      if (!v) return std::cerr << "goober-host: " << err << "\n", 1;
+      if (!created) std::cerr << "a vault key exists already; it is unchanged\n";
+    } else {
+      v = keys.resolve("keys/system/vault_key", "");
+    }
     if (!v) {
-      std::cout << "no vault key yet: the host makes one the first time a person connects an account\n";
+      std::cout << "no vault key yet: the host makes one the first time a person connects an account, or now with "
+                   "--create\n";
       return 0;
     }
     std::cout << *v << "\n";

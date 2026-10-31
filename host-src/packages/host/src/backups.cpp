@@ -143,14 +143,12 @@ std::unique_ptr<aws::S3> BackupService::bucket(const config::HostConfig& cfg) co
 }
 
 std::optional<backup::Key> BackupService::key(std::string* error) {
-  if (auto existing = keys_.resolve("keys/system/backup_key", "")) {
-    auto k = backup::parse_key(*existing);
-    if (!k) *error = "keys/system/backup_key isn't 64 hex digits";
-    return k;
-  }
   // Made once; the operator must keep a copy elsewhere (goober-host backup key).
-  auto k = backup::new_key();
-  if (!keys_.set("system", "", "backup_key", backup::key_hex(k), base::now_unix_ms(), error)) return std::nullopt;
+  bool created = false;
+  auto hex = keys_.ensure_random_system_key("backup_key", base::now_unix_ms(), &created, error);
+  if (!hex) return std::nullopt;
+  auto k = backup::parse_key(*hex);
+  if (!k) *error = "keys/system/backup_key isn't 64 hex digits";
   return k;
 }
 

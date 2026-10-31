@@ -23,6 +23,11 @@ class KeyStore {
   // hosts are where the key may be sent: names like api.stripe.com, or *.example.com.
   bool set(std::string_view scope, std::string_view tenant, std::string_view name, std::string_view value,
            int64_t now_ms, std::string* error, const std::vector<std::string>& hosts = {});
+  // The system key `name`, made of 32 random bytes (64 hex digits) when there is none. Made
+  // with an atomic create, so two processes making it at once (the host and goober-host on the
+  // console) agree on one value. `created` says whether this call made it.
+  std::optional<std::string> ensure_random_system_key(std::string_view name, int64_t now_ms, bool* created,
+                                                      std::string* error);
   bool remove(std::string_view scope, std::string_view tenant, std::string_view name);
   // A credentials name from a manifest, like keys/system/mailer or keys/tenant/{!tenant}/stripe.
   std::optional<std::string> resolve(std::string_view credentials, std::string_view tenant) const;

@@ -120,8 +120,9 @@ blocked until they allow mail on their account page, or you lift it in the panel
 
 **Connecting people's accounts (Strava, X, Hevy).** Boxes keep people's keys and tokens sealed
 by the host. Copy the vault key beside the backup key:
-`sudo -u goober goober-host vault key --config /srv/goober/host/host.json`. Without it, everyone
-must connect again. For an OAuth provider (Strava, X), register an app with the redirect URI
+`sudo -u goober goober-host vault key --config /srv/goober/host/host.json` (add `--create` to make
+it now, before anyone has connected an account; an existing key is never replaced). Without it,
+everyone must connect again. For an OAuth provider (Strava, X), register an app with the redirect URI
 `https://example.com/goober/connect/callback`, then have Grok `key_set` its client id and secret
 (hosts: the provider's token host).
 

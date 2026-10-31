@@ -6,6 +6,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <mutex>
+#include <thread>
 
 #include "../src/keys.h"
 #include "../src/network.h"
@@ -317,4 +318,38 @@ TEST_F(NetworkTest, OutboxCallsHaveADailyCapPerService) {
   ASSERT_EQ(post(port, "/send", &body), 200) << body;
   EXPECT_NE(body.find("limits.outbox-daily-per-service"), std::string::npos) << body;
   EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 3);
+}
+
+// goober-host vault key --create and the host can both make the vault key at once; they agree on
+// one value, and an existing key is never replaced.
+TEST(KeyStore, ASystemKeyIsMadeOnceEvenByTwoAtOnce) {
+  auto storage = fs::path(GOOBER_TEST_TMP) / "ensure-key";
+  fs::remove_all(storage);
+  for (int round = 0; round < 20; ++round) {
+    fs::remove_all(storage);
+    std::string a, b;
+    bool made_a = false, made_b = false;
+    std::thread t1([&] {
+      host::KeyStore keys(storage);
+      std::string err;
+      a = keys.ensure_random_system_key("vault_key", 1, &made_a, &err).value_or("");
+    });
+    std::thread t2([&] {
+      host::KeyStore keys(storage);
+      std::string err;
+      b = keys.ensure_random_system_key("vault_key", 1, &made_b, &err).value_or("");
+    });
+    t1.join();
+    t2.join();
+    ASSERT_EQ(a.size(), 64u);
+    EXPECT_EQ(a, b);
+    EXPECT_NE(made_a, made_b);
+  }
+  host::KeyStore keys(storage);
+  auto before = keys.resolve("keys/system/vault_key", "");
+  bool made = true;
+  std::string err;
+  EXPECT_EQ(keys.ensure_random_system_key("vault_key", 2, &made, &err), before);
+  EXPECT_FALSE(made);
+  EXPECT_TRUE(base::list_files(storage / "keys/system").size() == 1);
 }
