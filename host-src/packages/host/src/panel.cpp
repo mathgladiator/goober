@@ -48,7 +48,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
     "deletions",
-    "schema_check"};
+    "schema_check",
+    "flag_list"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 

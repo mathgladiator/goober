@@ -287,6 +287,21 @@ struct Manifest {
     int major = 1;
   };
   std::vector<LibraryImport> libraries;
+  // Runtime flags an operator flips without a new version (design/machine/039.Flags.md): a
+  // closed set, each with its default and, optionally, the values it may take.
+  struct Flag {
+    std::string name, default_value, about;
+    std::vector<std::string> values;  // empty: any string up to kFlagValueMax bytes
+  };
+  static constexpr size_t kMaxFlags = 32;
+  static constexpr size_t kFlagValueMax = 200;
+  std::vector<Flag> flags;
+  const Flag* flag(std::string_view name) const {
+    for (const auto& f : flags) {
+      if (f.name == name) return &f;
+    }
+    return nullptr;
+  }
   std::vector<std::string> warnings;  // fields v1 accepts but does not implement
 
   bool applies_to(std::string_view domain) const;

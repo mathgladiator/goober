@@ -64,6 +64,13 @@ PathKind classify_path(std::string_view path) {
     k.target = parts[1].substr(0, parts[1].size() - std::string_view(".schema.json").size());
     return k;
   }
+  // Box flags (039.Flags.md): flags/$tenant/$box.json, the whole set, before and after.
+  if (parts.size() == 3 && parts[0] == "flags" && parts[2].ends_with(".json")) {
+    k.kind = "flag";
+    k.tenant = parts[1];
+    k.target = parts[2].substr(0, parts[2].size() - std::string_view(".json").size());
+    return k;
+  }
   if (parts.size() == 4 && parts[0] == "objects" && parts[2] == "attachments") {
     k.kind = "attachment";
     k.tenant = parts[1];
@@ -177,7 +184,8 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
         std::error_code ec;
         existed = fs::exists(root_ / change.path, ec);
       }
-      bool texts = k.kind == "content" || k.kind == "partial" || k.kind == "template" || k.kind == "schema";
+      bool texts = k.kind == "content" || k.kind == "partial" || k.kind == "template" || k.kind == "schema" ||
+                   k.kind == "flag";
       std::string action = del ? "delete" : existed ? "write" : "create";
       insert(now_ms, k.kind, action, k.tenant, k.target, actor, request_id, before, after, texts, detail);
     }

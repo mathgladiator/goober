@@ -20,6 +20,23 @@ unsafe extern "C" {
     fn goober_result_read(ptr: *mut u8, len: i32) -> i32;
     fn goober_call(sv_ptr: *const u8, sv_len: i32, m_ptr: *const u8, m_len: i32, r_ptr: *const u8, r_len: i32) -> i32;
     fn goober_lib(l_ptr: *const u8, l_len: i32, f_ptr: *const u8, f_len: i32, a_ptr: *const u8, a_len: i32) -> i32;
+    fn goober_flag(name_ptr: *const u8, name_len: i32) -> i32;
+}
+
+/// A flag the manifest declares ("flags": {"frozen": {"default": "false"}};
+/// design/machine/039.Flags.md): the value an operator set with flag_set for this tenant, or the
+/// default. None when the manifest declares no such flag.
+pub fn flag(name: &str) -> Option<String> {
+    unsafe {
+        let n = goober_flag(name.as_ptr(), name.len() as i32);
+        if n < 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; n as usize];
+        let got = goober_result_read(buf.as_mut_ptr(), n);
+        buf.truncate(got.max(0) as usize);
+        String::from_utf8(buf).ok()
+    }
 }
 
 /// Calls a method of a service declared under "external" (design/machine/015.Network.md).

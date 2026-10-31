@@ -24,6 +24,7 @@
 #include "keys.h"
 #include "backups.h"
 #include "builder.h"
+#include "flags.h"
 #include "jobs.h"
 #include "grant_usage.h"
 #include "mailer.h"
@@ -245,6 +246,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_web_tools();
   register_source_tools();
   register_job_tools();
+  register_flag_tools();
   backups_->set_source(source_.get());
   register_panel_tools();
   register_pwa_tools();
@@ -1159,6 +1161,15 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   // A box's random bytes come from the seed and a key the logs don't hold (the host's reply key),
   // so reading the access log's seed predicts nothing; a replay on this host repeats them.
   input.random_key = base::hmac_sha256(reply_key(), "goober-box-random");
+  // Flags (039.Flags.md): what the box read goes in the access log, so a replay knows.
+  bj::object flags_read;
+  if (!m.flags.empty()) {
+    input.flag = [this, &m, &tenant, &flags_read](std::string_view name) -> std::optional<std::string> {
+      auto value = flag_for(m, tenant, name);
+      if (value) flags_read[std::string(name)] = *value;
+      return value;
+    };
+  }
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
   if (!m.data.empty()) {
@@ -1264,6 +1275,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                    {"now_ms", input.now_ms}};
   if (who) extra["user_id"] = std::to_string(who->user.user_id);
   if (library_calls) extra["libraries"] = library_calls;
+  if (!flags_read.empty()) extra["flags"] = std::move(flags_read);
   if (used_tzdata) extra["tzdata"] = calendar::tzdata_version();  // for a replay on newer rules
   // A typed response must match its type: a box can't leak a field the schema doesn't name (037).
   if (std::string type = types::json_type_name(route.response);

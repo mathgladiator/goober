@@ -50,6 +50,9 @@ struct CallInput {
   // Calls a declared host library for goober_lib: (library, function, argument JSON) to a result
   // JSON (design/machine/831.Libraries.md). Without it, goober_lib answers {"error"}.
   std::function<std::string(std::string_view, std::string_view, std::string_view)> lib = {};
+  // A flag's value for goober_flag (design/machine/039.Flags.md), or nullopt when the manifest
+  // doesn't declare it. Without it, every flag is undeclared.
+  std::function<std::optional<std::string>(std::string_view)> flag = {};
 };
 
 struct LogLine {

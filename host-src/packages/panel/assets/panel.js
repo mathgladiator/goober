@@ -497,6 +497,7 @@ const views = {
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
     const jobs = manifest && manifest.manifest.routes && manifest.manifest.routes.job ? await jobsOf(name) : [];
+    const flags = manifest && manifest.manifest.flags ? await flagsOf(name) : [];
     const deploys = changes.changes.filter((c) => c.target === name);
     const deployedAt = Object.fromEntries(deploys.map((c) => [c.detail.version, c.at_ms]));
     const routes = graph.nodes.filter((n) => n.kind === 'route');
@@ -507,6 +508,7 @@ const views = {
       wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) location.hash = '#/box/' + encodeURIComponent(n.label); })),
       grantsCard(grants[0]),
       jobsCard(jobs),
+      flagsCard(flags),
       h('div', { class: 'grid' },
         wideCard('Routes', table([
           { label: 'Protocol', get: (r) => r.protocol },
@@ -1185,6 +1187,31 @@ function grantsCard(report) {
 }
 
 // A box's jobs (038 § 7) for every tenant on the host: job_list is per tenant.
+// A box's flags (039) for every tenant on the host: flag_list is per tenant.
+async function flagsOf(box) {
+  const domains = await api('domain_list').catch(() => []);
+  const tenants = [...new Set(domains.filter((d) => !d.redirect_to).map((d) => d.tenant))].sort();
+  const lists = await Promise.all(tenants.map((t) => api('flag_list', { tenant: t, box }).catch(() => ({ boxes: [] }))));
+  return lists.flatMap((l, i) => l.boxes.flatMap((b) => b.flags.map((f) => ({ ...f, tenant: tenants[i] }))));
+}
+
+// On a box's page: its flags per tenant, what the box reads now, and who flipped them. Set over
+// MCP with flag_set; the panel only looks.
+function flagsCard(flags) {
+  if (!flags.length) return null;
+  return wideCard('Flags', h('p', { class: 'muted small' },
+    'Switches the manifest declares, flipped with flag_set; the box reads them on its next call, no new version.'),
+  table([
+    { label: 'Tenant', get: (f) => f.tenant, cls: () => 'mono' },
+    { label: 'Flag', get: (f) => f.flag, cls: () => 'mono' },
+    { label: 'Value', get: (f) => f.value, cls: (f) => 'mono' + (f.value === f.default ? ' muted' : '') },
+    { label: 'Default', get: (f) => f.default, cls: () => 'mono muted' },
+    { label: 'Set by', get: (f) => f.set_by || '', cls: () => 'mono muted' },
+    { label: 'When', get: (f) => f.set_at ? fmt.time(Date.parse(f.set_at)) : '', cls: () => 'muted' },
+    { label: 'Why', get: (f) => clip(f.set_why || f.about || '', 100), cls: () => 'muted' },
+  ], flags));
+}
+
 async function jobsOf(box) {
   const domains = await api('domain_list').catch(() => []);
   const tenants = [...new Set(domains.filter((d) => !d.redirect_to).map((d) => d.tenant))].sort();
