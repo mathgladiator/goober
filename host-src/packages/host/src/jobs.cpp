@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <set>
 #include <thread>
 
 #include "goober/base/encoding.h"
@@ -67,6 +68,7 @@ bj::object JobRun::to_json() const {
   if (!last_error.empty()) o["last_error"] = last_error;
   if (!errors.empty()) o["errors"] = errors;
   if (!log.empty()) o["log"] = log;
+  if (!snapshots.empty()) o["snapshots"] = snapshots;
   return o;
 }
 
@@ -76,18 +78,24 @@ JobRuns::JobRuns(const fs::path& file) {
   db_ = std::make_unique<sqlite::Db>(file);
   db_->exec("PRAGMA journal_mode = WAL");
   db_->exec(kSchema);
+  // Added 2026-10-31: the snapshots a real run took before its first batch.
+  try {
+    db_->exec("ALTER TABLE runs ADD COLUMN snapshots TEXT NOT NULL DEFAULT '[]'");
+  } catch (const std::exception&) {
+    // already there
+  }
 }
 
 void JobRuns::save(const JobRun& r) {
   std::lock_guard lock(mu_);
   sqlite::Stmt s(*db_,
                  "INSERT OR REPLACE INTO runs (id, box, version, job, tenant, dry_run, state, cursor, calls, moved, "
-                 "failures_in_row, last_error, by, started_ms, updated_ms, finished_ms, errors, log) "
-                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                 "failures_in_row, last_error, by, started_ms, updated_ms, finished_ms, errors, log, snapshots) "
+                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   s.bind(1, r.id).bind(2, r.box).bind(3, r.version).bind(4, r.job).bind(5, r.tenant).bind(6, int64_t(r.dry_run));
   s.bind(7, r.state).bind(8, r.cursor).bind(9, r.calls).bind(10, r.moved).bind(11, r.failures_in_row);
   s.bind(12, r.last_error).bind(13, r.by).bind(14, r.started_ms).bind(15, r.updated_ms).bind(16, r.finished_ms);
-  s.bind(17, json::dump(r.errors)).bind(18, json::dump(r.log)).run();
+  s.bind(17, json::dump(r.errors)).bind(18, json::dump(r.log)).bind(19, json::dump(r.snapshots)).run();
 }
 
 std::optional<JobRun> JobRuns::read(sqlite::Stmt& s) {
@@ -112,12 +120,13 @@ std::optional<JobRun> JobRuns::read(sqlite::Stmt& s) {
   std::string err;
   if (auto e = json::parse(s.text(16), &err); e && e->is_array()) r.errors = e->as_array();
   if (auto l = json::parse(s.text(17), &err); l && l->is_array()) r.log = l->as_array();
+  if (auto n = json::parse(s.text(18), &err); n && n->is_array()) r.snapshots = n->as_array();
   return r;
 }
 
 constexpr const char* kColumns =
     "SELECT id, box, version, job, tenant, dry_run, state, cursor, calls, moved, failures_in_row, last_error, by, "
-    "started_ms, updated_ms, finished_ms, errors, log FROM runs ";
+    "started_ms, updated_ms, finished_ms, errors, log, snapshots FROM runs ";
 
 std::optional<JobRun> JobRuns::get(int64_t id) {
   std::lock_guard lock(mu_);
@@ -423,6 +432,24 @@ void Host::register_job_tools() {
       }
     }
     JobRun r;
+    // A real run can't be undone by the host, so it starts only once every database it may
+    // write has a db_snapshot to go back to (db_restore_to_new); their ids are on the run.
+    if (!dry_run) {
+      std::set<std::pair<std::string, std::string>> writable;
+      for (const auto& d : box->manifest.data) {
+        if (d.applies_schema() && d.may_write()) writable.insert({d.tenant_for(tenant), d.database_for(tenant)});
+      }
+      for (const auto& [t, db] : writable) {
+        if (!databases_->exists(t, db)) continue;  // nothing there yet to lose
+        std::string err;
+        auto snap = take_snapshot(t, db, "before job " + box_name + "." + job + " on version " + box->version,
+                                  current_operator(), false, &err);
+        if (!snap) {
+          return ToolResult::fail("no snapshot of " + t + "/" + db + " before the run, so it didn't start: " + err);
+        }
+        r.snapshots.push_back(bj::object{{"tenant", t}, {"database", db}, {"snapshot", snap->at("snapshot")}});
+      }
+    }
     r.id = next_id_();
     r.box = box_name;
     r.version = box->version;
@@ -481,7 +508,9 @@ void Host::register_job_tools() {
                   "Changing tool. Runs a box's job for a tenant, for real, in batches, writing the tenant's real "
                   "databases: the box answers each call with {\"cursor\", \"done\", \"moved\"}, and the host keeps "
                   "the cursor after each batch commits, so a restart resumes. Refused until a dry run of the same box "
-                  "version, job, and tenant passed (job_dry_run). Pauses after 3 failed batches in a row, or when the "
+                  "version, job, and tenant passed (job_dry_run). Before a new run's first batch, every database the box may "
+                  "write is snapshotted (db_snapshot; ids under snapshots), so db_restore_to_new can bring back the data "
+                  "as it was; when a snapshot can't be taken, the run doesn't start. Pauses after 3 failed batches in a row, or when the "
                   "box gets a new version; job_start again goes on from the cursor of a paused or stopped run. A job "
                   "that ran to the end runs again only with again: true, which starts over. Returns the run (as "
                   "job_dry_run does; state running, done, or paused, and resumed when it went on). Answers within 25 s.",

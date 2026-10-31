@@ -6,6 +6,9 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- whats_new: this list, by day; call it after a deploy or a reconnect to learn what arrived.
+- A real job_start snapshots every database the box may write before its first batch (the run's snapshots name them); db_restore_to_new brings the data back as it was.
+- A deep link's #fragment survives signing in (/docs/guide#install lands on #install after the code).
 - Box SQL has no clock: 'now', CURRENT_TIMESTAMP and its kin, and date functions with no value are refused, and the statement is undone; pass the call's now_ms (datetime(:now_ms / 1000, 'unixepoch')). Operators' db_query keeps the clock.
 - The id service's first id is 4294967297 (2^32 + 1): every new id is past the 32-bit range; treat ids as 64-bit strings everywhere.
 - Mail routes get from_user_id (a string) when the host verifies the sender (a DKIM signature aligned with the From domain) and the address belongs to an active account; otherwise null, with sender_why.

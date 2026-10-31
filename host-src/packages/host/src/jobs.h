@@ -34,6 +34,7 @@ struct JobRun {
   int64_t started_ms = 0, updated_ms = 0, finished_ms = 0;
   boost::json::array errors;  // the newest 20: {call, error}
   boost::json::array log;     // the box's log lines, the newest 50: {call, level, text}
+  boost::json::array snapshots;  // a real run's db_snapshot of each database it may write, taken first
   boost::json::object to_json() const;
 };
 

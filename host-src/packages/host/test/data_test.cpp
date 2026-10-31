@@ -420,6 +420,11 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   auto run = start("job_start", "move_members");
   ASSERT_EQ(run.at("state"), "done") << json::dump(run);
   EXPECT_EQ(run.at("cursor"), "5");
+  // It started only after a snapshot of the database it may write, so it can be undone.
+  ASSERT_EQ(run.at("snapshots").as_array().size(), 1u) << json::dump(run);
+  EXPECT_EQ(run.at("snapshots").at(0).at("database"), "main");
+  auto snaps = tool("db_snapshots", {{"tenant", "playground"}, {"database", "main"}});
+  EXPECT_NE(json::dump(snaps).find("before job mover.move_members"), std::string::npos) << json::dump(snaps);
   EXPECT_EQ(run.at("moved"), 6);  // the box said 2 per batch
   EXPECT_EQ(count("members"), 5);
   auto ids = tool("db_query", {{"tenant", "playground"}, {"database", "main"}, {"sql", "SELECT min(id) >= 4294967296 FROM members"}});
