@@ -403,13 +403,19 @@ void Host::register_data_tools() {
                             "the same idempotency key. A changing tool."
                           : "Deletes a dead outbox element for good: it is never sent. A changing tool.",
                     outbox_ref, [this, retry](const bj::object& args) {
-                      auto id = args.if_contains("id");
-                      if (!id || !id->is_int64()) return ToolResult::fail("id is required");
-                      if (!outbox_set(arg(args, "tenant").value_or(""), arg(args, "database").value_or(""), id->as_int64(),
-                                      retry)) {
+                      // A number, or a string of digits.
+                      int64_t n = -1;
+                      if (const auto* id = args.if_contains("id"); id && id->is_int64()) {
+                        n = id->as_int64();
+                      } else if (id && id->is_string() && !id->as_string().empty() && id->as_string().size() <= 18 &&
+                                 std::string_view(id->as_string()).find_first_not_of("0123456789") == std::string_view::npos) {
+                        n = std::atoll(std::string(id->as_string()).c_str());
+                      }
+                      if (n < 0) return ToolResult::fail("id is required: the number outbox_dead_letters shows");
+                      if (!outbox_set(arg(args, "tenant").value_or(""), arg(args, "database").value_or(""), n, retry)) {
                         return ToolResult::fail("no such dead element");
                       }
-                      return ToolResult::ok(bj::object{{retry ? "retrying" : "discarded", id->as_int64()}});
+                      return ToolResult::ok(bj::object{{retry ? "retrying" : "discarded", n}});
                     }});
   }
   mcp_->add_tool({"timers_list",

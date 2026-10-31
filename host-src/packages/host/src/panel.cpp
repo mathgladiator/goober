@@ -90,6 +90,14 @@ int64_t arg_int(const bj::object& args, const char* k, int64_t fallback) {
   auto* v = args.if_contains(k);
   if (v && v->is_int64()) return v->as_int64();
   if (v && v->is_uint64()) return int64_t(v->as_uint64());
+  // A string of digits too: agents told "ids are strings in JSON" send them either way.
+  if (v && v->is_string()) {
+    std::string_view t = v->as_string();
+    if (t.empty() || t.size() > 18 || t.find_first_not_of("0123456789") != std::string_view::npos) return fallback;
+    int64_t n = 0;
+    for (char c : t) n = n * 10 + (c - '0');
+    return n;
+  }
   return fallback;
 }
 

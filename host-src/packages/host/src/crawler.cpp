@@ -44,8 +44,21 @@ std::optional<std::string> arg(const bj::object& args, const char* key) {
 }
 
 int64_t int_arg(const bj::object& args, const char* key, int64_t def) {
-  auto* v = args.if_contains(key);
-  return v && v->is_int64() ? v->as_int64() : def;
+  // A number, or a string of digits: agents told "ids are strings in JSON" send them either way.
+  const auto* v = args.if_contains(key);
+  if (!v) return def;
+  if (v->is_int64()) return v->as_int64();
+  if (v->is_uint64()) return int64_t(v->as_uint64());
+  if (v->is_string()) {
+    std::string_view t = v->as_string();
+    bool neg = !t.empty() && t.front() == '-';
+    if (neg) t.remove_prefix(1);
+    if (t.empty() || t.size() > 18 || t.find_first_not_of("0123456789") != std::string_view::npos) return def;
+    int64_t n = 0;
+    for (char c : t) n = n * 10 + (c - '0');
+    return neg ? -n : n;
+  }
+  return def;
 }
 
 std::vector<std::string> strings(const bj::object& o, const char* key) {

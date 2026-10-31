@@ -807,6 +807,9 @@ TEST_F(SiteRoutesTest, EtagsAreLabelledTemplatesGuardWritesAndWritesNameTheirCha
   ASSERT_TRUE(put.as_object().contains("change_id")) << json::dump(put);
   auto change = tool("change_get", {{"id", put.at("change_id")}});
   EXPECT_EQ(change.at("target"), "health/anxiety.md") << json::dump(change);
+  // The same id as a string of digits reads the same change.
+  auto by_string = tool("change_get", {{"id", std::to_string(put.at("change_id").as_int64())}});
+  EXPECT_EQ(by_string.at("target"), "health/anxiety.md") << json::dump(by_string);
   EXPECT_EQ(tool("page_get", {{"path", "/health/anxiety"}}).at("file_etag").as_string(), file_etag);
   EXPECT_EQ(tool("list_etags", {{"paths", bj::array{"/health/anxiety"}}}).at("etags").at("/health/anxiety").at("file_etag").as_string(),
             file_etag);

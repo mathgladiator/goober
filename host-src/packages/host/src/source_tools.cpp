@@ -22,10 +22,20 @@ std::optional<std::string> arg(const bj::object& args, const char* key) {
 }
 
 int64_t int_arg(const bj::object& args, const char* key, int64_t fallback) {
-  auto it = args.find(key);
-  if (it == args.end()) return fallback;
-  if (it->value().is_int64()) return it->value().as_int64();
-  if (it->value().is_uint64()) return int64_t(it->value().as_uint64());
+  // A number, or a string of digits: agents told "ids are strings in JSON" send them either way.
+  const auto* v = args.if_contains(key);
+  if (!v) return fallback;
+  if (v->is_int64()) return v->as_int64();
+  if (v->is_uint64()) return int64_t(v->as_uint64());
+  if (v->is_string()) {
+    std::string_view t = v->as_string();
+    bool neg = !t.empty() && t.front() == '-';
+    if (neg) t.remove_prefix(1);
+    if (t.empty() || t.size() > 18 || t.find_first_not_of("0123456789") != std::string_view::npos) return fallback;
+    int64_t n = 0;
+    for (char c : t) n = n * 10 + (c - '0');
+    return neg ? -n : n;
+  }
   return fallback;
 }
 
