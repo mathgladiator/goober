@@ -285,6 +285,47 @@ TEST_F(HostTest, FormsArriveDecodedAndAnonymousWritesAreBudgeted) {
   EXPECT_GT(limited, 0);
 }
 
+// "client-ip": true (2026-10-31): a route that records something gets the caller's address; the
+// upload says so as a widening, and the audit log notes each call with the address hashed.
+TEST_F(HostTest, ARouteMayAskForTheCallersAddress) {
+  auto manifest = [](const char* verb, bool ip) {
+    bj::object def{{"name", "echo"}, {"public", true}};
+    if (ip) def["client-ip"] = true;
+    return bj::object{{"box", "hello"},
+                      {"domains", bj::array{"*"}},
+                      {"routes", bj::object{{"http", bj::object{{"/consent", bj::object{{verb, def}}}}}}}};
+  };
+  auto get = tool("version_upload", {{"manifest", manifest("get", true)}, {"wat", kHelloWat}});
+  ASSERT_EQ(get.at("result").at("isError"), true);
+  EXPECT_NE(json::dump(get).find("a GET changes nothing"), std::string::npos) << json::dump(get);
+
+  ASSERT_EQ(tool("version_upload", {{"manifest", manifest("post", false)}, {"wat", kHelloWat}}).at("result").at("isError"), false);
+  auto without = fetch(port, bhttp::verb::post, "/consent", "localhost", "{}", "", "", "application/json");
+  ASSERT_EQ(without.status, 200) << without.body;
+  EXPECT_EQ(without.body.find("client_ip"), std::string::npos) << without.body;
+
+  auto v = tool("version_upload", {{"manifest", manifest("post", true)}, {"wat", kHelloWat}});
+  ASSERT_EQ(v.at("result").at("isError"), false) << json::dump(v);
+  EXPECT_NE(json::dump(v.at("result").at("structuredContent").at("widens")).find("now receives each caller's IP address"),
+            std::string::npos)
+      << json::dump(v.at("result").at("structuredContent").at("widens"));
+  auto with = fetch(port, bhttp::verb::post, "/consent", "localhost", "{}", "", "", "application/json");
+  ASSERT_EQ(with.status, 200) << with.body;
+  std::string err;
+  auto doc = json::parse(with.body, &err);
+  ASSERT_TRUE(doc) << with.body;
+  EXPECT_EQ(doc->at("client_ip"), "127.0.0.1");
+  EXPECT_EQ(doc->at("client_key").as_string().size(), 16u);
+
+  auto found = tool("log_search", {{"log", "audit"}, {"pattern", "\"action\":\"client_ip\""}});
+  const auto& lines = found.at("result").at("structuredContent").at("lines").as_array();
+  ASSERT_EQ(lines.size(), 1u) << json::dump(found);
+  std::string text(lines.at(0).as_string());
+  EXPECT_NE(text.find("\"route\":\"echo\""), std::string::npos) << text;
+  EXPECT_NE(text.find("client_h"), std::string::npos) << text;
+  EXPECT_EQ(text.find("127.0.0.1"), std::string::npos) << text;
+}
+
 TEST_F(HostTest, OperatorsMaySendLargerBodiesThanAnyoneElse) {
   std::string big(3 << 20, 'x');  // past the 1 MiB default
   auto v = tool("content_put", {{"tenant", "playground"}, {"path", "big.txt"}, {"text", big}});

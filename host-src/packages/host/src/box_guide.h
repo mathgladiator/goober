@@ -120,6 +120,10 @@ The request document is JSON:
   without a json body type. One value per name (the last).
 - "client_key": 16 hex characters, the same for the same address on the same site, so a box
   can spot repeats (one signup per visitor, say) without ever holding an IP address.
+- "client_ip": the caller's address itself, only on a post, put, patch, or delete route that
+  declares "client-ip": true (a consent record that must say where it was given). The upload's
+  review lists it as a widening, and every call that receives it is in the host's audit log.
+  Keep it only where you must; client_key covers spotting repeats.
 - Anonymous POSTs are limited per address (20 a minute, bursts of 10), on top of the host's
   overall limit, so a public form can't become a flood.
 - An MCP tool: method "tool", path "mcp:$name", body = the checked input as JSON.

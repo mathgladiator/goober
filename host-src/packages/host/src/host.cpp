@@ -1706,6 +1706,17 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // Who is asking, without saying who: the same address on the same site gives the same key,
   // so a box can spot repeats without ever holding an IP address.
   doc["client_key"] = base::sha256_hex("goober-client\n" + tenant + "\n" + client_key).substr(0, 16);
+  // A route that declares "client-ip" (2026-10-31) gets the address itself, and the audit log says
+  // so, with the address as a keyed hash. A try gets 192.0.2.1, an address kept for documentation.
+  if (route.client_ip) {
+    std::string ip = trying ? "192.0.2.1" : client_address(req);
+    doc["client_ip"] = ip;
+    if (!trying) {
+      audit("client_ip", "box:" + m.box, tenant + " " + route.name, "given",
+            bj::object{{"request_id", request_id}, {"box", m.box}, {"route", route.name},
+                       {"client_h", address_hash_for_logs(ip)}});
+    }
+  }
 
   // A GET or HEAD changes nothing (037.Caching.md § 2): its statements may only read, so they
   // begin deferred and never wait on the write lock, and its calls out must be reads.

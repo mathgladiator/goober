@@ -99,6 +99,10 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
       std::string who = reachable(n.kind) ? " (" + requirements_text(*n.route) + ")" : "";
       out.add("routes", what, "added", reachable(n.kind) ? "widens" : "neutral",
               "new " + what + who + (n.kind == "mail route" ? ": may now receive mail at " + n.key : ""));
+      if (n.route->client_ip) {
+        out.add("routes", what, "added", "widens", "new " + what + " receives each caller's IP address (client-ip)",
+                "client-ip", "false", "true");
+      }
       continue;
     }
     const HttpRoute& x = *it->second.route;
@@ -147,6 +151,11 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
       }
     }
     // What browsers may keep, and the rest of the cache.
+    if (x.client_ip != y.client_ip) {
+      field("client-ip", x.client_ip ? "true" : "false", y.client_ip ? "true" : "false", y.client_ip ? "widens" : "narrows",
+            y.client_ip ? what + " now receives each caller's IP address (client-ip)"
+                        : what + " no longer receives callers' IP addresses");
+    }
     if (x.cache.browser_ms != y.cache.browser_ms) {
       field("cache.browser-ms", std::to_string(x.cache.browser_ms), std::to_string(y.cache.browser_ms),
             y.cache.browser_ms > x.cache.browser_ms ? "widens" : "narrows",

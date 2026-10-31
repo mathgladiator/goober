@@ -1704,11 +1704,11 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             std::string key(f.key());
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
-                key == "response" || key == "cors" || key == "includes" || key == "cache") {
+                key == "response" || key == "cors" || key == "includes" || key == "cache" || key == "client-ip") {
               // A subscription answers its own page's EventSource: no body, no template or
               // partials (the events are the box's bytes), and no cross-origin readers.
               if (sse && (key == "body" || key == "max-body-bytes" || key == "template" || key == "includes" ||
-                          key == "cors" || key == "cache")) {
+                          key == "cors" || key == "cache" || key == "client-ip")) {
                 return *error = where + "." + key + " doesn't apply to a subscription", std::nullopt;
               }
               continue;
@@ -1739,6 +1739,12 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
           }
           if (!err.empty()) return *error = where + ": " + err, std::nullopt;
           route.agents = goober::json::get_bool(def, "agents", &err).value_or(false);
+          route.client_ip = goober::json::get_bool(def, "client-ip", &err).value_or(false);
+          if (route.client_ip && v == "get") {
+            return *error = where + ": client-ip is for a route that records something (post, put, patch, delete); a "
+                                    "GET changes nothing and may be cached",
+                   std::nullopt;
+          }
           if (sse) {
             const auto* w = def.if_contains("wake");
             if (!w || !w->is_array() || w->as_array().empty() || w->as_array().size() > 8) {

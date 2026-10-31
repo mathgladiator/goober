@@ -30,6 +30,10 @@ struct HttpRoute {
   // "agents": true lets agent tokens call the route (050.AgentsMCP.md); otherwise only
   // a person, signed in through a browser or a person client, may.
   bool agents = false;
+  // "client-ip": true hands the box the address the request came from (client_ip), on a route
+  // that records something: post, put, patch, or delete, never a GET (2026-10-31). Every call that
+  // receives it is in the audit log; everywhere else the box sees only client_key.
+  bool client_ip = false;
   // What the request may carry (037.Http.md § Everything a request can carry). The host
   // checks all of it before the box wakes up.
   std::string body;  // "", "json:$Type", "text", or "binary"
