@@ -28,6 +28,16 @@ version_upload {manifest, wat | wasm_base64, types?}
   already points here.
 - dry_run: true runs every check and stores nothing. With it, schemas: [schema, ...] checks the
   manifest against schemas you haven't stored yet (schema_check's rules; nothing is stored).
+Try before live: store the version dark (activate: false), then call its routes with
+route_try {domain, box, version, method?, path, headers?, body?, as?} as a visitor
+("as": "signed_out", the default) and as each kind of person ("as": {"email": "ada@example.com"},
+an account in the realm, looked up, not signed in). The request goes through what a real one
+does: the gate (401, or a 303 to sign-in with "accept": "text/html"), declared inputs, the
+template, partials, ETag, Vary. A GET runs read-only against live data; a POST, PUT, PATCH,
+or DELETE runs on copies of the tenant's databases, thrown away after, and answers the rows
+each table held before and after, and what it would have queued for delivery. Calls to other
+boxes are refused in a write's try, and nothing reaches anyone. When every route answers as
+it should for every kind of caller, version_promote {box, version}.
 Store database schemas first with schema_put. Then check box_logs, access_log, and db_query.
 Out of service: box_disable {box, why} stops every route, tool, timer, mail route, and job of
 a box, keeping its versions and data; box_enable {box} puts the same version back. To take

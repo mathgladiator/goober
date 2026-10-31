@@ -294,6 +294,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_source_tools();
   register_whats_new_tool();
   register_job_tools();
+  register_try_tools();
   register_cache_tools();
   register_flag_tools();
   register_perf_tools();
@@ -693,8 +694,11 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
         auto* v = line.if_contains(k);
         return v && v->is_string() ? std::string(v->as_string()) : std::string();
       };
-      live_.record(base::now_unix_ms(), *tenant, path, text("route"), text("box"), status,
-                   line.at("us").as_int64(), from);
+      // A route_try isn't traffic: no one visited (route_try.cpp).
+      if (!line.contains("try")) {
+        live_.record(base::now_unix_ms(), *tenant, path, text("route"), text("box"), status,
+                     line.at("us").as_int64(), from);
+      }
     }
   }
   log_line("access", std::move(line));
@@ -1228,6 +1232,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   int64_t call_started_us = base::monotonic_us();
   // The box's databases: one transaction each, committed below when the box answers under 500.
   std::optional<db::Session> session;
+  db::Usage used;  // what the statements did with each table, for the caller (route_try)
   if (!m.data.empty()) {
     session.emplace(options.databases ? *options.databases : *databases_, tenant, m.data, *schemas_);
     // The host writes too: the outbox, in the first strategy that applies a schema, and a
@@ -1388,6 +1393,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     extra["sql"] = session->statements();
     // Use is use, committed or not: what the statements that ran touched (grant_usage).
     if (grant_usage_) grant_usage_->record(m.box, ref.box->version, session->used(), input.now_ms);
+    used = session->used();
     std::string err;
     if (!ok) {
       session->rollback();
@@ -1455,11 +1461,12 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   }
   int64_t calls_out = 0;
   for (const auto& [k, n] : net.calls) calls_out += n;
-  return BoxCall{std::move(result), std::move(extra), std::move(perf), calls_out};
+  return BoxCall{std::move(result), std::move(extra), std::move(perf), calls_out, std::move(used)};
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
-                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>, int64_t posted_us) {
+                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>, int64_t posted_us,
+                     TryRun* trying) {
   int64_t served_us = base::monotonic_us();
   auto cfg = config_.get();
   std::string request_id = req.header("goober-request-id");
@@ -1468,7 +1475,8 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // Identity: who is calling, and may they use this route.
   std::optional<SignedIn> who;
   try {
-    who = signed_in(req, tenant);
+    // A try is as the person route_try named, looked up, never signed in.
+    who = trying ? trying->who : signed_in(req, tenant);
   } catch (const std::exception& e) {
     std::cerr << "goober-host: identity: " << e.what() << "\n";
     return finish(error_page(tenant, 500, request_id), R"({"why":"identity failed"})");
@@ -1492,13 +1500,13 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   // A browser's state-changing request must come from this site (070.UI.md § Keeping browsers safe).
   // A bearer token isn't sent by a browser on its own, so only cookie callers are checked.
   bool bearer_call = base::to_lower(req.header("authorization")).starts_with("bearer ");
-  if (req.method != "get" && req.method != "head" && !bearer_call && !same_origin(req, origin_of(req))) {
+  if (!trying && req.method != "get" && req.method != "head" && !bearer_call && !same_origin(req, origin_of(req))) {
     return finish(error_page(tenant, 403, request_id), R"({"why":"cross-origin request"})");
   }
   // Anonymous writes (a landing page's form, say) get their own, tighter budget per address,
   // so a public route that stores or mails what it's given can't be turned into a flood.
   std::string client_key = rate_key(client_address(req));
-  if (!who && req.method != "get" && req.method != "head") {
+  if (!trying && !who && req.method != "get" && req.method != "head") {
     if (int64_t wait = limiter_.take("anonymous-write", client_key, RateRule{20, 10}, base::now_unix_ms())) {
       auto res = error_page(tenant, 429, request_id);
       res.headers.emplace_back("retry-after", std::to_string(wait));
@@ -1581,9 +1589,24 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   CallOptions options;
   options.read_only = req.method == "get" || req.method == "head";
   options.perf_by_caller = true;
+  // A try's write runs on copies of the tenant's databases, as a job's dry run does: internal
+  // calls refused, deliveries kept in the copies, nothing published (route_try.cpp).
+  if (trying && !options.read_only) {
+    options.databases = trying->copies;
+    options.dry_run = true;
+  }
   // A route that declares "cache" (037 § 4) answers from its entry when it is still good; a
-  // miss runs the box and stores what it may.
-  auto cached = cache_lookup(ref, doc, tenant, who, req.method);
+  // miss runs the box and stores what it may. A try never reads or fills the cache, but its
+  // box sees exactly what a cached route's box sees.
+  CacheLookup cached;
+  if (!trying) {
+    cached = cache_lookup(ref, doc, tenant, who, req.method);
+  } else if (route.cache.on && options.read_only) {
+    doc["method"] = "get";
+    doc.erase("client_key");
+    if (!route.headers_declared) doc["headers"] = bj::object{};
+    if (route.is_public) doc["user"] = nullptr;
+  }
   BoxCall call = cached.hit ? std::move(*cached.hit) : call_box(ref, doc, tenant, request_id, who, options);
   if (cached.on) {
     cache_store(cached, route, call);
@@ -1602,6 +1625,11 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   int64_t render_us = 0;  // templates and partials, timed where they run below
   auto& result = call.result;
   auto& extra = call.extra;
+  if (trying) {
+    extra["try"] = true;
+    trying->logs = result.logs;
+    trying->used = call.used;
+  }
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
   int64_t now_ms = extra["now_ms"].as_int64();
   std::string extra_text = json::dump(extra);
@@ -1756,10 +1784,12 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     p.failed = p.failed || res.status >= 500;
     p.total_us = base::monotonic_us() - served_us;
     if (auto c = extra.if_contains("cache"); c && c->is_string()) p.cache = std::string(c->as_string());
-    perf_->record_call(p, base::now_unix_ms());
+    // A try isn't traffic: its numbers stay out of the performance report.
+    if (!trying) perf_->record_call(p, base::now_unix_ms());
     extra["perf"] = p.to_json();
     extra_text = json::dump(extra);
   }
+  if (trying) trying->extra = extra;
   finish(std::move(res), std::move(extra_text));
 }
 

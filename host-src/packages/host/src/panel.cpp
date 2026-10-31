@@ -54,7 +54,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "deletions",
     "schema_check",
     "flag_list",
-    "db_snapshots", "db_unbound"};
+    "db_snapshots", "db_unbound",
+    "route_try"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 

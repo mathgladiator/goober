@@ -52,6 +52,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     for (const char* t : {"db_snapshot", "db_snapshots", "db_restore_to_new", "db_create", "db_unbound"}) m[t] = Rule::kTenant;
     m["version_upload"] = Rule::kManifest;
     for (const char* t : {"mcp_tools_preview", "route_check"}) m[t] = Rule::kDomain;
+    m["route_try"] = Rule::kDomain;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",

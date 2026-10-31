@@ -6,6 +6,7 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-10-31
 
+- route_try: call any stored version's HTTP route (dark ones too) as signed_out or as an account ({email}), before version_promote. GETs read live data read-only; writes run on copies and report the rows they changed and what they would have queued. Nothing reaches people or real data.
 - whats_new: this list, by day; call it after a deploy or a reconnect to learn what arrived.
 - A real job_start snapshots every database the box may write before its first batch (the run's snapshots name them); db_restore_to_new brings the data back as it was.
 - A deep link's #fragment survives signing in (/docs/guide#install lands on #install after the code).

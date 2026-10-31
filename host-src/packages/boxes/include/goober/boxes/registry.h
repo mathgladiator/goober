@@ -114,6 +114,8 @@ class BoxRegistry {
   std::vector<VersionInfo> versions(const std::string& box) const;
   std::optional<std::string> manifest_text(const std::string& box, const std::string& version) const;
   std::optional<std::string> types_text(const std::string& box, const std::string& version) const;
+  // Any stored version, compiled and ready to call, live or not (route_try runs a dark one).
+  std::shared_ptr<const ActiveBox> load(const std::string& box, const std::string& version, std::string* error) const;
 
  private:
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;

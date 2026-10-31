@@ -232,6 +232,8 @@ std::optional<int64_t> parse_utc_ms(std::string_view t) {
 }
 
 std::optional<LineKey> key_line(const bj::object& line, const TenantOf& tenant_of) {
+  // A route_try (an operator's try of a box version) isn't traffic: no one visited.
+  if (line.contains("try")) return std::nullopt;
   auto at = parse_utc_ms(text(line, "at"));
   if (!at) return std::nullopt;
   LineKey k;

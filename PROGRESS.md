@@ -639,6 +639,13 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       script puts `location.hash` into `return`, `safe_return` keeps a well-formed fragment,
       and the final 303 lands on it; tests. Untried in a real browser.
 
+### Try before live (2026-10-31)
+- [x] `route_try`: any stored version's HTTP route, as nobody or as an account, through the
+      real gate, checks, template, and headers; GETs read-only on live data, writes on
+      throwaway copies with rows before and after and what would be queued; marked "try" in
+      the access log and left out of traffic and performance; `box_guide`; tests.
+- [ ] Tries of MCP tools and mail routes (only HTTP routes now).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
