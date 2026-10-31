@@ -225,7 +225,7 @@ void Host::register_db_admin_tools() {
 
   mcp_->add_tool(
       {"db_snapshot",
-       "Copies one tenant database as it is now (SQLite's online backup, safe while boxes write) into the host's "
+       "Changing tool. Copies one tenant database as it is now (SQLite's online backup, safe while boxes write) into the host's "
        "snapshots, and answers its id (DATABASE/STAMP), SHA-256, size, and tables with row counts. Before a migration "
        "or a drop. Snapshots are kept until a person deletes them in the panel, and the nightly backup carries them. A "
        "tenant's snapshots may hold 100 files and 2 GiB; past that this refuses. db_snapshots lists them; "
@@ -241,7 +241,7 @@ void Host::register_db_admin_tools() {
          return ToolResult::ok(std::move(*r));
        }});
   mcp_->add_tool({"db_snapshots",
-                  "A tenant's database snapshots, newest first: id (DATABASE/STAMP), when, who, the note, SHA-256, size, "
+                  "Read tool. A tenant's database snapshots, newest first: id (DATABASE/STAMP), when, who, the note, SHA-256, size, "
                   "tables with row counts, and before_drop for the ones the host took before a person dropped something.",
                   object_schema({{"tenant", tenant_prop}, {"database", string_property("Only this database's.")}}, {"tenant"}),
                   [this](const bj::object& args) {
@@ -251,9 +251,9 @@ void Host::register_db_admin_tools() {
                   }});
   mcp_->add_tool(
       {"db_restore_to_new",
-       "Makes a NEW database from a snapshot: the snapshot's tables, rows, and applied schemas, checked against its "
-       "SHA-256 and by SQLite's quick_check. Never writes over a database: the name must be free. Boxes reach it only "
-       "by naming it in a strategy.",
+       "Changing tool. Makes a NEW database from a snapshot: the snapshot's tables, rows, and applied schemas, "
+       "checked against its SHA-256 and by SQLite's quick_check. Never writes over a database: the name must be "
+       "free. Boxes reach it only by naming it in a strategy. Returns database, from, schemas, and tables.",
        object_schema({{"tenant", tenant_prop},
                       {"snapshot", string_property("The snapshot's id, DATABASE/STAMP, from db_snapshots.")},
                       {"database", string_property("The new database's name, unused in this tenant.")}},
@@ -286,9 +286,10 @@ void Host::register_db_admin_tools() {
        }});
   mcp_->add_tool(
       {"db_create",
-       "Makes a new, empty tenant database and applies stored schemas to it, before any box binds it, so it can be "
-       "checked empty (db_describe). The schemas must fit together, as boxes sharing a database must. Refused when the "
-       "database exists, or a schema is retired.",
+       "Changing tool. Makes a new, empty tenant database and applies stored schemas to it, before any box binds "
+       "it, so it can be checked empty (db_describe). The schemas must be stored (schema_put) and fit together, as "
+       "boxes sharing a database must. Refused when the database exists or a schema is retired. Returns what "
+       "db_describe returns.",
        object_schema({{"tenant", tenant_prop},
                       {"database", string_property("The new database's name.")},
                       {"schemas", mcp::any_property("The stored schemas to apply, in order: [\"main1\", ...].")}},
@@ -324,7 +325,7 @@ void Host::register_db_admin_tools() {
        }});
   mcp_->add_tool(
       {"db_unbound",
-       "A tenant's databases and tables that no box binds (active or disabled), and stored schemas no box names: what a "
+       "Read tool. A tenant's databases and tables that no box binds (active or disabled), and stored schemas no box names: what a "
        "person might drop or retire in the panel. Dropping is a person's act, never a tool's: an agent can only point "
        "at these.",
        object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this](const bj::object& args) {

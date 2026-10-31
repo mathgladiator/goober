@@ -89,10 +89,12 @@ void Host::register_flag_tools() {
 
   mcp_->add_tool(
       {"flag_set",
-       "Sets one of a box's flags for a tenant: a switch the box's manifest declares under \"flags\" and the box "
-       "reads with goober_flag on its next call, with no new version (a freeze, a kill switch, a mode). The value is "
-       "a string, one of the flag's declared values when it has them. Audited with the reason, and shown in the "
-       "change log with what it was before. Not for per-person state: that belongs in the box's database.",
+       "Changing tool. Sets one of a live box's flags for one tenant: a switch the box's manifest declares under "
+       "\"flags\" and the box reads with goober_flag on its next call, with no new version (a freeze, a kill "
+       "switch, a mode). The value is a string, one of the flag's declared values when it has them. Audited with "
+       "the reason, and in the change log with what it was before. Returns flag, value, and before. Refused for a "
+       "box that isn't live or doesn't serve the tenant, or a flag the manifest doesn't declare (the answer lists "
+       "the declared ones). Not for per-person state: that belongs in the box's database.",
        mcp::object_schema({{"tenant", tenant_prop},
                            {"box", box_prop},
                            {"flag", mcp::string_property("The flag's name, as the manifest declares it.")},
@@ -140,9 +142,9 @@ void Host::register_flag_tools() {
 
   mcp_->add_tool(
       {"flag_list",
-       "A tenant's box flags: for each active box serving it (or the one given), every flag its manifest declares, "
-       "with the value the box reads now, the default, the allowed values, and who set it, when, and why. A flag set "
-       "but no longer declared shows under retired.",
+       "Read tool. A tenant's box flags: for each live box serving it (or the one given), every flag its manifest "
+       "declares, with value (what the box reads now), default, values (the allowed ones), and set_by, set_at, and "
+       "set_why. A flag set but no longer declared shows under retired.",
        mcp::object_schema({{"tenant", tenant_prop}, {"box", box_prop}}, {"tenant"}),
        [this, serves](const bj::object& args) {
          auto tenant = arg(args, "tenant").value_or("");

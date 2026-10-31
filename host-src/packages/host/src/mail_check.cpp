@@ -65,8 +65,10 @@ void Host::register_mail_check_tools() {
       {"mail_domain_check",
        "A tenant domain's mail DNS and sending identity, checked live, with the records to add for anything "
        "missing: MX (and whether it points at this host, whose port 25 is then tried from here), SPF, DMARC, and, "
-       "when mail goes out through SES, the domain's SES identity, its verification, and its DKIM tokens. Only the "
-       "host's own domains, and port 25 only on this host's own addresses.",
+       "when mail goes out through SES, the domain's SES identity, its verification, and its DKIM tokens and "
+       "records. Answers {mx, spf, dmarc, ses, findings: [{level, text, fix}]}. SES must have the whole domain "
+       "verified, not one address, for boxes to send from addresses on it (a mail service's \"from\"). Only the "
+       "host's own domains, and port 25 only on this host's own addresses. A read tool.",
        object_schema({{"domain", domain_prop}}, {"domain"}),
        [this](const bj::object& args) {
          auto cfg = config_.get();
@@ -205,7 +207,9 @@ void Host::register_mail_check_tools() {
       {"mail_route_check",
        "Which box, version, and mail route would take mail for an address, exactly as the host decides when "
        "Stalwart asks (specific addresses before a catch-all *@), or why it would be refused at RCPT. Give a "
-       "domain and an address or just its local part. A reply address's token is checked as for real mail.",
+       "domain and an address or just its local part. A reply address's token is checked as for real mail. Only "
+       "live versions take mail: a disabled box takes none, and a version stored dark (activate: false) takes "
+       "none until version_promote. A read tool.",
        object_schema({{"domain", domain_prop},
                       {"address", string_property("An address, like support@example.com, or a local part, like support.")}},
                      {"domain", "address"}),

@@ -309,7 +309,9 @@ void Host::register_spec_tools() {
                   "Stores an OpenAPI document (2.0, 3.0, 3.1, or 3.2, as JSON; convert YAML first) in the host's spec store and "
                   "answers its pin, name@ and the first 12 hex digits of its SHA-256, which a manifest's external service names "
                   "as \"spec\" (034 § 2). The same bytes give the same pin; a fixed spec is a new pin. Methods then import "
-                  "operations by operationId or \"VERB /path\".",
+                  "operations by operationId or \"VERB /path\". Specs are shared by every tenant and never change "
+                  "under a pin, so storing one changes nothing a box uses until a manifest names its pin. A changing "
+                  "tool.",
                   object_schema({{"name", string_property("A name like strava or hevy: [a-z][a-z0-9_-]*.")},
                                  {"text", string_property("The spec's JSON.")}},
                                 {"name", "text"}),
@@ -323,7 +325,9 @@ void Host::register_spec_tools() {
                                                      {"title", spec ? spec->title : ""},
                                                      {"operations", spec ? int64_t(spec->ops.size()) : 0}});
                   }});
-  mcp_->add_tool({"spec_list", "The specs in the host's store: each pin, format, title, version, and how many operations.",
+  mcp_->add_tool({"spec_list",
+                  "The specs in the host's store: each pin, format, title, version, and how many operations. A read "
+                  "tool.",
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array out;
                     for (const auto& s : specs_->list()) {
@@ -334,7 +338,7 @@ void Host::register_spec_tools() {
                   }});
   mcp_->add_tool({"spec_get",
                   "One stored spec's operations: each operationId (or none), verb, path, parameters by place, and body types. "
-                  "Filter with match (a substring of the id or path).",
+                  "Filter with match (a substring of the id or path). A read tool.",
                   object_schema({{"pin", string_property("name@sha12, from spec_put or spec_list.")},
                                  {"match", string_property("Only operations whose id or path holds this.")}},
                                 {"pin"}),

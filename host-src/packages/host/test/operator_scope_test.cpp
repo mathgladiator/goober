@@ -256,10 +256,24 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   EXPECT_NE(listed.body.find("\"agent\":\"token:grok\""), std::string::npos) << listed.body;
   EXPECT_EQ(api(helper, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 403);
   EXPECT_EQ(api(watcher, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 403);
+  // The panel only looks: an observer can read the unsubscribed list but not block an address.
+  EXPECT_EQ(api(watcher, "mail_unsubscribed", R"({"tenant":"kc","email":"a@example.com","set":true})").status, 403);
   EXPECT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true})").status, 400);  // unconfirmed
   ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 200);
   // On: looking still runs; changing waits, and nothing changed.
   EXPECT_FALSE(call("content_list", R"({"tenant":"kc"})").at("isError").as_bool());
+  // Whether a call looks depends on its arguments: a dry run and a checkout never wait;
+  // mail_unsubscribed waits when it would block an address.
+  auto not_held = [&](const char* tool, const char* args) {
+    auto r = call(tool, args);
+    EXPECT_EQ(std::string(r.at("text").as_string()).find("pending_approval"), std::string::npos) << tool << " " << args;
+  };
+  not_held("version_upload", R"j({"manifest":{"box":"x","domains":["*"]},"wat":"(module)","dry_run":true})j");
+  not_held("source_checkout", R"({"project":"nope"})");
+  not_held("mail_unsubscribed", R"({"tenant":"kc"})");
+  EXPECT_NE(std::string(call("mail_unsubscribed", R"({"tenant":"kc","email":"a@example.com","set":true})").at("text").as_string())
+                .find("pending_approval"),
+            std::string::npos);
   auto held = call("content_put", R"({"tenant":"kc","path":"a.txt","text":"two"})");
   EXPECT_FALSE(held.at("isError").as_bool());
   auto text = std::string(held.at("text").as_string());

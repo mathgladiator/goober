@@ -26,7 +26,7 @@ void Host::register_mail_tools() {
   namespace mt = mail::templates;
 
   auto tenant_prop = string_property(
-      "A tenant name from the host config, like playground, or _host for the templates every tenant uses unless it "
+      "A tenant name from the host config, like example, or _host for the templates every tenant uses unless it "
       "has its own.");
   auto name_prop = string_property(
       "The template: layout (wraps every mail), sign-in-new, sign-in-returning, new-grant, agent-token, or a name "
@@ -52,7 +52,7 @@ void Host::register_mail_tools() {
       {"mail_template_list",
        "Lists the mail templates in effect for a tenant: every mail the host sends (sign-in codes for new and "
        "returning people, notices about apps and agents) and the layout around them, plus templates of your own. "
-       "source says whose copy is used: tenant, every-tenant (_host), or default.",
+       "source says whose copy is used: tenant, every-tenant (_host), or default. A read tool.",
        object_schema({{"tenant", tenant_prop}}, {"tenant"}),
        [this, check_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -69,7 +69,7 @@ void Host::register_mail_tools() {
   mcp_->add_tool(
       {"mail_template_get",
        "Reads the template in effect: its subject, text, and html (Mustache), whose copy it is, what it's for, and "
-       "the values the host gives it (sample). Start from this to customize one.",
+       "the values the host gives it (sample). Start from this to customize one. A read tool.",
        object_schema({{"tenant", tenant_prop}, {"name", name_prop}}, {"tenant", "name"}),
        [this, check_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -92,7 +92,8 @@ void Host::register_mail_tools() {
        "by name. subject and text are plain-text Mustache; html is Mustache whose values are escaped, or \"\" to "
        "make the HTML from the text. The layout's text and html must hold {{{content}}}. Sign-in mails get code, "
        "site, email, and expires_minutes; keep the code in them, and add no links (a link in a sign-in mail is what "
-       "a phisher would send). The template is checked by rendering it before it's saved.",
+       "a phisher would send). The template is checked by rendering it before it's saved, and is used from the "
+       "next mail on. A changing tool.",
        object_schema({{"tenant", tenant_prop},
                       {"name", name_prop},
                       {"subject", string_property("One line of Mustache, like \"Welcome to {{site}}\".")},
@@ -113,7 +114,7 @@ void Host::register_mail_tools() {
   mcp_->add_tool(
       {"mail_template_remove",
        "Removes a tenant's copy of a template (or _host's). A built-in one goes back to every tenant's copy or the "
-       "default; one of your own is gone.",
+       "default; one of your own is gone. A changing tool.",
        object_schema({{"tenant", tenant_prop}, {"name", name_prop}}, {"tenant", "name"}),
        [this, check_tenant](const bj::object& args) {
          auto tenant = arg(args, "tenant");
@@ -158,7 +159,7 @@ void Host::register_mail_tools() {
   mcp_->add_tool(
       {"mail_template_preview",
        "Renders a template as a tenant would send it, with the sample values (vars overrides any), and returns the "
-       "subject, text, and html. Sends nothing; mail_template_send_test sends one.",
+       "subject, text, and html. Sends nothing; mail_template_send_test sends one. A read tool.",
        object_schema({{"tenant", tenant_prop},
                       {"name", name_prop},
                       {"vars", object_property("Values to use instead of the samples, like {\"code\": \"123456\"}.")}},
@@ -166,11 +167,14 @@ void Host::register_mail_tools() {
        [render_preview](const bj::object& args) { return render_preview(args, std::nullopt); }});
   mcp_->add_tool(
       {"mail_template_send_test",
-       "Renders a template as mail_template_preview does and sends it to one address, with [Test] before the subject.",
+       "Renders a template as mail_template_preview does and sends it, at once, to one address, with [Test] before "
+       "the subject: from the host's mailer address, not through the outbox, and without a box's category and "
+       "opt-in checks, so send it only to yourself or a teammate. It shows in mail_activity for that tenant with "
+       "test: true (a _host template's test belongs to no tenant). A changing tool.",
        object_schema({{"tenant", tenant_prop},
                       {"name", name_prop},
                       {"vars", object_property("Values to use instead of the samples.")},
-                      {"to", string_property("The one address to send it to.")}},
+                      {"to", string_property("The one address to send it to, like you@example.com.")}},
                      {"tenant", "name", "to"}),
        [render_preview](const bj::object& args) { return render_preview(args, arg(args, "to")); }});
 }

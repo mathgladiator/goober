@@ -29,10 +29,12 @@ void Host::register_mail_out_tools() {
        "A tenant's recent mail, newest last: what arrived for its addresses (from, to, which box and route took "
        "it, and the answer: delivered, refused, deferred, dropped as automatic) and what its boxes sent (to, from, "
        "subject, sent or failed and why; test: true for mail_template_send_test). Use it to answer \"did my mail arrive?\" and \"did my reply go?\". "
-       "Mail a box queued but the host hasn't sent yet is in outbox_list. Logs keep addresses only as hashes (032): "
-       "each entry shows the address's domain and hash; give email to see only that address's mail, by name.",
-       object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                      {"email", string_property("Only this address's mail.")},
+       "Mail a box queued waits in the outbox until its request commits and the host sends it (retried for a "
+       "day); mail the outbox gave up on is in outbox_dead_letters. Logs keep addresses only as hashes (032): "
+       "each entry shows the address's domain and hash; give email to see only that address's mail, by name. A "
+       "read tool.",
+       object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                      {"email", string_property("Only this address's mail, like person@example.com.")},
                       {"limit", mcp::integer_property("How many entries, 1 to 200. Default 30.")}},
                      {"tenant"}),
        [this](const bj::object& args) {
@@ -118,8 +120,9 @@ void Host::register_mail_out_tools() {
        "Whether an address is blocked for a tenant: it unsubscribed from everything, declined an invite, or was "
        "blocked by an operator. Addresses are kept only as hashes, so give an email to check one; without one, "
        "the count. set: true blocks an address (they asked by phone or reply). Lifting a block takes a person: "
-       "them, signed in on the site, or an operator in the panel. No tool lifts one. Prefer mail_preferences.",
-       object_schema({{"tenant", string_property("A tenant name from the host config.")},
+       "them, signed in on the site, or an operator in the panel. No tool lifts one. Prefer mail_preferences, "
+       "which shows each category and list. Checking is a read; set: true is a change, recorded at once.",
+       object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
                       {"email", string_property("An address to check or block.")},
                       {"set", boolean_property("true blocks the address. false is refused: lift blocks in the panel.")}},
                      {"tenant"}),

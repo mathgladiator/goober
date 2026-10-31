@@ -270,7 +270,15 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "from there (source_create, source_checkout, source_commit, source_deploy), or deploy WASM boxes directly "
       "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status). "
       "See traffic, heat, and data flow (traffic, hot_boxes, box_graph), and what changed and who changed it "
-      "(changes, change_get, operator_actions).");
+      "(changes, change_get, operator_actions). "
+      "Terms every tool uses: a read tool changes nothing and never waits; a changing tool acts at once, unless "
+      "approvals are on for you (a person turns them on in the panel), when it answers pending_approval and waits "
+      "for a person (approval_status follows it). A changing tool that writes the change log answers change_id (or "
+      "change_ids), numbers to pin in a review. \"Goes live\" means served now; \"stored dark\" means kept but not "
+      "served (version_upload activate: false, then version_promote); a \"dry run\" checks everything and stores "
+      "nothing, changes nothing. file_etag is a stored file's etag, the one if_etag compares; body_etag is the "
+      "served body's, after templates and partials. Host ids (users, uploads, rows keyed by id, job runs) are "
+      "strings in JSON. If you are focused on some tenants (operator_scope), tools outside them are refused.");
   init_web();
   register_tools();
   register_content_tools();
@@ -296,9 +304,10 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_spec_tools();
   register_approval_tools();
   mcp_->add_tool({"bus_status",
-                  "The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last publish, and "
-                  "watchers, and each open subscription's route, subscribers, evaluations, and last answer's size.",
-                  mcp::object_schema({{"tenant", mcp::string_property("The tenant.")}}, {"tenant"}),
+                  "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
+                  "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "
+                  "answer's size. Topics live in memory: they start again when the host restarts.",
+                  mcp::object_schema({{"tenant", mcp::string_property("The tenant, like example.")}}, {"tenant"}),
                   [this](const bj::object& args) {
                     auto* t = args.if_contains("tenant");
                     if (!t || !t->is_string()) return mcp::ToolResult::fail("tenant is required");

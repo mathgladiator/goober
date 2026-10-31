@@ -612,9 +612,10 @@ void Host::register_consent_tools() {
       {"mail_preferences",
        "What a tenant may mail one address, and why: blocked (it declined an invite or unsubscribed; only the person "
        "or an operator in the panel lifts it), each list in, out, or none (with how and when), the relationship "
-       "(account, wrote_in, none), outreach (allowed, used, opted_out), and the history of every change.",
-       object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                      {"email", string_property("The address.")}},
+       "(account, wrote_in, none), outreach (allowed, used, opted_out), and the history of every change. Use it "
+       "to see why a box's mail to someone was refused. A read tool.",
+       object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                      {"email", string_property("The address, like person@example.com.")}},
                      {"tenant", "email"}),
        [this, known](const bj::object& args) {
          std::string tenant = field(args, "tenant"), email = base::to_lower(field(args, "email"));
@@ -649,10 +650,10 @@ void Host::register_consent_tools() {
       {"mail_consent_record",
        "Records that a person agreed elsewhere (in person, on paper, by phone) to a tenant's list, with the "
        "statement in your words: it's kept as evidence, shown as an operator's record. It never re-subscribes "
-       "someone who left the list, and never reaches a blocked address.",
-       object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                      {"email", string_property("The address.")},
-                      {"list", string_property("A list a box of the tenant declares.")},
+       "someone who left the list, and never reaches a blocked address. A changing tool.",
+       object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                      {"email", string_property("The address, like person@example.com.")},
+                      {"list", string_property("A list a box of the tenant declares, as mail_lists names it.")},
                       {"statement", string_property("How they agreed, at least 20 characters: \"Signed up at the 11/2 meetup\".")}},
                      {"tenant", "email", "list", "statement"}),
        [this, known](const bj::object& args) {
@@ -672,8 +673,10 @@ void Host::register_consent_tools() {
          return ToolResult::ok(bj::object{{"tenant", tenant}, {"email", email}, {"list", list}, {"state", "in"}});
        }});
   mcp_->add_tool({"mail_lists",
-                  "A tenant's lists: each name, title, about, the box that declares it, and how many are subscribed.",
-                  object_schema({{"tenant", string_property("A tenant name from the host config.")}}, {"tenant"}),
+                  "A tenant's lists: each name, title, about, the box that declares it (on its mail service's "
+                  "\"lists\"), and how many are subscribed. A read tool.",
+                  object_schema({{"tenant", string_property("A tenant name from the host config, like example.")}},
+                                {"tenant"}),
                   [this, known](const bj::object& args) {
                     std::string tenant = field(args, "tenant");
                     if (!known(tenant)) return ToolResult::fail("no domain in the host config serves tenant " + tenant);

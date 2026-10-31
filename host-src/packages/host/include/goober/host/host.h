@@ -148,6 +148,9 @@ class Host {
   uint16_t panel_port() const;
   // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).
   static bool is_read_tool(std::string_view tool);
+  // Whether this call, with these arguments, only looks: a read tool, except mail_unsubscribed
+  // with "set" (it blocks an address); and version_upload {dry_run: true}, which stores nothing.
+  static bool is_read_call(std::string_view tool, const boost::json::object& args);
   // Operator scope (design/machine/030.OperatorScope.md): which tenants an operator acts on.
   enum class ScopeRule { kTenant, kBox, kManifest, kDomain, kSchema, kProject, kProjectCreate, kTicket, kResult,
                          kFiltered, kOpen, kHost };

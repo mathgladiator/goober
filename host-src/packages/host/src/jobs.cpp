@@ -41,6 +41,14 @@ std::optional<std::string> arg(const bj::object& args, const char* key) {
   return std::string(it->value().get_string());
 }
 
+// A run's id: the string the tools answer, or the same number.
+int64_t run_arg(const bj::object& args) {
+  const auto* v = args.if_contains("run");
+  if (v && v->is_int64()) return v->as_int64();
+  if (v && v->is_string()) return std::atoll(std::string(v->as_string()).c_str());
+  return 0;
+}
+
 void keep_newest(bj::array& a, bj::value v, size_t n) {
   a.push_back(std::move(v));
   while (a.size() > n) a.erase(a.begin());
@@ -346,7 +354,8 @@ void Host::register_job_tools() {
   auto tenant_prop = mcp::string_property("The tenant whose databases the job works on, like playground.");
   auto box_prop = mcp::string_property("The box, as box_list names it.");
   auto job_prop = mcp::string_property("The job's route name, from the box's routes.job.");
-  auto run_prop = mcp::string_property("The run's id, as job_dry_run or job_start answered it.");
+  auto run_prop = mcp::string_property("The run's id, as job_dry_run, job_start, or job_list answered it (a string; a "
+                                       "number is accepted too).");
 
   // Waits up to `ms` for a run to leave "running", then answers its state.
   auto wait_for = [this](int64_t id, int64_t ms) {
@@ -435,9 +444,10 @@ void Host::register_job_tools() {
   };
 
   mcp_->add_tool({"job_list",
-                  "The jobs (routes.job) of the active boxes that serve a tenant, each with its newest runs: one-time "
-                  "work, like moving data into a new database, that an operator starts. A job runs only after a dry "
-                  "run of the same box version passed (job_dry_run), then with job_start.",
+                  "Read tool. The jobs (routes.job) of the live boxes that serve a tenant: one-time work, like moving "
+                  "data into a new database, that only an operator starts. Each {box, version, job, tenant, "
+                  "dry_run_passed, done, runs (the newest 5)}. A job runs for real only after a dry run of the same box "
+                  "version passed: job_dry_run, then job_start.",
                   mcp::object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this](const bj::object& args) {
                     if (!job_runs_) return ToolResult::fail("jobs are off: see host_health's startup notes");
                     auto tenant = arg(args, "tenant").value_or("");
@@ -458,40 +468,49 @@ void Host::register_job_tools() {
                     return ToolResult::ok(bj::object{{"tenant", tenant}, {"jobs", std::move(out)}});
                   }});
   mcp_->add_tool({"job_dry_run",
-                  "Runs a box's job for a tenant against copies of the tenant's databases the box names, then throws "
-                  "the copies away. Reports batches, rows the box said it moved, every error, and the box's log. "
-                  "Internal calls to other boxes are refused; anything queued for delivery stays in the copies. A real "
-                  "run (job_start) needs a passed dry run of the same box version. Answers within 25 s, or with a run "
-                  "to follow with job_status.",
+                  "Changing tool (it waits for approval when that's on), though it changes no data: runs a box's job "
+                  "for a tenant against copies of the tenant's databases the box names, then throws the copies away. "
+                  "Internal calls to other boxes are refused, and anything queued for delivery stays in the copies. "
+                  "Returns the run: run (its id, a string), state (running, passed, or failed), calls, moved (rows the "
+                  "box said it moved), errors, last_error, and the box's log. A real run (job_start) needs a passed "
+                  "dry run of the same box version. One job runs at a time per tenant. Answers within 25 s; a run "
+                  "still running is followed with job_status.",
                   mcp::object_schema({{"box", box_prop}, {"job", job_prop}, {"tenant", tenant_prop}}, {"box", "job", "tenant"}),
                   [start](const bj::object& args) { return start(args, true); }});
   mcp_->add_tool({"job_start",
-                  "Runs a box's job for a tenant, for real, in batches: the box answers each call with "
-                  "{\"cursor\", \"done\", \"moved\"}, and the host keeps the cursor after each commit, so a restart "
-                  "resumes. Needs a passed dry run of the same box version (job_dry_run). Pauses after 3 failed batches "
-                  "in a row; job_start again goes on from the cursor of a paused or stopped run. A job that ran to the "
-                  "end runs again only with again: true.",
+                  "Changing tool. Runs a box's job for a tenant, for real, in batches, writing the tenant's real "
+                  "databases: the box answers each call with {\"cursor\", \"done\", \"moved\"}, and the host keeps "
+                  "the cursor after each batch commits, so a restart resumes. Refused until a dry run of the same box "
+                  "version, job, and tenant passed (job_dry_run). Pauses after 3 failed batches in a row, or when the "
+                  "box gets a new version; job_start again goes on from the cursor of a paused or stopped run. A job "
+                  "that ran to the end runs again only with again: true, which starts over. Returns the run (as "
+                  "job_dry_run does; state running, done, or paused, and resumed when it went on). Answers within 25 s.",
                   mcp::object_schema({{"box", box_prop},
                                       {"job", job_prop},
                                       {"tenant", tenant_prop},
-                                      {"again", mcp::boolean_property("Run a job that already finished, again.")}},
+                                      {"again", mcp::boolean_property("true runs a job that already finished again, "
+                                                                      "from the beginning. Default false.")}},
                                      {"box", "job", "tenant"}),
                   [start](const bj::object& args) { return start(args, false); }});
-  mcp_->add_tool({"job_status", "One run of a job: its state, cursor, batches, rows moved, errors, and the box's log.",
+  mcp_->add_tool({"job_status",
+                  "Read tool. One run of a job: state, cursor, calls (batches), moved, errors, last_error, and the "
+                  "box's log; waits up to 5 s while it's running. States: running; passed or failed (a dry run); done, "
+                  "paused, or stopped (a real run).",
                   mcp::object_schema({{"run", run_prop}}, {"run"}), [this, wait_for](const bj::object& args) {
                     if (!job_runs_) return ToolResult::fail("jobs are off: see host_health's startup notes");
-                    int64_t id = std::atoll(arg(args, "run").value_or("0").c_str());
+                    int64_t id = run_arg(args);
                     auto r = wait_for(id, 5000);
                     if (!r) return ToolResult::fail("no run " + std::to_string(id));
                     return ToolResult::ok(r->to_json());
                   }});
   mcp_->add_tool({"job_stop",
-                  "Stops a running job after its current batch. A real run keeps its cursor: job_start on the same box "
-                  "version goes on from it (again: true starts over from the beginning).",
+                  "Changing tool. Stops a running job after its current batch; refused when the run isn't running. A "
+                  "real run keeps its cursor: job_start on the same box version goes on from it (again: true starts "
+                  "over). A stopped dry run's copies are thrown away. Returns the run.",
                   mcp::object_schema({{"run", run_prop}, {"tenant", tenant_prop}}, {"run", "tenant"}),
                   [this](const bj::object& args) {
                     if (!job_runs_) return ToolResult::fail("jobs are off: see host_health's startup notes");
-                    int64_t id = std::atoll(arg(args, "run").value_or("0").c_str());
+                    int64_t id = run_arg(args);
                     auto r = job_runs_->get(id);
                     if (!r || r->tenant != arg(args, "tenant").value_or("")) return ToolResult::fail("no run " + std::to_string(id) + " for that tenant");
                     if (r->state != "running") return ToolResult::fail("run " + std::to_string(id) + " is " + r->state);

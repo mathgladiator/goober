@@ -431,6 +431,13 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   auto again = start("job_start", "move_members", {{"again", true}});
   EXPECT_EQ(again.at("state"), "done") << json::dump(again);
   EXPECT_EQ(count("members"), 5);
+  // An operator's db_exec into a table keyed by id answers the ids the host stamped, as strings.
+  auto exec = tool("db_exec", {{"tenant", "playground"}, {"database", "main"},
+                               {"sql", "INSERT INTO members (old_id, name) VALUES (99, 'by hand')"}});
+  ASSERT_TRUE(exec.as_object().contains("id")) << json::dump(exec);
+  EXPECT_TRUE(exec.at("id").is_string());
+  EXPECT_EQ(exec.at("ids").as_array().size(), 1u);
+  EXPECT_EQ(count("members"), 6);
 
   // A job that keeps failing fails its dry run after three tries, saying why.
   auto broken = start("job_dry_run", "always_fails");
@@ -449,6 +456,9 @@ TEST_F(DataRoutesTest, JobsDryRunThenMoveRowsInBatches) {
   }
   auto status = tool("job_status", {{"run", run.at("run")}});
   EXPECT_EQ(status.at("state"), "done");
+  // The same run by number: a client that turns ids into numbers still finds it.
+  auto by_number = tool("job_status", {{"run", std::atoll(std::string(run.at("run").as_string()).c_str())}});
+  EXPECT_EQ(by_number.at("state"), "done") << json::dump(by_number);
   // Job routes have no address: nothing on the web reaches them.
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/move_members").status, 404);
 }

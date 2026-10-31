@@ -475,11 +475,17 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
       return true;
     };
   }
-  if (!scope.all) {
+  if (read_only || !scope.all) {
     policy.check = [this, scope, operator_name, read_only](const std::string& tool, const bj::object& args) {
-      if (read_only && !is_read_tool(tool)) return std::optional<std::string>("its access is read-only");
+      // A read tool can still change something with some arguments (mail_unsubscribed's "set").
+      if (read_only && (!is_read_tool(tool) || !is_read_call(tool, args))) {
+        return std::optional<std::string>("its access is read-only");
+      }
+      if (scope.all) return std::optional<std::string>();
       return scope_refusal(scope, operator_name, tool, args);
     };
+  }
+  if (!scope.all) {
     policy.filter = [this, scope, operator_name](const std::string& tool, bj::value& result) {
       return scope_filter(scope, operator_name, tool, result);
     };
@@ -576,8 +582,9 @@ std::pair<int, bj::object> Host::panel_set_scope(const SignedIn& who, const bj::
 
 void Host::register_scope_tools() {
   mcp_->add_tool({"operator_scope",
-                  "Your own operator scope: \"all\" tenants, or the tenants you're focused on. Tools outside it are "
-                  "refused; only a human changes it, in the panel's Operators view.",
+                  "Read tool. Your own operator scope: scope is \"all\", or the list of tenants you're focused on. A "
+                  "tool aimed at another tenant is refused, and lists show only your tenants. Only a person changes it, "
+                  "in the panel's Operators view; no tool can.",
                   mcp::object_schema({}, {}), [this](const bj::object&) {
                     std::string me = current_operator();
                     auto s = operator_scope(me);

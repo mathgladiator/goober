@@ -351,14 +351,17 @@ void Host::register_deletion_tools() {
   };
   mcp_->add_tool(
       {"user_delete",
-       "Deletes a person's account in a tenant's realm, for good: their sessions, agents' grants, roles, and pending "
+       "Changing tool; it can't be undone. Deletes a person's account in a tenant's realm, for good: their "
+       "sessions, agents' grants, roles, and pending "
        "codes end, and their address is erased everywhere the realm keeps it. The user id stays as a tombstone, never "
        "reused; the address may sign up again as a new person. Boxes with a routes.identity \"deleted\" route hear it "
        "and must erase their rows for that user_id within 30 days (see deletions). Give the email or the user_id, and "
-       "why (it goes in the audit log). People delete their own accounts at /identity/account.",
+       "why (it goes in the audit log). Returns deleted (the user id, a string) and event_id. People delete their "
+       "own accounts at /identity/account.",
        mcp::object_schema({{"tenant", tenant_prop},
                            {"email", mcp::string_property("The person's address.")},
-                           {"user_id", mcp::string_property("The person's user id, instead of the address.")},
+                           {"user_id", mcp::string_property("The person's user id, instead of the address: a string, "
+                                                            "as realm_get shows it.")},
                            {"why", mcp::string_property("Why, for the audit log: like \"the person asked by email\".")}},
                           {"tenant", "why"}),
        [this, known_tenant](const bj::object& args) {
@@ -386,7 +389,7 @@ void Host::register_deletion_tools() {
                                                {"next", "deletions shows which boxes have acknowledged it"}});
        }});
   mcp_->add_tool({"deletions",
-                  "Accounts deleted in a tenant's realm, and for each, every box that holds the tenant's data: "
+                  "Read tool. Accounts deleted in a tenant's realm, and for each, every box that holds the tenant's data: "
                   "acknowledged (its routes.identity \"deleted\" route answered), pending, failing (given up), missed "
                   "(the route was added after), or no_route. Boxes must erase a deleted person's rows within 30 days; "
                   "overdue marks a deletion past that with a box not acknowledged.",

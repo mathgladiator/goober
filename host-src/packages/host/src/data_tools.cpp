@@ -258,8 +258,9 @@ void Host::register_data_tools() {
        "What each active box's data strategies grant, table by table, against what its statements actually did since "
        "the host started (tables, columns, insert, update, delete), with findings: tables granted and never touched, "
        "writes granted and never made, and read: true or update: true where the columns used would do (a suggested "
-       "list). Narrow a box's grants to these before its next version.",
-       mcp::object_schema({{"box", mcp::string_property("Only this box.")}}, {}), [this](const bj::object& args) {
+       "list). Narrow a box's grants to these before its next version. Use is counted in memory since the host "
+       "started, so \"unused\" means \"not yet\" for routes that run rarely. A read tool.",
+       mcp::object_schema({{"box", mcp::string_property("Only this box, by name, as box_list shows it.")}}, {}), [this](const bj::object& args) {
          auto only = arg(args, "box");
          bj::array out;
          for (const auto& [name, box] : boxes_->active()->boxes) {
@@ -274,12 +275,15 @@ void Host::register_data_tools() {
          return ToolResult::ok(std::move(out));
        }});
   mcp_->add_tool({"box_guide",
-                  "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, "
-                  "databases, and types work on goober, and how to deploy them.",
+                  "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, jobs, "
+                  "flags, databases, ids, mail, and types work on goober, and how to deploy them. For pages, "
+                  "templates, and partials, read site_guide. A read tool.",
                   mcp::object_schema({}, {}), [](const bj::object&) { return ToolResult::ok(bj::value(kBoxGuide)); }});
   mcp_->add_tool({"rust_binding",
                   "The Rust source of goober.rs, a ready binding for writing boxes in Rust (Request, respond_json, "
-                  "sql, call), with the Cargo.toml and build command to use it. Save it as src/goober.rs in your crate.",
+                  "sql, call, flag), with the Cargo.toml and build command to use it. Save it as src/goober.rs in your "
+                  "crate; a source project made with source_create {template: \"rust-box\"} already has it. A read "
+                  "tool.",
                   mcp::object_schema({}, {}), [](const bj::object&) {
                     return ToolResult::ok(bj::object{
                         {"file", "src/goober.rs"},
@@ -296,21 +300,26 @@ void Host::register_data_tools() {
                   }});
   // Keys for external services (015 §5): write-only.
   auto scope_props = [](std::initializer_list<std::pair<std::string, bj::value>> extra) {
-    bj::object props{{"scope", mcp::enum_property("system, for every tenant; or tenant, for one.", {"system", "tenant"})},
-                     {"tenant", mcp::string_property("The tenant, when scope is tenant.")},
+    bj::object props{{"scope", mcp::enum_property("system: one key every tenant's boxes may name (keys/system/NAME); "
+                                                  "tenant: one tenant's own (keys/tenant/TENANT/NAME).",
+                                                  {"system", "tenant"})},
+                     {"tenant", mcp::string_property("The tenant, like example; required when scope is tenant.")},
                      {"name", mcp::string_property("The key's name, like stripe or openai.")}};
     for (const auto& [k, v] : extra) props[k] = v;
     return bj::object{{"type", "object"}, {"properties", props}, {"required", bj::array{"scope", "name"}}};
   };
   mcp_->add_tool({"key_set",
                   "Sets a credential that boxes name in external.$service.credentials, like keys/system/openai or "
-                  "keys/tenant/{!tenant}/stripe, and the hosts it may be sent to: a box calling anywhere else gets an "
-                  "error, not the key. Write-only: no tool ever reads a value back, and boxes never see it.",
+                  "keys/tenant/{!tenant}/stripe, and the hosts it may be sent to (required): a box calling anywhere "
+                  "else gets an error, not the key. Write-only: no tool ever reads a value back, and boxes never see "
+                  "it; key_list shows a fingerprint. Setting a name again replaces it. The host's own keys (aws_*, "
+                  "backup_key) are refused here: a person sets them on the server with `goober-host key set`. A "
+                  "changing tool.",
                   scope_props({{"value", mcp::string_property("The secret, 1 to 8192 printable bytes.")},
                                {"hosts", bj::value(bj::object{{"type", "array"},
                                                               {"items", bj::object{{"type", "string"}}},
-                                                              {"description", "Where it may go: like api.resend.com, or "
-                                                                              "*.example.com."}})}}),
+                                                              {"description", "Required: the hosts it may be sent to, "
+                                                                              "like api.resend.com, or *.example.com."}})}}),
                   [this](const bj::object& args) {
                     std::string err;
                     // The host's own keys are set on the machine, never by an agent: whoever sets the AWS
@@ -334,9 +343,14 @@ void Host::register_data_tools() {
                     }
                     return ToolResult::ok(bj::object{{"set", true}});
                   }});
-  mcp_->add_tool({"key_list", "The keys that are set: names, when, and a fingerprint, never values.",
+  mcp_->add_tool({"key_list",
+                  "The keys that are set, system and per tenant: names, when, and a fingerprint, never values. A read "
+                  "tool.",
                   mcp::object_schema({}, {}), [this](const bj::object&) { return ToolResult::ok(keys_->list()); }});
-  mcp_->add_tool({"key_delete", "Removes a key. Calls that name it fail until it is set again.", scope_props({}),
+  mcp_->add_tool({"key_delete",
+                  "Removes a key. Box calls that name it fail until it is set again (key_set). The host's own keys "
+                  "(aws_*, backup_key) are refused. A changing tool.",
+                  scope_props({}),
                   [this](const bj::object& args) {
                     std::string name = arg(args, "name").value_or("");
                     if (arg(args, "scope") == "system" && (name.starts_with("aws_") || name == "backup_key")) {
@@ -350,17 +364,21 @@ void Host::register_data_tools() {
                   }});
   // Backups to S3 (design/machine/019.Backups.md).
   mcp_->add_tool({"backup_status",
-                  "Backups to S3: whether they're on, the current night and last increment, the attachment queue, the "
-                  "last error, whether the backup key's copy is confirmed, and (with points) the restore points.",
+                  "Backups to S3: whether they're on and healthy, the current night and last increment, the attachment "
+                  "queue, the source mirror, the last error, whether a person has confirmed keeping a copy of the "
+                  "backup key (only a person can, on the server), and, with points, the restore points in the bucket. "
+                  "A read tool.",
                   mcp::object_schema({{"points", mcp::boolean_property("Also list the restore points in the bucket.")}}, {}),
                   [this](const bj::object& args) {
                     bool points = args.contains("points") && args.at("points").is_bool() && args.at("points").as_bool();
                     return ToolResult::ok(backup_status(points));
                   }});
   mcp_->add_tool({"backup_run",
-                  "Runs a backup stream now: nightly (a whole sealed archive; increments then measure against it), "
-                  "increment (the databases' changed pages and changed files), assets (queued attachments), or "
-                  "source (source projects' patches and deployed trees not yet in the bucket).",
+                  "Runs one backup stream now instead of on its schedule: nightly (a whole sealed archive; increments "
+                  "then measure against it), increment (the databases' changed pages and changed files), assets "
+                  "(queued attachments), or source (source projects' patches and deployed trees not yet in the "
+                  "bucket). Answers what went up, or why it couldn't run (backups off, no AWS keys, a path it can't "
+                  "read). A changing tool.",
                   mcp::object_schema({{"what", mcp::enum_property("Which stream.", {"nightly", "increment", "assets", "source"})}},
                                      {"what"}),
                   [this](const bj::object& args) {
@@ -371,17 +389,19 @@ void Host::register_data_tools() {
                   }});
   // The outbox's dead letters (035): what couldn't be delivered, and what to do about it.
   mcp_->add_tool({"outbox_dead_letters",
-                  "Effectful calls the outbox gave up on: which box, service, and request, how many attempts, and the "
-                  "last status or error.",
+                  "Effectful calls the outbox gave up on (mail, API calls with effects): tenant, database, id, which "
+                  "box, service, and request, how many attempts, and the last status or error. Then outbox_retry or "
+                  "outbox_discard with that tenant, database, and id. A read tool.",
                   mcp::object_schema({}, {}), [this](const bj::object&) { return ToolResult::ok(outbox_list("dead")); }});
   auto outbox_ref = mcp::object_schema({{"tenant", mcp::string_property("The tenant.")},
                                         {"database", mcp::string_property("The database, as outbox_dead_letters shows it.")},
-                                        {"id", mcp::integer_property("The element's id.")}},
+                                        {"id", mcp::integer_property("The element's id, a number, as outbox_dead_letters shows it.")}},
                                        {"tenant", "database", "id"});
   for (bool retry : {true, false}) {
     mcp_->add_tool({retry ? "outbox_retry" : "outbox_discard",
-                    retry ? "Tries a dead element again, from the first attempt, for ten more minutes."
-                          : "Deletes a dead element for good.",
+                    retry ? "Tries a dead outbox element again, from its first attempt, for ten more minutes, with "
+                            "the same idempotency key. A changing tool."
+                          : "Deletes a dead outbox element for good: it is never sent. A changing tool.",
                     outbox_ref, [this, retry](const bj::object& args) {
                       auto id = args.if_contains("id");
                       if (!id || !id->is_int64()) return ToolResult::fail("id is required");
@@ -393,14 +413,16 @@ void Host::register_data_tools() {
                     }});
   }
   mcp_->add_tool({"timers_list",
-                  "The timers the host has planned (045): each timer, tenant, and row, with when it is next due.",
+                  "The timers the host has planned (045): each timer route, tenant, and source row, with when it is "
+                  "next due. A read tool.",
                   mcp::object_schema({}, {}),
                   [this](const bj::object&) { return ToolResult::ok(timers_due()); }});
   mcp_->add_tool({"timer_run",
-                  "Fires a timer now for one tenant, once per active row of its source, as its schedule would. For "
-                  "trying a timer without waiting for its time.",
-                  mcp::object_schema({{"timer", mcp::string_property("The timer's route name.")},
-                                      {"tenant", mcp::string_property("A tenant, like playground.")}},
+                  "Fires a timer now for one tenant, for real, as its schedule would: once, or once per active row "
+                  "of its by_timer source. Its writes commit and its effects are queued. Answers {fired}: how many "
+                  "calls succeeded. For trying a timer without waiting for its time. A changing tool.",
+                  mcp::object_schema({{"timer", mcp::string_property("The timer's route name, like daily_digest.")},
+                                      {"tenant", mcp::string_property("A tenant, like example.")}},
                                      {"timer", "tenant"}),
                   [this](const bj::object& args) {
                     auto timer = arg(args, "timer");
@@ -416,20 +438,23 @@ void Host::register_data_tools() {
   using mcp::object_schema;
   using mcp::string_property;
 
-  auto tenant_prop = string_property("A tenant name, like playground.");
-  auto db_prop = string_property("A database name, like guestbook.");
+  auto tenant_prop = string_property("A tenant name, like example.");
+  auto db_prop = string_property("A database name, like guestbook: a strategy's \"database\".");
 
   mcp_->add_tool(
       {"schema_put",
        "Stores a database schema: {\"schema\": \"name1\", \"tables\": {\"t\": {\"columns\": {\"c\": {\"type\": "
-       "\"string\"}}, \"indexes\": {...}}}}. Types are id, int32, int64, double, float, boolean, and string; columns "
-       "take nullable, default, max-length, and primary-key. Key every table with \"id\": {\"type\": \"id\", "
-       "\"primary-key\": true}: the host stamps it from its id service, and a box never names one. The primary key "
-       "is never a natural key (a string like address|day): make that a unique index on its own columns, and insert "
-       "with ON CONFLICT on it. Try a schema with schema_check first: it stores nothing. A column that "
-       "refers to a user or a row, in any database, is {\"type\": \"id\"}; never text, never an email. Ids read "
-       "back as strings. A schema is a version: its name can't be reused with different content, and databases only "
-       "ever grow by the schemas applied to them. The answer's warnings name keys and references that aren't ids.",
+       "\"string\"}}, \"indexes\": {...}}}}, for good. Types are id, int32, int64, double, float, boolean, and "
+       "string; columns take nullable, default, max-length, primary-key, and not-a-reference. Key every table with "
+       "\"id\": {\"type\": \"id\", \"primary-key\": true}: the host stamps it from its id service, and a box never "
+       "names one. The primary key is never a natural key (a string like address|day): make that a unique index on "
+       "its own columns, and insert with ON CONFLICT on it. A column that refers to a user or a row, in any "
+       "database, is {\"type\": \"id\"}; never text, never an email. Ids read back as strings. A schema is a "
+       "version: its name is never reused with different content (the same content again is a no-op), and "
+       "databases only ever grow by the schemas applied to them. Try it with schema_check first, which stores "
+       "nothing. Answers {schema, tables, warnings?}: the warnings name keys and references that aren't ids "
+       "(\"not-a-reference\": true silences one on a column that only looks like a reference, like a "
+       "message_id). A changing tool.",
        object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
        [this](const bj::object& args) {
          auto it = args.find("schema");
@@ -448,10 +473,11 @@ void Host::register_data_tools() {
 
   mcp_->add_tool(
       {"schema_check",
-       "Checks a schema exactly as schema_put would (its shape, the types and keys, that its name is free or holds the "
-       "same content) and answers the warnings, without storing anything: a schema name is never reused, so try it "
-       "here first. A source build checks a project's own schemas the same way when goober.project.json lists them "
-       "under \"schemas\".",
+       "A dry run of schema_put: checks a schema exactly as schema_put would (its shape, the types and keys, that its "
+       "name is free or holds the same content) and answers {schema, ok, stored, note, tables, warnings}, storing "
+       "nothing. A schema name is never reused, so try it here first. To check a manifest against schemas not "
+       "stored yet, pass them to version_upload {dry_run: true, schemas: [...]}; a source build checks a project's "
+       "own schemas the same way when goober.project.json lists them under \"schemas\". A read tool.",
        object_schema({{"schema", any_property("The schema, as a JSON object or JSON text.")}}, {"schema"}),
        [this](const bj::object& args) {
          auto it = args.find("schema");
@@ -473,7 +499,8 @@ void Host::register_data_tools() {
                                           {"warnings", std::move(warnings)}});
        }});
 
-  mcp_->add_tool({"schema_get", "Returns a stored schema.", object_schema({{"name", string_property("The schema's name.")}}, {"name"}),
+  mcp_->add_tool({"schema_get", "A stored schema's JSON, exactly as stored. A read tool.",
+                  object_schema({{"name", string_property("The schema's name, like orders1.")}}, {"name"}),
                   [this](const bj::object& args) {
                     auto name = arg(args, "name");
                     if (!name) return ToolResult::fail("name is required");
@@ -483,7 +510,8 @@ void Host::register_data_tools() {
                     return ToolResult::ok(*json::parse(s->text, &err));
                   }});
 
-  mcp_->add_tool({"schema_list", "Lists the stored schemas.", object_schema({}, {}), [this](const bj::object&) {
+  mcp_->add_tool({"schema_list", "The names of the stored schemas. A read tool.", object_schema({}, {}),
+                  [this](const bj::object&) {
                     bj::array out;
                     for (const auto& n : schemas_->list()) out.push_back(bj::value(n));
                     return ToolResult::ok(std::move(out));
@@ -491,9 +519,10 @@ void Host::register_data_tools() {
 
   mcp_->add_tool(
       {"db_list",
-       "Lists every tenant's databases: the boxes and strategies that use each one, whether it exists yet (they are "
-       "created on first use), its size, and its tables with row counts.",
-       object_schema({{"tenant", string_property("Only this tenant.")}}, {}), [this](const bj::object& args) {
+       "Lists every tenant's databases: the active boxes and strategies that use each one, whether its file exists "
+       "yet (a box's first request creates it, or db_create does ahead of time), its size, and its tables with row "
+       "counts. A read tool.",
+       object_schema({{"tenant", string_property("Only this tenant, like example.")}}, {}), [this](const bj::object& args) {
          std::set<std::string> tenants;
          for (const auto& [d, e] : config_.get()->domains) tenants.insert(e.tenant);
          for (const auto& t : databases_->tenants()) tenants.insert(t);
@@ -531,7 +560,9 @@ void Host::register_data_tools() {
          return ToolResult::ok(std::move(out));
        }});
 
-  mcp_->add_tool({"db_describe", "Describes one tenant database: tables, columns, indexes, row counts, and the schemas applied.",
+  mcp_->add_tool({"db_describe",
+                  "Describes one tenant database: tables, columns, indexes, row counts, and the schemas applied. A "
+                  "read tool.",
                   object_schema({{"tenant", tenant_prop}, {"database", db_prop}}, {"tenant", "database"}),
                   [this](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
@@ -543,7 +574,9 @@ void Host::register_data_tools() {
   auto params_prop = any_property("Parameters: an array for ? placeholders, or an object for :name ones.");
   mcp_->add_tool(
       {"db_query",
-       "Runs one read-only SQL statement on a tenant's database and returns columns and rows.",
+       "Runs one read-only SQL statement on a tenant's database and returns {columns, rows}. Values read straight "
+       "from id columns are strings; computed ones, like max(id), are numbers. Unlike a box's SQL, any SQLite "
+       "function may be called. A read tool.",
        object_schema({{"tenant", tenant_prop},
                       {"database", db_prop},
                       {"sql", string_property("One SELECT (or other read-only) statement.")},
@@ -568,8 +601,10 @@ void Host::register_data_tools() {
 
   mcp_->add_tool(
       {"db_exec",
-       "Runs one INSERT, UPDATE, or DELETE on a tenant's database and returns the rows changed. Schema changes and "
-       "the host's goober_ tables are refused. Every call is logged to logs/db.log.",
+       "Runs one INSERT, UPDATE, or DELETE on a tenant's database, at once, and returns {changes, last_insert_id}, "
+       "plus {ids, id} (strings) for rows inserted into a table keyed by id. Leave such a key out: the host stamps "
+       "it, and naming one is refused, for operators as for boxes. Schema changes and the host's goober_ tables "
+       "are refused. Every call is logged to logs/db.log with the operator. A changing tool.",
        object_schema({{"tenant", tenant_prop},
                       {"database", db_prop},
                       {"sql", string_property("One INSERT, UPDATE, or DELETE.")},
@@ -593,7 +628,11 @@ void Host::register_data_tools() {
                                                  {"changes", r ? r->at("changes") : bj::value(nullptr)},
                                                  {"error", r ? "" : err}}));
          if (!r) return ToolResult::fail(err);
-         return ToolResult::ok(bj::object{{"changes", r->at("changes")}, {"last_insert_id", r->at("last_insert_id")}});
+         bj::object out{{"changes", r->at("changes")}, {"last_insert_id", r->at("last_insert_id")}};
+         for (const char* k : {"ids", "id"}) {
+           if (const auto* v = r->if_contains(k)) out[k] = *v;
+         }
+         return ToolResult::ok(std::move(out));
        }});
 }
 

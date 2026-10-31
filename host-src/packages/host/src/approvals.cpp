@@ -155,7 +155,7 @@ void Host::saw_agent(const std::string& agent) {
 std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent, const std::string& tool,
                                                        const bj::object& args) {
   // Looking never waits; nor does asking about one's own requests.
-  if (is_read_tool(tool) || tool == "approval_status") return std::nullopt;
+  if (is_read_call(tool, args) || tool == "approval_status") return std::nullopt;
   if (!approvals_on(agent)) return std::nullopt;
   bj::object held = args;
   // A deploy or build held without a revision is pinned to the head now, so the person approves
@@ -430,10 +430,12 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
 
 void Host::register_approval_tools() {
   mcp_->add_tool({"approval_status",
-                  "Your calls held for approval (approvals are turned on per agent, by a person in the panel): one by id, or "
-                  "your latest 20. Each is pending, done (with its result), denied, or expired (not decided in a day). "
-                  "Also says whether approvals are on for you.",
-                  mcp::object_schema({{"id", mcp::integer_property("A request's number, from pending_approval.")}}, {}),
+                  "Read tool. Your changing calls held for a person's approval (approvals are turned on per agent, by a "
+                  "person in the panel; read tools never wait): one by id, or your latest 20 with approvals_on. Each is "
+                  "pending, done (a person approved it and it ran as you: its result is here), denied, or expired (not "
+                  "decided in a day). Nothing runs until a person approves; don't call the tool again meanwhile.",
+                  mcp::object_schema({{"id", mcp::integer_property("The request's number (an integer), from the "
+                                                                   "pending_approval answer.")}}, {}),
                   [this](const bj::object& args) {
                     std::string me = current_operator();
                     bool on = approvals_on(me);

@@ -134,13 +134,13 @@ void Host::register_source_tools() {
   }
   // Every finished job is kept with its log (020 § 9), and numbers go on from the newest kept.
   jobs_ = std::make_unique<BuildJobs>(source_->max_job_id(), [this](const BuildJob& j) { source_->save_job(record_of(j)); });
-  auto project_prop = mcp::string_property("The project's name, like ranches.");
-  auto rev_prop = mcp::integer_property("A revision number; omit (or 0) for the newest.");
+  auto project_prop = mcp::string_property("The project's name, like ranches: [a-z][a-z0-9_-]*.");
+  auto rev_prop = mcp::integer_property("A revision number (1, 2, ...); omit (or 0) for the newest.");
 
   mcp_->add_tool({"source_list",
                   "The source projects this host keeps: each with its newest revision, which revision is deployed, "
                   "and how far the backup bucket's mirror of its history has come (mirror: patches through "
-                  "patch_rev, snapshots of deployed revisions, and what's still pending).",
+                  "patch_rev, snapshots of deployed revisions, and what's still pending). A read tool.",
                   mcp::object_schema({}, {}), [this](const bj::object&) {
                     bj::array out;
                     for (const auto& p : source_->list()) {
@@ -157,7 +157,9 @@ void Host::register_source_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"source_tree", "Every file of a project at a revision, without contents: path, size, sha256, and whether it's text.",
+  mcp_->add_tool({"source_tree",
+                  "Every file of a project at a revision, without contents (path, size, sha256), with the revision's "
+                  "message, author, time, and the files it changed. Read contents with source_read. A read tool.",
                   mcp::object_schema({{"project", project_prop}, {"rev", rev_prop}}, {"project"}),
                   [this](const bj::object& args) {
                     std::string name = arg(args, "project").value_or("");
@@ -184,8 +186,9 @@ void Host::register_source_tools() {
 
   mcp_->add_tool({"source_box_history",
                   "Where a box's versions came from: each source deploy that uploaded it, newest first, with the "
-                  "project, revision, its message, who deployed it, when, the job (its build log), and the version.",
-                  mcp::object_schema({{"box", mcp::string_property("The box's name.")},
+                  "project, revision, its message, who deployed it, when, the job (its build log: source_job), and "
+                  "the version. Versions uploaded with version_upload have no entry. A read tool.",
+                  mcp::object_schema({{"box", mcp::string_property("The box's name, as box_list shows it.")},
                                       {"limit", mcp::integer_property("How many (default 50).")}},
                                      {"box"}),
                   [this](const bj::object& args) {
@@ -205,7 +208,9 @@ void Host::register_source_tools() {
       {"source_create",
        "Starts a source project kept in this host, so the code lives next to what it builds. Templates: empty; rust-box "
        "(a Rust box with Cargo.toml, src/lib.rs, the goober.rs binding, and a manifest); wat-box (WebAssembly text); "
-       "site (static pages for a tenant). goober.project.json says what the project builds and deploys.",
+       "site (static pages for a tenant). goober.project.json says what the project builds and deploys: boxes "
+       "(directories), schemas (files the build checks in place and the deploy stores), specs, and sites. Answers "
+       "{project, head, next}. Nothing is built or deployed until source_build or source_deploy. A changing tool.",
        mcp::object_schema({{"project", project_prop},
                            {"description", mcp::string_property("What the project is for.")},
                            {"template", mcp::enum_property("Files to start with (default empty).",
@@ -234,7 +239,9 @@ void Host::register_source_tools() {
   mcp_->add_tool(
       {"source_checkout",
        "Every file of a project at a revision: text files with their contents in path order (until "
-       "max_bytes, default 200000), the rest listed for source_read. Remember the rev: commits name it as base_rev.",
+       "max_bytes, default 200000), the rest listed for source_read. Answers {project, rev, head, files: [{path, "
+       "size, sha256, text | binary | omitted}]}, plain JSON. Remember the rev: commits name it as base_rev. A read "
+       "tool.",
        mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
                            {"max_bytes", mcp::integer_property("How much file text to include (default 200000, at most 2000000).")}},
                           {"project"}),
@@ -271,7 +278,9 @@ void Host::register_source_tools() {
          return ToolResult::ok(std::move(result));
        }});
 
-  mcp_->add_tool({"source_read", "Chosen files of a project at a revision: text as text, others as base64.",
+  mcp_->add_tool({"source_read",
+                  "Chosen files of a project at a revision (up to 50 paths): text as text, others as base64. A read "
+                  "tool.",
                   mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
                                       {"paths", bj::value(bj::object{{"type", "array"},
                                                                      {"items", bj::object{{"type", "string"}}},
@@ -300,7 +309,9 @@ void Host::register_source_tools() {
        "text}, {path, base64}, or {path, delete: true}; a later one for a path replaces an earlier) to your draft on a "
        "project, made from base_rev. Nothing is a revision until source_commit with the stage id commits it all at "
        "once, so no half-done revision exists. A draft is yours (your operator sign-in), holds up to 500 changes, and "
-       "is dropped by a commit, by discard: true, or after an hour without a change.",
+       "is dropped by a commit, by discard: true, or after an hour without a change; it survives a restart. "
+       "Answers the stage id and the draft's paths. Stage on the base_rev you read; after a conflict, discard, read "
+       "again, and stage on the new head. A changing tool.",
        mcp::object_schema({{"project", project_prop},
                            {"base_rev", mcp::integer_property("The revision the draft starts from (from source_checkout).")},
                            {"changes", bj::value(bj::object{{"type", "array"},
@@ -348,7 +359,10 @@ void Host::register_source_tools() {
        "Changes files in a project, as a new revision. base_rev is the revision you read (from source_checkout). If "
        "someone committed since, your commit still lands when it touches none of their files; otherwise it's refused "
        "with the conflicting paths, and you read them again. Each change is {path, text} or {path, base64} to write, or "
-       "{path, delete: true}. Too many files for one call? source_stage them, then commit with the stage id.",
+       "{path, delete: true}. Too many files for one call? source_stage them, then commit with the stage id. "
+       "Answers {committed, rev, rebased} or the conflicts. A commit only stores source: nothing is built or goes "
+       "live until source_build or source_deploy. Its pin is the revision number (source commits aren't in the "
+       "change log, so there is no change_id). A changing tool.",
        mcp::object_schema({{"project", project_prop},
                            {"base_rev", mcp::integer_property("The revision these changes start from.")},
                            {"message", mcp::string_property("What changed and why, in a sentence or two.")},
@@ -420,7 +434,9 @@ void Host::register_source_tools() {
          return ToolResult::ok(bj::object{{"committed", true}, {"rev", r->rev}, {"rebased", r->rebased}});
        }});
 
-  mcp_->add_tool({"source_log", "A project's revisions, newest first: number, message, who, when, and the files each changed.",
+  mcp_->add_tool({"source_log",
+                  "A project's revisions, newest first: number, message, who, when, and the files each changed. A "
+                  "read tool.",
                   mcp::object_schema({{"project", project_prop}, {"limit", mcp::integer_property("How many (default 20).")}},
                                      {"project"}),
                   [this](const bj::object& args) {
@@ -438,7 +454,7 @@ void Host::register_source_tools() {
 
   mcp_->add_tool({"source_diff",
                   "What changed between two revisions of a project (to defaults to the newest): each file with lines "
-                  "added and removed, and with verbose the unified diff.",
+                  "added and removed, and with verbose the unified diff. A read tool.",
                   mcp::object_schema({{"project", project_prop},
                                       {"from", mcp::integer_property("The older revision.")},
                                       {"to", rev_prop},
@@ -489,7 +505,9 @@ void Host::register_source_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"source_revert", "A new revision holding an older revision's files: going back without losing history.",
+  mcp_->add_tool({"source_revert",
+                  "A new revision holding an older revision's files: going back without losing history. Answers "
+                  "{rev}. It changes source only: source_deploy that revision to put it live. A changing tool.",
                   mcp::object_schema({{"project", project_prop}, {"rev", mcp::integer_property("The revision to go back to.")}},
                                      {"project", "rev"}),
                   [this](const bj::object& args) {
@@ -503,12 +521,17 @@ void Host::register_source_tools() {
   for (bool deploy : {false, true}) {
     mcp_->add_tool(
         {deploy ? "source_deploy" : "source_build",
-         deploy ? "Builds a revision (newest by default) and deploys it: stores its schemas, uploads each box as a new "
-                  "version, and writes each site's files. Returns once done, or after 25 s with a job to follow with "
-                  "source_job."
+         deploy ? "Builds a revision (newest by default) and puts it live: first every check a build runs, and if "
+                  "any fails nothing is stored; then it stores the project's schemas for good, uploads each box as a "
+                  "new version that goes live at once, and writes each site's files. Answers the job: its state, log, "
+                  "and the schemas, box versions, and sites it deployed. Returns once done, or after 25 s with a job to "
+                  "follow with source_job. To check without deploying, source_build. A changing tool."
                 : "Builds a revision (newest by default) in the host's sandbox (no network; Rust crates from the host's "
-                  "vendored set) and reports the log, compiler errors included. Returns once done, or after 25 s with a "
-                  "job to follow with source_job.",
+                  "vendored set) and checks it exactly as source_deploy would, storing nothing and changing nothing: "
+                  "the project's own schemas (those goober.project.json lists) are checked in place, unstored, and "
+                  "each box as an upload would be, conflicts with live boxes included. A green build deploys. Answers "
+                  "the job: its state and log, compiler errors included. Returns once done, or after 25 s with a job "
+                  "to follow with source_job. A changing tool (it runs a build job).",
          mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
                              {"verbose", mcp::boolean_property("The whole log even when it succeeds.")}},
                             {"project"}),
@@ -533,9 +556,10 @@ void Host::register_source_tools() {
   }
 
   mcp_->add_tool({"source_job",
-                  "A build or deploy job: its state, log, and what it did. Waits up to 20 s for it to finish. Without "
-                  "job, the recent jobs (of one project, with project), newest first; every finished job is kept, "
-                  "with its log.",
+                  "A build or deploy job: its state (queued, running, succeeded, failed), log, and what it did. Waits "
+                  "up to 20 s for it to finish. Without job, the recent jobs (of one project, with project), newest "
+                  "first; every finished job is kept, with its log. Not the same as job_status, which follows a "
+                  "box's one-time job (routes.job). A read tool.",
                   mcp::object_schema({{"job", mcp::integer_property("The job's number; omit for the recent jobs.")},
                                       {"project", project_prop},
                                       {"limit", mcp::integer_property("How many recent jobs (default 20).")},

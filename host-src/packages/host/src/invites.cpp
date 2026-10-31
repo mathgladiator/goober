@@ -572,9 +572,12 @@ void Host::register_invite_tools() {
        "accepting grants (roles), the lists it joins, and the site's terms; it has an accept link (a sign-in code "
        "proves the address) and a decline link that stops all of the site's mail to them for good. One reminder "
        "after 7 days; it lapses at 30, and the address can't be invited again for 90. Refused (with code) for a "
-       "blocked address, an account, an open invite, a cooling address, or no postal address in the host config.",
-       object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                      {"email", string_property("The one address invited.")},
+       "blocked address, an account, an open invite, a cooling address, or no postal address in the host config "
+       "(a person sets it at deploy or in host.json; no tool does). Answers the invite, with invite_id (a string) "
+       "and accept_url. An operator's invite grants the roles it names; a box's only those host.json's "
+       "tenants.$t.invites.roles allows. The mail goes at once. A changing tool.",
+       object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                      {"email", string_property("The one address invited, like person@example.com.")},
                       {"roles", array_property("Tenant roles granted on acceptance, like member.")},
                       {"lists", array_property("Lists joined on acceptance (mail_lists names them).")},
                       {"note", string_property("Up to 500 characters, shown as a quote from the inviter.")},
@@ -607,8 +610,9 @@ void Host::register_invite_tools() {
        }});
   mcp_->add_tool({"invite_list",
                   "A tenant's invites, newest first: each with its state (open, accepted, declined, lapsed, revoked), "
-                  "who invited, what it grants, and its dates. Filter by state, email, or box.",
-                  object_schema({{"tenant", string_property("A tenant name from the host config.")},
+                  "who invited, what it grants, and its dates; invite_id is a string. Filter by state, email, or "
+                  "box. A read tool.",
+                  object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
                                  {"state", string_property("open, accepted, declined, lapsed, or revoked.")},
                                  {"email", string_property("One address.")},
                                  {"box", string_property("The box that sent them.")},
@@ -625,9 +629,10 @@ void Host::register_invite_tools() {
                     }
                     return ToolResult::ok(bj::object{{"tenant", tenant}, {"invites", std::move(out)}});
                   }});
-  mcp_->add_tool({"invite_get", "One invite, with its accept link (to resend by hand, say).",
-                  object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                                 {"invite_id", string_property("The invite's id.")}},
+  mcp_->add_tool({"invite_get",
+                  "One invite, with its accept link while it is open (to resend by hand, say). A read tool.",
+                  object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                                 {"invite_id", string_property("The invite's id, a string, as invite_list shows it.")}},
                                 {"tenant", "invite_id"}),
                   [this, known](const bj::object& args) {
                     std::string tenant = field(args, "tenant");
@@ -643,9 +648,11 @@ void Host::register_invite_tools() {
                     if (inv->state == "open") out["accept_url"] = invite_url(tenant, *inv, false);
                     return ToolResult::ok(std::move(out));
                   }});
-  mcp_->add_tool({"invite_revoke", "Withdraws an open invite: its links then say so, and the address cools for 90 days.",
-                  object_schema({{"tenant", string_property("A tenant name from the host config.")},
-                                 {"invite_id", string_property("The invite's id.")}},
+  mcp_->add_tool({"invite_revoke",
+                  "Withdraws an open invite: its links then say so, and the address can't be invited again for 90 "
+                  "days. A changing tool.",
+                  object_schema({{"tenant", string_property("A tenant name from the host config, like example.")},
+                                 {"invite_id", string_property("The invite's id, a string, as invite_list shows it.")}},
                                 {"tenant", "invite_id"}),
                   [this, known](const bj::object& args) {
                     std::string tenant = field(args, "tenant");

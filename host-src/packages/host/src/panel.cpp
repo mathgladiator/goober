@@ -44,6 +44,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
     "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
+    "source_checkout",
     "spec_list",       "spec_get",          "ids_status",          "approval_status",  "bus_status",      "box_render",
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
@@ -90,6 +91,16 @@ int64_t arg_int(const bj::object& args, const char* k, int64_t fallback) {
 }  // namespace
 
 bool Host::is_read_tool(std::string_view tool) { return kReadTools.count(tool) > 0; }
+
+bool Host::is_read_call(std::string_view tool, const bj::object& args) {
+  auto flag = [&](const char* k) {
+    const auto* v = args.if_contains(k);
+    return v && v->is_bool() && v->as_bool();
+  };
+  if (tool == "mail_unsubscribed") return !args.contains("set");
+  if (tool == "version_upload") return flag("dry_run");
+  return is_read_tool(tool);
+}
 
 std::string& Host::current_request_id() {
   thread_local std::string id;
@@ -270,7 +281,7 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
             status == 200 ? "ok" : "refused", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
-    if (!is_read_tool(tool)) {
+    if (!is_read_tool(tool) || !is_read_call(tool, args)) {
       return finish(json_reply(403, bj::object{{"error", "the panel only looks: " + tool + " isn't a read tool"}}),
                     json::dump(bj::object{{"panel", tool}, {"why", "not a read tool"}}));
     }

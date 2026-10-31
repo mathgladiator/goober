@@ -336,8 +336,12 @@ void Host::register_tools() {
                                      "content such as error-message/404.html.");
 
   mcp_->add_tool({"host_health",
-                  "Uptime, request count, storage path, boxes, startup notes, how mail leaves, whether backups "
-                  "are healthy, and whether the SMTP listener mail in runs on answers (smtp_listener).",
+                  "Read tool. The host's state; start here when something seems wrong. Returns build and version, "
+                  "ready (the same checks as /goober/ready), uptime_ms, requests, queued_jobs, storage, boxes and "
+                  "boxes_loaded (each live box with its version), mail (how mail leaves), smtp_listener (whether mail "
+                  "in's listener on port 25 answers, with its banner), backups (healthy, last_nightly_at, "
+                  "last_increment_at, last_error, key_warning), tenants_without_postal_address with postal_address_how "
+                  "(a person sets it; no tool does), and startup_notes.",
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array notes;
                     for (const auto& n : startup_notes_) notes.push_back(bj::value(n));
@@ -382,8 +386,12 @@ void Host::register_tools() {
                   }});
 
   mcp_->add_tool({"ids_status",
-                  "The host's id service (design/machine/038.Ids.md): the first id never handed out, the range in use, "
-                  "and the newest ranges. Every new user, invite, upload, and row keyed by type id takes its id from it.",
+                  "Read tool. The host's id service (design/machine/038.Ids.md), which mints every new user, invite, "
+                  "upload, and row keyed by type id. Returns counter (the first id never handed out), next and "
+                  "range_end (the range this host is using; null before its first new id since it started), and the "
+                  "newest ranges; ids are strings in JSON. An empty ranges list means no id has been minted yet, and a "
+                  "note says so. Nothing can be reserved: a box's or a job's inserts get their ids as they happen. Ids "
+                  "from before the service (earlier users, rowid-keyed tables) are kept, below the counter.",
                   object_schema({}, {}), [this](const bj::object&) {
                     if (!ids_) return ToolResult::fail("the id service is off: see host_health's startup notes");
                     auto [next, end] = ids_->current();
@@ -410,8 +418,9 @@ void Host::register_tools() {
                   }});
 
   mcp_->add_tool({"domain_list",
-                  "The domains this host answers, and the tenant each one serves; a redirect domain also names the "
-                  "domain it redirects to (redirect_to).",
+                  "Read tool. Every domain in the host config: {domain, tenant, owner} for a tenant's own domain, "
+                  "and {domain, tenant, redirect_to} for a redirect domain, which the host answers with a 301 to "
+                  "redirect_to. Domains are set in host.json by a person (or the deploy); no tool adds one.",
                   object_schema({}, {}), [this](const bj::object&) {
                     bj::array out;
                     auto cfg = config_.get();
@@ -427,11 +436,14 @@ void Host::register_tools() {
 
   mcp_->add_tool(
       {"content_put",
-       "Writes one static file for a tenant, persisted to disk through the host WAL. Give text, or base64 for binary. "
-       "The path is relative, like index.html or css/site.css; / serves index.html. The type comes from the "
-       "extension (.csv is text/csv, .atom application/atom+xml, .webmanifest, .json, .xml, .svg, ...). Both text and "
-       "base64 are stored byte for byte, but a tool-call layer may change text on its way here (CRLF becoming LF): "
-       "when the exact bytes matter, give sha256 and the write is refused unless what arrived matches.",
+       "Changing tool. Writes one static file for a tenant through the host WAL; it goes live at once (there is no "
+       "draft) and replaces any file at that path. Give text, or base64 for binary. The path is relative, like "
+       "index.html or css/site.css; / serves index.html. The type comes from the extension (.csv is text/csv, .atom "
+       "application/atom+xml, .webmanifest, .json, .xml, .svg, ...). Both text and base64 are stored byte for byte, "
+       "but a tool-call layer may change text on its way here (CRLF becoming LF): when the exact bytes matter, give "
+       "sha256 and the write is refused unless what arrived matches. Returns path, bytes, sha256, content_type, and "
+       "file_etag (the stored file's; etag is the same value). There is no if_etag here: for pages, templates, and "
+       "partials use page_put, template_put, and partial_put, which take it.",
        object_schema({{"tenant", tenant_prop},
                       {"path", string_property("A relative path, like index.html.")},
                       {"text", string_property("The file's contents as text.")},
@@ -468,10 +480,14 @@ void Host::register_tools() {
                                           {"bytes", data.size()},
                                           {"sha256", sha},
                                           {"content_type", f ? f->content_type : ""},
+                                          {"file_etag", f ? f->etag : ""},
                                           {"etag", f ? f->etag : ""}});
        }});
 
-  mcp_->add_tool({"content_get", "Reads one static file. Text comes back as text, anything else as base64.",
+  mcp_->add_tool({"content_get",
+                  "Read tool. One stored file as it is on disk (before any template or partial): text as text, "
+                  "anything else as base64, with content_type, bytes, and file_etag (etag is the same value). What "
+                  "visitors get, and its body_etag, is url_check's or page_render's to say.",
                   object_schema({{"tenant", tenant_prop}, {"path", string_property("A relative path.")}},
                                 {"tenant", "path"}),
                   [this](const bj::object& args) {
@@ -481,7 +497,7 @@ void Host::register_tools() {
                     auto f = content_->get(*tenant, *path);
                     if (!f) return ToolResult::fail("no such file");
                     bj::object out{{"tenant", *tenant}, {"path", *path}, {"content_type", f->content_type},
-                                   {"etag", f->etag},   {"bytes", f->data.size()}};
+                                   {"file_etag", f->etag}, {"etag", f->etag}, {"bytes", f->data.size()}};
                     if (looks_like_text(f->data)) {
                       out["text"] = f->data;
                     } else {
@@ -490,7 +506,9 @@ void Host::register_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"content_list", "Lists a tenant's static files, optionally under a prefix.",
+  mcp_->add_tool({"content_list",
+                  "Read tool. The paths of a tenant's stored files (pages, templates, partials, and other files), "
+                  "optionally under a prefix, as a list of strings.",
                   object_schema({{"tenant", tenant_prop}, {"prefix", string_property("Only paths starting with this.")}},
                                 {"tenant"}),
                   [this](const bj::object& args) {
@@ -503,7 +521,9 @@ void Host::register_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"content_delete", "Deletes one static file through the host WAL.",
+  mcp_->add_tool({"content_delete",
+                  "Changing tool. Deletes one stored file through the host WAL; it stops being served at once. "
+                  "Returns deleted (the path).",
                   object_schema({{"tenant", tenant_prop}, {"path", string_property("A relative path.")}},
                                 {"tenant", "path"}),
                   [this](const bj::object& args) {
@@ -517,16 +537,20 @@ void Host::register_tools() {
 
   mcp_->add_tool(
       {"version_upload",
-       "Uploads a box: a manifest (object or JSON text) and its module, as WAT text or base64 WASM. The host checks "
-       "the manifest, the module's imports (only goober-abi@1), and one export goober_route_$name per route, then "
-       "stores the version and makes it active (the v1 dev policy: no approval step), or, with activate: false, "
-       "stores it dark for version_promote to make live later. When the manifest names a "
-       "types document (\"types\": \"x.openapi.json\"), pass that document as types: the OpenAPI components.schemas "
-       "the routes' json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset. With "
-       "dry_run, every check runs (conflicts with the active boxes included) and nothing is stored or changed; "
-       "schemas gives it schemas not stored yet. A dark version (activate: false) that conflicts with a live box "
-       "is stored with a warning, so a route or mail address can move between boxes: box_disable the old box, "
-       "then version_promote the new version (rollback: box_disable the new, box_enable the old).",
+       "Changing tool. Uploads a box version: a manifest (object or JSON text) and its module (wat or wasm_base64), "
+       "plus types when the manifest names a types document (\"types\": \"x.openapi.json\": the OpenAPI "
+       "components.schemas its json:$Type bodies, responses, and tool inputs refer to, in goober's strict subset). "
+       "The host checks the manifest, the module's imports (goober-abi@1 only), one export goober_route_$name per "
+       "route, the types, the data strategies against stored schemas, and conflicts with the live boxes. Three modes: "
+       "(1) by default the version is stored and goes live at once, replacing the box's live version (there is no "
+       "separate review stage; an agent whose approvals are on waits for a person first, as with every changing "
+       "tool); (2) activate: false stores it dark: kept, not serving, until version_promote {box, version} makes it "
+       "go live. A dark version whose route names or mail addresses clash with a live box is stored with a warning "
+       "and checked again at promote: that is how a route moves between boxes (box_disable the old box, then "
+       "version_promote the new; roll back with box_disable the new, box_enable the old); (3) dry_run: true checks "
+       "everything and stores nothing, changes nothing (activate is ignored); schemas lets it use schemas not stored "
+       "yet. Returns version, active, and warnings; a dry run returns dry_run, ok, stored: false, active: false, and "
+       "schemas_checked and schema_warnings when schemas were given.",
        object_schema({{"manifest", mcp::any_property("The manifest, as a JSON object or as JSON text.")},
                       {"dry_run", mcp::boolean_property("Check only: store nothing, activate nothing.")},
                       {"schemas", mcp::any_property("With dry_run: schemas the manifest uses that aren't stored yet "
@@ -606,8 +630,10 @@ void Host::register_tools() {
        }});
 
   mcp_->add_tool({"version_list",
-                  "Lists a box's versions, and which is active; a version a source deploy uploaded names its project, "
-                  "revision, and job (source).",
+                  "Read tool. A box's stored versions, each {version, active}: active is true for the one live now, "
+                  "false for older versions and versions stored dark (activate: false). A box taken out by box_disable "
+                  "marks the version it had with disabled and why. source {project, rev, job} names the source deploy "
+                  "that uploaded a version.",
                   object_schema({{"box", string_property("The box name.")}}, {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
@@ -630,7 +656,9 @@ void Host::register_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"version_get", "Returns a version's manifest.",
+  mcp_->add_tool({"version_get",
+                  "Read tool. One stored version's manifest (live, dark, or old): {box, version, manifest}. The whole "
+                  "manifest, with the tools, timers, mail routes, jobs, data grants, and flags that box_list doesn't show.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
@@ -647,9 +675,11 @@ void Host::register_tools() {
 
   mcp_->add_tool(
       {"box_disable",
-       "Takes a box out of service: none of its routes, tools, timers, mail routes, or jobs answer (a page's path "
-       "falls through to the site's content, or 404). Its versions and data stay. box_enable puts it back. To take "
-       "out one route, deploy a version without it instead.",
+       "Changing tool. Takes a box out of service at once: none of its routes, tools, timers, mail routes, or jobs "
+       "answer (a path it served falls through to the site's pages and files, or 404). Its versions and data stay, "
+       "and it frees its route names and mail addresses, so another box may take them. box_enable puts it back; "
+       "version_promote, or uploading a live version, also brings it back. To take out one route, upload a version "
+       "without it instead. Returns box, version (the one it had), and why.",
        object_schema({{"box", string_property("The box name.")},
                       {"why", string_property("Why, in a sentence: kept with the box and shown by version_list.")}},
                      {"box", "why"}),
@@ -666,8 +696,10 @@ void Host::register_tools() {
        }});
   mcp_->add_tool(
       {"box_enable",
-       "Puts a disabled box back in service: the version it had (or the version given), checked against the active "
-       "boxes again as any promotion is.",
+       "Changing tool. Puts a disabled box back in service at once: the version it had, or the version given, "
+       "checked against the live boxes as any promotion is. Refused while another box holds its route names or "
+       "mail addresses (box_disable that box first: the rollback of a move). Returns box and active (the version "
+       "now live).",
        object_schema({{"box", string_property("The box name.")},
                       {"version", string_property("A version to serve instead of the one it had.")}},
                      {"box"}),
@@ -694,7 +726,10 @@ void Host::register_tools() {
          return ToolResult::ok(bj::object{{"box", *box}, {"active", *version}});
        }});
 
-  mcp_->add_tool({"version_promote", "Makes an existing version active, which is how v1 rolls back.",
+  mcp_->add_tool({"version_promote",
+                  "Changing tool. Makes a stored version of a box go live at once, replacing its live version: a "
+                  "version stored dark (activate: false), or an older one, which is how a box rolls back. Checked "
+                  "against the live boxes like an upload; a disabled box comes back with it. Returns box and active.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
@@ -708,8 +743,10 @@ void Host::register_tools() {
 
   mcp_->add_tool(
       {"route_check",
-       "Which handler answers a request to a domain: the host itself (its reserved paths), a box route (its box, "
-       "version, route name, pattern, parameters, and who may call it), or the site's pages and files. Lists every "
+       "Read tool. Which handler answers an HTTP request to a domain: the host itself (its reserved paths; a "
+       "redirect domain's 301), a box route (its box, version, route name, pattern, parameters, template, and who "
+       "may call it), the site's pages and files (the file, its kind, and its partials), or nothing (404, 405). "
+       "For a mail address, use mail_route_check. Lists every "
        "other box route whose path also fits, so a shadowed route shows up. Every box whose domains cover the domain "
        "(\"*\" covers all of them) shares one route table there: the same verb and shape (literals, with every "
        "parameter as {}) in two boxes is refused at upload, and otherwise a literal segment beats a parameter at the "
@@ -840,7 +877,7 @@ void Host::register_tools() {
 
   mcp_->add_tool(
       {"mcp_tools_preview",
-       "What a domain's /mcp lists right now: every box tool there, with its box, active version, requirements, and "
+       "Read tool. What a domain's /mcp lists right now: every box tool there, with its box, active version, requirements, and "
        "typed input, and, for a person (email), whether they see it and why not. Use it when an MCP client shows "
        "tools that don't match a deploy: /mcp builds its list from the active versions on every request, so a "
        "different list means a different domain, a person whose roles hide the tool, or the client's own copy.",
@@ -895,7 +932,11 @@ void Host::register_tools() {
          return ToolResult::ok(std::move(out));
        }});
 
-  mcp_->add_tool({"box_list", "Lists active boxes with their versions, domains, and routes.", object_schema({}, {}),
+  mcp_->add_tool({"box_list",
+                  "Read tool. The live boxes, each with version, mission, domains, its HTTP routes {verb, path, name}, "
+                  "and mail (the addresses it takes). Disabled boxes and versions stored dark aren't listed "
+                  "(version_list shows them); tools, timers, jobs, and flags are in version_get's manifest.",
+                  object_schema({}, {}),
                   [this](const bj::object&) {
                     bj::array out;
                     for (const auto& [name, box] : boxes_->active()->boxes) {
@@ -922,9 +963,11 @@ void Host::register_tools() {
                     return ToolResult::ok(std::move(out));
                   }});
 
-  mcp_->add_tool({"box_logs", "The newest lines a box wrote with goober_log, plus host notes about failed calls.",
+  mcp_->add_tool({"box_logs",
+                  "Read tool. The newest lines a box wrote with goober_log, plus the host's notes about calls that "
+                  "failed (level host), as a list, newest last.",
                   object_schema({{"box", string_property("The box name.")},
-                                 {"limit", integer_property("How many lines, newest last. Default 50.")}},
+                                 {"limit", integer_property("How many lines, 1 to 1000. Default 50.")}},
                                 {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
@@ -934,8 +977,10 @@ void Host::register_tools() {
                     return ToolResult::ok(parse_lines(lines));
                   }});
 
-  mcp_->add_tool({"access_log", "The newest lines of the access log.",
-                  object_schema({{"limit", integer_property("How many lines, newest last. Default 50.")}}, {}),
+  mcp_->add_tool({"access_log",
+                  "Read tool. The newest lines of the host's access log (every request and operator tool call), as a "
+                  "list, newest last. log_search searches further back.",
+                  object_schema({{"limit", integer_property("How many lines, 1 to 1000. Default 50.")}}, {}),
                   [this](const bj::object& args) {
                     auto lines = base::tail_lines(config_.get()->storage / "logs" / "access.log",
                                                   size_t(std::clamp<int64_t>(int_arg(args, "limit", 50), 1, 1000)));
@@ -952,7 +997,8 @@ void Host::register_tools() {
     return false;
   };
   mcp_->add_tool({"realm_get",
-                  "A tenant realm's users, their roles and live sessions, and the newest identity audit records.",
+                  "Read tool. A tenant realm's users (user_id as a string, email, roles, live sessions), and the newest "
+                  "identity audit records.",
                   object_schema({{"tenant", realm_prop}}, {"tenant"}),
                   [this, known_tenant](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
@@ -961,9 +1007,9 @@ void Host::register_tools() {
                   }});
   mcp_->add_tool(
       {"role_grant",
-       "Grants a tenant role (like owner, admin, or admin/project_42) to an email in a tenant's realm. The user is "
-       "created if the address is new, so the role waits for their first sign-in. Host roles come only from the "
-       "host config.",
+       "Changing tool. Grants a tenant role (like owner, admin, or admin/project_42) to an email in a tenant's realm, "
+       "at once and audited. The user is created (with a new host id) if the address is new, so the role waits for "
+       "their first sign-in. Host roles come only from the host config. Returns granted, to, tenant.",
        object_schema({{"tenant", realm_prop},
                       {"email", string_property("The person's email address.")},
                       {"role", string_property("role or role/scope, each part [A-Za-z0-9_]+.")}},
@@ -980,7 +1026,9 @@ void Host::register_tools() {
          }
          return ToolResult::ok(bj::object{{"granted", *role}, {"to", *email}, {"tenant", *tenant}});
        }});
-  mcp_->add_tool({"role_revoke", "Revokes a tenant role from an email in a tenant's realm.",
+  mcp_->add_tool({"role_revoke",
+                  "Changing tool. Revokes one tenant role from an email in a tenant's realm, at once and audited. "
+                  "Returns revoked, from, tenant.",
                   object_schema({{"tenant", realm_prop},
                                  {"email", string_property("The person's email address.")},
                                  {"role", string_property("The exact role string.")}},
@@ -997,7 +1045,10 @@ void Host::register_tools() {
                     }
                     return ToolResult::ok(bj::object{{"revoked", *role}, {"from", *email}, {"tenant", *tenant}});
                   }});
-  mcp_->add_tool({"sessions_revoke", "Ends every session of a person in a tenant's realm, at their next request.",
+  mcp_->add_tool({"sessions_revoke",
+                  "Changing tool. Ends every session and token a person holds in a tenant's realm: their browser "
+                  "sessions and the tokens apps and agents hold for them, at their next request. Audited. Returns ended "
+                  "(how many). user_delete deletes the account itself.",
                   object_schema({{"tenant", realm_prop}, {"email", string_property("The person's email address.")}},
                                 {"tenant", "email"}),
                   [this, known_tenant](const bj::object& args) {
@@ -1020,7 +1071,9 @@ void Host::register_tools() {
                       {"acts_as", c.person ? "person" : "agent"},
                       {"source", c.source}};
   };
-  mcp_->add_tool({"client_list", "The OAuth clients registered in a tenant's realm: apps that act as the person, and agents.",
+  mcp_->add_tool({"client_list",
+                  "Read tool. The OAuth clients registered in a tenant's realm, apps that act as the person and "
+                  "agents: each with client_id, name, redirect_uris, acts_as, and source.",
                   object_schema({{"tenant", realm_prop}}, {"tenant"}),
                   [this, known_tenant, client_json](const bj::object& args) {
                     auto tenant = arg(args, "tenant");
@@ -1031,7 +1084,7 @@ void Host::register_tools() {
                   }});
   mcp_->add_tool(
       {"client_put",
-       "Registers or replaces an OAuth client in a tenant's realm. A person client (acts_as person) is the realm's own "
+       "Changing tool. Registers or replaces an OAuth client in a tenant's realm. A person client (acts_as person) is the realm's own "
        "app and acts as the person, so only register one you trust like your own phone. Agents act for the person "
        "and reach only routes that allow agents.",
        object_schema({{"tenant", realm_prop},
@@ -1062,7 +1115,8 @@ void Host::register_tools() {
          if (!identity_->put_client(*tenant, c, base::now_unix_ms(), &why)) return ToolResult::fail(why);
          return ToolResult::ok(client_json(*identity_->client(*tenant, c.client_id)));
        }});
-  mcp_->add_tool({"client_remove", "Removes an OAuth client from a tenant's realm, ending every token it holds.",
+  mcp_->add_tool({"client_remove",
+                  "Changing tool. Removes an OAuth client from a tenant's realm, ending every token it holds, at once.",
                   object_schema({{"tenant", realm_prop}, {"client_id", string_property("The client to remove.")}},
                                 {"tenant", "client_id"}),
                   [this, known_tenant](const bj::object& args) {
@@ -1076,11 +1130,11 @@ void Host::register_tools() {
                   }});
   mcp_->add_tool(
       {"agent_token_mint",
-       "Mints a long-lived access token for an agent client to act for one person, for agents that send a fixed "
+       "Changing tool. Mints a long-lived access token for an agent client to act for one person, for agents that send a fixed "
        "bearer header and can't refresh, like Grok's remote MCP tool or a script. Use it as Authorization: Bearer "
        "<token> on https://<domain>/mcp (box tools) and on box routes that allow agents. The person is mailed, sees "
        "it on their account page, and can revoke it there. Prefer OAuth (dynamic registration or the device flow) "
-       "for agents that can do it.",
+       "for agents that can do it. Returns access_token (shown once; goober keeps only its hash) and expires_at.",
        object_schema({{"tenant", realm_prop},
                       {"client_id", string_property("An agent client from client_put (acts_as agent).")},
                       {"email", string_property("The person the agent acts for; they must have signed in once.")},
