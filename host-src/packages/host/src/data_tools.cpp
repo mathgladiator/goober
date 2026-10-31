@@ -598,7 +598,9 @@ void Host::register_data_tools() {
       {"schema_put",
        "Stores a database schema: {\"schema\": \"name1\", \"tables\": {\"t\": {\"columns\": {\"c\": {\"type\": "
        "\"string\"}}, \"indexes\": {...}}}}, for good. Types are id, int32, int64, double, float, boolean, and "
-       "string; columns take nullable, default, max-length, primary-key, and not-a-reference. Key every table with "
+       "string; columns take nullable, default, max-length, primary-key, not-a-reference, description (what the "
+       "column holds, for people, 1 to 500 characters), and references (a table of the same schema whose key the "
+       "column holds, of that key's type; checked, never enforced). Key every table with "
        "\"id\": {\"type\": \"id\", \"primary-key\": true}: the host stamps it from its id service, and a box never "
        "names one. The primary key is never a natural key (a string like address|day): make that a unique index on "
        "its own columns, and insert with ON CONFLICT on it. A column that refers to a user or a row, in any "

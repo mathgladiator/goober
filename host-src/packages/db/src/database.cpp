@@ -1598,9 +1598,23 @@ bj::object Databases::describe(std::string_view tenant, std::string_view databas
   std::error_code ec;
   out["bytes"] = int64_t(std::filesystem::file_size(path, ec));
   bj::array schemas;
+  // Each column's annotations (description, references), from the newest applied schema that
+  // declares it: a later version's say replaces an earlier one's.
+  std::map<std::string, const Column*> annotated;
+  std::vector<Schema> applied;
   {
-    sqlite::Stmt q(db, "SELECT name, applied_ms FROM goober_schemas ORDER BY applied_ms");
-    while (q.step()) schemas.push_back(bj::object{{"schema", q.text(0)}, {"applied", base::format_utc_ms(q.int64(1))}});
+    sqlite::Stmt q(db, "SELECT name, applied_ms FROM goober_schemas ORDER BY applied_ms, rowid");
+    while (q.step()) {
+      schemas.push_back(bj::object{{"schema", q.text(0)}, {"applied", base::format_utc_ms(q.int64(1))}});
+      if (store_) {
+        if (auto s = store_->get(q.text(0))) applied.push_back(std::move(*s));
+      }
+    }
+  }
+  for (const auto& s : applied) {
+    for (const auto& t : s.tables) {
+      for (const auto& c : t.columns) annotated[t.name + "." + c.name] = &c;
+    }
   }
   out["schemas"] = std::move(schemas);
   bj::array tables;
@@ -1616,12 +1630,17 @@ bj::object Databases::describe(std::string_view tenant, std::string_view databas
                        "LEFT JOIN goober_columns g ON g.table_name = ? AND g.column_name = c.name ORDER BY c.cid");
     c.bind(1, t).bind(2, t);
     while (c.step()) {
-      columns.push_back(bj::object{{"name", c.text(0)},
-                                   {"sql_type", c.text(1)},
-                                   {"nullable", c.int64(2) == 0 && c.int64(3) == 0},
-                                   {"primary_key", c.int64(3) != 0},
-                                   {"declared", c.is_null(4) ? "" : c.text(4)},
-                                   {"schema", c.is_null(5) ? "" : c.text(5)}});
+      bj::object col{{"name", c.text(0)},
+                     {"sql_type", c.text(1)},
+                     {"nullable", c.int64(2) == 0 && c.int64(3) == 0},
+                     {"primary_key", c.int64(3) != 0},
+                     {"declared", c.is_null(4) ? "" : c.text(4)},
+                     {"schema", c.is_null(5) ? "" : c.text(5)}};
+      if (auto it = annotated.find(t + "." + c.text(0)); it != annotated.end()) {
+        if (!it->second->description.empty()) col["description"] = it->second->description;
+        if (!it->second->references.empty()) col["references"] = it->second->references;
+      }
+      columns.push_back(std::move(col));
     }
     bj::array indexes;
     sqlite::Stmt i(db, "SELECT index_name, signature FROM goober_indexes WHERE table_name = ? ORDER BY index_name");

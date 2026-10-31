@@ -21,6 +21,9 @@ struct Column {
   bool primary_key = false;
   bool nullable = false;
   bool not_a_reference = false;  // "not-a-reference": silences the reference warning (038 § 5)
+  // Annotations (2026-10-31): nothing stored or checked at run time depends on them.
+  std::string description;  // "description": what the column holds, for people (at most 500 characters)
+  std::string references;   // "references": the table of this schema whose key the column holds
   std::optional<bj::value> default_value;
   std::optional<int64_t> max_length;
   // The SQL that declares the column inside CREATE TABLE or ALTER TABLE ADD COLUMN.

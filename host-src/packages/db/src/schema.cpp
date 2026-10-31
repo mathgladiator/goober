@@ -48,7 +48,7 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   for (const auto& f : o) {
     std::string k(f.key());
     if (k != "type" && k != "primary-key" && k != "nullable" && k != "default" && k != "max-length" &&
-        k != "not-a-reference") {
+        k != "not-a-reference" && k != "description" && k != "references") {
       return fail(error, where + ": unknown field \"" + k + "\"");
     }
   }
@@ -63,7 +63,23 @@ bool parse_column(const std::string& table, const std::string& name, const bj::v
   c->max_length = json::get_int(o, "max-length", &err);
   // Says the name only looks like a reference (an RFC Message-ID, a host event id): no warning.
   c->not_a_reference = json::get_bool(o, "not-a-reference", &err).value_or(false);
+  c->description = json::get_string(o, "description", &err).value_or("");
+  c->references = json::get_string(o, "references", &err).value_or("");
   if (!err.empty()) return fail(error, where + ": " + err);
+  // A description is for people: one paragraph, no control characters but newlines.
+  size_t chars = 0;
+  for (unsigned char ch : c->description) {
+    if ((ch & 0xC0) != 0x80) ++chars;
+    if ((ch < 0x20 && ch != '\n') || ch == 0x7f) return fail(error, where + ": a description holds no control characters");
+  }
+  if (o.contains("description") && (chars == 0 || chars > 500)) {
+    return fail(error, where + ": a description is 1 to 500 characters");
+  }
+  if (o.contains("references")) {
+    if (!is_valid_sql_name(c->references)) return fail(error, where + ": references names a table of this schema");
+    if (c->not_a_reference) return fail(error, where + ": a column can't both reference a table and be \"not-a-reference\"");
+    if (c->primary_key) return fail(error, where + ": a primary key references nothing; another table's column references it");
+  }
   if (c->primary_key && ((c->type != "id" && c->type != "int64") || c->nullable)) {
     return fail(error, where + ": a primary key is a non-nullable id, which the host stamps (or, as tables were keyed "
                               "before, int64). A natural key, like an address and a day, is a unique index on its own "
@@ -206,7 +222,7 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
       if (col.primary_key && col.type == "int64") {
         s.warnings.push_back(where + " is an int64 primary key: new rows get this database's rowids, not host ids; "
                              "declare {\"type\": \"id\", \"primary-key\": true} (design/machine/038.Ids.md)");
-      } else if (!col.primary_key && !col.not_a_reference && looks_like_reference(col.name) &&
+      } else if (!col.primary_key && !col.not_a_reference && col.references.empty() && looks_like_reference(col.name) &&
                  (col.type == "string" || col.type == "int32" || col.type == "int64")) {
         s.warnings.push_back(where + " looks like a reference to a user or a row, but is " + col.type +
                              ": a reference is {\"type\": \"id\"}; ids are never text and never emails. If it isn't "
@@ -247,6 +263,30 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
     }
     if (!err.empty()) return *error = table.name + ": " + err, std::nullopt;
     s.tables.push_back(std::move(table));
+  }
+  // "references" names a table of this same schema (a version that follows another holds all of
+  // its tables), and the column is the type of that table's key: id for a host-keyed table, int64
+  // for one keyed before ids. Checked here; never enforced as a foreign key.
+  for (const auto& t : s.tables) {
+    for (const auto& c : t.columns) {
+      if (c.references.empty()) continue;
+      std::string where = t.name + "." + c.name;
+      const Table* target = s.table(c.references);
+      if (!target) {
+        return *error = where + " references " + c.references + ", which isn't a table of schema " + s.name +
+                        "; a reference names a table the same schema declares",
+               std::nullopt;
+      }
+      const Column* key = nullptr;
+      for (const auto& k : target->columns) {
+        if (k.primary_key) key = &k;
+      }
+      if (!key || key->type != c.type) {
+        return *error = where + " references " + c.references + ", whose key is " + (key ? key->type : "missing") +
+                        ", so " + where + " must be " + (key ? key->type : "an id") + " too, not " + c.type,
+               std::nullopt;
+      }
+    }
   }
   s.text = std::string(text);
   return s;
@@ -370,6 +410,17 @@ Step plan_step(const Schema& from, const Schema& to) {
                           (!fc.default_value || *fc.default_value == *tc->default_value);
       if (!same_default) add("forced", tt.name, fc.name, "changes " + where + "'s default, which changes what older boxes' inserts store");
       // An annotation changes nothing stored: no data, no SQL, nothing an older box sees.
+      if (fc.description != tc->description) {
+        add("annotation", tt.name, fc.name,
+            (tc->description.empty() ? "removes " + where + "'s description" : "describes " + where + ": \"" + tc->description + "\"") +
+                "; nothing stored changes");
+      }
+      if (fc.references != tc->references) {
+        add("annotation", tt.name, fc.name,
+            (tc->references.empty() ? "says " + where + " no longer references " + fc.references
+                                    : "says " + where + " references " + tc->references) +
+                "; nothing stored changes, and nothing enforces it");
+      }
       if (fc.not_a_reference != tc->not_a_reference) {
         add("annotation", tt.name, fc.name,
             (tc->not_a_reference ? "marks " + where + " \"not-a-reference\" (the reference warning is silenced)"

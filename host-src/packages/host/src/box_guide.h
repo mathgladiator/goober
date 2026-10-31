@@ -348,6 +348,10 @@ through the mail service. Failures are retried in order, then given up after 8 t
 - A column whose name looks like a reference but isn't one (an RFC Message-ID, a host event
   id) says so, and schema_put stops warning: "message_id": {"type": "string",
   "not-a-reference": true}.
+- Say what a column means and what it points at, in the schema: "description": "ck:<client
+  key>, a keyed hash; not an address" (1 to 500 characters), and "user_id": {"type": "id",
+  "references": "users"} for a table of the same schema (the column is that table's key type).
+  schema_check verifies the table; nothing enforces it as a foreign key. db_describe shows both.
 - Operators: db_create {tenant, database, schemas} makes a database from stored schemas before
   any box binds it, so it can be checked empty; db_snapshot copies one database as it is
   (before a migration), db_snapshots lists them, and db_restore_to_new makes a NEW database
@@ -388,7 +392,8 @@ through the mail service. Failures are retried in order, then given up after 8 t
   database on an older version and no active box on an older version writes it (schema_check
   answers held: false and immediate, saying so). Each database is checked again as the step
   applies; one holding rows by then waits for a person.
-- Annotations change nothing stored ("not-a-reference"): the step lists them as kind annotation.
+- Annotations change nothing stored ("not-a-reference", "description", "references"): the step
+  lists them as kind annotation, and they apply at once.
 - A primary key never changes, not even forced. A rename is a drop and an add, which loses the
   data (design/human/420.Migration.md: to the host a rename is a contraction and an expansion):
   add the new column, move the data with a job, and drop the old one in a later version.

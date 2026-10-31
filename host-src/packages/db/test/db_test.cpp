@@ -1022,6 +1022,70 @@ TEST_F(DbTest, AFreshDatabaseTakesEveryStep) {
   EXPECT_FALSE(db::Databases::compatible({&*g3}, &err));  // no store: what it follows can't be found
 }
 
+// Columns take a description and a reference to a table of the same schema (2026-10-31):
+// checked, shown, and changed as annotations; nothing stored depends on them.
+TEST_F(DbTest, ColumnsCarryDescriptionsAndReferences) {
+  const char* v1 = R"({"schema":"club1","tables":{
+    "members":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string"}}},
+    "visits":{"columns":{"id":{"type":"id","primary-key":true},
+      "member_id":{"type":"id","references":"members"},
+      "client":{"type":"string","description":"ck:<client_key>, a keyed hash of the visitor; not an address"}}}}})";
+  std::string err;
+  auto s = db::parse_schema(v1, &err);
+  ASSERT_TRUE(s) << err;
+  EXPECT_EQ(s->table("visits")->column("member_id")->references, "members");
+  EXPECT_EQ(s->table("visits")->column("client")->description.substr(0, 3), "ck:");
+  for (const auto& w : s->warnings) EXPECT_EQ(w.find("member_id"), std::string::npos) << w;
+
+  auto refuse = [&](const std::string& text, const char* why) {
+    std::string e;
+    EXPECT_FALSE(db::parse_schema(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  const std::string head = R"({"schema":"club9","tables":{"members":{"columns":{"id":{"type":"id","primary-key":true}}},)";
+  refuse(head + R"("visits":{"columns":{"member_id":{"type":"id","references":"people"}}}}})", "isn't a table of schema club9");
+  refuse(head + R"("visits":{"columns":{"member_id":{"type":"int64","references":"members"}}}}})", "must be id too");
+  refuse(head + R"("visits":{"columns":{"member_id":{"type":"id","references":"members","not-a-reference":true}}}}})", "both");
+  refuse(head + R"("visits":{"columns":{"note":{"type":"string","description":""}}}}})", "1 to 500");
+  refuse(head + R"("visits":{"columns":{"note":{"type":"string","description":")" + std::string(501, 'x') + R"("}}}}})", "1 to 500");
+  refuse(head + R"("visits":{"columns":{"note":{"type":"string","description":"a\tb"}}}}})", "control");
+
+  // A version that only changes annotations: every change is one, and nothing waits.
+  ASSERT_TRUE(schemas->put(v1, &err)) << err;
+  const char* v2 = R"({"schema":"club2","follows":"club1","tables":{
+    "members":{"columns":{"id":{"type":"id","primary-key":true},"name":{"type":"string","description":"as the member typed it"}}},
+    "visits":{"columns":{"id":{"type":"id","primary-key":true},
+      "member_id":{"type":"id"},
+      "client":{"type":"string","description":"ck:<client_key>, a keyed hash"}}}}})";
+  auto next = schemas->check(v2, &err);
+  ASSERT_TRUE(next) << err;
+  auto step = schemas->step(*next);
+  ASSERT_TRUE(step);
+  ASSERT_EQ(step->changes.size(), 3u);
+  for (const auto& c : step->changes) EXPECT_EQ(c.kind, "annotation") << c.says;
+  EXPECT_FALSE(step->needs_person());
+  ASSERT_TRUE(schemas->put(v2, &err)) << err;
+
+  // db_describe shows each column's annotations from the newest schema applied.
+  manifest::TableGrant g;
+  g.read_all = true;
+  auto st = strategy(g, "club2");
+  st.tables.clear();
+  st.tables["visits"] = g;
+  st.database = "club";
+  dbs->set_schema_store(schemas.get());
+  std::vector<manifest::DataStrategy> strategies{st};
+  {
+    db::Session session(*dbs, "playground", strategies, *schemas);
+    ASSERT_FALSE(J(session.run("book", "SELECT count(*) FROM visits", "")).as_object().contains("error"));
+  }
+  auto d = dbs->describe("playground", "club");
+  std::string text = json::dump(d);
+  EXPECT_NE(text.find(R"("description":"ck:<client_key>, a keyed hash")"), std::string::npos) << text;
+  EXPECT_NE(text.find(R"("description":"as the member typed it")"), std::string::npos) << text;
+  EXPECT_EQ(text.find(R"("references")"), std::string::npos) << text;  // club2 dropped it
+}
+
 // A box undoes part of its call with named savepoints and still commits the rest: a job step
 // that fails rolls its writes back to the savepoint, then records a FAILED marker (2026-10-31).
 TEST_F(DbTest, SavepointsUndoPartOfACall) {
