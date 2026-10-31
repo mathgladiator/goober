@@ -292,6 +292,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_deletion_tools();
   register_web_tools();
   register_source_tools();
+  register_whats_new_tool();
   register_job_tools();
   register_cache_tools();
   register_flag_tools();

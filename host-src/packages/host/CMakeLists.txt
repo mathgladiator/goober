@@ -1,7 +1,7 @@
 goober_package(
   NAME host
   SOURCES src/worker_pool.cpp src/rate_limit.cpp src/mailer.cpp src/backup.cpp src/backups.cpp src/rehydrate.cpp src/scheduler.cpp src/identity_events.cpp src/mail_tools.cpp src/mail_in.cpp src/mail_out.cpp src/toolchain.cpp src/keys.cpp src/network.cpp src/outbox.cpp src/host.cpp src/operations.cpp src/identity_routes.cpp src/oauth_routes.cpp src/mcp_routes.cpp src/operator_tokens.cpp
-          src/attachment_routes.cpp src/content_tools.cpp src/data_tools.cpp src/web_fetch.cpp src/crawler.cpp src/builder.cpp src/source_tools.cpp src/panel.cpp src/pwa_routes.cpp src/operator_scope.cpp src/consent.cpp src/invites.cpp src/logs_tools.cpp src/http_out.cpp src/connect_routes.cpp src/approvals.cpp src/sse.cpp src/audit.cpp src/grant_usage.cpp src/jobs.cpp src/perf.cpp src/flags.cpp src/db_admin.cpp src/route_cache.cpp src/cache_routes.cpp
+          src/attachment_routes.cpp src/content_tools.cpp src/data_tools.cpp src/web_fetch.cpp src/crawler.cpp src/builder.cpp src/source_tools.cpp src/panel.cpp src/pwa_routes.cpp src/operator_scope.cpp src/consent.cpp src/invites.cpp src/logs_tools.cpp src/http_out.cpp src/connect_routes.cpp src/approvals.cpp src/sse.cpp src/audit.cpp src/grant_usage.cpp src/jobs.cpp src/perf.cpp src/flags.cpp src/db_admin.cpp src/route_cache.cpp src/cache_routes.cpp src/whats_new.cpp
           src/dns.cpp src/mail_check.cpp
   DEPS goober_base goober_aws goober_backup goober_json goober_config goober_wal goober_content goober_site goober_attachments goober_router goober_manifest
        goober_runtime_wasm goober_db goober_boxes goober_identity goober_mail_templates goober_mail_inbound goober_server_http goober_mcp goober_timers goober_web goober_source goober_operations goober_panel goober_webpush goober_calendar goober_libraries goober_mail_consent goober_logs goober_vault goober_specs goober_signing goober_bus goober_ids
@@ -20,6 +20,10 @@ target_compile_options(goober-host PRIVATE -Wall -Wextra -Wpedantic)
 file(READ "${CMAKE_SOURCE_DIR}/examples/boxes/shared/goober.rs" GOOBER_RUST_BINDING)
 configure_file(src/rust_binding.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/rust_binding.h" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/examples/boxes/shared/goober.rs")
+# What's new on this build (host-src/CHANGES.md), embedded for the whats_new tool.
+file(READ "${CMAKE_SOURCE_DIR}/CHANGES.md" GOOBER_CHANGES)
+configure_file(src/changes_doc.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/changes_doc.h" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/CHANGES.md")
 target_include_directories(goober_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # The commit each build came from (host_health, goober-host --version), checked on every build.

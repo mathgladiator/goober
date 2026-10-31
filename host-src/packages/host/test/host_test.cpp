@@ -603,3 +603,19 @@ TEST(HostFlags, OperatorsFlipFlagsBoxesReadThem) {
   auto port = again.start();
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/frozen").body, "true");
 }
+
+// whats_new serves host-src/CHANGES.md as built in: entries by day, filtered by day and word.
+TEST_F(HostTest, WhatsNewSaysWhatThisBuildBrings) {
+  auto all = tool("whats_new", {});
+  const auto& r = all.at("result").at("structuredContent");
+  ASSERT_FALSE(r.at("entries").as_array().empty());
+  EXPECT_TRUE(r.as_object().contains("build"));
+  std::string first_date(r.at("entries").at(0).at("date").as_string());
+  auto since = tool("whats_new", {{"since", "2026-10-31"}}).at("result").at("structuredContent");
+  for (const auto& e : since.at("entries").as_array()) EXPECT_GE(std::string(e.at("date").as_string()), "2026-10-31");
+  auto about = tool("whats_new", {{"about", "route_try"}}).at("result").at("structuredContent");
+  for (const auto& e : about.at("entries").as_array()) {
+    EXPECT_NE(std::string(e.at("text").as_string()).find("route_try"), std::string::npos);
+  }
+  EXPECT_EQ(first_date.size(), 10u);  // YYYY-MM-DD
+}

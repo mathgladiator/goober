@@ -763,6 +763,8 @@ class Host {
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();
+  // whats_new (host-src/CHANGES.md, built in): what this build lets agents do.
+  void register_whats_new_tool();
   // Operators and databases (db_admin.cpp): snapshots, restoring to a new database, db_create,
   // db_unbound.
   void register_db_admin_tools();
