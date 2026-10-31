@@ -242,6 +242,7 @@ class Host {
     boost::json::object extra;  // fields for the access log
     CallPerf perf;              // where its time went (037 § 7.1)
     int64_t calls_out = 0;      // calls through goober_call (web, mail, other boxes, APIs)
+    db::Usage used;             // what its statements did with each table (route_try reports it)
   };
   // Optional parts of a box call: a timer's own timeout, and host work that must commit
   // with the box's writes (a one-shot timer turning its row off), run only on success.
@@ -287,9 +288,23 @@ class Host {
   void handle_tenant_mcp(const server::http::Request& req, const Finish& finish, const std::string& domain,
                          const std::string& tenant);
   // `posted_us` is when the request was queued for a box thread (monotonic), for its queue time.
+  // route_try (route_try.cpp): one request, run as someone, against any stored version of a box,
+  // that reaches no one. serve_box takes it last: the caller is `who` (looked up, not signed
+  // in), a write's databases are `copies`, nothing is cached or counted as traffic, and what
+  // the call did is left here.
+  struct TryRun {
+    std::optional<SignedIn> who;
+    db::Databases* copies = nullptr;
+    std::vector<runtime::wasm::LogLine> logs;
+    boost::json::object extra;
+    db::Usage used;
+  };
   void serve_box(server::http::Request req, Finish finish, boxes::RouteRef ref,
                  std::map<std::string, std::string> params, std::string domain, std::string tenant,
-                 std::shared_ptr<const boxes::ActiveSet> keep_alive, int64_t posted_us = 0);
+                 std::shared_ptr<const boxes::ActiveSet> keep_alive, int64_t posted_us = 0, TryRun* trying = nullptr);
+  void register_try_tools();
+  std::mutex trying_mu_;
+  std::set<std::string> trying_;  // operators with a route_try running: one at a time each
   // Content: pages, templates, listings, and static files (007.Content.md).
   void serve_content(const server::http::Request& req, const Finish& finish, const std::string& tenant,
                      const std::string& path);

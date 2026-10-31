@@ -98,6 +98,13 @@ std::shared_ptr<const ActiveSet> BoxRegistry::active() const {
   return active_;
 }
 
+std::shared_ptr<const ActiveBox> BoxRegistry::load(const std::string& box, const std::string& version,
+                                                  std::string* error) const {
+  auto loaded = load_version(box, version, error);
+  if (!loaded) return nullptr;
+  return std::make_shared<const ActiveBox>(std::move(*loaded));
+}
+
 std::optional<ActiveBox> BoxRegistry::load_version(const std::string& box, const std::string& version,
                                                    std::string* error) const {
   fs::path dir = wal_.root() / "boxes" / box / "versions" / version;
