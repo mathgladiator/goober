@@ -109,16 +109,16 @@ TEST_F(RegistryTest, MailAddressesAreClaimedOnce) {
            R"(":{"receive":{"name":")" + route + R"(","public":true}}}}})";
   };
   std::string err;
-  ASSERT_TRUE(reg->upload(mail("desk", "kcmeatup.com", "support@", "desk_support"), module_for({"desk_support"}), &err)) << err;
-  EXPECT_FALSE(reg->upload(mail("other", "kcmeatup.com", "support@kcmeatup.com", "other_support"),
+  ASSERT_TRUE(reg->upload(mail("desk", "acme.example", "support@", "desk_support"), module_for({"desk_support"}), &err)) << err;
+  EXPECT_FALSE(reg->upload(mail("other", "acme.example", "support@acme.example", "other_support"),
                            module_for({"other_support"}), &err));
   EXPECT_NE(err.find("already claimed by box desk"), std::string::npos) << err;
   // Another domain is another address; a different local part is too.
   EXPECT_TRUE(reg->upload(mail("other", "beef.example", "support@", "other_support"), module_for({"other_support"}), &err)) << err;
-  EXPECT_TRUE(reg->upload(mail("third", "kcmeatup.com", "orders@", "third_orders"), module_for({"third_orders"}), &err)) << err;
+  EXPECT_TRUE(reg->upload(mail("third", "acme.example", "orders@", "third_orders"), module_for({"third_orders"}), &err)) << err;
   // One catch-all per domain.
   ASSERT_TRUE(reg->upload(mail("inbox", "*", "*@", "inbox_all"), module_for({"inbox_all"}), &err)) << err;
-  EXPECT_FALSE(reg->upload(mail("inbox2", "kcmeatup.com", "*@", "inbox2_all"), module_for({"inbox2_all"}), &err));
+  EXPECT_FALSE(reg->upload(mail("inbox2", "acme.example", "*@", "inbox2_all"), module_for({"inbox2_all"}), &err));
   // A route without its export is refused like any other.
   EXPECT_FALSE(reg->upload(mail("x", "x.example", "x@", "x_route"), module_for({}), &err));
 }

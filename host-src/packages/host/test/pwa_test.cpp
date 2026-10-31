@@ -101,7 +101,7 @@ std::string wat(const std::string& s) {
   return out;
 }
 
-const char* kShop = R"({"scope": "/shop/", "manifest": {"name": "KC Meat Shop", "short_name": "Meat", "theme_color": "#8b1e1e",
+const char* kShop = R"({"scope": "/shop/", "manifest": {"name": "Acme Shop", "short_name": "Meat", "theme_color": "#8b1e1e",
   "icons": [{"src": "/icons/192.png", "sizes": "192x192", "type": "image/png"},
             {"src": "/icons/512.png", "sizes": "512x512", "type": "image/png"}]},
   "offline": {"fallback": "/shop/offline"}, "push": {"anonymous": true}})";

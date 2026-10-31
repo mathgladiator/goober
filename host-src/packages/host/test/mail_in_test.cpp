@@ -87,18 +87,18 @@ const char* kWat = R"wat((module
 const char* kSchema = R"({"schema":"got1","tables":{"got":{"columns":{
   "path":{"type":"string"},"body":{"type":"string"}}}}})";
 
-const char* kDesk = R"({"box":"desk","domains":["kcmeatup.com"],
+const char* kDesk = R"({"box":"desk","domains":["acme.example"],
   "data":{"sqlite3":{"w":{"schema":"got1","database":"got","pattern":"sql","tables":{"got":{"read":true,"insert":true}}}}},
-  "external":{"mail":{"mail":{"from-name":"KC Meat Up"}}},
+  "external":{"mail":{"mail":{"from-name":"Acme Grill"}}},
   "routes":{
     "http":{"/notify":{"post":{"name":"notify","public":true}}},
     "mail":{
       "support@":{"receive":{"name":"support_inbox","public":true,"max-bytes":4096,"attachments":1}},
       "refuse@":{"receive":{"name":"refuse_inbox","public":true}},
-      "later@kcmeatup.com":{"receive":{"name":"later_inbox","public":true}},
+      "later@acme.example":{"receive":{"name":"later_inbox","public":true}},
       "reply+{ticket : token}@":{"receive":{"name":"ticket_reply","public":true}}}}})";
 
-const char* kInbox = R"({"box":"inbox","domains":["kcmeatup.com"],
+const char* kInbox = R"({"box":"inbox","domains":["acme.example"],
   "data":{"sqlite3":{"w":{"schema":"got1","database":"got","pattern":"sql","tables":{"got":{"read":true,"insert":true}}}}},
   "routes":{"mail":{"*@":{"receive":{"name":"inbox_all","public":true,"automatic":true}}}}})";
 
@@ -141,8 +141,8 @@ class MailInTest : public ::testing::Test {
     base::write_file_durable(root / "hook.token", kToken + "\n");
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"kcmeatup.com": {"tenant": "kc"}, "localhost": {"tenant": "kc"}},
-        "tenants": {"kc": {"postal-address": "KC Meat Up, 1 Main St, Kansas City, MO 64105"}},
+        "domains": {"acme.example": {"tenant": "acme"}, "localhost": {"tenant": "acme"}},
+        "tenants": {"acme": {"postal-address": "Acme Grill, 1 Main St, Springfield, IL 62701"}},
         "mail": {"inbound": {"token-file": "hook.token"}},
         "operations": {"token": "op-token-for-mail-in-tests-0123456789"},
         "threads": {"network": 1, "boxes": 2}})",
@@ -152,7 +152,7 @@ class MailInTest : public ::testing::Test {
     port = host->start();
     ASSERT_TRUE(host->schemas().put(kSchema, &err)) << err;
     auto schema = host->schemas().get("got1");
-    ASSERT_TRUE(host->databases().open("kc", "got", &*schema, &err)) << err;
+    ASSERT_TRUE(host->databases().open("acme", "got", &*schema, &err)) << err;
     ASSERT_TRUE(host->boxes().upload(kDesk, kWat, &err)) << err;
   }
   void TearDown() override { host.reset(); }
@@ -178,7 +178,7 @@ class MailInTest : public ::testing::Test {
   int64_t status(const bj::object& o) { return o.contains("response") ? o.at("response").at("status").as_int64() : 0; }
   bj::array rows() {
     std::string err;
-    auto r = host->databases().operate("kc", "got", "SELECT path, body FROM got ORDER BY rowid", nullptr, 100, false, &err);
+    auto r = host->databases().operate("acme", "got", "SELECT path, body FROM got ORDER BY rowid", nullptr, 100, false, &err);
     return r ? r->at("rows").as_array() : bj::array{};
   }
 
@@ -188,7 +188,7 @@ class MailInTest : public ::testing::Test {
 };
 
 TEST_F(MailInTest, OnlyStalwartOnThisMachineWithItsToken) {
-  std::string body = hook("rcpt", {"support@kcmeatup.com"});
+  std::string body = hook("rcpt", {"support@acme.example"});
   EXPECT_EQ(post(port, "/internal/routes/mta/stalwart", body, {}).status, 404);
   EXPECT_EQ(post(port, "/internal/routes/mta/stalwart", body, {{"authorization", "Bearer wrong"}}).status, 404);
   // Through Caddy (any proxy header), even with the token.
@@ -200,35 +200,35 @@ TEST_F(MailInTest, OnlyStalwartOnThisMachineWithItsToken) {
 }
 
 TEST_F(MailInTest, RecipientsAreRefusedAtTheDoor) {
-  EXPECT_EQ(action(call(hook("rcpt", {"support@kcmeatup.com"}))), "accept");
-  EXPECT_EQ(action(call(hook("rcpt", {"later@kcmeatup.com"}))), "accept");
-  auto nobody = call(hook("rcpt", {"nobody@kcmeatup.com"}));
+  EXPECT_EQ(action(call(hook("rcpt", {"support@acme.example"}))), "accept");
+  EXPECT_EQ(action(call(hook("rcpt", {"later@acme.example"}))), "accept");
+  auto nobody = call(hook("rcpt", {"nobody@acme.example"}));
   EXPECT_EQ(action(nobody), "reject");
   EXPECT_EQ(status(nobody), 550);
   EXPECT_EQ(nobody.at("response").at("enhanced_status"), "5.1.1");
   EXPECT_EQ(status(call(hook("rcpt", {"support@elsewhere.example"}))), 550);
   EXPECT_EQ(status(call(hook("rcpt", {"not an address"}))), 550);
   // One recipient per message: the second is asked to come separately.
-  auto second = call(hook("rcpt", {"support@kcmeatup.com", "refuse@kcmeatup.com"}));
+  auto second = call(hook("rcpt", {"support@acme.example", "refuse@acme.example"}));
   EXPECT_EQ(status(second), 452);
   // Other stages pass.
   EXPECT_EQ(action(call(hook("ehlo", {}))), "accept");
 }
 
 TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
-  std::string headers = "From: Ann Lee <ann@example.org>\r\nTo: support@kcmeatup.com\r\nSubject: Half a cow?\r\n"
+  std::string headers = "From: Ann Lee <ann@example.org>\r\nTo: support@acme.example\r\nSubject: Half a cow?\r\n"
                         "Message-ID: <m1@example.org>";
-  auto taken = call(hook("data", {"support@kcmeatup.com"}, headers, "Do you have half a cow left?\r\n"));
+  auto taken = call(hook("data", {"support@acme.example"}, headers, "Do you have half a cow left?\r\n"));
   EXPECT_EQ(action(taken), "discard");  // 250, and Stalwart keeps nothing
   auto got = rows();
   ASSERT_EQ(got.size(), 1u);
-  EXPECT_EQ(got[0].at(0), "mail:support@kcmeatup.com");
+  EXPECT_EQ(got[0].at(0), "mail:support@acme.example");
   std::string err;
   auto typed = json::parse(std::string(got[0].at(1).as_string()), &err)->as_object();
   EXPECT_EQ(typed.at("subject"), "Half a cow?");
   EXPECT_EQ(typed.at("from").at("address"), "ann@example.org");
   EXPECT_EQ(typed.at("from").at("name"), "Ann Lee");
-  EXPECT_EQ(typed.at("to"), "support@kcmeatup.com");
+  EXPECT_EQ(typed.at("to"), "support@acme.example");
   EXPECT_EQ(typed.at("text"), "Do you have half a cow left?\r\n");
   EXPECT_EQ(typed.at("message_id"), "m1@example.org");
   EXPECT_TRUE(typed.at("sender").is_null());  // not a verified claim
@@ -244,15 +244,15 @@ TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
     EXPECT_EQ(s.text(1).find("ann"), std::string::npos);
   }
 
-  auto no = call(hook("data", {"refuse@kcmeatup.com"}, "Subject: hi", "hi"));
+  auto no = call(hook("data", {"refuse@acme.example"}, "Subject: hi", "hi"));
   EXPECT_EQ(status(no), 550);
   EXPECT_EQ(no.at("response").at("message"), "No thanks");
-  auto later = call(hook("data", {"later@kcmeatup.com"}, "Subject: hi", "hi"));
+  auto later = call(hook("data", {"later@acme.example"}, "Subject: hi", "hi"));
   EXPECT_EQ(status(later), 451);
   EXPECT_EQ(rows().size(), 1u);
 
   // An agent can see it all without the server: what came in for the tenant, and the answers.
-  auto seen = tool("mail_activity", {{"tenant", "kc"}});
+  auto seen = tool("mail_activity", {{"tenant", "acme"}});
   const auto& mail = seen.at("mail").as_array();
   std::string outcomes;
   for (const auto& m : mail) {
@@ -260,33 +260,33 @@ TEST_F(MailInTest, TheBoxsAnswerIsTheSmtpAnswer) {
     outcomes += std::string(m.at("to").as_string()) + "=" + std::string(m.at("outcome").as_string()) + " ";
   }
   // Logs keep addresses as hashes (032 § 1): each shows as #hash@domain, and by name when asked for.
-  EXPECT_NE(outcomes.find("@kcmeatup.com=delivered"), std::string::npos) << outcomes;
-  EXPECT_EQ(outcomes.find("support@kcmeatup.com"), std::string::npos) << outcomes;
-  auto one = tool("mail_activity", {{"tenant", "kc"}, {"email", "Support@kcmeatup.com"}}).at("mail").as_array();
+  EXPECT_NE(outcomes.find("@acme.example=delivered"), std::string::npos) << outcomes;
+  EXPECT_EQ(outcomes.find("support@acme.example"), std::string::npos) << outcomes;
+  auto one = tool("mail_activity", {{"tenant", "acme"}, {"email", "Support@acme.example"}}).at("mail").as_array();
   ASSERT_EQ(one.size(), 1u);
-  EXPECT_EQ(one[0].at("to"), "support@kcmeatup.com");
+  EXPECT_EQ(one[0].at("to"), "support@acme.example");
   EXPECT_EQ(one[0].at("outcome"), "delivered");
-  EXPECT_EQ(tool("mail_activity", {{"tenant", "kc"}, {"email", "later@kcmeatup.com"}}).at("mail").as_array().size(), 1u);
+  EXPECT_EQ(tool("mail_activity", {{"tenant", "acme"}, {"email", "later@acme.example"}}).at("mail").as_array().size(), 1u);
   EXPECT_TRUE(tool("mail_activity", {{"tenant", "other"}}).at("mail").as_array().empty());
 }
 
 TEST_F(MailInTest, LimitsLoopsAndAttachments) {
   // An auto-reply is taken and dropped, never reaching the box.
-  auto auto_reply = call(hook("data", {"support@kcmeatup.com"}, "Subject: Out of office\r\nAuto-Submitted: auto-replied", "away"));
+  auto auto_reply = call(hook("data", {"support@acme.example"}, "Subject: Out of office\r\nAuto-Submitted: auto-replied", "away"));
   EXPECT_EQ(action(auto_reply), "discard");
   // So is a bounce (an empty envelope sender).
-  EXPECT_EQ(action(call(hook("data", {"support@kcmeatup.com"}, "Subject: Undeliverable", "x", ""))), "discard");
+  EXPECT_EQ(action(call(hook("data", {"support@acme.example"}, "Subject: Undeliverable", "x", ""))), "discard");
   EXPECT_TRUE(rows().empty());
 
   // Past the route's max-bytes (4096).
-  auto big = call(hook("data", {"support@kcmeatup.com"}, "Subject: big", std::string(5000, 'x')));
+  auto big = call(hook("data", {"support@acme.example"}, "Subject: big", std::string(5000, 'x')));
   EXPECT_EQ(status(big), 552);
 
   std::string mixed = "Subject: menu\r\nContent-Type: multipart/mixed; boundary=b";
   std::string one = "--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n--b\r\nContent-Type: application/pdf\r\n"
                     "Content-Disposition: attachment; filename=menu.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n"
                     "JVBERi0xLjQK\r\n--b--\r\n";
-  EXPECT_EQ(action(call(hook("data", {"support@kcmeatup.com"}, mixed, one))), "discard");
+  EXPECT_EQ(action(call(hook("data", {"support@acme.example"}, mixed, one))), "discard");
   auto got = rows();
   ASSERT_EQ(got.size(), 1u);
   std::string err;
@@ -298,22 +298,22 @@ TEST_F(MailInTest, LimitsLoopsAndAttachments) {
   // Two attachments, where the route takes one: refused.
   std::string two = one.substr(0, one.size() - 6) + "\r\n--b\r\nContent-Type: image/png\r\nContent-Disposition: attachment; "
                     "filename=a.png\r\n\r\nx\r\n--b--\r\n";
-  EXPECT_EQ(status(call(hook("data", {"support@kcmeatup.com"}, mixed, two))), 550);
+  EXPECT_EQ(status(call(hook("data", {"support@acme.example"}, mixed, two))), 550);
   // A route that takes none says so.
-  EXPECT_EQ(call(hook("data", {"refuse@kcmeatup.com"}, mixed, one)).at("response").at("message"),
+  EXPECT_EQ(call(hook("data", {"refuse@acme.example"}, mixed, one)).at("response").at("message"),
             "This address takes no attachments");
 }
 
 TEST_F(MailInTest, ReplyAddressesAreCapabilities) {
   // The box sends mail and asks for a reply address on its token route.
   asio::io_context io;
-  auto r = post(port, "/notify", "{}", {{"host", "kcmeatup.com"}});
+  auto r = post(port, "/notify", "{}", {{"host", "acme.example"}});
   ASSERT_EQ(r.status, 200) << r.body;
   std::string err;
   auto sent = json::parse(r.body, &err)->as_object();
   std::string reply(sent.at("reply_to").as_string());
   ASSERT_TRUE(reply.starts_with("reply+")) << reply;
-  ASSERT_TRUE(reply.ends_with("@kcmeatup.com")) << reply;
+  ASSERT_TRUE(reply.ends_with("@acme.example")) << reply;
 
   std::string why;
   auto m = host->match_mail(reply, &why);
@@ -327,7 +327,7 @@ TEST_F(MailInTest, ReplyAddressesAreCapabilities) {
   std::string forged = reply;
   forged[7] = forged[7] == 'a' ? 'b' : 'a';
   EXPECT_EQ(status(call(hook("rcpt", {forged}))), 550);
-  EXPECT_FALSE(host->match_mail("reply+aaaaaaaaaaaaaaaaaaaaaaaa@kcmeatup.com", &why));
+  EXPECT_FALSE(host->match_mail("reply+aaaaaaaaaaaaaaaaaaaaaaaa@acme.example", &why));
 
   EXPECT_EQ(action(call(hook("data", {reply}, "From: cy@example.org\r\nSubject: Re: About ticket 42", "Yes."))), "discard");
   auto got = rows();
@@ -338,16 +338,16 @@ TEST_F(MailInTest, ReplyAddressesAreCapabilities) {
 TEST_F(MailInTest, ACatchAllTakesWhatNothingElseClaims) {
   std::string err;
   ASSERT_TRUE(host->boxes().upload(kInbox, kWat, &err)) << err;
-  EXPECT_EQ(action(call(hook("rcpt", {"anyone@kcmeatup.com"}))), "accept");
+  EXPECT_EQ(action(call(hook("rcpt", {"anyone@acme.example"}))), "accept");
   std::string why;
-  EXPECT_EQ(host->match_mail("support@kcmeatup.com", &why)->ref.route->name, "support_inbox");  // specific first
-  EXPECT_EQ(host->match_mail("anyone@kcmeatup.com", &why)->ref.route->name, "inbox_all");
+  EXPECT_EQ(host->match_mail("support@acme.example", &why)->ref.route->name, "support_inbox");  // specific first
+  EXPECT_EQ(host->match_mail("anyone@acme.example", &why)->ref.route->name, "inbox_all");
   // This route opted in to automatic mail.
-  EXPECT_EQ(action(call(hook("data", {"anyone@kcmeatup.com"}, "Subject: Out\r\nAuto-Submitted: auto-replied", "away"))),
+  EXPECT_EQ(action(call(hook("data", {"anyone@acme.example"}, "Subject: Out\r\nAuto-Submitted: auto-replied", "away"))),
             "discard");
   auto got = rows();
   ASSERT_EQ(got.size(), 1u);
-  EXPECT_EQ(got[0].at(0), "mail:anyone@kcmeatup.com");
+  EXPECT_EQ(got[0].at(0), "mail:anyone@acme.example");
   auto typed = json::parse(std::string(got[0].at(1).as_string()), &err)->as_object();
   EXPECT_TRUE(typed.at("automatic").as_bool());
 }
@@ -356,12 +356,12 @@ TEST_F(MailInTest, ACatchAllTakesWhatNothingElseClaims) {
 // words without the quoted digest, and an RSVP's answer from its text/calendar part.
 TEST_F(MailInTest, RepliesComeWithTheirOwnWordsAndRsvps) {
   std::string mixed = "Subject: Accepted: Brisket night\r\nContent-Type: multipart/mixed; boundary=b";
-  std::string ics = "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:meetup-7@kcmeatup.com\r\n"
+  std::string ics = "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:meetup-7@acme.example\r\n"
                     "ATTENDEE;PARTSTAT=ACCEPTED;CN=Ann:mailto:ann@example.org\r\nSEQUENCE:0\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
   std::string body = "--b\r\nContent-Type: text/plain\r\n\r\nI'll bring the sauce.\r\n\r\nOn Tue, Oct 29, 2026 at 6:00 AM "
-                     "The KC Thesis <thesis@kcmeatup.com> wrote:\r\n> Three proposals today\r\n\r\n--b\r\n"
+                     "The KC Thesis <thesis@acme.example> wrote:\r\n> Three proposals today\r\n\r\n--b\r\n"
                      "Content-Type: text/calendar; method=REPLY; charset=utf-8\r\n\r\n" + ics + "--b--\r\n";
-  EXPECT_EQ(action(call(hook("data", {"support@kcmeatup.com"}, mixed, body))), "discard");
+  EXPECT_EQ(action(call(hook("data", {"support@acme.example"}, mixed, body))), "discard");
   auto got = rows();
   ASSERT_EQ(got.size(), 1u);
   std::string err;
@@ -369,7 +369,7 @@ TEST_F(MailInTest, RepliesComeWithTheirOwnWordsAndRsvps) {
   EXPECT_EQ(typed.at("reply_text"), "I'll bring the sauce.");
   ASSERT_TRUE(typed.contains("calendar")) << json::dump(typed);
   EXPECT_EQ(typed.at("calendar").at("method"), "REPLY");
-  EXPECT_EQ(typed.at("calendar").at("uid"), "meetup-7@kcmeatup.com");
+  EXPECT_EQ(typed.at("calendar").at("uid"), "meetup-7@acme.example");
   EXPECT_EQ(typed.at("calendar").at("partstat"), "ACCEPTED");
   EXPECT_EQ(typed.at("calendar").at("attendee"), "ann@example.org");
 }
@@ -399,7 +399,7 @@ TEST_F(MailInTest, AVerifiedSenderIsNamedByItsUserId) {
                       bj::array{"Message-ID", " <20030712040037.46341.5F8J@football.example.com>\r\n"}};
     bj::object o{{"context", bj::object{{"stage", "data"}}},
                  {"envelope", bj::object{{"from", bj::object{{"address", "joe@football.example.com"}}},
-                                         {"to", bj::array{bj::object{{"address", "support@kcmeatup.com"}}}}}},
+                                         {"to", bj::array{bj::object{{"address", "support@acme.example"}}}}}},
                  {"message", bj::object{{"headers", std::move(headers)}, {"contents", text},
                                         {"size", int64_t(text.size() + 600)}}}};
     EXPECT_EQ(action(call(json::dump(o))), "discard");
@@ -415,8 +415,8 @@ TEST_F(MailInTest, AVerifiedSenderIsNamedByItsUserId) {
   EXPECT_TRUE(typed.at("from_user_id").is_null());
 
   // An account: named by its id, as a string.
-  tool("role_grant", {{"tenant", "kc"}, {"email", "Joe@Football.example.com"}, {"role", "member"}});
-  auto user = host->identity().active_user("kc", "joe@football.example.com");
+  tool("role_grant", {{"tenant", "acme"}, {"email", "Joe@Football.example.com"}, {"role", "member"}});
+  auto user = host->identity().active_user("acme", "joe@football.example.com");
   ASSERT_TRUE(user);
   typed = deliver(body);
   EXPECT_EQ(typed.at("from_user_id").as_string(), std::to_string(user->user_id));
@@ -430,7 +430,7 @@ TEST_F(MailInTest, AVerifiedSenderIsNamedByItsUserId) {
   EXPECT_EQ(typed.at("from").at("address"), "joe@football.example.com");  // what the message says, unverified
 
   // A deleted account is never matched; nor is a domain with no DKIM key published.
-  tool("user_delete", {{"tenant", "kc"}, {"email", "joe@football.example.com"}, {"why", "asked to be forgotten"}});
+  tool("user_delete", {{"tenant", "acme"}, {"email", "joe@football.example.com"}, {"why", "asked to be forgotten"}});
   typed = deliver(body);
   EXPECT_EQ(typed.at("sender"), "joe@football.example.com");
   EXPECT_TRUE(typed.at("from_user_id").is_null());

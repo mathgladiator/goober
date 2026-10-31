@@ -29,8 +29,8 @@ struct Reply {
   std::map<std::string, std::string> headers;
 };
 
-const std::string kSite = "kc.example.com";
-const std::string kOrigin = "http://kc.example.com";
+const std::string kSite = "acme.example.com";
+const std::string kOrigin = "http://acme.example.com";
 const std::string kOps = "ops.example.com";
 
 Reply fetch(uint16_t port, const std::string& host, bhttp::verb verb, const std::string& target,
@@ -105,7 +105,7 @@ class InvitesHostTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({
         "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
-        "domains": {"kc.example.com": {"tenant": "kc"}, "other.example.com": {"tenant": "other"}},
+        "domains": {"acme.example.com": {"tenant": "acme"}, "other.example.com": {"tenant": "other"}},
         "operations": {"token": "op-token-for-invite-tests-0123456789", "domain": "ops.example.com"},
         "identity": {"operators": {"boss@example.com": ["host:owner"], "bot@example.com": ["host:operator"]}},
         "tenants": )" + tenants + R"(,
@@ -183,23 +183,23 @@ class InvitesHostTest : public ::testing::Test {
   uint16_t port = 0;
 };
 
-const char* kTenants = R"({"kc": {"postal-address": "KC Meat Up, 1 Main St, Kansas City, MO 64105", "terms": "/terms",
+const char* kTenants = R"({"acme": {"postal-address": "Acme Grill, 1 Main St, Springfield, IL 62701", "terms": "/terms",
     "privacy": "/privacy", "invites": {"roles": ["member"]}}})";
 
 TEST_F(InvitesHostTest, AnOperatorsInviteIsAcceptedByCodeAndGrantsWhatItSaid) {
   start(kTenants);
   std::string err;
-  ASSERT_TRUE(host->content().put("kc", "terms.md", "---\ntitle: Terms\n---\nBe kind.\n", &err)) << err;
-  auto sent = tool("invite_send", R"({"tenant":"kc","email":"Bob@Example.com","roles":["member","editor"],
+  ASSERT_TRUE(host->content().put("acme", "terms.md", "---\ntitle: Terms\n---\nBe kind.\n", &err)) << err;
+  auto sent = tool("invite_send", R"({"tenant":"acme","email":"Bob@Example.com","roles":["member","editor"],
       "note":"Come grill with us","inviter_name":"Ann","return":"/welcome"})");
   ASSERT_FALSE(sent.at("isError").as_bool()) << sent.at("text");
   std::string id(sent.at("value").at("invite_id").as_string());
   std::string mail = newest_mail("bob@example.com");
   ASSERT_FALSE(mail.empty());
   // The host's mail: who invited, the note, both links, the footer, and the one-click decline.
-  EXPECT_NE(mail.find("Ann invited you to kc.example.com"), std::string::npos) << mail;
+  EXPECT_NE(mail.find("Ann invited you to acme.example.com"), std::string::npos) << mail;
   EXPECT_NE(mail.find("Come grill with us"), std::string::npos);
-  EXPECT_NE(mail.find("KC Meat Up, 1 Main St"), std::string::npos);
+  EXPECT_NE(mail.find("Acme Grill, 1 Main St"), std::string::npos);
   EXPECT_NE(mail.find("You'll get one reminder, then nothing."), std::string::npos);
   std::string path = link(mail, "/identity/invite/");
   ASSERT_NE(path.find("/identity/invite/" + id + "/"), std::string::npos) << path;
@@ -211,7 +211,7 @@ TEST_F(InvitesHostTest, AnOperatorsInviteIsAcceptedByCodeAndGrantsWhatItSaid) {
   EXPECT_NE(page.body.find("Ann invited <strong>bob@example.com</strong>"), std::string::npos) << page.body;
   EXPECT_NE(page.body.find("member, editor"), std::string::npos);
   EXPECT_NE(page.body.find("By continuing, you accept"), std::string::npos);
-  EXPECT_EQ(parse(tool("invite_get", R"({"tenant":"kc","invite_id":")" + id + R"("})").at("text").as_string().c_str())
+  EXPECT_EQ(parse(tool("invite_get", R"({"tenant":"acme","invite_id":")" + id + R"("})").at("text").as_string().c_str())
                 .at("state"),
             "open");
   // Continue from another site is refused; from this one, a code goes to the invited address,
@@ -236,54 +236,54 @@ TEST_F(InvitesHostTest, AnOperatorsInviteIsAcceptedByCodeAndGrantsWhatItSaid) {
   // Roles from an operator's invite are granted as written; terms are recorded with the page's hash.
   auto me = parse(fetch(port, kSite, bhttp::verb::get, "/identity/me", {{"cookie", cookie}}).body).as_object();
   EXPECT_EQ(me.at("roles").as_array().size(), 2u);
-  auto user = host->identity().user("kc", std::stoll(std::string(me.at("user_id").as_string())));
+  auto user = host->identity().user("acme", std::stoll(std::string(me.at("user_id").as_string())));
   ASSERT_TRUE(user);
-  EXPECT_TRUE(host->identity().terms_accepted("kc", user->user_id, "/terms").has_value());
-  auto after = parse(tool("invite_get", R"({"tenant":"kc","invite_id":")" + id + R"("})").at("text").as_string().c_str());
+  EXPECT_TRUE(host->identity().terms_accepted("acme", user->user_id, "/terms").has_value());
+  auto after = parse(tool("invite_get", R"({"tenant":"acme","invite_id":")" + id + R"("})").at("text").as_string().c_str());
   EXPECT_EQ(after.at("state"), "accepted");
   EXPECT_EQ(after.at("answer_how"), "code");
   EXPECT_EQ(get(path).status, 410);  // answered: the page says so, and offers nothing
   // An account can't be invited again.
-  auto again = tool("invite_send", R"({"tenant":"kc","email":"bob@example.com"})");
+  auto again = tool("invite_send", R"({"tenant":"acme","email":"bob@example.com"})");
   EXPECT_TRUE(again.at("isError").as_bool());
   EXPECT_NE(std::string(again.at("text").as_string()).find("member"), std::string::npos);
 }
 
 TEST_F(InvitesHostTest, DecliningBlocksTheTenantUntilAPersonLiftsIt) {
   start(kTenants);
-  auto sent = tool("invite_send", R"({"tenant":"kc","email":"cy@example.com"})");
+  auto sent = tool("invite_send", R"({"tenant":"acme","email":"cy@example.com"})");
   ASSERT_FALSE(sent.at("isError").as_bool()) << sent.at("text");
   std::string decline = link(newest_mail("cy@example.com"), "/identity/invite/") + "/decline";
   auto asked = get(decline);
-  EXPECT_NE(asked.body.find("Don't invite me to kc.example.com again?"), std::string::npos) << asked.body;
-  EXPECT_FALSE(host->mail_suppressed("kc", "cy@example.com"));  // a GET changes nothing
+  EXPECT_NE(asked.body.find("Don't invite me to acme.example.com again?"), std::string::npos) << asked.body;
+  EXPECT_FALSE(host->mail_suppressed("acme", "cy@example.com"));  // a GET changes nothing
   // A mail provider's one-click POST: no cookie, no Origin.
   auto one = fetch(port, kSite, bhttp::verb::post, decline, {{"content-type", "application/x-www-form-urlencoded"}},
                    "List-Unsubscribe=One-Click");
   EXPECT_EQ(one.status, 200);
-  EXPECT_TRUE(host->mail_suppressed("kc", "cy@example.com"));
+  EXPECT_TRUE(host->mail_suppressed("acme", "cy@example.com"));
   EXPECT_FALSE(host->mail_suppressed("other", "cy@example.com"));  // one tenant only
-  auto refused = tool("invite_send", R"({"tenant":"kc","email":"cy@example.com"})");
+  auto refused = tool("invite_send", R"({"tenant":"acme","email":"cy@example.com"})");
   EXPECT_TRUE(refused.at("isError").as_bool());
   EXPECT_NE(std::string(refused.at("text").as_string()).find("blocked"), std::string::npos);
-  auto prefs = tool("mail_preferences", R"({"tenant":"kc","email":"cy@example.com"})");
+  auto prefs = tool("mail_preferences", R"({"tenant":"acme","email":"cy@example.com"})");
   EXPECT_EQ(prefs.at("value").at("blocked").at("how"), "invite_declined");
 
   // No tool lifts it.
-  auto shim = tool("mail_unsubscribed", R"({"tenant":"kc","email":"cy@example.com","set":false})");
+  auto shim = tool("mail_unsubscribed", R"({"tenant":"acme","email":"cy@example.com","set":false})");
   EXPECT_TRUE(shim.at("isError").as_bool());
-  EXPECT_TRUE(host->mail_suppressed("kc", "cy@example.com"));
+  EXPECT_TRUE(host->mail_suppressed("acme", "cy@example.com"));
   // The person can, signed in, with the statement; the account page shows the block.
   std::string cookie = sign_in("cy@example.com");
   ASSERT_FALSE(cookie.empty());
   auto account = get("/identity/account", cookie);
   EXPECT_NE(account.body.find("not to email you"), std::string::npos) << account.body;
   EXPECT_EQ(post_form("/identity/mail/allow", "", cookie).status, 400);  // no statement: not lifted
-  EXPECT_TRUE(host->mail_suppressed("kc", "cy@example.com"));
-  auto allow = post_form("/identity/mail/allow", "statement=I%27m+asking+kc.example.com+to+email+me+again.", cookie);
+  EXPECT_TRUE(host->mail_suppressed("acme", "cy@example.com"));
+  auto allow = post_form("/identity/mail/allow", "statement=I%27m+asking+acme.example.com+to+email+me+again.", cookie);
   EXPECT_EQ(allow.status, 303);
-  EXPECT_FALSE(host->mail_suppressed("kc", "cy@example.com"));
-  auto history = tool("mail_preferences", R"({"tenant":"kc","email":"cy@example.com"})").at("value").at("history").as_array();
+  EXPECT_FALSE(host->mail_suppressed("acme", "cy@example.com"));
+  auto history = tool("mail_preferences", R"({"tenant":"acme","email":"cy@example.com"})").at("value").at("history").as_array();
   ASSERT_GE(history.size(), 2u);
   EXPECT_EQ(history.back().at("what"), "lift");
   EXPECT_EQ(history.back().at("how"), "person");
@@ -291,8 +291,8 @@ TEST_F(InvitesHostTest, DecliningBlocksTheTenantUntilAPersonLiftsIt) {
 
 TEST_F(InvitesHostTest, AnOperatorLiftsABlockOnlyInThePanelSayingWhy) {
   start(kTenants);
-  tool("mail_unsubscribed", R"({"tenant":"kc","email":"dee@example.com","set":true})");
-  ASSERT_TRUE(host->mail_suppressed("kc", "dee@example.com"));
+  tool("mail_unsubscribed", R"({"tenant":"acme","email":"dee@example.com","set":true})");
+  ASSERT_TRUE(host->mail_suppressed("acme", "dee@example.com"));
   // Sign in on the panel's origin as the owner.
   auto start_code = fetch(port, kOps, bhttp::verb::post, "/identity/email/start",
                           {{"content-type", "application/x-www-form-urlencoded"}}, "email=boss@example.com");
@@ -305,19 +305,19 @@ TEST_F(InvitesHostTest, AnOperatorLiftsABlockOnlyInThePanelSayingWhy) {
     return fetch(port, kOps, bhttp::verb::post, "/api/write/unblock",
                  {{"cookie", boss}, {"content-type", "application/json"}, {"origin", "http://" + kOps}}, body);
   };
-  EXPECT_EQ(api(R"({"tenant":"kc","email":"dee@example.com","statement":"asked","confirm":true})").status, 400);  // too short
-  EXPECT_EQ(api(R"({"tenant":"kc","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin"})").status, 400);
-  auto ok = api(R"({"tenant":"kc","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin","confirm":true})");
+  EXPECT_EQ(api(R"({"tenant":"acme","email":"dee@example.com","statement":"asked","confirm":true})").status, 400);  // too short
+  EXPECT_EQ(api(R"({"tenant":"acme","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin"})").status, 400);
+  auto ok = api(R"({"tenant":"acme","email":"dee@example.com","statement":"Asked by phone on 11/2 to rejoin","confirm":true})");
   EXPECT_EQ(ok.status, 200) << ok.body;
   EXPECT_EQ(parse(ok.body).at("result").at("lifted"), true);
-  EXPECT_FALSE(host->mail_suppressed("kc", "dee@example.com"));
+  EXPECT_FALSE(host->mail_suppressed("acme", "dee@example.com"));
 }
 
 TEST_F(InvitesHostTest, ATenantTemplateCantDropTheLinks) {
   start(kTenants);
   std::string err;
-  ASSERT_TRUE(host->mail_templates().put("kc", "invite", {"Join us", "Come to {{site}}!", ""}, &err)) << err;
-  ASSERT_FALSE(tool("invite_send", R"({"tenant":"kc","email":"eve@example.com"})").at("isError").as_bool());
+  ASSERT_TRUE(host->mail_templates().put("acme", "invite", {"Join us", "Come to {{site}}!", ""}, &err)) << err;
+  ASSERT_FALSE(tool("invite_send", R"({"tenant":"acme","email":"eve@example.com"})").at("isError").as_bool());
   std::string mail = newest_mail("eve@example.com");
   EXPECT_EQ(mail.find("Subject: Join us"), std::string::npos) << mail;  // the default went instead
   EXPECT_NE(mail.find("/identity/invite/"), std::string::npos);
@@ -325,8 +325,8 @@ TEST_F(InvitesHostTest, ATenantTemplateCantDropTheLinks) {
 }
 
 TEST_F(InvitesHostTest, NoPostalAddressNoInvites) {
-  start(R"({"kc": {"invites": {"roles": ["member"]}}})");
-  auto r = tool("invite_send", R"({"tenant":"kc","email":"fay@example.com"})");
+  start(R"({"acme": {"invites": {"roles": ["member"]}}})");
+  auto r = tool("invite_send", R"({"tenant":"acme","email":"fay@example.com"})");
   EXPECT_TRUE(r.at("isError").as_bool());
   EXPECT_NE(std::string(r.at("text").as_string()).find("no_postal_address"), std::string::npos) << r.at("text");
   EXPECT_EQ(mails_to("fay@example.com"), 0);
@@ -334,7 +334,7 @@ TEST_F(InvitesHostTest, NoPostalAddressNoInvites) {
 
 TEST_F(InvitesHostTest, OneReminderAfterAWeek) {
   start(kTenants);
-  ASSERT_FALSE(tool("invite_send", R"({"tenant":"kc","email":"gil@example.com"})").at("isError").as_bool());
+  ASSERT_FALSE(tool("invite_send", R"({"tenant":"acme","email":"gil@example.com"})").at("isError").as_bool());
   EXPECT_EQ(mails_to("gil@example.com"), 1);
   int64_t now = base::now_unix_ms();
   host->identity_tick(now + 8LL * 24 * 3600 * 1000);
@@ -357,8 +357,8 @@ void upload_club(host::Host& host) {
       {"prefs", "mail", "preferences", R"({"email":"jo@example.com"})"},
   });
   std::string err;
-  ASSERT_TRUE(host.boxes().upload(R"({"box":"club","domains":["kc.example.com"],
-      "external":{"mail":{"mail":{"from-name":"KC Meat Up","lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
+  ASSERT_TRUE(host.boxes().upload(R"({"box":"club","domains":["acme.example.com"],
+      "external":{"mail":{"mail":{"from-name":"Acme Grill","lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
                   "club":{"invites":{"roles":["member"],"lists":["digest"]}}},
       "routes":{"http":{"/inv":{"post":{"name":"inv","public":true}},"/grab":{"post":{"name":"grab","public":true}},
         "/named":{"post":{"name":"named","public":true}},"/status":{"post":{"name":"status","public":true}},
@@ -379,10 +379,10 @@ TEST_F(InvitesHostTest, ABoxInvitesWithinItsGrants) {
   // person's name.
   EXPECT_NE(call("/grab").find("isn't one this service's invites declare"), std::string::npos);
   std::string err;
-  EXPECT_FALSE(host->boxes().upload(R"({"box":"grabby","domains":["kc.example.com"],
+  EXPECT_FALSE(host->boxes().upload(R"({"box":"grabby","domains":["acme.example.com"],
       "external":{"i":{"invites":{"roles":["owner"]}}}})", "(module (memory (export \"memory\") 1))", &err));
-  EXPECT_NE(err.find("tenants.kc.invites.roles"), std::string::npos) << err;
-  EXPECT_FALSE(host->boxes().upload(R"({"box":"rival","domains":["kc.example.com"],
+  EXPECT_NE(err.find("tenants.acme.invites.roles"), std::string::npos) << err;
+  EXPECT_FALSE(host->boxes().upload(R"({"box":"rival","domains":["acme.example.com"],
       "external":{"m":{"mail":{"lists":{"digest":{"title":"Another digest"}}}}}})", "(module (memory (export \"memory\") 1))", &err));
   EXPECT_NE(err.find("one list, one title"), std::string::npos) << err;
   EXPECT_NE(call("/named").find("needs a signed-in person"), std::string::npos);
@@ -391,9 +391,9 @@ TEST_F(InvitesHostTest, ABoxInvitesWithinItsGrants) {
   EXPECT_EQ(mails_to("hal@example.com"), 0);  // after the commit, through the outbox
   EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
   std::string mail = newest_mail("hal@example.com");
-  EXPECT_NE(mail.find("kc.example.com invited you to kc.example.com"), std::string::npos) << mail;  // the site
+  EXPECT_NE(mail.find("acme.example.com invited you to acme.example.com"), std::string::npos) << mail;  // the site
   EXPECT_NE(mail.find("The daily digest"), std::string::npos);
-  auto list = tool("invite_list", R"({"tenant":"kc","box":"club"})").at("value").at("invites").as_array();
+  auto list = tool("invite_list", R"({"tenant":"acme","box":"club"})").at("value").at("invites").as_array();
   ASSERT_EQ(list.size(), 1u);
   EXPECT_EQ(list[0].at("inviter").at("kind"), "site");
   EXPECT_NE(call("/status").find(R"("state":"open")"), std::string::npos);
@@ -423,7 +423,7 @@ TEST_F(InvitesHostTest, ABoxRunsAListOnlyWithConsent) {
   EXPECT_NE(sent.find(R"("category":"list")"), std::string::npos) << sent;
   host->outbox_tick(base::now_unix_ms());
   std::string digest = newest_mail("jo@example.com");
-  EXPECT_NE(digest.find("List-Id: <digest.kc.kc.example.com>"), std::string::npos) << digest;
+  EXPECT_NE(digest.find("List-Id: <digest.acme.acme.example.com>"), std::string::npos) << digest;
   EXPECT_NE(digest.find("because you subscribed to The daily digest"), std::string::npos);
   // Its one-click unsubscribe leaves the list, and nothing else.
   std::string unsub = link(digest, "/goober/mail/");
@@ -433,15 +433,15 @@ TEST_F(InvitesHostTest, ABoxRunsAListOnlyWithConsent) {
                     "List-Unsubscribe=One-Click");
   EXPECT_EQ(left.status, 200);
   EXPECT_NE(left.body.find("You've left The daily digest"), std::string::npos) << left.body;
-  EXPECT_FALSE(host->mail_suppressed("kc", "jo@example.com"));
+  EXPECT_FALSE(host->mail_suppressed("acme", "jo@example.com"));
   EXPECT_NE(call("/digest").find("isn't subscribed"), std::string::npos);
   // An operator can't re-subscribe someone who left.
-  auto record = tool("mail_consent_record", R"({"tenant":"kc","email":"jo@example.com","list":"digest",
+  auto record = tool("mail_consent_record", R"({"tenant":"acme","email":"jo@example.com","list":"digest",
       "statement":"Signed up at the 11/2 meetup"})");
   EXPECT_TRUE(record.at("isError").as_bool());
   // Nor can the box ask them again: only they rejoin, signed in.
   EXPECT_NE(call("/sub").find("left digest"), std::string::npos);
-  auto lists = tool("mail_lists", R"({"tenant":"kc"})").at("value").at("lists").as_array();
+  auto lists = tool("mail_lists", R"({"tenant":"acme"})").at("value").at("lists").as_array();
   ASSERT_EQ(lists.size(), 1u);
   EXPECT_EQ(lists[0].at("box"), "club");
 }
@@ -450,7 +450,7 @@ TEST_F(InvitesHostTest, AcceptingAnInviteJoinsItsListsWithTheInviteAsEvidence) {
   start(kTenants);
   std::string module = calling_module({{"inv", "club", "send", R"({"email":"lou@example.com","roles":["member"],"lists":["digest"]})"}});
   std::string err;
-  ASSERT_TRUE(host->boxes().upload(R"({"box":"club","domains":["kc.example.com"],
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"club","domains":["acme.example.com"],
       "external":{"mail":{"mail":{"lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
                   "club":{"invites":{"roles":["member"],"lists":["digest"]}}},
       "routes":{"http":{"/inv":{"post":{"name":"inv","public":true}}}}})",
@@ -469,7 +469,7 @@ TEST_F(InvitesHostTest, AcceptingAnInviteJoinsItsListsWithTheInviteAsEvidence) {
   EXPECT_EQ(done.status, 303);
   me = parse(fetch(port, kSite, bhttp::verb::get, "/identity/me", {{"cookie", cookie}}).body).as_object();
   EXPECT_EQ(me.at("roles").as_array().size(), 1u);
-  auto prefs = tool("mail_preferences", R"({"tenant":"kc","email":"lou@example.com"})").at("value").as_object();
+  auto prefs = tool("mail_preferences", R"({"tenant":"acme","email":"lou@example.com"})").at("value").as_object();
   EXPECT_EQ(prefs.at("lists").at("digest").at("state"), "in");
   EXPECT_EQ(prefs.at("lists").at("digest").at("how"), "invite");
   EXPECT_EQ(prefs.at("relationship"), "account");

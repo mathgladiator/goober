@@ -523,12 +523,12 @@ TEST_F(SiteRoutesTest, TemplateGetGivesTheBuiltInsAndContentPutChecksBytes) {
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/data/x.csv").headers["content-type"], "text/csv; charset=utf-8");
 }
 
-// The blog kcmeatup asked for (031 § 2): one page_put per post, with the built-in post template;
+// The blog a site's engineers asked for (031 § 2): one page_put per post, with the built-in post template;
 // the listing, feed, and sitemap follow with no other edits.
 TEST_F(SiteRoutesTest, APostIsOnePagePutAndEverythingElseFollows) {
   std::string err;
   ASSERT_TRUE(host->content().put("playground", "_data/site.json",
-                                  R"({"title":"KC Meat Up","description":"Meat in Kansas City.","author":"Jeffrey M. Barber"})", &err));
+                                  R"({"title":"Acme Grill","description":"Food in Springfield.","author":"Jeffrey M. Barber"})", &err));
   // The index: a listing of every page under updates written with the post template, 2 a page.
   auto index = tool("page_put", {{"path", "/updates"}, {"format", "markdown"}, {"body", "News from the grill."},
                                  {"title", "Updates"},
@@ -600,7 +600,7 @@ TEST_F(SiteRoutesTest, APostIsOnePagePutAndEverythingElseFollows) {
       << sitemap.body;
   EXPECT_EQ(sitemap.body.find("secret"), std::string::npos);
   auto llms = fetch(port, bhttp::verb::get, "/llms.txt");
-  EXPECT_NE(llms.body.find("# KC Meat Up\n\n> Meat in Kansas City."), std::string::npos) << llms.body;
+  EXPECT_NE(llms.body.find("# Acme Grill\n\n> Food in Springfield."), std::string::npos) << llms.body;
   EXPECT_NE(llms.body.find("- [Post number 3](http://localhost/updates/post-3): A summary of post 3"), std::string::npos);
   // A drafts preview still renders the draft.
   auto preview = tool("page_render", {{"path", "/updates/secret"}, {"drafts", true}});
@@ -609,7 +609,7 @@ TEST_F(SiteRoutesTest, APostIsOnePagePutAndEverythingElseFollows) {
   EXPECT_TRUE(preview.at("problems").as_array().empty()) << json::dump(preview);
   // A box's sitemap joins by name: /sitemap.xml becomes an index.
   ASSERT_TRUE(host->content().put("playground", "_data/site.json",
-                                  R"({"title":"KC Meat Up","sitemaps":["/places/sitemap.xml"]})", &err));
+                                  R"({"title":"Acme Grill","sitemaps":["/places/sitemap.xml"]})", &err));
   auto index_map = fetch(port, bhttp::verb::get, "/sitemap.xml").body;
   EXPECT_NE(index_map.find("<sitemapindex"), std::string::npos) << index_map;
   EXPECT_NE(index_map.find("<loc>http://localhost/places/sitemap.xml</loc>"), std::string::npos);

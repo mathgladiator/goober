@@ -334,9 +334,9 @@ TEST(Manifest, MailService) {
   refuse(R"({"m":{"mail":{"from":"Evil <x@y.z>"}}})", "mail.from is one address");
   refuse(R"({"m":{"mail":{"from":"nobody"}}})", "mail.from is one address");
   std::string ok_err;
-  auto with_from = parse_manifest(R"({"box":"n","domains":["*"],"external":{"m":{"mail":{"from":"Hello@KCmeatup.com"}}}})", &ok_err);
+  auto with_from = parse_manifest(R"({"box":"n","domains":["*"],"external":{"m":{"mail":{"from":"Hello@ACME.example"}}}})", &ok_err);
   ASSERT_TRUE(with_from) << ok_err;
-  EXPECT_EQ(with_from->external.at(0).mail_from, "hello@kcmeatup.com");
+  EXPECT_EQ(with_from->external.at(0).mail_from, "hello@acme.example");
   refuse(R"({"m":{"mail":{"from-name":"Evil\" <x@y.z>"}}})", "from-name");
   refuse(R"({"m":{"mail":{},"methods":{"blast":{}}}})", "methods are send, and attachment");
   refuse(R"({"m":{"mail":{},"methods":{"send":{"budget":{"calls":50}}}}})", "1 to 10");
@@ -371,9 +371,9 @@ TEST(Manifest, IdentityRoutes) {
 
 TEST(Manifest, MailRoutes) {
   std::string err;
-  auto m = parse_manifest(R"({"box":"desk","domains":["kcmeatup.com","beef.example"],
+  auto m = parse_manifest(R"({"box":"desk","domains":["acme.example","beef.example"],
     "routes":{"mail":{
-      "support@kcmeatup.com":{"receive":{"name":"support_inbox","public":true,"max-bytes":10485760,"attachments":5}},
+      "support@acme.example":{"receive":{"name":"support_inbox","public":true,"max-bytes":10485760,"attachments":5}},
       "reply+{ticket : token}@":{"receive":{"name":"ticket_reply","public":true,"attachments":0}},
       "*@":{"receive":{"name":"catch_all","public":true,"automatic":true,"timeout-ms":3000}}}}})", &err);
   ASSERT_TRUE(m) << err;
@@ -383,7 +383,7 @@ TEST(Manifest, MailRoutes) {
     if (r.name == "support_inbox") support = &r;
   }
   EXPECT_EQ(support->verb, "receive");
-  EXPECT_EQ(support->mail_address, "support@kcmeatup.com");
+  EXPECT_EQ(support->mail_address, "support@acme.example");
   EXPECT_EQ(*support->max_body_bytes, 10485760);
   EXPECT_EQ(support->mail_attachments, 5);
   EXPECT_FALSE(support->mail_automatic);
@@ -395,7 +395,7 @@ TEST(Manifest, MailRoutes) {
 
   auto refuse = [&](const std::string& routes, const char* why) {
     std::string e;
-    std::string text = R"({"box":"t","domains":["kcmeatup.com"],"routes":{"mail":)" + routes + "}}";
+    std::string text = R"({"box":"t","domains":["acme.example"],"routes":{"mail":)" + routes + "}}";
     EXPECT_FALSE(parse_manifest(text, &e)) << routes;
     EXPECT_NE(e.find(why), std::string::npos) << e;
   };
@@ -446,7 +446,7 @@ TEST(Manifest, Libraries) {
 TEST(Manifest, MailListsAndInvites) {
   std::string err;
   auto m = parse_manifest(R"({"box":"thesis","domains":["*"],"external":{
-      "mail":{"mail":{"from-name":"KC Meat Up","lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
+      "mail":{"mail":{"from-name":"Acme Grill","lists":{"digest":{"title":"The daily digest","about":"One email a day."}}}},
       "invites":{"invites":{"roles":["member","editor/blog"],"lists":["digest"]}}}})", &err);
   ASSERT_TRUE(m) << err;
   ASSERT_EQ(m->external.size(), 2u);

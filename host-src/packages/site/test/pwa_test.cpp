@@ -9,7 +9,7 @@ namespace fs = std::filesystem;
 namespace bj = boost::json;
 
 namespace {
-const char* kShop = R"({"scope": "/shop/", "manifest": {"name": "KC Meat Shop", "short_name": "Meat",
+const char* kShop = R"({"scope": "/shop/", "manifest": {"name": "Acme Shop", "short_name": "Meat",
   "theme_color": "#8b1e1e", "background_color": "#fff",
   "icons": [{"src": "/icons/192.png", "sizes": "192x192", "type": "image/png"},
             {"src": "/icons/512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}],
@@ -29,11 +29,11 @@ TEST(Pwa, AnAppIsCheckedAndItsManifestFilledIn) {
   EXPECT_EQ(m["start_url"], "/shop/");
   EXPECT_EQ(m["id"], "/shop/");
   EXPECT_EQ(m["display"], "standalone");
-  EXPECT_EQ(m["name"], "KC Meat Shop");
+  EXPECT_EQ(m["name"], "Acme Shop");
 
   // The whole domain, with nothing but a name: an app, with what's missing for install named.
   warnings.clear();
-  auto whole = site::parse_app("site", R"({"manifest": {"name": "KC Meat Up"}})", &err, &warnings);
+  auto whole = site::parse_app("site", R"({"manifest": {"name": "Acme Grill"}})", &err, &warnings);
   ASSERT_TRUE(whole) << err;
   EXPECT_EQ(whole->scope, "/");
   EXPECT_EQ(warnings.size(), 2u);

@@ -110,7 +110,7 @@ Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target, std::vec
   beast::tcp_stream stream(io);
   stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
   bhttp::request<bhttp::string_body> req(verb, target, 11);
-  req.set(bhttp::field::host, "kc.example.com");
+  req.set(bhttp::field::host, "acme.example.com");
   for (const auto& [k, v] : headers) req.set(k, v);
   req.body() = body;
   req.prepare_payload();
@@ -156,7 +156,7 @@ class HttpTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
-        "domains": {"kc.example.com": {"tenant": "kc"}}, "threads": {"network": 1, "boxes": 2},
+        "domains": {"acme.example.com": {"tenant": "acme"}}, "threads": {"network": 1, "boxes": 2},
         "operations": {"token": "op-token-for-http-tests-0123456789"}})",
                                     root, &err);
     ASSERT_TRUE(cfg) << err;
@@ -187,11 +187,11 @@ class HttpTest : public ::testing::Test {
     ASSERT_TRUE(host->boxes().upload(manifest, kLoggingBox, &err)) << err;
   }
   bj::object call(const std::string& service, const std::string& method, const std::string& request, const std::string& user = "") {
-    return parse(host->call_as_box("app", "kc", service, method, request, user));
+    return parse(host->call_as_box("app", "acme", service, method, request, user));
   }
   std::string sign_in(const std::string& email) {
     fetch(port, bhttp::verb::post, "/identity/email/start",
-          {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://kc.example.com"}}, "email=" + email);
+          {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://acme.example.com"}}, "email=" + email);
     host->drain_mail();
     std::string code;
     for (const auto& f : base::list_files(root / "storage/mail/outbox")) {
@@ -200,7 +200,7 @@ class HttpTest : public ::testing::Test {
       if (text.find("To: " + email) != std::string::npos && std::regex_search(text, m, std::regex("is ([0-9]{6})"))) code = m[1];
     }
     auto v = fetch(port, bhttp::verb::post, "/identity/email/verify",
-                   {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://kc.example.com"}},
+                   {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://acme.example.com"}},
                    "email=" + email + "&code=" + code);
     return v.headers["set-cookie"].substr(0, v.headers["set-cookie"].find(';'));
   }
@@ -240,14 +240,14 @@ TEST_F(HttpTest, APastedKeyIsCheckedSealedAndAppliedFromTheBoxsCall) {
   api.on("/v1/user", [](const server::http::Request& r) {
     return r.header("api-key") == "good-key" ? json_reply(200, R"({"name":"Ann"})") : json_reply(401, R"({"error":"no"})");
   });
-  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+  upload(R"({"box":"app","domains":["acme.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{"hevy":{"base":")" + api.base() + R"(","spec":")" + p + R"(","credentials":"sealed",
       "auth":{"kind":"header","name":"api-key"},"headers":{"x-version":"2"},
       "connect":{"paste":{"label":"Hevy API key","check":"GET /v1/user","result-route":"connected"}},
       "methods":{"workouts":{"op":"GET /v1/workouts"},"log":{"op":"POST /v1/workouts","effect":"none"}}}}})");
   // An op the spec doesn't have is refused at upload.
   std::string err;
-  EXPECT_FALSE(host->boxes().upload(R"({"box":"bad","domains":["kc.example.com"],"external":{"hevy":{"base":")" + api.base() +
+  EXPECT_FALSE(host->boxes().upload(R"({"box":"bad","domains":["acme.example.com"],"external":{"hevy":{"base":")" + api.base() +
                                     R"(","spec":")" + p + R"(","methods":{"x":{"op":"DELETE /v1/nothing"}}}}})", kLoggingBox, &err));
   EXPECT_NE(err.find("has no operation DELETE /v1/nothing"), std::string::npos) << err;
 
@@ -258,7 +258,7 @@ TEST_F(HttpTest, APastedKeyIsCheckedSealedAndAppliedFromTheBoxsCall) {
   EXPECT_NE(form.body.find("Hevy API key"), std::string::npos) << form.body;
   auto post = [&](const std::string& key) {
     return fetch(port, bhttp::verb::post, "/goober/connect/app/hevy",
-                 {{"cookie", cookie}, {"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://kc.example.com"}},
+                 {{"cookie", cookie}, {"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://acme.example.com"}},
                  "key=" + key + "&return=%2Fsettings&ref=row7");
   };
   auto refused = post("bad-key");
@@ -305,7 +305,7 @@ TEST_F(HttpTest, APastedKeyIsCheckedSealedAndAppliedFromTheBoxsCall) {
   EXPECT_NE(down.body.find("couldn&#39;t be reached"), std::string::npos) << down.body;
   // A later version moving the service to another origin can't take the sealed key with it.
   std::string moved_base = "http://localhost:" + std::to_string(api.port());
-  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+  upload(R"({"box":"app","domains":["acme.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{"hevy":{"base":")" + moved_base + R"(","spec":")" + p + R"(","credentials":"sealed",
       "auth":{"kind":"header","name":"api-key"},"methods":{"workouts":{"op":"GET /v1/workouts"}}}}})");
   EXPECT_NE(json::dump(call("hevy", "workouts", R"({"credential":")" + sealed + R"("})")).find("connect hevy again"),
@@ -323,8 +323,8 @@ TEST_F(HttpTest, OAuthConnectsRefreshesOnceAndRemembersRotation) {
     "paths":{"/athlete":{"get":{"operationId":"getLoggedInAthlete"}}}})";
   std::string p = pin("strava", spec);
   std::string err;
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "strava_client_id", "cid-1", 1, &err, {"127.0.0.1"})) << err;
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "strava_client_secret", "csecret", 1, &err, {"127.0.0.1"})) << err;
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "strava_client_id", "cid-1", 1, &err, {"127.0.0.1"})) << err;
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "strava_client_secret", "csecret", 1, &err, {"127.0.0.1"})) << err;
   int refreshes = 0;
   api.on("/oauth/token", [&](const server::http::Request& r) {
     if (r.body.find("grant_type=authorization_code") != std::string::npos) {
@@ -336,7 +336,7 @@ TEST_F(HttpTest, OAuthConnectsRefreshesOnceAndRemembersRotation) {
     }
     return json_reply(400, R"({"error":"invalid_grant"})");
   });
-  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+  upload(R"({"box":"app","domains":["acme.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{"strava":{"base":")" + api.base() + R"(/api/v3","spec":")" + p + R"(","credentials":"sealed","auth":{"kind":"bearer"},
       "connect":{"oauth2":{"authorize":")" + api.base() + R"(/oauth/authorize","token":")" + api.base() + R"(/oauth/token",
         "client-id":"keys/tenant/{!tenant}/strava_client_id","client-secret":"keys/tenant/{!tenant}/strava_client_secret",
@@ -392,7 +392,7 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
     "/2/media/upload":{"get":{"operationId":"status","parameters":[{"name":"media_id","in":"query"}]}}}})";
   std::string p = pin("x", spec);
   std::string err;
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "x_token", "xt", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "x_token", "xt", 1, &err, {"127.0.0.1"}));
   api.on("/2/media/upload/initialize", [](const server::http::Request&) { return json_reply(200, R"({"data":{"id":"m77"}})"); });
   api.on("/2/media/upload/m77/append", [](const server::http::Request&) { return json_reply(204, ""); });
   api.on("/2/media/upload/m77/finalize", [](const server::http::Request&) {
@@ -404,7 +404,7 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
     return ++polls < 2 ? json_reply(200, R"({"data":{"processing_info":{"state":"in_progress"}}})")
                        : json_reply(200, R"({"data":{"id":"m77","processing_info":{"state":"succeeded"}}})");
   });
-  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+  upload(R"({"box":"app","domains":["acme.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{"x":{"base":")" + api.base() + R"(","spec":")" + p + R"(","credentials":"keys/tenant/{!tenant}/x_token",
       "auth":{"kind":"bearer"},
       "methods":{"ping":{"op":"status","effect":"outbox"},"media":{"op":"init","result-route":"done",
@@ -417,7 +417,7 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
           "failed-when":{"at":"body.data.processing_info.state","equals":"failed"},"every-ms":1000}}}}}})");
   // 150 KiB: three appends of 64 KiB.
   std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(150 * 1024, 'p') + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12);
-  auto a = host->attachments().put("kc", png, "cat.png", "a cat", "public", 1, &err);
+  auto a = host->attachments().put("acme", png, "cat.png", "a cat", "public", 1, &err);
   ASSERT_TRUE(a) << err;
   auto queued = call("x", "media", R"({"body":{"media":")" + std::to_string(a->id) + R"("}})");
   ASSERT_TRUE(queued.contains("accepted")) << json::dump(queued);
@@ -453,16 +453,16 @@ TEST_F(HttpTest, AChunkedUploadThenPollingReportsToTheResultRoute) {
 // Bodies the specs don't make JSON, rate limits, errors on 200, and any-public URLs.
 TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   std::string err;
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "tok", "t0k", 1, &err, {"127.0.0.1"}));
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "ck", "xvz1evFS4wEEPTGEFPHBog", 1, &err, {"127.0.0.1"}));
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "cs", "kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Z7kBw", 1, &err, {"127.0.0.1"}));
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "tk", "370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb", 1, &err, {"127.0.0.1"}));
-  ASSERT_TRUE(host->keys().set("tenant", "kc", "ts", "LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "tok", "t0k", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "ck", "xvz1evFS4wEEPTGEFPHBog", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "cs", "kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Z7kBw", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "tk", "370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb", 1, &err, {"127.0.0.1"}));
+  ASSERT_TRUE(host->keys().set("tenant", "acme", "ts", "LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE", 1, &err, {"127.0.0.1"}));
   api.on("/slack", [](const server::http::Request&) { return json_reply(200, R"({"ok":false,"error":"channel_not_found"})"); });
   api.on("/busy", [](const server::http::Request&) { return json_reply(429, "{}", {{"retry-after", "120"}}); });
   api.on("/huge", [](const server::http::Request&) { return json_reply(429, "{}", {{"retry-after", "9999999999999999999999999"}}); });
   api.on("/forever", [](const server::http::Request&) { return json_reply(503, "{}", {{"retry-after", "999999999"}}); });
-  upload(R"({"box":"app","domains":["kc.example.com"],"routes":{"result":{"connected":{},"done":{}}},
+  upload(R"({"box":"app","domains":["acme.example.com"],"routes":{"result":{"connected":{},"done":{}}},
     "external":{
       "forms":{"base":")" + api.base() + R"(","credentials":"keys/tenant/{!tenant}/tok","auth":{"kind":"basic","user":"api"},
         "methods":{"status":{"verb":"post","path":"/statuses","body":"form","effect":"none"},
@@ -487,7 +487,7 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   EXPECT_EQ(s.auth, "Basic " + base::base64_encode("api:t0k"));
   call("forms", "repeat", R"({"body":{"to":["a","b"]}})");
   EXPECT_EQ(api.seen("/repeat").back().body, "to=a&to=b");
-  auto att = host->attachments().put("kc", std::string("\x89PNG\r\n\x1a\nxx", 10) + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12), "a\".png",
+  auto att = host->attachments().put("acme", std::string("\x89PNG\r\n\x1a\nxx", 10) + std::string("\0\0\0\0IEND\xAE\x42\x60\x82", 12), "a\".png",
                                      "", "public", 1, &err);
   ASSERT_TRUE(att) << err;
   std::string id = std::to_string(att->id);
@@ -507,7 +507,7 @@ TEST_F(HttpTest, FormsMultipartRawLimitsAndErrorsOn200) {
   call("q", "list", R"({"query":{"page":"1"}})");
   EXPECT_EQ(api.seen("/list").back().query, "page=1&key=t0k");
   // any-public: the whole URL from the call (here the loopback stand-in, local mode); a non-https one refused.
-  auto wm = call("anywhere", "mention", R"({"url":")" + api.base() + R"(/webmention","body":{"source":"https://kc.example.com/p","target":"https://x.example/a"}})");
+  auto wm = call("anywhere", "mention", R"({"url":")" + api.base() + R"(/webmention","body":{"source":"https://acme.example.com/p","target":"https://x.example/a"}})");
   EXPECT_EQ(wm.at("status").as_int64(), 200) << json::dump(wm);
   EXPECT_NE(json::dump(call("anywhere", "mention", R"({"url":"http://10.0.0.1/x","body":{}})")).find("https"), std::string::npos);
   // OAuth 1.0a: the signature the service gets checks out with the secrets it would hold.

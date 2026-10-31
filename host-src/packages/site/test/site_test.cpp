@@ -250,7 +250,7 @@ TEST_F(SiteTest, BrokenFrontMatterFailsClosed) {
 TEST(Partials, TheBestFittingLinkIsMarked) {
   const std::string nav = R"(<nav><a href="/" data-match-exact="/">Home</a>)"
                           R"(<a href="/places" class="nav" data-match="/places">Places</a>)"
-                          R"(<a href="/places/kc" data-match="/places/kc">KC</a>)"
+                          R"(<a href="/places/acme" data-match="/places/acme">KC</a>)"
                           R"(<a href=/future data-match=/future class=x data-key="future">Future</a></nav>)";
   // Home only on "/" itself.
   auto home = site::mark_active(nav, "/", "");
@@ -260,9 +260,9 @@ TEST(Partials, TheBestFittingLinkIsMarked) {
   // A prefix covers what's below it; the longest fit wins; class is appended to, query ignored.
   auto place = site::mark_active(nav, "/places/joes?x=1", "");
   EXPECT_NE(place.find(R"(class="nav active" data-match="/places" aria-current="page">)"), std::string::npos) << place;
-  auto kc = site::mark_active(nav, "/places/kc/", "");
-  EXPECT_NE(kc.find(R"(data-match="/places/kc" aria-current="page" class="active">KC)"), std::string::npos) << kc;
-  EXPECT_EQ(kc.find(R"(class="nav active")"), std::string::npos) << kc;
+  auto acme = site::mark_active(nav, "/places/acme/", "");
+  EXPECT_NE(acme.find(R"(data-match="/places/acme" aria-current="page" class="active">KC)"), std::string::npos) << acme;
+  EXPECT_EQ(acme.find(R"(class="nav active")"), std::string::npos) << acme;
   // A prefix isn't a string prefix: /placesx isn't under /places.
   EXPECT_EQ(site::mark_active(nav, "/placesx", ""), nav);
   // An unquoted class gets quoted; a page's nav-key wins over the path.

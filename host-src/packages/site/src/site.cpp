@@ -338,7 +338,7 @@ std::optional<std::string> json_ld_script(const bj::value& ld) {
 }
 
 // A template written before the host built the tag wraps {{{json_ld}}} in a script of its own:
-// that outer tag is dropped, so the page has one (Pit Boss, 2026-10-29). Only an ld+json
+// that outer tag is dropped, so the page has one. Only an ld+json
 // script holding exactly the host's tag, with whitespace around it, is unwrapped.
 static void unwrap_json_ld(std::string& html, const std::string& tag) {
   if (tag.empty()) return;

@@ -78,8 +78,8 @@ class MailTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"localhost": {"tenant": "playground"}, "kc.example": {"tenant": "playground"}},
-        "tenants": {"playground": {"postal-address": "Beef Share, 1 Main St, Kansas City, MO 64105"}},
+        "domains": {"localhost": {"tenant": "playground"}, "acme.example": {"tenant": "playground"}},
+        "tenants": {"playground": {"postal-address": "Beef Share, 1 Main St, Springfield, IL 62701"}},
         "threads": {"network": 1, "boxes": 2},
         "identity": {"mailer": "ses", "ses": {"from": "no-reply@example.com", "endpoint": ")" + fake.endpoint() + R"("}},
         "mail": {"per-address-daily": 1})" + extra + "}",
@@ -127,7 +127,7 @@ TEST_F(MailTest, BoxMailLeavesThroughSesAfterTheCommit) {
 
   // Mail to someone with no relationship is outreach (029 § 3): the host's footer says so, with
   // the postal address and the link to stop it.
-  EXPECT_NE(mails[0].find("Beef Share, 1 Main St, Kansas City, MO 64105"), std::string::npos) << mails[0];
+  EXPECT_NE(mails[0].find("Beef Share, 1 Main St, Springfield, IL 62701"), std::string::npos) << mails[0];
   EXPECT_NE(mails[0].find("wrote to you once. It won't again unless you reply."), std::string::npos) << mails[0];
   // One outreach per address in 30 days: the second is refused in the call.
   ASSERT_EQ(post(port, "/join", &body), 200);
@@ -162,7 +162,7 @@ void upload_outreach(host::Host& host, const std::string& in_reply_to = "abc@mai
 )";
   std::string err;
   ASSERT_TRUE(host.boxes().upload(
-      R"({"box":"outreach","domains":["*"],"external":{"mail":{"mail":{"from-name":"KC Meat Up","from":"hello@kc.example"}}},)"
+      R"({"box":"outreach","domains":["*"],"external":{"mail":{"mail":{"from-name":"Acme Grill","from":"hello@acme.example"}}},)"
       R"("routes":{"http":{"/reach":{"post":{"name":"reach","public":true}}}}})",
       wat, &err))
       << err;
@@ -181,28 +181,28 @@ TEST_F(MailTest, OutreachThreadsAndUnsubscribesForGood) {
   auto mails = fake.mails();
   ASSERT_EQ(mails.size(), 1u);
   const std::string& m = mails[0];
-  EXPECT_NE(m.find("From: \"KC Meat Up\" <hello@kc.example>\r\n"), std::string::npos) << m;
+  EXPECT_NE(m.find("From: \"Acme Grill\" <hello@acme.example>\r\n"), std::string::npos) << m;
   EXPECT_NE(m.find("In-Reply-To: <abc@mail.example.org>\r\n"), std::string::npos) << m;
   EXPECT_NE(m.find("References: <root@mail.example.org> <abc@mail.example.org>\r\n"), std::string::npos) << m;
   EXPECT_NE(m.find("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"), std::string::npos) << m;
-  auto at = m.find("List-Unsubscribe: <https://kc.example/goober/mail/playground/");
+  auto at = m.find("List-Unsubscribe: <https://acme.example/goober/mail/playground/");
   ASSERT_NE(at, std::string::npos) << m;
-  EXPECT_NE(m.find("Unsubscribe: https://kc.example/goober/mail/"), std::string::npos) << m;  // the footer
+  EXPECT_NE(m.find("Unsubscribe: https://acme.example/goober/mail/"), std::string::npos) << m;  // the footer
   // logs/mail.log names the tenant and the From, which mail_activity reads.
   auto mail_log = base::read_file(root / "storage/logs/mail.log");
   ASSERT_TRUE(mail_log);
   EXPECT_NE(mail_log->find(R"("tenant":"playground")"), std::string::npos) << *mail_log;
-  EXPECT_NE(mail_log->find(R"("from_address":"hello@kc.example")"), std::string::npos) << *mail_log;
+  EXPECT_NE(mail_log->find(R"("from_address":"hello@acme.example")"), std::string::npos) << *mail_log;
   EXPECT_EQ(mail_log->find("fan@example.org"), std::string::npos) << *mail_log;  // the person: a hash
   std::string url = m.substr(at + 19, m.find('>', at) - at - 19);
-  std::string path = url.substr(std::string("https://kc.example").size());
+  std::string path = url.substr(std::string("https://acme.example").size());
 
   auto request = [&](bhttp::verb verb, const std::string& target) {
     asio::io_context io;
     beast::tcp_stream stream(io);
     stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
     bhttp::request<bhttp::string_body> req(verb, target, 11);
-    req.set(bhttp::field::host, "kc.example");
+    req.set(bhttp::field::host, "acme.example");
     if (verb == bhttp::verb::post) {
       req.set(bhttp::field::content_type, "application/x-www-form-urlencoded");
       req.body() = "List-Unsubscribe=One-Click";
@@ -387,8 +387,8 @@ TEST_F(MailTest, ADigestInMarkdownCarriesAnInviteAndAFile) {
   EXPECT_NE(html.find("<li>Thursday</li>"), std::string::npos) << html;
   std::string ics = decoded_parts("text/calendar");
   for (size_t p; (p = ics.find("\r\n ")) != std::string::npos;) ics.erase(p, 3);  // unfold
-  EXPECT_NE(ics.find("UID:meetup-7@kc.example"), std::string::npos) << ics;
-  EXPECT_NE(ics.find("ORGANIZER;CN=KC Meat Up:mailto:hello@kc.example"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("UID:meetup-7@acme.example"), std::string::npos) << ics;
+  EXPECT_NE(ics.find("ORGANIZER;CN=Acme Grill:mailto:hello@acme.example"), std::string::npos) << ics;
   EXPECT_NE(ics.find("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ada@example.org"), std::string::npos) << ics;
   EXPECT_NE(ics.find("DTSTART:20261106T000000Z"), std::string::npos) << ics;
 

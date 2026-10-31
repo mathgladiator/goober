@@ -42,13 +42,13 @@ void write_lines(const fs::path& f, const std::vector<std::string>& lines) {
 
 TEST(Logs, EveryLineIsEnvelopedAndChained) {
   auto dir = fresh("logs_chain");
-  logs::Set set(dir, "kc.example.com");
+  logs::Set set(dir, "acme.example.com");
   set.write("access", bj::object{{"path", "/"}, {"status", 200}, {"seq", 99}, {"chain", "forged"}}, kT0 + 1000);
   set.write("access", bj::object{{"path", "/b"}, {"status", 404}}, kT0 + 2000);
   auto lines = lines_of(dir / "access.log");
   ASSERT_EQ(lines.size(), 2u);
   // The envelope first, and the line's own fields never replace it.
-  EXPECT_TRUE(lines[0].starts_with(R"({"at":"2026-10-29T00:00:01.000Z","log":"access","seq":1,"host":"kc.example.com","path":"/")"))
+  EXPECT_TRUE(lines[0].starts_with(R"({"at":"2026-10-29T00:00:01.000Z","log":"access","seq":1,"host":"acme.example.com","path":"/")"))
       << lines[0];
   EXPECT_NE(lines[1].find(R"("seq":2)"), std::string::npos);
   auto a = logs::split_chain(lines[0]), b = logs::split_chain(lines[1]);
@@ -166,10 +166,10 @@ TEST(Logs, SearchIsNewestFirstWithinTheWindowAndScope) {
   auto dir = fresh("logs_search");
   logs::Set set(dir, "h");
   for (int i = 0; i < 10; ++i) {
-    set.write("access", bj::object{{"path", "/p" + std::to_string(i)}, {"tenant", i % 2 ? "kc" : "other"}, {"status", i == 7 ? 500 : 200}},
+    set.write("access", bj::object{{"path", "/p" + std::to_string(i)}, {"tenant", i % 2 ? "acme" : "other"}, {"status", i == 7 ? 500 : 200}},
               kT0 + i * 1000);
   }
-  set.write("mail", bj::object{{"to_h", "abc123"}, {"subject", "Hi"}, {"tenant", "kc"}}, kT0 + 4500);
+  set.write("mail", bj::object{{"to_h", "abc123"}, {"subject", "Hi"}, {"tenant", "acme"}}, kT0 + 4500);
   logs::Query q;
   q.pattern = "/p";
   auto f = logs::search(dir, {"access"}, q);
@@ -203,7 +203,7 @@ TEST(Logs, SearchIsNewestFirstWithinTheWindowAndScope) {
   ASSERT_EQ(byhash.hits.size(), 1u);
   EXPECT_EQ(byhash.hits[0].log, "mail");
   logs::Query scoped;
-  scoped.allow = [](const std::string&, const bj::object& o) { return o.contains("tenant") && o.at("tenant") == "kc"; };
+  scoped.allow = [](const std::string&, const bj::object& o) { return o.contains("tenant") && o.at("tenant") == "acme"; };
   EXPECT_EQ(logs::search(dir, {"access", "mail"}, scoped).hits.size(), 6u);
   logs::Query small;
   small.max_read = 100;
@@ -221,7 +221,7 @@ TEST(Logs, NamesAndTimes) {
 
 TEST(Logs, RegexesThatCanRunForeverAreRefused) {
   std::string why;
-  for (const char* ok : {"status\":5..", "^\\{.*\"tenant\":\"kc\"", "(a|b)c+", "[(+]+x", "\\(a+\\)+"}) {
+  for (const char* ok : {"status\":5..", "^\\{.*\"tenant\":\"acme\"", "(a|b)c+", "[(+]+x", "\\(a+\\)+"}) {
     EXPECT_TRUE(goober::logs::safe_regex(ok, &why)) << ok << ": " << why;
   }
   for (const char* bad : {"(a+)+", "^(\\w+\\s?)*$", "((ab)*)+", "(a|aa)*{2}x", "(x)\\1", "(?:a*)*"}) {

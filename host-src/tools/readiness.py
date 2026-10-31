@@ -2,10 +2,9 @@
 """Checks a deployed goober host from the outside, the way people and agents reach it.
 
   readiness.py https://example.com \
-      --expect /places/rye-leawood text/html \
+      --expect /about text/html \
       --expect /sitemap.xml application/xml \
-      --expect /calculate/meat-macros.csv text/csv \
-      --box locations --box accounts
+      --box guestbook
 
 Always checked: /goober/ready (build and every subsystem), /, OAuth and identity discovery,
 and that /mcp asks for OAuth the way MCP clients expect. With GOOBER_TOKEN (an operator

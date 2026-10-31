@@ -186,14 +186,14 @@ TEST(Config, RefusesBadSesBackupAndSource) {
 TEST(Config, ThePanelHasADomainOfItsOwn) {
   std::string err;
   auto cfg = parse_config(
-      R"({"domains":{"kcmeatup.com":{"tenant":"kc"}},"operations":{"domain":"Ops.KCMeatUp.com","listen":"127.0.0.1:9443"}})",
+      R"({"domains":{"acme.example":{"tenant":"acme"}},"operations":{"domain":"Ops.Acme.Example","listen":"127.0.0.1:9443"}})",
       "/", &err);
   ASSERT_TRUE(cfg) << err;
-  EXPECT_EQ(cfg->operations_domain, "ops.kcmeatup.com");
-  EXPECT_EQ(cfg->panel_domain(), "ops.kcmeatup.com");
+  EXPECT_EQ(cfg->operations_domain, "ops.acme.example");
+  EXPECT_EQ(cfg->panel_domain(), "ops.acme.example");
   EXPECT_EQ(cfg->operations_listen_address, "127.0.0.1");
   EXPECT_EQ(cfg->operations_listen_port, 9443);
-  EXPECT_FALSE(parse_config(R"({"domains":{"kcmeatup.com":{"tenant":"kc"}},"operations":{"domain":"kcmeatup.com"}})",
+  EXPECT_FALSE(parse_config(R"({"domains":{"acme.example":{"tenant":"acme"}},"operations":{"domain":"acme.example"}})",
                             "/", &err));
   EXPECT_NE(err.find("tenant's domain"), std::string::npos) << err;
   EXPECT_FALSE(parse_config(R"({"operations":{"domain":"not a name"}})", "/", &err));
@@ -219,24 +219,24 @@ TEST(Config, PwaPushHostsAndContact) {
 
 TEST(Config, TenantsCarryPostalAddressTermsAndInviteRoles) {
   std::string err;
-  auto cfg = parse_config(R"({"domains":{"kc.example.com":{"tenant":"kc"}},
+  auto cfg = parse_config(R"({"domains":{"acme.example.com":{"tenant":"acme"}},
       "mail":{"outreach-daily-max":20},
-      "tenants":{"kc":{"postal-address":"KC Meat Up, 1 Main St, Kansas City, MO 64105","terms":"/terms","privacy":"/privacy",
+      "tenants":{"acme":{"postal-address":"Acme Grill, 1 Main St, Springfield, IL 62701","terms":"/terms","privacy":"/privacy",
                        "invites":{"roles":["member","editor/blog"],"daily-max":30,"per-inviter-daily":5}}}})",
                           "/", &err);
   ASSERT_TRUE(cfg) << err;
-  EXPECT_EQ(cfg->tenant("kc").postal_address, "KC Meat Up, 1 Main St, Kansas City, MO 64105");
-  EXPECT_EQ(cfg->tenant("kc").terms, "/terms");
-  EXPECT_EQ(cfg->tenant("kc").invites.roles.size(), 2u);
-  EXPECT_EQ(cfg->tenant("kc").invites.daily_max, 30);
+  EXPECT_EQ(cfg->tenant("acme").postal_address, "Acme Grill, 1 Main St, Springfield, IL 62701");
+  EXPECT_EQ(cfg->tenant("acme").terms, "/terms");
+  EXPECT_EQ(cfg->tenant("acme").invites.roles.size(), 2u);
+  EXPECT_EQ(cfg->tenant("acme").invites.daily_max, 30);
   EXPECT_EQ(cfg->mail.outreach_daily_max, 20);
   EXPECT_EQ(cfg->tenant("other").invites.daily_max, 50);  // defaults for a tenant without an entry
   EXPECT_TRUE(cfg->tenant("other").invites.roles.empty());
-  EXPECT_FALSE(parse_config(R"({"tenants":{"kc":{}}})", "/", &err));  // no domain serves it
-  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"terms":"terms"}}})", "/", &err));
-  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"invites":{"roles":["host:owner"]}}}})", "/", &err));
-  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"postal-address":"a\nb"}}})", "/", &err));
-  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"kc"}},"tenants":{"kc":{"colour":"red"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"tenants":{"acme":{}}})", "/", &err));  // no domain serves it
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"acme"}},"tenants":{"acme":{"terms":"terms"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"acme"}},"tenants":{"acme":{"invites":{"roles":["host:owner"]}}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"acme"}},"tenants":{"acme":{"postal-address":"a\nb"}}})", "/", &err));
+  EXPECT_FALSE(parse_config(R"({"domains":{"a.com":{"tenant":"acme"}},"tenants":{"acme":{"colour":"red"}}})", "/", &err));
 }
 
 TEST(Config, RedirectDomainsSendEverythingToTheirPrimary) {

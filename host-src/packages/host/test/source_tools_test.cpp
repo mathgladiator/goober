@@ -265,7 +265,7 @@ TEST_F(SourceToolsTest, BuildsCantPointTheHostAtItsOwnFiles) {
 TEST_F(SourceToolsTest, NothingIsStoredUnlessEverythingChecksOut) {
   ASSERT_EQ(tool("source_create", {{"project", "dir"}}).at("head"), 0);
   std::string schema = R"({"schema":"locations_v3","tables":{"locations":{"columns":{"name":{"type":"string"}}}}})";
-  std::string bad = R"({"box":"kc_dir","domains":["*"],
+  std::string bad = R"({"box":"acme_dir","domains":["*"],
     "data":{"sqlite3":{"w":{"schema":"locations_v3","database":"dir","pattern":"sql","tables":{"locations":{"read":true}}}}},
     "routes":{"http":{"/search":{"get":{"name":"search","public":true,
       "query":{"limit":{"type":"int32","default":20}}}}}}})";
@@ -313,7 +313,7 @@ TEST_F(SourceToolsTest, DeployedToolsAreListedWithTheirTypes) {
       tools += R"(,"get_location":{"tool":{"description":"Gets.","requirements":[["owner"]],"input":"json:Slug"}},
       "import_locations":{"tool":{"description":"Imports.","requirements":[["owner"]],"input":"json:ListInput"}})";
     }
-    return R"({"box":"kc_locations","domains":["localhost"],)" + std::string(v2 ? R"("types":"types.json",)" : "") +
+    return R"({"box":"acme_locations","domains":["localhost"],)" + std::string(v2 ? R"("types":"types.json",)" : "") +
            R"("routes":{"mcp":{)" + tools + "}}}";
   };
   std::string types = R"({"openapi":"3.1.0","components":{"schemas":{
@@ -343,7 +343,7 @@ TEST_F(SourceToolsTest, DeployedToolsAreListedWithTheirTypes) {
   std::string err;
   ASSERT_TRUE(host->identity().grant("playground", "owner@example.com", "owner", "test", 1'900'000'000'000, &err)) << err;
   auto preview = tool("mcp_tools_preview", {{"domain", "localhost"}, {"email", "owner@example.com"}});
-  std::string version(host->boxes().active()->boxes.at("kc_locations")->version);
+  std::string version(host->boxes().active()->boxes.at("acme_locations")->version);
   std::set<std::string> listed;
   for (const auto& t : preview.at("tools").as_array()) {
     EXPECT_EQ(std::string(t.at("version").as_string()), version);

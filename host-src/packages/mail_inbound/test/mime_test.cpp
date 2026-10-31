@@ -9,11 +9,11 @@ using namespace goober::mail::inbound;
 TEST(Mime, APlainMessage) {
   auto m = parse_raw_message(
       "From: \"Lee, Ann\" <Ann@Example.org>\r\n"
-      "To: support@kcmeatup.com, Bob <bob@example.org>\r\n"
+      "To: support@acme.example, Bob <bob@example.org>\r\n"
       "Subject: Half a cow\r\n"
       "Message-ID: <abc@example.org>\r\n"
-      "In-Reply-To: <x1@kcmeatup.com>\r\n"
-      "References: <x0@kcmeatup.com>\r\n <x1@kcmeatup.com>\r\n"
+      "In-Reply-To: <x1@acme.example>\r\n"
+      "References: <x0@acme.example>\r\n <x1@acme.example>\r\n"
       "\r\n"
       "Do you have half a cow left?\r\n");
   ASSERT_TRUE(m.from);
@@ -23,9 +23,9 @@ TEST(Mime, APlainMessage) {
   EXPECT_EQ(m.to[1].address, "bob@example.org");
   EXPECT_EQ(m.subject, "Half a cow");
   EXPECT_EQ(m.message_id, "abc@example.org");
-  EXPECT_EQ(m.in_reply_to, "x1@kcmeatup.com");
+  EXPECT_EQ(m.in_reply_to, "x1@acme.example");
   ASSERT_EQ(m.references.size(), 2u);
-  EXPECT_EQ(m.references[1], "x1@kcmeatup.com");
+  EXPECT_EQ(m.references[1], "x1@acme.example");
   EXPECT_EQ(m.text, "Do you have half a cow left?\r\n");
   EXPECT_TRUE(m.html.empty());
   EXPECT_TRUE(m.attachments.empty());

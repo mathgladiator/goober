@@ -166,7 +166,7 @@ const std::vector<Builtin>& builtins() {
                   {"terms_url", "https://example.com/terms"}, {"privacy_url", "https://example.com/privacy"},
                   {"accept_url", "https://example.com/identity/invite/1/abc"},
                   {"decline_url", "https://example.com/identity/invite/1/abc/decline"},
-                  {"postal_address", "1 Main St, Kansas City, MO"}, {"expires", "2026-11-28"}, {"reminder", false},
+                  {"postal_address", "1 Main St, Springfield, IL"}, {"expires", "2026-11-28"}, {"reminder", false},
                   {"has_roles", true}, {"has_lists", true},
                   {"site", "example.com"}, {"email", "bob@example.com"}},
        Template{"{{#reminder}}Reminder: {{/reminder}}{{inviter}} invited you to {{site}}", kInviteText, kInviteHtml}},
@@ -174,7 +174,7 @@ const std::vector<Builtin>& builtins() {
        "Asks someone to confirm a list a box asked to subscribe them to (029 § 4, double opt-in). It must keep "
        "confirm_url, or the host sends its default instead.",
        bj::object{{"list_title", "The daily digest"}, {"list_about", "One email a day."},
-                  {"confirm_url", "https://example.com/goober/list/kc/abc/digest/def"}, {"site", "example.com"},
+                  {"confirm_url", "https://example.com/goober/list/acme/abc/digest/def"}, {"site", "example.com"},
                   {"email", "bob@example.com"}},
        Template{"Confirm: {{list_title}} from {{site}}", kListConfirmText, kListConfirmHtml}},
       {"agent-token",

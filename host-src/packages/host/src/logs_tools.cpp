@@ -327,7 +327,7 @@ void Host::register_log_tools() {
        "max over the last 5m, 15m, or 1h, for a tenant or all. Sort by p99 (default), count, or errors.",
        object_schema({{"tenant", string_property("A tenant; default all.")},
                       {"window", mcp::enum_property("5m, 15m, or 1h (default).", {"5m", "15m", "1h"})},
-                      {"prefix", string_property("Only paths starting with this, like /places.")},
+                      {"prefix", string_property("Only paths starting with this, like /docs.")},
                       {"sort", mcp::enum_property("p99, count, or errors.", {"p99", "count", "errors"})},
                       {"limit", integer_property("1 to 1000, default 100.")}},
                      {}),

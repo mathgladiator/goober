@@ -1098,7 +1098,7 @@ const views = {
       ]),
       dbs.length ? null : h('p', { class: 'muted small' }, 'No databases for this tenant.'));
     const right = [];
-    const sqlBox = h('textarea', { spellcheck: 'false', placeholder: 'One read-only statement, like SELECT * FROM places WHERE city = \'Kansas City\'' });
+    const sqlBox = h('textarea', { spellcheck: 'false', placeholder: 'One read-only statement, like SELECT * FROM orders WHERE status = \'open\'' });
     const sqlOut = h('div', {});
     const sqlDb = database || (dbs[0] && dbs[0].database) || '';
     if (database && tableName) {

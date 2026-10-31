@@ -154,7 +154,7 @@ page_render {as: "signed_out"} renders as a visitor with no session: a gated pag
 303 to sign-in they'd get (accept: application/json gets the 401). The host serves /sitemap.xml and /llms.txt from the pages' front
 matter unless a file or a box route claims them; a page with noindex: true or sitemap: false is
 left out. A box's own sitemap joins by naming it in _data/site.json: "sitemaps":
-["/places/sitemap.xml"] makes /sitemap.xml an index of it and /sitemap-pages.xml.
+["/shop/sitemap.xml"] makes /sitemap.xml an index of it and /sitemap-pages.xml.
 
 ## Site data [content_put]
 _data/site.json holds the site's title, navigation, and footer:

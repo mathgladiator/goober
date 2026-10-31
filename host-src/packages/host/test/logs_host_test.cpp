@@ -60,7 +60,7 @@ class LogsHostTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({
         "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
-        "domains": {"kc.example.com": {"tenant": "kc"}, "other.example.com": {"tenant": "other"}},
+        "domains": {"acme.example.com": {"tenant": "acme"}, "other.example.com": {"tenant": "other"}},
         "operations": {"token": "op-token-for-log-tests-0123456789"},
         "threads": {"network": 1, "boxes": 2}})",
                                     root, &err);
@@ -72,7 +72,7 @@ class LogsHostTest : public ::testing::Test {
   void TearDown() override { host.reset(); }
 
   bj::object call(const std::string& bearer, const std::string& tool, const std::string& args = "{}") {
-    auto r = fetch(port, "kc.example.com", bhttp::verb::post, "/goober-operations-mcp",
+    auto r = fetch(port, "acme.example.com", bhttp::verb::post, "/goober-operations-mcp",
                    {{"authorization", "Bearer " + bearer}, {"content-type", "application/json"}},
                    R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":")" + tool + R"(","arguments":)" + args + "}}");
     std::string err;
@@ -108,8 +108,8 @@ TEST_F(LogsHostTest, ToolCallsAuthFailuresAndSignInsAreAudited) {
   op("domain_list");
   call("not-a-token", "domain_list");
   // A sign-in: the address is in the audit log only as a hash.
-  auto start = fetch(port, "kc.example.com", bhttp::verb::post, "/identity/email/start",
-                     {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://kc.example.com"}},
+  auto start = fetch(port, "acme.example.com", bhttp::verb::post, "/identity/email/start",
+                     {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://acme.example.com"}},
                      "email=ann@example.com");
   host->drain_mail();
   std::string code;
@@ -118,8 +118,8 @@ TEST_F(LogsHostTest, ToolCallsAuthFailuresAndSignInsAreAudited) {
     auto text = *base::read_file(root / "storage/mail/outbox" / f);
     if (std::regex_search(text, m, std::regex("is ([0-9]{6})"))) code = m[1];
   }
-  fetch(port, "kc.example.com", bhttp::verb::post, "/identity/email/verify",
-        {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://kc.example.com"}},
+  fetch(port, "acme.example.com", bhttp::verb::post, "/identity/email/verify",
+        {{"content-type", "application/x-www-form-urlencoded"}, {"origin", "http://acme.example.com"}},
         "email=ann@example.com&code=" + code);
   auto audit = lines("audit");
   std::string all;
@@ -145,11 +145,11 @@ TEST_F(LogsHostTest, ToolCallsAuthFailuresAndSignInsAreAudited) {
 
 TEST_F(LogsHostTest, TheDiveIsGrepWithinAWindowAndAScope) {
   std::string err;
-  ASSERT_TRUE(host->content().put("kc", "index.md", "# KC", &err));
+  ASSERT_TRUE(host->content().put("acme", "index.md", "# KC", &err));
   ASSERT_TRUE(host->content().put("other", "index.md", "# Other", &err));
-  fetch(port, "kc.example.com", bhttp::verb::get, "/");
+  fetch(port, "acme.example.com", bhttp::verb::get, "/");
   fetch(port, "other.example.com", bhttp::verb::get, "/");
-  fetch(port, "kc.example.com", bhttp::verb::get, "/missing-page");
+  fetch(port, "acme.example.com", bhttp::verb::get, "/missing-page");
   auto by_field = op("log_search", R"({"log":"access","fields":{"status":"404"}})");
   ASSERT_EQ(by_field.at("value").at("count").as_int64(), 1) << by_field.at("text");
   auto rx = op("log_search", R"({"log":"access","regex":"\"path\":\"/missing-[a-z]+\""})");
@@ -158,14 +158,14 @@ TEST_F(LogsHostTest, TheDiveIsGrepWithinAWindowAndAScope) {
                 .at("value").at("count").as_int64(), 0);
   EXPECT_TRUE(op("log_search", R"({"log":"../etc/passwd"})").at("isError").as_bool());
   // A focused operator sees only their tenant's lines.
-  host::Host::OperatorScope kc;
-  kc.all = false;
-  kc.tenants = {"kc"};
-  ASSERT_TRUE(host->set_operator_scope("token:grok", kc, "test", &err)) << err;
+  host::Host::OperatorScope acme;
+  acme.all = false;
+  acme.tenants = {"acme"};
+  ASSERT_TRUE(host->set_operator_scope("token:grok", acme, "test", &err)) << err;
   auto mine = call(token, "log_search", R"({"log":"access","pattern":"\"path\":\"/\""})");
   ASSERT_FALSE(mine.at("isError").as_bool()) << mine.at("text");
   for (const auto& l : mine.at("value").at("lines").as_array()) {
-    EXPECT_NE(std::string(l.as_string()).find(R"("tenant":"kc")"), std::string::npos) << l;
+    EXPECT_NE(std::string(l.as_string()).find(R"("tenant":"acme")"), std::string::npos) << l;
   }
   EXPECT_GE(mine.at("value").at("count").as_int64(), 1);
   EXPECT_TRUE(call(token, "log_verify").at("isError").as_bool());  // the whole host's: not theirs
@@ -173,28 +173,28 @@ TEST_F(LogsHostTest, TheDiveIsGrepWithinAWindowAndAScope) {
 
 TEST_F(LogsHostTest, LiveStatsTheSiteTreeAndFlow) {
   std::string err;
-  ASSERT_TRUE(host->content().put("kc", "index.md", "# KC", &err));
-  ASSERT_TRUE(host->content().put("kc", "places/joes.md", "---\ntitle: Joe's\n---\nBBQ", &err));
-  ASSERT_TRUE(host->content().put("kc", "css/site.css", "body{}", &err));
-  for (int i = 0; i < 5; ++i) fetch(port, "kc.example.com", bhttp::verb::get, "/");
-  fetch(port, "kc.example.com", bhttp::verb::get, "/places/joes", {{"referer", "http://kc.example.com/"}});
-  auto stats = op("uri_stats", R"({"tenant":"kc","window":"5m","sort":"count"})");
+  ASSERT_TRUE(host->content().put("acme", "index.md", "# KC", &err));
+  ASSERT_TRUE(host->content().put("acme", "places/joes.md", "---\ntitle: Joe's\n---\nBBQ", &err));
+  ASSERT_TRUE(host->content().put("acme", "css/site.css", "body{}", &err));
+  for (int i = 0; i < 5; ++i) fetch(port, "acme.example.com", bhttp::verb::get, "/");
+  fetch(port, "acme.example.com", bhttp::verb::get, "/places/joes", {{"referer", "http://acme.example.com/"}});
+  auto stats = op("uri_stats", R"({"tenant":"acme","window":"5m","sort":"count"})");
   ASSERT_FALSE(stats.at("isError").as_bool()) << stats.at("text");
   const auto& rows = stats.at("value").as_array();
   ASSERT_GE(rows.size(), 2u);
   EXPECT_EQ(rows[0].at("path"), "/");
   EXPECT_EQ(rows[0].at("n").as_int64(), 5);
   EXPECT_GT(rows[0].at("p99_us").as_int64(), 0);
-  auto tree = op("uri_tree", R"({"tenant":"kc"})");
+  auto tree = op("uri_tree", R"({"tenant":"acme"})");
   std::string t(tree.at("text").as_string());
   EXPECT_NE(t.find("\"name\": \"joes\""), std::string::npos) << t;
   EXPECT_NE(t.find("\"kind\": \"file\""), std::string::npos);  // css/site.css, never visited
-  auto flow = op("uri_flow", R"({"tenant":"kc","path":"/places/joes"})");
+  auto flow = op("uri_flow", R"({"tenant":"acme","path":"/places/joes"})");
   EXPECT_EQ(flow.at("value").at("in").at(0).at("from"), "/");
 }
 
 TEST_F(LogsHostTest, AnAgentGoingHamIsFlagged) {
-  for (int i = 0; i < 70; ++i) call(token, "content_put", R"({"tenant":"kc","path":"spam.txt","text":"x"})");
+  for (int i = 0; i < 70; ++i) call(token, "content_put", R"({"tenant":"acme","path":"spam.txt","text":"x"})");
   auto a = op("agent_audit", R"({"window":"1h"})");
   ASSERT_FALSE(a.at("isError").as_bool()) << a.at("text");
   const auto& actors = a.at("value").at("actors").as_array();
@@ -219,13 +219,13 @@ TEST_F(LogsHostTest, AddressesInFreeTextAreHashedAndStillFound) {
 }
 
 TEST_F(LogsHostTest, CapabilityLinksArentKeptInStatsOrTheAccessLog) {
-  fetch(port, "kc.example.com", bhttp::verb::get, "/goober/unsubscribe/kc/abcdef0123456789/deadbeefcafe");
-  for (int i = 0; i < 3; ++i) fetch(port, "kc.example.com", bhttp::verb::get, "/scan-" + std::to_string(i));
+  fetch(port, "acme.example.com", bhttp::verb::get, "/goober/unsubscribe/acme/abcdef0123456789/deadbeefcafe");
+  for (int i = 0; i < 3; ++i) fetch(port, "acme.example.com", bhttp::verb::get, "/scan-" + std::to_string(i));
   auto access = *base::read_file(root / "storage/logs/access.log");
   EXPECT_EQ(access.find("deadbeefcafe"), std::string::npos);
   EXPECT_NE(access.find("/goober/unsubscribe/*"), std::string::npos);
   EXPECT_NE(access.find("/scan-1"), std::string::npos);  // the log keeps what wasn't found
-  auto stats = op("uri_stats", R"({"tenant":"kc","window":"5m"})");
+  auto stats = op("uri_stats", R"({"tenant":"acme","window":"5m"})");
   std::string text = json::dump(stats.at("value"));
   EXPECT_EQ(text.find("/scan-"), std::string::npos) << text;  // the stats count them together
   EXPECT_NE(text.find("(not found)"), std::string::npos) << text;

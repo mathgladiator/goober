@@ -164,7 +164,7 @@ def main():
         (tmp / "host").mkdir()
         (tmp / "host" / "host.json").write_text(json.dumps({
             "listen": {"address": "127.0.0.1", "port": host_port}, "storage": "storage",
-            "platform-domain": "example.test", "domains": {"example.test": {"tenant": "kc"}},
+            "platform-domain": "example.test", "domains": {"example.test": {"tenant": "acme"}},
             "operations": {"token": op_token}, "identity": {"mailer": "dev", "cookie-secure": False},
             "mail": {"inbound": {"token-file": str(tmp / "hook.token")}}}))
 
@@ -206,7 +206,7 @@ def main():
         check(True, "Stalwart answers SMTP")
 
         def rows():
-            out = mcp(host_port, op_token, "db_query", {"tenant": "kc", "database": "got",
+            out = mcp(host_port, op_token, "db_query", {"tenant": "acme", "database": "got",
                                                          "sql": "SELECT path, body FROM got ORDER BY rowid"})
             return out.get("rows", [])
 

@@ -50,7 +50,7 @@ TEST(WebPush, VapidIsAnEs256JwtTheKeyVerifies) {
   std::string err;
   auto key = generate_key(&err);
   ASSERT_TRUE(key) << err;
-  auto header = vapid_authorization(*key, "https://fcm.googleapis.com", "mailto:ops@kcmeatup.com", 1800000000, &err);
+  auto header = vapid_authorization(*key, "https://fcm.googleapis.com", "mailto:ops@acme.example", 1800000000, &err);
   ASSERT_TRUE(header) << err;
   ASSERT_TRUE(header->starts_with("vapid t="));
   auto comma = header->find(", k=");
@@ -60,7 +60,7 @@ TEST(WebPush, VapidIsAnEs256JwtTheKeyVerifies) {
   auto other = generate_key(&err);
   EXPECT_FALSE(verify_jwt(jwt, other->public_raw));
   auto claims = *b64url_decode(jwt.substr(jwt.find('.') + 1, jwt.rfind('.') - jwt.find('.') - 1));
-  EXPECT_EQ(claims, R"({"aud":"https://fcm.googleapis.com","exp":1800000000,"sub":"mailto:ops@kcmeatup.com"})");
+  EXPECT_EQ(claims, R"({"aud":"https://fcm.googleapis.com","exp":1800000000,"sub":"mailto:ops@acme.example"})");
 }
 
 TEST(WebPush, Base64UrlBothWays) {

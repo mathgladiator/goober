@@ -20,7 +20,7 @@ constexpr int64_t kNoon = 1793275200000;
 std::string at(int64_t ms) { return base::format_utc_ms(ms); }
 
 std::optional<std::string> tenant_of(const std::string& domain) {
-  if (domain == "kcmeatup.com") return std::string("kcmeatup");
+  if (domain == "acme.example") return std::string("acme");
   return std::nullopt;
 }
 
@@ -71,15 +71,15 @@ TEST(KeyLine, HostWorkIsNamedAndNoPathIsKept) {
     return *operations::key_line(v->as_object(), tenant_of);
   };
   auto t = at(kNoon);
-  auto box = key(R"({"at":")" + t + R"(","domain":"kcmeatup.com","path":"/places/42","box":"kc","route":"place"})");
-  EXPECT_EQ(box.tenant, "kcmeatup");
-  EXPECT_EQ(box.box, "kc");
+  auto box = key(R"({"at":")" + t + R"(","domain":"acme.example","path":"/places/42","box":"acme","route":"place"})");
+  EXPECT_EQ(box.tenant, "acme");
+  EXPECT_EQ(box.box, "acme");
   EXPECT_EQ(box.route, "place");
-  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"kcmeatup.com","path":"/about"})").route, "page");
-  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"kcmeatup.com","path":"/identity/sign-in"})").route, "identity");
-  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"kcmeatup.com","path":"/.well-known/x"})").route, "oauth");
+  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"acme.example","path":"/about"})").route, "page");
+  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"acme.example","path":"/identity/sign-in"})").route, "identity");
+  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"acme.example","path":"/.well-known/x"})").route, "oauth");
   EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"evil.test","path":"/wp-login.php"})").route, "unknown");
-  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"ops.kcmeatup.com","path":"/api/x","panel":"x"})").route, "panel");
+  EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"ops.acme.example","path":"/api/x","panel":"x"})").route, "panel");
   EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"x","path":"/goober-operations-mcp","operations":"mcp"})").route,
             "operations");
   // A timer's line names its tenant itself.
@@ -89,10 +89,10 @@ TEST(KeyLine, HostWorkIsNamedAndNoPathIsKept) {
 
 TEST_F(TrafficTest, LinesAreSummedIntoSeriesAndRoutes) {
   for (int i = 0; i < 10; ++i) {
-    line(R"({"at":")" + at(kNoon + i * 1000) + R"(","domain":"kcmeatup.com","path":"/p","status":200,"us":1000,"box":"kc","route":"place","fuel":10,"sql":2})");
+    line(R"({"at":")" + at(kNoon + i * 1000) + R"(","domain":"acme.example","path":"/p","status":200,"us":1000,"box":"acme","route":"place","fuel":10,"sql":2})");
   }
-  line(R"({"at":")" + at(kNoon + 90 * 1000) + R"(","domain":"kcmeatup.com","path":"/p","status":500,"us":90000,"box":"kc","route":"place","fuel":5,"sql":1})");
-  line(R"({"at":")" + at(kNoon + 90 * 1000) + R"(","domain":"kcmeatup.com","path":"/missing","status":404,"us":100})");
+  line(R"({"at":")" + at(kNoon + 90 * 1000) + R"(","domain":"acme.example","path":"/p","status":500,"us":90000,"box":"acme","route":"place","fuel":5,"sql":1})");
+  line(R"({"at":")" + at(kNoon + 90 * 1000) + R"(","domain":"acme.example","path":"/missing","status":404,"us":100})");
   auto t = open();
   EXPECT_EQ(t->catch_up(kNoon + 120 * 1000), 12u);
   auto routes = t->routes("1h", "", "", kNoon + 120 * 1000);
@@ -109,7 +109,7 @@ TEST_F(TrafficTest, LinesAreSummedIntoSeriesAndRoutes) {
   EXPECT_EQ(routes[1].as_object().at("route"), "page");
   EXPECT_EQ(routes[1].as_object().at("n4").as_int64(), 1);
 
-  auto s = t->series("1h", "kcmeatup", "kc", kNoon + 120 * 1000);
+  auto s = t->series("1h", "acme", "acme", kNoon + 120 * 1000);
   const auto& points = s.at("points").as_array();
   ASSERT_EQ(points.size(), 60u);
   int64_t n = 0;
@@ -121,27 +121,27 @@ TEST_F(TrafficTest, LinesAreSummedIntoSeriesAndRoutes) {
   EXPECT_EQ(points[size_t((kNoon + 60000 - from) / 60000)].as_object().at("n5").as_int64(), 1);
 
   // Hours were written alongside: the 7-day window sees the same requests.
-  auto week = t->routes("7d", "kcmeatup", "", kNoon + 120 * 1000);
+  auto week = t->routes("7d", "acme", "", kNoon + 120 * 1000);
   ASSERT_EQ(week.size(), 2u);
   EXPECT_EQ(week[0].as_object().at("n").as_int64(), 11);
 
   auto hot = t->hot_boxes("12h", kNoon + 120 * 1000);
   ASSERT_EQ(hot.size(), 1u);
-  EXPECT_EQ(hot[0].as_object().at("box"), "kc");
+  EXPECT_EQ(hot[0].as_object().at("box"), "acme");
   EXPECT_DOUBLE_EQ(hot[0].as_object().at("share").as_double(), 1.0);
 }
 
 TEST_F(TrafficTest, ARestartResumesAtTheCursorAndARotationIsFollowed) {
-  line(R"({"at":")" + at(kNoon) + R"(","domain":"kcmeatup.com","path":"/","status":200,"us":10})");
+  line(R"({"at":")" + at(kNoon) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
   {
     auto t = open();
     EXPECT_EQ(t->catch_up(kNoon), 1u);
     EXPECT_EQ(t->catch_up(kNoon), 0u);
   }
-  line(R"({"at":")" + at(kNoon + 1) + R"(","domain":"kcmeatup.com","path":"/","status":200,"us":10})");
+  line(R"({"at":")" + at(kNoon + 1) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
   // A rotation, as append_line does it, then more lines in the new file.
   fs::rename(root / "logs" / "access.log", root / "logs" / "access.log.1");
-  line(R"({"at":")" + at(kNoon + 2) + R"(","domain":"kcmeatup.com","path":"/","status":200,"us":10})");
+  line(R"({"at":")" + at(kNoon + 2) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
   // A line still being written (no newline yet) waits for the next pass.
   {
     std::ofstream out(root / "logs" / "access.log", std::ios::app);
@@ -151,7 +151,7 @@ TEST_F(TrafficTest, ARestartResumesAtTheCursorAndARotationIsFollowed) {
   EXPECT_EQ(t->catch_up(kNoon), 2u);
   {
     std::ofstream out(root / "logs" / "access.log", std::ios::app);
-    out << R"(:"kcmeatup.com","path":"/","status":200,"us":10})" << "\n";
+    out << R"(:"acme.example","path":"/","status":200,"us":10})" << "\n";
   }
   EXPECT_EQ(t->catch_up(kNoon), 1u);
   auto routes = t->routes("1h", "", "", kNoon);
@@ -160,14 +160,14 @@ TEST_F(TrafficTest, ARestartResumesAtTheCursorAndARotationIsFollowed) {
 }
 
 TEST_F(TrafficTest, EdgesComeFromInternalCallsAndTheEgressLog) {
-  line(R"({"at":")" + at(kNoon) + R"(","domain":"kcmeatup.com","path":"internal:geo/x","status":200,"us":50,"box":"geo","route":"x","internal":"kc -> geo"})");
+  line(R"({"at":")" + at(kNoon) + R"(","domain":"acme.example","path":"internal:geo/x","status":200,"us":50,"box":"geo","route":"x","internal":"acme -> geo"})");
   base::append_line(root / "logs" / "egress.log",
-                    R"({"at":")" + at(kNoon) + R"(","tenant":"kcmeatup","box":"kc","service":"xai","status":200,"us":900000,"bytes_out":300,"bytes_in":2000})");
+                    R"({"at":")" + at(kNoon) + R"(","tenant":"acme","box":"acme","service":"xai","status":200,"us":900000,"bytes_out":300,"bytes_in":2000})");
   base::append_line(root / "logs" / "egress.log",
-                    R"({"at":")" + at(kNoon) + R"(","tenant":"kcmeatup","box":"kc","service":"xai","status":0,"us":10,"bytes_out":300,"bytes_in":0,"error":"timeout"})");
+                    R"({"at":")" + at(kNoon) + R"(","tenant":"acme","box":"acme","service":"xai","status":0,"us":10,"bytes_out":300,"bytes_in":0,"error":"timeout"})");
   auto t = open();
   EXPECT_EQ(t->catch_up(kNoon), 3u);
-  auto edges = t->edges("1h", "kc", kNoon);
+  auto edges = t->edges("1h", "acme", kNoon);
   ASSERT_EQ(edges.size(), 2u);
   const auto& svc = edges[0].as_object();
   EXPECT_EQ(svc.at("to_kind"), "service");
@@ -183,7 +183,7 @@ TEST_F(TrafficTest, EdgesComeFromInternalCallsAndTheEgressLog) {
 }
 
 TEST_F(TrafficTest, OldMinutesAreDroppedAndHoursKept) {
-  line(R"({"at":")" + at(kNoon) + R"(","domain":"kcmeatup.com","path":"/","status":200,"us":10})");
+  line(R"({"at":")" + at(kNoon) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
   auto t = open();
   t->catch_up(kNoon);
   int64_t later = kNoon + 3 * 24 * 3600 * 1000LL;
@@ -199,19 +199,19 @@ TEST_F(TrafficTest, OldMinutesAreDroppedAndHoursKept) {
 // answers counted as one place and box-to-box calls left out.
 TEST_F(TrafficTest, ErrorsFromOutsideAreCountedByPlaceAndMaker) {
   auto L = [&](int64_t ms, const std::string& rest) {
-    line(R"({"at":")" + at(ms) + R"(","domain":"kcmeatup.com",)" + rest + "}");
+    line(R"({"at":")" + at(ms) + R"(","domain":"acme.example",)" + rest + "}");
   };
   for (int i = 0; i < 6; ++i) L(kNoon + i * 1000, R"("path":"/","status":200,"us":10,"file":"index.md")");
   for (const char* scan : {"/wp-login.php", "/.env", "/admin.php"}) {
     L(kNoon, std::string(R"("path":")") + scan + R"(","status":404,"us":10,"error_by":"host")");
   }
-  L(kNoon, R"("path":"/places/9","status":404,"us":10,"box":"kc","route":"place","outcome":"ok","error_by":"box","ref":"same")");
-  L(kNoon, R"("path":"/places/8","status":500,"us":10,"box":"kc","route":"place","outcome":"trap","error_by":"box_failed","ref":"other")");
+  L(kNoon, R"("path":"/places/9","status":404,"us":10,"box":"acme","route":"place","outcome":"ok","error_by":"box","ref":"same")");
+  L(kNoon, R"("path":"/places/8","status":500,"us":10,"box":"acme","route":"place","outcome":"trap","error_by":"box_failed","ref":"other")");
   L(kNoon, R"("path":"/members","status":401,"us":10,"file":"members.md","error_by":"host")");
-  L(kNoon, R"("path":"internal:kc/x","status":500,"us":10,"box":"kc","route":"x","outcome":"trap","internal":"web -> kc")");
+  L(kNoon, R"("path":"internal:acme/x","status":500,"us":10,"box":"acme","route":"x","outcome":"trap","internal":"web -> acme")");
   auto t = open();
   t->catch_up(kNoon + 60000);
-  auto e = t->errors("1h", "kcmeatup", kNoon + 60000);
+  auto e = t->errors("1h", "acme", kNoon + 60000);
   const auto& totals = e.at("totals").as_object();
   EXPECT_EQ(totals.at("n").as_int64(), 13);  // every request, the internal call's included
   EXPECT_EQ(totals.at("n4").as_int64(), 5);

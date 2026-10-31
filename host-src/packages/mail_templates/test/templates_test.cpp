@@ -37,20 +37,20 @@ TEST_F(MailTemplatesTest, EveryDefaultRendersWithItsSample) {
 
 TEST_F(MailTemplatesTest, SignInMailsCarryTheCodeAndNoLinks) {
   std::string err;
-  bj::object vars{{"code", "042917"}, {"site", "kcmeatup.com"}, {"email", "ann@example.com"}, {"expires_minutes", 10}};
+  bj::object vars{{"code", "042917"}, {"site", "acme.example"}, {"email", "ann@example.com"}, {"expires_minutes", 10}};
   auto fresh = store->render("playground", "sign-in-new", vars, &err);
   ASSERT_TRUE(fresh) << err;
-  EXPECT_EQ(fresh->subject, "Welcome to kcmeatup.com: your sign-in code");
+  EXPECT_EQ(fresh->subject, "Welcome to acme.example: your sign-in code");
   EXPECT_TRUE(has(fresh->text, "042917"));
   EXPECT_TRUE(has(fresh->html, ">042917</div>"));
-  EXPECT_TRUE(has(fresh->html, "Welcome to kcmeatup.com"));
-  EXPECT_TRUE(has(fresh->html, "Sent by kcmeatup.com to ann@example.com."));
-  EXPECT_TRUE(has(fresh->text, "Sent by kcmeatup.com to ann@example.com."));
+  EXPECT_TRUE(has(fresh->html, "Welcome to acme.example"));
+  EXPECT_TRUE(has(fresh->html, "Sent by acme.example to ann@example.com."));
+  EXPECT_TRUE(has(fresh->text, "Sent by acme.example to ann@example.com."));
   EXPECT_FALSE(has(fresh->html, "href"));  // 013: never a link that signs in
 
   auto back = store->render("playground", "sign-in-returning", vars, &err);
   ASSERT_TRUE(back) << err;
-  EXPECT_EQ(back->subject, "Your sign-in code for kcmeatup.com");
+  EXPECT_EQ(back->subject, "Your sign-in code for acme.example");
   EXPECT_TRUE(has(back->html, "Welcome back"));
   EXPECT_LT(back->text.size(), fresh->text.size());  // leaner
 }
@@ -94,7 +94,7 @@ TEST_F(MailTemplatesTest, OverridesPerTenantThenEveryTenantThenDefault) {
 TEST_F(MailTemplatesTest, ALayoutWrapsEveryMailAndCustomTemplatesAreListed) {
   std::string err;
   ASSERT_TRUE(store->put("playground", "layout",
-                         Template{"", "{{{content}}}\n-- The KC Meat Up crew",
+                         Template{"", "{{{content}}}\n-- The Acme Grill crew",
                                   "<html><body style=\"background:#7f1d1d\">{{{content}}}</body></html>"},
                          &err))
       << err;
@@ -102,7 +102,7 @@ TEST_F(MailTemplatesTest, ALayoutWrapsEveryMailAndCustomTemplatesAreListed) {
       << err;
   auto r = store->render("playground", "order-ready", bj::object{{"name", "Ann"}}, &err);
   ASSERT_TRUE(r) << err;
-  EXPECT_EQ(r->text, "Pick it up, Ann.\n-- The KC Meat Up crew");
+  EXPECT_EQ(r->text, "Pick it up, Ann.\n-- The Acme Grill crew");
   EXPECT_EQ(r->html, "<html><body style=\"background:#7f1d1d\"><p style=\"margin:0 0 16px;\">Pick it up, Ann.</p>\n</body></html>");
 
   auto box = store->wrap_text("playground", "Hi", "Line one\nline <two>\n\nNext", {});
