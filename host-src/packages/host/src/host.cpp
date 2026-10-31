@@ -24,6 +24,7 @@
 #include "keys.h"
 #include "backups.h"
 #include "builder.h"
+#include "grant_usage.h"
 #include "mailer.h"
 #include "network.h"
 #include "timer_state.h"
@@ -165,6 +166,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check(
       [this](const manifest::Manifest& m, std::string* error) { return check_data(m, error) && check_calls(m, error); });
+  boxes_->set_manifest_advice([this](const manifest::Manifest& m) { return grant_advice(m, *schemas_); });
   timers_ = std::make_unique<TimerState>();
   keys_ = std::make_unique<KeyStore>(config->storage);
   mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
@@ -1267,6 +1269,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   bool committed = false;
   if (session && session->statements() > 0) {
     extra["sql"] = session->statements();
+    // Use is use, committed or not: what the statements that ran touched (grant_usage).
+    if (grant_usage_) grant_usage_->record(m.box, ref.box->version, session->used(), input.now_ms);
     std::string err;
     if (!ok) {
       session->rollback();

@@ -57,6 +57,21 @@ class Databases {
   std::set<std::string> applied_;  // "$file|$schema", applied in this process
 };
 
+// What statements actually did with one table, as the authorizer saw them: the columns read
+// and updated, and whether rows were inserted or deleted (grant_usage, 008 § 4).
+struct TableUse {
+  std::set<std::string> read, update;
+  bool insert = false, remove = false;
+  void merge(const TableUse& o) {
+    read.insert(o.read.begin(), o.read.end());
+    update.insert(o.update.begin(), o.update.end());
+    insert |= o.insert;
+    remove |= o.remove;
+  }
+};
+// Strategy -> table -> use.
+using Usage = std::map<std::string, std::map<std::string, TableUse>>;
+
 // One request's use of its box's databases: one transaction per database touched,
 // committed or rolled back as a whole (008 §6). Not thread-safe; one per call.
 class Session {
@@ -91,8 +106,11 @@ class Session {
   void set_read_only(bool on) { read_only_ = on; }
   // The strategies a statement that writes ran through, for the topics they publish.
   const std::set<std::string>& wrote() const { return wrote_; }
+  // What the statements that ran without error used of their grants.
+  const Usage& used() const { return used_; }
 
  private:
+  Usage used_;
   struct Open {
     std::unique_ptr<sqlite::Db> db;
     bool in_transaction = false;

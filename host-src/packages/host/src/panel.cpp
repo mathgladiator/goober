@@ -16,6 +16,7 @@
 #include "goober/operations/changes.h"
 #include "goober/operations/traffic.h"
 #include "goober/panel/assets.h"
+#include "grant_usage.h"
 #include "http_util.h"
 
 namespace goober::host {
@@ -44,7 +45,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
     "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
     "spec_list",       "spec_get",          "approval_status",  "bus_status",      "box_render",
-    "source_tree",     "source_box_history"};
+    "source_tree",     "source_box_history", "grant_usage"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -454,8 +455,19 @@ void Host::register_panel_tools() {
                 bj::object{{"n", s[0]}, {"n5", s[1]}, {"us", s[2]},
                            {"version", it == active->boxes.end() ? std::string() : it->second->version}});
          };
-         // What one box reaches: databases (SQL calls, split evenly when it has several), services,
-         // and boxes it calls.
+         // Each database's tables, one column further right: an edge per table, carrying every
+         // box's grant on it (operations, columns) and whether the grant has been used since the
+         // host started (grant_usage). Shared databases show each box's grant on one edge.
+         std::map<std::pair<std::string, std::string>, bj::array> table_grants;
+         std::map<std::pair<std::string, std::string>, int64_t> table_calls;
+         auto columns_of = [](bool all, const std::set<std::string>& some) -> bj::value {
+           if (all) return true;
+           bj::array a;
+           for (const auto& c : some) a.emplace_back(c);
+           return a;
+         };
+         // What one box reaches: databases (SQL calls, split evenly when it has several), their
+         // tables, services, and boxes it calls.
          auto outputs = [&](const std::string& b, int column) {
            auto it = active->boxes.find(b);
            if (it == active->boxes.end()) return;
@@ -467,6 +479,35 @@ void Host::register_panel_tools() {
              node("db:" + d, "database", d, column);
              edge("box:" + b, "db:" + d, dbs.size() ? sql / int64_t(dbs.size()) : 0, 0, 0,
                   bj::object{{"approx", dbs.size() > 1}, {"what", "sql calls"}});
+           }
+           auto seen = grant_usage_ ? grant_usage_->of(b, it->second->version) : GrantUsage::Seen2{};
+           for (const auto& st : m.data) {
+             if (!st.runnable()) continue;
+             std::string d = st.database.empty() ? st.name : st.database;
+             for (const auto& [t, g] : st.tables) {
+               GrantUsage::Seen s;
+               if (auto ss = seen.find(st.name); ss != seen.end()) {
+                 if (auto tt = ss->second.find(t); tt != ss->second.end()) s = tt->second;
+               }
+               std::string ops, used_ops;
+               auto op = [&](bool granted, bool used, char c) {
+                 if (granted) ops += c;
+                 if (granted && used) used_ops += c;
+               };
+               op(g.read_all || !g.read.empty(), !s.use.read.empty(), 'r');
+               op(g.insert, s.use.insert, 'i');
+               op(g.update_all || !g.update.empty(), !s.use.update.empty(), 'u');
+               op(g.remove, s.use.remove, 'd');
+               node("table:" + d + "." + t, "table", t, column + 1, bj::object{{"database", d}});
+               table_grants[{d, t}].push_back(bj::object{{"box", b},
+                                                         {"strategy", st.name},
+                                                         {"ops", ops},
+                                                         {"used_ops", used_ops},
+                                                         {"read", columns_of(g.read_all, g.read)},
+                                                         {"update", columns_of(g.update_all, g.update)},
+                                                         {"calls", s.calls}});
+               table_calls[{d, t}] += s.calls;
+             }
            }
            std::map<std::string, bj::object> seen_calls;
            for (const auto& c : calls) {
@@ -581,6 +622,21 @@ void Host::register_panel_tools() {
              }
            }
            outputs(only, 2);
+         }
+         for (auto& [key, grants] : table_grants) {
+           const auto& [d, t] = key;
+           std::set<char> ops;
+           bool used = false;
+           for (const auto& gr : grants) {
+             for (char c : gr.at("ops").as_string()) ops.insert(c);
+             used |= gr.at("calls").as_int64() > 0;
+           }
+           std::string label;
+           for (char c : std::string("riud")) {
+             if (ops.count(c)) label += c;
+           }
+           edge("db:" + d, "table:" + d + "." + t, table_calls[key], 0, 0,
+                bj::object{{"what", "calls since start"}, {"ops", label}, {"unused", !used}, {"grants", std::move(grants)}});
          }
          return ToolResult::ok(bj::object{{"window", w}, {"box", only}, {"nodes", std::move(nodes)}, {"edges", std::move(edges)}});
        }});

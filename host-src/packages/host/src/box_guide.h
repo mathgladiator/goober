@@ -169,8 +169,15 @@ through the mail service. Failures are retried in order, then given up after 8 t
      "tables": {"orders": {"read": true, "insert": true, "update": ["paid"], "delete": false}},
      "row-limit": 500}}}
    Each tenant gets its own file for "orders". Grants are per table and column; nothing else
-   can be read or written. Two boxes may share a database with different grants: give an
-   agents' box insert-only access and keep the deciding writes in a box people call.
+   can be read or written, by any statement (a subquery, a join, RETURNING, a WHERE on a
+   column all count). Grant only what the box needs: name only the tables it uses, list the
+   columns it reads and updates rather than true, and grant insert and delete only where it
+   does them. Narrow grants are the box's limits: a bug or a prompt-injected agent can't
+   reach past them. The operators' grant_usage tool (and the panel's Grants card) shows what
+   each table's grant was actually used for, with the column lists to narrow to; an upload
+   says when update: true covers a wide table. Two boxes may share a database with different
+   grants: give an agents' box insert-only access and keep the deciding writes in a box people
+   call.
    "tenant": "shared" (any name) makes one database for every domain and box that names it,
    instead of one per tenant: use it for data that spans sites, like a public index. Boxes
    sharing a database must bring schemas that fit together; upload checks.

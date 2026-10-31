@@ -232,3 +232,56 @@ TEST_F(DataRoutesTest, BoxesShareADatabaseAcrossTenants) {
   auto dbs = tool("db_list", {{"tenant", "shared"}});
   EXPECT_NE(json::dump(dbs).find("notes_b"), std::string::npos) << json::dump(dbs);
 }
+
+// Grants against use (008 § 4): an upload is told when `true` covers a wide table, and
+// grant_usage says what the box actually did, table by table, with what to narrow.
+TEST_F(DataRoutesTest, GrantUsageComparesGrantsWithWhatRan) {
+  std::string err;
+  auto schema = json::parse(R"({"schema": "wide1", "tables": {
+    "notes": {"columns": {"text": {"type": "string"}, "a": {"type": "string", "nullable": true},
+      "b": {"type": "string", "nullable": true}, "c": {"type": "string", "nullable": true},
+      "d": {"type": "string", "nullable": true}, "e": {"type": "string", "nullable": true},
+      "f": {"type": "string", "nullable": true}, "g": {"type": "string", "nullable": true},
+      "h": {"type": "string", "nullable": true}}},
+    "extra": {"columns": {"x": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(schema) << err;
+  ASSERT_FALSE(tool("schema_put", {{"schema", *schema}}).as_object().contains("error"));
+  const char* manifest = R"({"box":"notes","domains":["*"],
+    "data":{"sqlite3":{"notes":{"schema":"wide1","database":"notes","pattern":"sql",
+      "tables":{"notes":{"read":true,"insert":true,"update":true,"delete":true},"extra":{"read":["x"]}}}}},
+    "routes":{"http":{"/notes":{"post":{"name":"add","public":true},"get":{"name":"list","public":true}},
+      "/boom":{"post":{"name":"boom","public":true}}}}})";
+  auto up = host->boxes().upload(manifest, kNotesWat, &err);
+  ASSERT_TRUE(up) << err;
+  std::string advice;
+  for (const auto& w : up->warnings) advice += w + "\n";
+  EXPECT_NE(advice.find("tables.notes: update: true lets the box change all 10 columns"), std::string::npos) << advice;
+  EXPECT_EQ(advice.find("read: true"), std::string::npos) << advice;  // reads: grant_usage, with evidence
+  EXPECT_EQ(advice.find("tables.extra"), std::string::npos) << advice;
+
+  auto none = tool("grant_usage", {{"box", "notes"}});
+  EXPECT_EQ(none.at(0).at("strategies").at(0).at("tables").at(1).at("findings").at(0).at("kind"), "unused_table");
+
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/notes").status, 201);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/notes").status, 200);
+  auto report = tool("grant_usage", {{"box", "notes"}});
+  ASSERT_TRUE(report.is_array()) << json::dump(report);
+  const auto& tables = report.at(0).at("strategies").at(0).at("tables").as_array();
+  // Sorted by table name: extra, then notes.
+  EXPECT_EQ(tables.at(0).at("table"), "extra");
+  EXPECT_EQ(tables.at(0).at("calls"), 0);
+  EXPECT_EQ(tables.at(0).at("findings").at(0).at("kind"), "unused_table");
+  const auto& notes = tables.at(1).as_object();
+  EXPECT_EQ(notes.at("calls"), 2);
+  EXPECT_EQ(notes.at("granted").at("ops"), "riud");
+  EXPECT_EQ(json::dump(notes.at("used").at("read")), R"(["text"])");
+  EXPECT_EQ(notes.at("used").at("insert"), true);
+  std::map<std::string, bj::value> kinds;
+  for (const auto& f : notes.at("findings").as_array()) kinds[std::string(f.at("kind").as_string())] = f;
+  ASSERT_TRUE(kinds.count("unused_write")) << json::dump(notes);
+  EXPECT_EQ(json::dump(kinds["unused_write"].at("operations")), R"(["update","delete"])");
+  ASSERT_TRUE(kinds.count("narrow_read")) << json::dump(notes);
+  EXPECT_EQ(json::dump(kinds["narrow_read"].at("suggested")), R"(["text"])");
+  EXPECT_EQ(report.at(0).at("findings"), 3);
+  EXPECT_TRUE(tool("grant_usage", {{"box", "nope"}}).as_object().contains("error"));
+}

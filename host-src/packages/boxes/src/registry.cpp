@@ -255,6 +255,9 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
   auto t = load_types(*m, types_text, error);
   if (!t) return std::nullopt;
   if (check_ && !check_(*m, error)) return std::nullopt;
+  if (advice_) {
+    for (auto& w : advice_(*m)) m->warnings.push_back(std::move(w));
+  }
   std::string wasm;
   if (!runtime::wasm::Engine::is_binary(module)) {
     if (!runtime::wasm::Engine::wat_to_wasm(module, &wasm, error)) return std::nullopt;

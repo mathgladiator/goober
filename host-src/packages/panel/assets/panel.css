@@ -117,6 +117,13 @@ svg.flow path.edge { fill: none; stroke: var(--edge); opacity: .55; }
 svg.flow path.edge.idle { stroke-dasharray: 3 4; opacity: .4; }
 svg.flow path.edge.bad { stroke: var(--server); opacity: .7; }
 svg.flow path.edge:hover { opacity: 1; }
+svg.flow .node.table rect { stroke: var(--p99); stroke-dasharray: 2 2; }
+svg.flow path.edge.grant { stroke: var(--p99); }
+svg.flow path.edge.grant.unused { stroke: var(--muted); stroke-dasharray: 6 5; opacity: .5; }
+svg.flow text.ops { fill: var(--fg); font: 600 10.5px ui-monospace, monospace; }
+svg.flow text.ops.unused { fill: var(--muted); }
+ul.findings { margin: .6em 0 0; padding-left: 1.2em; }
+ul.findings li { margin: .25em 0; }
 .h0f { fill: var(--cold); } .h1f { fill: color-mix(in srgb, var(--hot) 20%, var(--cold)); }
 .h2f { fill: color-mix(in srgb, var(--hot) 45%, var(--cold)); } .h3f { fill: color-mix(in srgb, var(--hot) 70%, var(--cold)); }
 .h4f { fill: var(--hot); }

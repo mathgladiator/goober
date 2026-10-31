@@ -679,6 +679,8 @@ class Host {
                                      int64_t now_ms);
   std::string push_call(struct CallContext& ctx, const manifest::ExternalService& svc, const manifest::ExternalMethod& m,
                         const boost::json::value& request);
+  // What boxes do with their grants, since start (grant_usage.h; data_tools.cpp's grant_usage).
+  std::unique_ptr<class GrantUsage> grant_usage_;
   // Source projects and their builds (source_tools.cpp, builder.cpp).
   std::unique_ptr<source::Store> source_;
   void register_source_tools();

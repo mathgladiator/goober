@@ -49,6 +49,7 @@ struct Auth {
   bool write = false;                                // an operator's db_exec
   std::set<std::string> tables;                      // the database's real tables; anything else read is a CTE
   std::string denied;
+  std::map<std::string, TableUse> uses;              // what the statement was allowed to do, by table
 };
 
 // A second check, independent of the authorizer: the compiled program itself. SQLite's
@@ -141,6 +142,7 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
       if (!g && !auth.tables.count(t) && !host_table(t)) return SQLITE_OK;
       if (!g) return deny("strategy " + auth.strategy->name + " can't read table " + t);
       if (!g->read_all && !g->read.count(c)) return deny("strategy " + auth.strategy->name + " can't read " + t + "." + c);
+      if (!c.empty()) auth.uses[t].read.insert(c);
       return SQLITE_OK;
     case SQLITE_INSERT:
     case SQLITE_DELETE:
@@ -159,6 +161,10 @@ int authorize(void* p, int code, const char* a, const char* b, const char*, cons
       if (code == SQLITE_UPDATE && !g->update_all && !g->update.count(c)) {
         return deny("strategy " + auth.strategy->name + " can't update " + t + "." + c);
       }
+      auto& use = auth.uses[t];
+      if (code == SQLITE_INSERT) use.insert = true;
+      if (code == SQLITE_DELETE) use.remove = true;
+      if (code == SQLITE_UPDATE && !c.empty()) use.update.insert(c);
       return SQLITE_OK;
     }
     case SQLITE_FUNCTION:
@@ -768,6 +774,10 @@ std::string Session::run(std::string_view strategy, std::string_view sql, std::s
     return fail(broken_);
   }
   if (wrote && !result.contains("error")) wrote_.insert(st->name);
+  if (!result.contains("error")) {
+    auto& used = used_[st->name];
+    for (const auto& [table, use] : auth.uses) used[table].merge(use);
+  }
   return json::dump(result);
 }
 

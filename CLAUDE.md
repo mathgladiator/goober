@@ -96,7 +96,8 @@ Read these before doing design work:
     `/attachment/$id.$ext` with uploads and MCP tools.
   - `design/machine/008.Databases.md`: tenant databases: JSON schemas that only expand,
     `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
-    and the operator's db tools and CLI.
+    the operator's db tools and CLI, and grants as a box's whole reach with `grant_usage`
+    (§ 4.1).
   - `design/machine/009.OAuth.md`: OAuth 2.1 for the terminal and agents: person and agent
     clients, PKCE codes with consent, rotating refresh tokens, the device flow, bearer tokens,
     and `"agents": true`.

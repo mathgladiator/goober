@@ -70,6 +70,10 @@ class BoxRegistry {
   // and databases. It runs on every upload and promotion, before anything is stored.
   using ManifestCheck = std::function<bool(const manifest::Manifest&, std::string* error)>;
   void set_manifest_check(ManifestCheck check) { check_ = std::move(check); }
+  // Advice the host adds to an upload's warnings, like grants wider than a box needs. It
+  // never refuses anything.
+  using ManifestAdvice = std::function<std::vector<std::string>(const manifest::Manifest&)>;
+  void set_manifest_advice(ManifestAdvice advice) { advice_ = std::move(advice); }
 
   // Loads every box's active version. Problems are returned as warnings.
   std::vector<std::string> load_all();
@@ -107,6 +111,7 @@ class BoxRegistry {
   wal::HostWal& wal_;
   runtime::wasm::Engine& engine_;
   ManifestCheck check_;
+  ManifestAdvice advice_;
   mutable std::mutex mu_;  // serializes uploads and promotions
   mutable std::mutex snapshot_mu_;
   std::shared_ptr<const ActiveSet> active_;

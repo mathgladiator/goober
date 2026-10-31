@@ -48,7 +48,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 021 PrimaryKeys | none | SQLite rowids (008 §9). | Host-minted ids, range leases. |
 | 023 Sourcing | none | | Sources, `append`, event routes, cursors. |
 | 025 DataShape | none | A SQLite transaction per database per request (008 §6). | Write sets, bundles, layered reads, leases, worst-case checks. |
-| 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets. | `pattern: "query"` iterators, plan checks, pagination cursors. |
+| 028 Query | partial | Direct SQL under SQLite's authorizer, row limits, step budgets; grants are a box's whole reach, and `grant_usage` shows what each is used for (008 § 4.1). | `pattern: "query"` iterators, plan checks, pagination cursors. |
 | 030 Larger env. | partial | `external` services by verb and path, `require` pins from the context, credentials by key name, per-request budgets, never past the request's deadline, an egress log (015); box-to-box calls (016); the web as a service through the host's robot (017). | OpenAPI documents and generated clients, async calls, per-service rate limits. |
 | 035 Outbox | partial | Elements committed with the request's writes, a dispatcher delivering each service from its own oldest element (one stuck service never blocks another), backoff, stable idempotency keys, dead letters and retry, and stranded outboxes found by scanning storage (015). | Result routes, delivery to internal routes. |
 | 036 Json | partial | The types document in the strict subset (plus `date-time` and `date`), stored with the version, used to check bodies, queries, tool inputs, and typed responses; int64 as strings; defaults filled (011). | `token`, change classification, generated structures and serializers. |
@@ -500,6 +500,19 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       logs, under `source/` in the backup bucket, never rotated; `goober-host source-mirror`
       reads it back; `git am` replays it (tested).
 - [ ] Untried against real S3, like the rest of the backups.
+
+### Phase 31: grants as a box's limits, down to the table (008 § 4.1)
+- [x] Every way into an ungranted table or column refused (subqueries, joins, CTEs,
+      `RETURNING`, upserts, `sqlite_master`, `pragma_*`, views, triggers, temp tables,
+      `ATTACH`), probed in one test.
+- [x] Use recorded from the authorizer per box version; `grant_usage` compares grants with
+      use (unused tables, writes, columns; `true` where a list would do, with the list).
+- [x] The panel's graphs show each database's tables with the operations granted, dashed
+      while unused; a box's Grants card.
+- [x] Upload advice for `update: true` on wide tables; `box_guide` says to grant only what a
+      box uses.
+- [ ] Use is kept in memory since start; a long window (kept across restarts) would make
+      `unused` mean more for routes that run rarely.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets and host ids (025, 021),

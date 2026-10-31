@@ -273,6 +273,42 @@ TEST_F(PanelTest, TheSourceViewReadsProjectsJobsAndBoxHistory) {
   EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body.find("async source()"), std::string::npos);
 }
 
+// The data flow down to tables (008 § 4): a box's graph shows each table its strategies grant,
+// with the operations, dashed until a statement uses them; the Grants card reads grant_usage.
+TEST_F(PanelTest, TheGraphShowsEachTableAndItsGrant) {
+  std::string token = "0123456789abcdef0123";
+  auto put = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema_put",
+      "arguments":{"schema":{"schema":"shop1","tables":{"orders":{"columns":{"paid":{"type":"boolean","default":false}}},
+        "notes":{"columns":{"text":{"type":"string"}}}}}}}})");
+  ASSERT_EQ(put.status, 200) << put.body;
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"shop","domains":["*"],
+      "data":{"sqlite3":{"db":{"schema":"shop1","database":"shop","pattern":"sql",
+        "tables":{"orders":{"read":["paid"],"update":["paid"]},"notes":{"insert":true}}}}},
+      "routes":{"http":{"/x":{"get":{"name":"x","public":true}}}}})",
+                                   R"((module (memory (export "memory") 1) (func (export "goober_route_x") (result i32) (i32.const 0))))",
+                                   &err))
+      << err;
+  std::string cookie = sign_in("watcher@example.com");
+  ASSERT_FALSE(cookie.empty());
+  auto graph = parse(api(cookie, "box_graph", R"({"box":"shop"})").body)["result"].as_object();
+  std::map<std::string, bj::object> nodes, edges;
+  for (const auto& n : graph["nodes"].as_array()) nodes[std::string(n.at("id").as_string())] = n.as_object();
+  for (const auto& e : graph["edges"].as_array()) edges[std::string(e.at("to").as_string())] = e.as_object();
+  ASSERT_TRUE(nodes.count("table:shop.orders")) << json::dump(graph);
+  EXPECT_EQ(nodes["table:shop.orders"].at("column"), 3);
+  EXPECT_EQ(nodes["table:shop.orders"].at("database"), "shop");
+  EXPECT_EQ(edges["table:shop.orders"].at("from"), "db:shop");
+  EXPECT_EQ(edges["table:shop.orders"].at("ops"), "ru");
+  EXPECT_EQ(edges["table:shop.notes"].at("ops"), "i");
+  EXPECT_EQ(edges["table:shop.notes"].at("unused"), true);
+  EXPECT_EQ(edges["table:shop.orders"].at("grants").at(0).at("read").at(0), "paid");
+  auto usage = parse(api(cookie, "grant_usage", R"({"box":"shop"})").body)["result"];
+  EXPECT_EQ(usage.at(0).at("strategies").at(0).at("tables").at(0).at("findings").at(0).at("kind"), "unused_table");
+  EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body.find("function grantsCard"),
+            std::string::npos);
+}
+
 TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {
   uint16_t panel = host->panel_port();
   ASSERT_NE(panel, 0);

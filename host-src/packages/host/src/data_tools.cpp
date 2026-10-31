@@ -8,6 +8,7 @@
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "box_guide.h"
+#include "grant_usage.h"
 #include "rust_binding.h"
 #include "keys.h"
 #include "goober/host/host.h"
@@ -240,6 +241,27 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
 
 void Host::register_data_tools() {
   using mcp::any_property;
+  grant_usage_ = std::make_unique<GrantUsage>(started_ms_);
+  mcp_->add_tool(
+      {"grant_usage",
+       "What each active box's data strategies grant, table by table, against what its statements actually did since "
+       "the host started (tables, columns, insert, update, delete), with findings: tables granted and never touched, "
+       "writes granted and never made, and read: true or update: true where the columns used would do (a suggested "
+       "list). Narrow a box's grants to these before its next version.",
+       mcp::object_schema({{"box", mcp::string_property("Only this box.")}}, {}), [this](const bj::object& args) {
+         auto only = arg(args, "box");
+         bj::array out;
+         for (const auto& [name, box] : boxes_->active()->boxes) {
+           if (only && *only != name) continue;
+           bool sql = false;
+           for (const auto& st : box->manifest.data) sql |= st.runnable();
+           if (!sql) continue;
+           out.push_back(grant_report(box->manifest, box->version, grant_usage_->of(name, box->version),
+                                      grant_usage_->since_ms(), schemas_.get()));
+         }
+         if (only && out.empty()) return ToolResult::fail("no active box named " + *only + " with sql strategies");
+         return ToolResult::ok(std::move(out));
+       }});
   mcp_->add_tool({"box_guide",
                   "Read this first when building a product: how boxes, manifests, routes, MCP tools, timers, "
                   "databases, and types work on goober, and how to deploy them.",

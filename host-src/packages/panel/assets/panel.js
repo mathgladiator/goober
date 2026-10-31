@@ -217,10 +217,15 @@ function timeAxis(g, series, L, W, y) {
 
 // Columns of nodes, joined by curves whose width is traffic and whose color is health.
 function flowGraph(graph, onNode) {
-  const cols = [[], [], []];
-  for (const n of graph.nodes) cols[Math.min(2, Math.max(0, n.column))].push(n);
-  for (const c of cols) c.sort((a, b) => (a.kind === b.kind ? a.label.localeCompare(b.label) : a.kind.localeCompare(b.kind)));
-  const NW = 210, NH = 46, GAP = 14, W = 1000, colX = [10, (W - NW) / 2, W - NW - 10];
+  // Three columns at least; tables (008 § 4) add a fourth, right of their databases.
+  const ncol = Math.max(3, 1 + Math.max(0, ...graph.nodes.map((n) => n.column || 0)));
+  const cols = Array.from({ length: ncol }, () => []);
+  for (const n of graph.nodes) cols[Math.min(ncol - 1, Math.max(0, n.column))].push(n);
+  // Tables sit beside their database: by database, then name.
+  const order = (n) => n.kind === 'table' ? (n.database || '') + '\u0000' + n.label : n.label;
+  for (const c of cols) c.sort((a, b) => (a.kind === b.kind ? order(a).localeCompare(order(b)) : a.kind.localeCompare(b.kind)));
+  const NW = 210, NH = 46, GAP = 14, W = Math.max(1000, ncol * 290);
+  const colX = cols.map((_, i) => 10 + i * (W - NW - 20) / (ncol - 1));
   const rows = Math.max(1, ...cols.map((c) => c.length));
   const H = rows * (NH + GAP) + GAP;
   const at = {};
@@ -244,11 +249,24 @@ function flowGraph(graph, onNode) {
     }
     const width = e.n ? 1.5 + 14 * Math.log1p(e.n) / Math.log1p(maxN) : 1;
     const bad = e.n && e.errors / e.n >= 0.05;
-    const path = s('path', { class: 'edge' + (e.n ? '' : ' idle') + (bad ? ' bad' : ''), d, 'stroke-width': width.toFixed(1) });
-    path.appendChild(s('title', {}, `${e.from.replace(/^\w+:/, '')} → ${e.to.replace(/^\w+:/, '')}: ${fmt.n(e.n)} ${e.what || ''}` +
-      (e.errors ? `, ${fmt.n(e.errors)} failed` : '') + (e.us ? `, ${fmt.us(e.us)} CPU` : '') +
-      (e.bytes_in ? `, ${fmt.bytes(e.bytes_out)} out / ${fmt.bytes(e.bytes_in)} in` : '') + (e.approx ? ' (split evenly across its databases)' : '')));
+    const grant = !!e.grants;
+    const path = s('path', { class: 'edge' + (e.n ? '' : ' idle') + (bad ? ' bad' : '') + (grant ? ' grant' : '') +
+      (e.unused ? ' unused' : ''), d, 'stroke-width': (grant ? Math.min(width, 6) : width).toFixed(1) });
+    const title = grant
+      ? `${e.to.replace(/^table:/, '')}: ` + e.grants.map((gr) => `${gr.box} (${gr.strategy}) may ${gr.ops}` +
+          (Array.isArray(gr.read) ? `, reads ${gr.read.join(', ') || 'nothing'}` : gr.read ? ', reads every column' : '') +
+          (Array.isArray(gr.update) ? (gr.update.length ? `, updates ${gr.update.join(', ')}` : '') : gr.update ? ', updates every column' : '') +
+          (gr.calls ? `; used ${gr.used_ops || 'nothing'} in ${fmt.n(gr.calls)} calls` : '; not used since the host started')).join('\n')
+      : `${e.from.replace(/^\w+:/, '')} → ${e.to.replace(/^\w+:/, '')}: ${fmt.n(e.n)} ${e.what || ''}` +
+        (e.errors ? `, ${fmt.n(e.errors)} failed` : '') + (e.us ? `, ${fmt.us(e.us)} CPU` : '') +
+        (e.bytes_in ? `, ${fmt.bytes(e.bytes_out)} out / ${fmt.bytes(e.bytes_in)} in` : '') + (e.approx ? ' (split evenly across its databases)' : '');
+    path.appendChild(s('title', {}, title));
     g.appendChild(path);
+    if (grant && e.ops) {
+      // The operations granted (r, i, u, d), on the edge just short of the table.
+      const lx = b.x - 8, ly = b.y + NH / 2 - 4;
+      g.appendChild(s('text', { class: 'ops' + (e.unused ? ' unused' : ''), x: lx, y: ly, 'text-anchor': 'end' }, e.ops));
+    }
   }
   for (const n of graph.nodes) {
     const p = at[n.id];
@@ -273,6 +291,7 @@ function nodeSub(n) {
     case 'box': return `${fmt.n(n.n || 0)} req · ${fmt.us(n.us)} CPU` + (n.n5 ? ` · ${fmt.n(n.n5)} 5xx` : '');
     case 'route': return `${fmt.n(n.n || 0)} · p99 ${fmt.us(n.p99_us)}` + (n.n5 ? ` · ${fmt.n(n.n5)} 5xx` : '');
     case 'database': return 'database';
+    case 'table': return 'table in ' + (n.database || '');
     case 'service': return n.mail ? 'mail' : n.web ? 'the web (robot)' : (n.base || 'service');
     case 'pages': return 'pages and files';
     case 'host': return 'host routes';
@@ -439,8 +458,10 @@ const views = {
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Data flow'), windowPicker(render)),
       wideCard('', h('p', { class: 'muted small' },
-        'Tenants on the left, then their pages and boxes, then the databases, services, and boxes those reach. ' +
-        'Width is traffic; a box\'s bar is its share of CPU time; red edges fail 5% or more. Click a box to open it.'),
+        'Tenants on the left, then their pages and boxes, then the databases, services, and boxes those reach, and ' +
+        'each database\'s tables on the right: the letters are what boxes may do there (read, insert, update, delete), and a ' +
+        'dashed table edge is a grant no statement has used since the host started. Width is traffic; a box\'s bar is its ' +
+        'share of CPU time; red edges fail 5% or more. Click a box to open it.'),
       flowGraph(g, (n) => { location.hash = '#/box/' + encodeURIComponent(n.label); })),
     ];
   },
@@ -467,11 +488,12 @@ const views = {
   },
 
   async box(params, name) {
-    const [graph, versions, logs, changes, sourceHistory] = await Promise.all([
+    const [graph, versions, logs, changes, sourceHistory, grants] = await Promise.all([
       api('box_graph', { window: state.window, box: name }), api('version_list', { box: name }),
       api('box_logs', { box: name, limit: 30 }).catch(() => []),
       api('changes', { kind: 'deploy', limit: 200, tenant: focus() ? focus()[0] : '' }).catch(() => ({ changes: [] })),
-      api('source_box_history', { box: name, limit: 20 }).catch(() => ({ deploys: [] }))]);
+      api('source_box_history', { box: name, limit: 20 }).catch(() => ({ deploys: [] })),
+      api('grant_usage', { box: name }).catch(() => [])]);
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
     const deploys = changes.changes.filter((c) => c.target === name);
@@ -482,6 +504,7 @@ const views = {
         h('a', { href: '#/traffic?box=' + encodeURIComponent(name) }, 'Traffic →')),
       manifest && manifest.manifest.mission ? h('p', { class: 'muted' }, manifest.manifest.mission) : null,
       wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) location.hash = '#/box/' + encodeURIComponent(n.label); })),
+      grantsCard(grants[0]),
       h('div', { class: 'grid' },
         wideCard('Routes', table([
           { label: 'Protocol', get: (r) => r.protocol },
@@ -1105,6 +1128,36 @@ function jobsTable(jobs, withProject) {
     { label: 'Queued', get: (j) => fmt.time(Date.parse(j.queued_at)), cls: () => 'muted' },
     { label: 'Boxes', get: (j) => (j.boxes || []).map((b) => b.box + (b.version ? ' ' + String(b.version).slice(0, 8) : '')).join(', '), cls: () => 'mono muted' },
   ].filter(Boolean), jobs, (j) => { location.hash = '#/job/' + j.job; });
+}
+
+// On a box's page: each table its strategies grant, what was actually used since the host
+// started, and what to narrow (grant_usage, 008 § 4).
+function grantsCard(report) {
+  if (!report || !report.strategies || !report.strategies.length) return null;
+  const cols = (v) => v === true ? 'every column' : (v || []).length ? v.join(', ') : '—';
+  const rows = [];
+  for (const st of report.strategies) for (const t of st.tables) rows.push({ st, t });
+  const findings = rows.flatMap(({ st, t }) => t.findings.map((f) => ({ st, t, f })));
+  return wideCard(`Grants (since ${fmt.time(Date.parse(report.since))})`,
+    h('p', { class: 'muted small' }, 'What each table\'s grant allows, and what this version\'s statements did with it. ' +
+      'Grant only what is used: narrow grants are the box\'s limits.'),
+    table([
+      { label: 'Strategy', get: (r) => r.st.strategy, cls: () => 'mono muted' },
+      { label: 'Database', get: (r) => r.st.database, cls: () => 'mono' },
+      { label: 'Table', get: (r) => r.t.table, cls: () => 'mono' },
+      { label: 'Granted', get: (r) => r.t.granted.ops, cls: () => 'mono' },
+      { label: 'Used', get: (r) => [r.t.used.read.length ? 'r' : '', r.t.used.insert ? 'i' : '', r.t.used.update.length ? 'u' : '',
+        r.t.used.delete ? 'd' : ''].join('') || '—', cls: (r) => 'mono' + (r.t.calls ? '' : ' muted') },
+      { label: 'Reads', get: (r) => cols(r.t.granted.read), cls: () => 'muted' },
+      { label: 'Read', get: (r) => cols(r.t.used.read), cls: () => 'muted' },
+      { label: 'Updates', get: (r) => cols(r.t.granted.update), cls: () => 'muted' },
+      { label: 'Calls', num: true, get: (r) => fmt.n(r.t.calls) },
+    ], rows),
+    findings.length ? h('ul', { class: 'findings' }, findings.map(({ st, t, f }) => h('li', {},
+      h('code', {}, `${st.strategy}.${t.table}`), ' ', f.text,
+      f.suggested ? [': ', h('code', {}, JSON.stringify(f.suggested))] : null,
+      f.columns ? [': ', h('code', {}, f.columns.join(', '))] : null)))
+      : h('p', { class: 'muted small' }, 'Nothing to narrow: every grant has been used.'));
 }
 
 // On a box's page: the source deploys behind its versions (020 § 9).
