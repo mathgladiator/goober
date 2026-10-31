@@ -2,7 +2,7 @@
 # Deploys goober to a server over ssh: builds the server binary here, copies it, and runs
 # tools/server-bootstrap.sh there (Caddy, a goober user, setup, systemd units, backups).
 #
-#   tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail]
+#   tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail] [--reprovision-mail]
 #                   [--add-tenant [DOMAIN]] [--tenant-name NAME] [--tenant-owner EMAIL]
 #                   [--tenant-postal ADDRESS] [--tenant-www]
 #
@@ -17,7 +17,9 @@
 # skips it.
 # Mail in is part of every deploy too (design/machine/024.MailIn.md): Stalwart, installed or
 # upgraded to the pinned version, on port 25, handing every message to the host's MTA hook.
-# --without-mail skips it.
+# It is provisioned again only when something it is made from changed (the pinned version, its
+# configuration, the relayed domains, the hook, the units) or it isn't up; otherwise it is left
+# running as it is. --reprovision-mail provisions it anyway. --without-mail skips it.
 # --add-tenant launches one more site on this host during the deploy: a wizard for just the new
 # tenant (its domain, name, first owner, postal address, pages, www.), which adds it to
 # host.json and to Caddy as a site of its own, checked and put back if refused. It needs a
@@ -34,7 +36,7 @@ set -euo pipefail
 # rest of the run read from the middle of a line.
 main() {
 
-USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail]
+USAGE="usage: tools/deploy.sh [user@]server [DIR] [--user LOGIN] [--run-as NAME] [--without-rust] [--without-mail] [--reprovision-mail]
        [--add-tenant [DOMAIN]] [--tenant-name NAME] [--tenant-owner EMAIL] [--tenant-postal ADDRESS] [--tenant-www]"
 TARGET="${1:?$USAGE}"
 DIR=""
@@ -42,6 +44,7 @@ LOGIN=""
 RUN_AS="goober"
 WITH_RUST="--with-rust"
 WITHOUT_MAIL=""
+REPROVISION_MAIL=""
 ADD_TENANT=""
 TENANT_ARGS=()
 shift
@@ -50,6 +53,7 @@ while (($#)); do
     --with-rust) WITH_RUST=--with-rust ;;  # the default; kept so older commands still work
     --without-rust) WITH_RUST="" ;;
     --without-mail) WITHOUT_MAIL=--without-mail ;;
+    --reprovision-mail) REPROVISION_MAIL=--reprovision-mail ;;
     --user) LOGIN="${2:?$USAGE}"; shift ;;
     --user=*) LOGIN="${1#--user=}" ;;
     --run-as) RUN_AS="${2:?$USAGE}"; shift ;;
@@ -149,7 +153,7 @@ if [[ -n "$ADD_TENANT" ]]; then
   TENANT_REMOTE="--add-tenant"
   ((${#TENANT_ARGS[@]})) && TENANT_REMOTE+=" $(printf '%q ' "${TENANT_ARGS[@]}")"
 fi
-ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL $PUBLIC_ARG --build $BUILD $TENANT_REMOTE; rm -rf $REMOTE"
+ssh -t "${SSH_OPTS[@]}" "$TARGET" "sudo bash $REMOTE/server-bootstrap.sh $(printf %q "$DIR") --user $RUN_AS $WITH_RUST $WITHOUT_MAIL $REPROVISION_MAIL $PUBLIC_ARG --build $BUILD $TENANT_REMOTE; rm -rf $REMOTE"
 
 }
 

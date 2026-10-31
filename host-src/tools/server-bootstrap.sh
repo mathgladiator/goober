@@ -19,11 +19,13 @@ BUILD=""
 RUN_AS="goober"
 WITH_RUST=""
 WITHOUT_MAIL=""
+REPROVISION_MAIL=""
 ADD_TENANT="" T_DOMAIN="" T_NAME="" T_OWNER="" T_POSTAL="" T_WWW=""
 while (($#)); do
   case "$1" in
     --with-rust) WITH_RUST=--with-rust ;;
     --without-mail) WITHOUT_MAIL=1 ;;
+    --reprovision-mail) REPROVISION_MAIL=1 ;;
     --user) RUN_AS="${2:-}"; shift ;;
     --public) PUBLIC="${2:-}"; shift ;;
     --build) BUILD="${2:-}"; shift ;;
@@ -573,37 +575,66 @@ import json, re, sys
 c = json.load(sys.stdin)
 print(",".join(d for d, e in sorted(c.get("domains", {}).items()) if "redirect-to" not in e and re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d) and not re.fullmatch(r"[0-9.]+", d)))
 ')"
-  # configure runs with Stalwart stopped, in a private network namespace root makes: its
-  # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
-  STALWART_STOPPED=1
-  systemctl stop stalwart 2>/dev/null || true
-  unshare --net -- sh -c 'ip link set lo up && exec runuser -u stalwart -- env STALWART_PRIVATE_NETNS=1 "$@"' sh \
-    bash "$SW" configure "$MAIL_HOME" --smtp 0.0.0.0:25 --admin 127.0.0.1:8025 \
-    --hook-url "http://127.0.0.1:$PORT/internal/routes/mta/stalwart" --hook-token-file "$MAIL_HOME/hook.token" \
-    --max-bytes 26214400 --hostname "${PLATFORM:-localhost}" ${RELAY:+--relay-domains "$RELAY"} \
-    --cert "$MAIL_HOME/tls/cert.pem" --key "$MAIL_HOME/tls/key.pem"
-  bash "$SW" systemd "$MAIL_HOME" stalwart > /etc/systemd/system/stalwart.service
-  cat > /etc/systemd/system/goober-stalwart-tls.service <<UNIT
-[Unit]
+  SW_UNIT="$(bash "$SW" systemd "$MAIL_HOME" stalwart)"
+  TLS_SERVICE="[Unit]
 Description=Copy Caddy's certificate to Stalwart
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/goober/stalwart-tls.sh ${PLATFORM:-localhost}
-UNIT
-  cat > /etc/systemd/system/goober-stalwart-tls.timer <<UNIT
-[Unit]
+ExecStart=/usr/local/lib/goober/stalwart-tls.sh ${PLATFORM:-localhost}"
+  TLS_TIMER="[Unit]
 Description=Copy Caddy's certificate to Stalwart, daily
 [Timer]
 OnCalendar=daily
 RandomizedDelaySec=1h
 Persistent=true
 [Install]
-WantedBy=timers.target
-UNIT
-  systemctl daemon-reload
-  systemctl enable --now stalwart goober-stalwart-tls.timer >/dev/null 2>&1
-  systemctl restart stalwart
-  STALWART_STOPPED=""
+WantedBy=timers.target"
+  # Provisioning stops Stalwart and rewrites its configuration, so it runs only when something
+  # Stalwart is made from changed: stalwart.sh (the pinned version and the configuration it
+  # writes), the binary, the hook's port and token, the host name, the domains relayed, and
+  # the units. Or when Stalwart isn't up and listening, or with --reprovision-mail. Renewed
+  # certificates don't need it: the timer above copies them and reloads.
+  SW_STAMP=/usr/local/lib/goober/stalwart.provisioned
+  SW_PRINT="$( { sha256sum < "$SW"; "$MAIL_HOME/bin/stalwart" --version 2>/dev/null || true
+                printf '%s\n' "$PORT" "${PLATFORM:-localhost}" "$RELAY" "$SW_UNIT" "$TLS_SERVICE" "$TLS_TIMER"
+                sha256sum < "$MAIL_HOME/hook.token"; } | sha256sum | cut -d' ' -f1)"
+  SW_WHY=""
+  if [[ -n "$REPROVISION_MAIL" ]]; then SW_WHY="--reprovision-mail"
+  elif [[ ! -f "$SW_STAMP" ]]; then SW_WHY="first provisioning"
+  elif [[ "$(cat "$SW_STAMP")" != "$SW_PRINT" ]]; then SW_WHY="its version, configuration, relayed domains, or units changed"
+  elif ! systemctl is-active --quiet stalwart; then SW_WHY="it isn't running"
+  elif ! systemctl is-enabled --quiet goober-stalwart-tls.timer 2>/dev/null; then SW_WHY="the certificate timer is off"
+  elif [[ -z "$(ss -ltnH 'sport = :25' 2>/dev/null)" ]]; then SW_WHY="nothing listens on port 25"
+  fi
+  if [[ -z "$SW_WHY" ]]; then
+    echo "   Stalwart $("$MAIL_HOME/bin/stalwart" --version 2>/dev/null) is running and nothing it is made from changed: left as it is"
+  else
+    echo "   provisioning Stalwart: $SW_WHY"
+    # configure runs with Stalwart stopped, in a private network namespace root makes: its
+    # temporary admin listener (on every interface, Stalwart's choice) never meets a network.
+    rm -f "$SW_STAMP"  # until provisioning finishes, the next deploy provisions again
+    STALWART_STOPPED=1
+    systemctl stop stalwart 2>/dev/null || true
+    unshare --net -- sh -c 'ip link set lo up && exec runuser -u stalwart -- env STALWART_PRIVATE_NETNS=1 "$@"' sh \
+      bash "$SW" configure "$MAIL_HOME" --smtp 0.0.0.0:25 --admin 127.0.0.1:8025 \
+      --hook-url "http://127.0.0.1:$PORT/internal/routes/mta/stalwart" --hook-token-file "$MAIL_HOME/hook.token" \
+      --max-bytes 26214400 --hostname "${PLATFORM:-localhost}" ${RELAY:+--relay-domains "$RELAY"} \
+      --cert "$MAIL_HOME/tls/cert.pem" --key "$MAIL_HOME/tls/key.pem"
+    printf '%s\n' "$SW_UNIT" > /etc/systemd/system/stalwart.service
+    printf '%s\n' "$TLS_SERVICE" > /etc/systemd/system/goober-stalwart-tls.service
+    printf '%s\n' "$TLS_TIMER" > /etc/systemd/system/goober-stalwart-tls.timer
+    systemctl daemon-reload
+    systemctl enable --now stalwart goober-stalwart-tls.timer >/dev/null 2>&1
+    systemctl restart stalwart
+    STALWART_STOPPED=""
+    # Recorded once it is up: a provisioning that didn't finish is done again next time.
+    if systemctl is-active --quiet stalwart; then
+      SW_STAMP_TMP="$(mktemp)"
+      printf '%s\n' "$SW_PRINT" > "$SW_STAMP_TMP"
+      install -m 0600 "$SW_STAMP_TMP" "$SW_STAMP"
+      rm -f "$SW_STAMP_TMP"
+    fi
+  fi
   # goober takes the hook once its config names the token.
   if sudo -u "$RUN_AS" python3 -c '
 import json, sys

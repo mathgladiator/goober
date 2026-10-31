@@ -483,6 +483,8 @@ spend cap. Nothing is built until Q42 to Q49 are answered.
       postal address, terms and privacy, www.), shown the DNS it needs, added to host.json and
       to Caddy as a site block of its own, checked, proved by a restart, put back if refused;
       flags for the answers without a terminal; `tools/tenant_edit.py`, tested in CTest.
+- [x] Stalwart is provisioned only when something it is made from changed or it isn't up (a
+      fingerprint kept beside its scripts); `--reprovision-mail` forces it (024 § 7).
 - [ ] More checks as operating teaches them: certificates' expiry, disk, the backup key and
       vault key copied off the machine.
 

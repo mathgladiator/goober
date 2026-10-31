@@ -159,6 +159,10 @@ server; MX if mail comes in) and whether they're there yet, then asks before cha
 both files are put back. Before DNS points here the site is added but has no certificate yet;
 deploy again once it does, or just wait: Caddy gets one on the first visit.
 
+Stalwart (mail in) is left running as it is unless something it's made from changed (its
+version, its configuration, the domains it relays for) or it isn't up; the deploy says which.
+`--reprovision-mail` on the deploy provisions it anyway.
+
 If any step fails partway, the deploy says which line, starts Stalwart again if it had
 stopped it, and puts the previous build back unless the new one is up and ready. A new build
 that isn't ready within a minute is rolled back on its own: the deploy prints the
