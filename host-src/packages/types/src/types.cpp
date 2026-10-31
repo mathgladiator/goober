@@ -14,9 +14,9 @@ const std::set<std::string> kAnnotations = {"description", "title", "example", "
 
 // Keywords outside the subset, refused by name so the message says why (036 § A strict subset).
 const std::set<std::string> kRefused = {"oneOf", "anyOf", "allOf", "not", "patternProperties", "if", "then",
-                                        "else", "nullable", "const", "dependentRequired", "dependentSchemas",
+                                        "else", "nullable", "dependentRequired", "dependentSchemas",
                                         "unevaluatedProperties", "propertyNames", "uniqueItems", "prefixItems",
-                                        "contains", "pattern", "multipleOf", "exclusiveMinimum", "exclusiveMaximum"};
+                                        "contains", "multipleOf", "exclusiveMinimum", "exclusiveMaximum"};
 
 constexpr size_t kMaxDepth = 32;
 constexpr int64_t kMaxExpandedNodes = 10000;
@@ -114,6 +114,13 @@ bool parse_into(const bj::value& v, const std::string& where, bool scalars_only,
   for (const auto& kv : o) {
     std::string k(kv.key());
     if (kRefused.count(k)) return fail(error, where + ": \"" + k + "\" is outside goober's subset (036.Json.md)");
+    // Not refused for ever: a pattern needs a regex engine that runs in linear time on what any
+    // caller sends (no backtracking), and the host doesn't have one yet (011 § 2).
+    if (k == "pattern") {
+      return fail(error, where + ": \"pattern\" isn't supported yet: the host checks patterns only with a regex engine "
+                             "that runs in linear time on any input, and it has none yet; use enum, format, minLength "
+                             "and maxLength, or check the value in the box");
+    }
   }
   if (auto* d = o.if_contains("description"); d && d->is_string()) out->description = std::string(d->as_string());
 
@@ -140,7 +147,7 @@ bool parse_into(const bj::value& v, const std::string& where, bool scalars_only,
     if (!f->is_string()) return fail(error, where + ": format must be a string");
     format = std::string(f->as_string());
   }
-  std::set<std::string> allowed = {"type", "default"};
+  std::set<std::string> allowed = {"type", "default", "const"};
   if (t == "integer") {
     if (format == "int32") out->kind = Schema::Kind::kInt32;
     else if (format == "int64") out->kind = Schema::Kind::kInt64;
@@ -216,6 +223,36 @@ bool parse_into(const bj::value& v, const std::string& where, bool scalars_only,
       }
     }
   }
+  if (auto* c = o.if_contains("const")) {
+    bool ok = false;
+    switch (out->kind) {
+      case Schema::Kind::kString: ok = c->is_string(); break;
+      case Schema::Kind::kBoolean: ok = c->is_bool(); break;
+      case Schema::Kind::kInt32: ok = c->is_int64() && c->as_int64() >= INT32_MIN && c->as_int64() <= INT32_MAX; break;
+      case Schema::Kind::kInt64:
+        if (c->is_int64()) {
+          out->const_value = bj::value(std::to_string(c->as_int64()));
+          ok = true;
+        } else if (c->is_string()) {
+          std::string_view t = c->as_string();
+          ok = !t.empty() && t.size() <= 20;
+          for (size_t j = t[0] == '-' ? 1 : 0; ok && j < t.size(); ++j) ok = t[j] >= '0' && t[j] <= '9';
+          if (ok) {
+            try {
+              out->const_value = bj::value(std::to_string(std::stoll(std::string(t))));
+            } catch (...) {
+              ok = false;
+            }
+          }
+        }
+        break;
+      case Schema::Kind::kFloat:
+      case Schema::Kind::kDouble: ok = number(*c).has_value(); break;
+      default: return fail(error, where + ": const is for a string, boolean, integer, or number");
+    }
+    if (!ok) return fail(error, where + ": const must be a value of the schema's own type");
+    if (!out->const_value) out->const_value = *c;
+  }
   if (out->kind == Schema::Kind::kArray) {
     auto* items = o.if_contains("items");
     if (!items) return fail(error, where + ": an array needs items");
@@ -272,7 +309,11 @@ bool parse_into(const bj::value& v, const std::string& where, bool scalars_only,
 }
 
 std::optional<bj::value> check_at(const Types* types, const Schema& s, const bj::value& v, const std::string& path,
-                                  size_t depth, std::string* error) {
+                                  size_t depth, std::string* error);
+
+// The value against the schema's type and bounds, before const (check_at).
+std::optional<bj::value> check_shape(const Types* types, const Schema& s, const bj::value& v, const std::string& path,
+                                     size_t depth, std::string* error) {
   auto bad = [&](const std::string& why) -> std::optional<bj::value> {
     *error = path + ": " + why;
     return std::nullopt;
@@ -405,6 +446,23 @@ std::optional<bj::value> check_at(const Types* types, const Schema& s, const bj:
     }
   }
   return bad("unknown schema");
+}
+
+std::optional<bj::value> check_at(const Types* types, const Schema& s, const bj::value& v, const std::string& path,
+                                  size_t depth, std::string* error) {
+  auto out = check_shape(types, s, v, path, depth, error);
+  if (!out || !s.const_value) return out;
+  // Compared as the box would see it: an int64 as its string of digits, a number by value.
+  bool same = *out == *s.const_value;
+  if (!same && (s.kind == Schema::Kind::kFloat || s.kind == Schema::Kind::kDouble)) {
+    auto a = number(*out), b = number(*s.const_value);
+    same = a && b && *a == *b;
+  }
+  if (!same) {
+    *error = path + ": must be " + json::dump(*s.const_value);
+    return std::nullopt;
+  }
+  return out;
 }
 
 }  // namespace
@@ -607,6 +665,7 @@ bj::value to_json_schema(const Types* types, const Schema& s) {
   if (s.maximum && s.kind != Schema::Kind::kInt64) o["maximum"] = bound(*s.maximum);
   if (!s.description.empty()) o["description"] = s.description;
   if (s.default_value) o["default"] = *s.default_value;
+  if (s.const_value) o["const"] = *s.const_value;
   return o;
 }
 

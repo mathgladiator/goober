@@ -285,6 +285,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_source_tools();
   register_job_tools();
   register_flag_tools();
+  register_db_admin_tools();
   backups_->set_source(source_.get());
   register_panel_tools();
   register_pwa_tools();

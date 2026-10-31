@@ -45,6 +45,9 @@ struct Schema {
   // kInt32, kInt64, kFloat, kDouble
   std::optional<double> minimum;
   std::optional<double> maximum;
+  // const: the one value allowed, for a string, boolean, integer, or number. An int64's is
+  // kept as its string of digits, as int64 values cross JSON (021).
+  std::optional<bj::value> const_value;
 };
 
 class Types;

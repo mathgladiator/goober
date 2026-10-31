@@ -49,6 +49,16 @@ class Databases {
   // Tables (with columns, indexes, and row counts) and the schemas applied.
   bj::object describe(std::string_view tenant, std::string_view database) const;
 
+  // Forgets which schemas this process applied to a database, so the next open applies them
+  // again: after its file was replaced, restored, or dropped.
+  void forget(std::string_view tenant, std::string_view database);
+  // Removes a database's file (and its -wal and -shm). The caller has checked no box binds it
+  // and taken a snapshot (008 § 11).
+  bool drop_database(std::string_view tenant, std::string_view database, std::string* error);
+  // Drops one table, its indexes and the host's records of them; the schemas that declared it
+  // are marked unapplied, so a box binding one later makes the table again, empty.
+  bool drop_table(std::string_view tenant, std::string_view database, std::string_view table, std::string* error);
+
   // Runs one operator statement: read-only unless `write`, when it may be an INSERT,
   // UPDATE, or DELETE outside the host's tables. Returns the result object, or nullopt
   // with `error` set.

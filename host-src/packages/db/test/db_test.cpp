@@ -489,4 +489,69 @@ TEST(Schema, WarnsAboutKeysAndReferencesThatArentIds) {
   EXPECT_NE(all.find("notes.author_id"), std::string::npos) << all;
   EXPECT_FALSE(db::parse_schema(R"({"schema":"s1","tables":{"t":{"columns":{"id":{"type":"id","primary-key":true,"nullable":true}}}}})", &err));
   EXPECT_FALSE(db::parse_schema(R"({"schema":"s1","tables":{"t":{"columns":{"k":{"type":"string","primary-key":true}}}}})", &err));
+  // A column that only looks like a reference says so, and isn't warned about.
+  auto mail = db::parse_schema(R"({"schema": "mail1", "tables": {"messages": {"columns": {
+      "id": {"type": "id", "primary-key": true},
+      "message_id": {"type": "string", "max-length": 998, "not-a-reference": true},
+      "event_id": {"type": "string", "not-a-reference": true},
+      "thread_id": {"type": "string"}}}}})", &err);
+  ASSERT_TRUE(mail) << err;
+  ASSERT_EQ(mail->warnings.size(), 1u);
+  EXPECT_NE(mail->warnings[0].find("messages.thread_id"), std::string::npos) << mail->warnings[0];
+  EXPECT_NE(mail->warnings[0].find("not-a-reference"), std::string::npos) << mail->warnings[0];
+  EXPECT_FALSE(db::parse_schema(R"({"schema":"s1","tables":{"t":{"columns":{"x":{"type":"string","not-a-reference":"yes"}}}}})", &err));
+}
+
+// Dropping (008 § 11): a table goes with the host's records of it, and binding its schema again
+// makes it anew, empty; a database's file goes whole; a retired schema stays readable.
+TEST_F(DbTest, DropsAndRetiring) {
+  manifest::TableGrant g;
+  g.read_all = true;
+  g.insert = true;
+  std::vector<manifest::DataStrategy> strategies{strategy(g)};
+  {
+    db::Session s(*dbs, "playground", strategies, *schemas);
+    s.run("book", "INSERT INTO entries (name, message, created_ms) VALUES ('Ada', 'hi', 1)", "");
+    std::string err;
+    ASSERT_TRUE(s.commit(&err)) << err;
+  }
+  std::string err;
+  EXPECT_FALSE(dbs->drop_table("playground", "guestbook", "nope", &err));
+  ASSERT_TRUE(dbs->drop_table("playground", "guestbook", "entries", &err)) << err;
+  EXPECT_EQ(dbs->describe("playground", "guestbook").at("tables").as_array().size(), 0u);
+  {
+    // Bound again: the table is back, empty.
+    db::Session s(*dbs, "playground", strategies, *schemas);
+    auto r = J(s.run("book", "SELECT count(*) FROM entries", ""));
+    ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+    EXPECT_EQ(r.at("rows").at(0).at(0), 0);
+  }
+  ASSERT_TRUE(dbs->drop_database("playground", "guestbook", &err)) << err;
+  EXPECT_FALSE(dbs->exists("playground", "guestbook"));
+  EXPECT_FALSE(dbs->drop_database("playground", "guestbook", &err));
+  {
+    // Bound after the drop: a new, empty file with the schema applied again.
+    db::Session s(*dbs, "playground", strategies, *schemas);
+    auto r = J(s.run("book", "SELECT count(*) FROM entries", ""));
+    ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+  }
+  EXPECT_FALSE(schemas->retired("guestbook1"));
+  ASSERT_TRUE(schemas->retire("guestbook1", R"({"by":"test"})", &err)) << err;
+  EXPECT_EQ(*schemas->retired("guestbook1"), R"({"by":"test"})");
+  EXPECT_TRUE(schemas->get("guestbook1"));  // kept for history
+  EXPECT_FALSE(schemas->retire("guestbook1", "{}", &err));
+  EXPECT_FALSE(schemas->retire("nope1", "{}", &err));
+}
+
+// A table keyed by host ids (its default and triggers call the host's functions) drops too.
+TEST_F(DbTest, IdKeyedTablesDrop) {
+  int64_t next = int64_t(1) << 32;
+  dbs->set_id_source([&] { return next++; });
+  std::string err;
+  ASSERT_TRUE(schemas->put(R"({"schema": "keyed1", "tables": {"items": {"columns": {
+      "id": {"type": "id", "primary-key": true}, "name": {"type": "string"}}}}})", &err)) << err;
+  auto schema = schemas->get("keyed1");
+  ASSERT_TRUE(dbs->ensure_schema("playground", "keyed", *schema, &err)) << err;
+  ASSERT_TRUE(dbs->drop_table("playground", "keyed", "items", &err)) << err;
+  EXPECT_EQ(dbs->describe("playground", "keyed").at("tables").as_array().size(), 0u);
 }

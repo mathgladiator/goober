@@ -19,6 +19,7 @@ struct Column {
   std::string type;  // id, int32, int64, double, float, boolean, or string
   bool primary_key = false;
   bool nullable = false;
+  bool not_a_reference = false;  // "not-a-reference": silences the reference warning (038 § 5)
   std::optional<bj::value> default_value;
   std::optional<int64_t> max_length;
   // The SQL that declares the column inside CREATE TABLE or ALTER TABLE ADD COLUMN.
@@ -71,6 +72,11 @@ class SchemaStore {
   std::optional<Schema> check(std::string_view text, std::string* error) const;
   std::optional<Schema> get(std::string_view name) const;
   std::vector<std::string> list() const;
+  // Retiring (008 § 11): a stored schema no new upload or database may use; its file stays for
+  // history. `record` is JSON saying who and why, kept beside it as $name.retired.
+  bool retire(std::string_view name, const std::string& record, std::string* error);
+  // The retirement record, or nullopt while the schema is in service.
+  std::optional<std::string> retired(std::string_view name) const;
 
  private:
   wal::HostWal& wal_;

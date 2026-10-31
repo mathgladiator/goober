@@ -281,6 +281,28 @@ through the mail service. Failures are retried in order, then given up after 8 t
    last_insert_rowid (use the answer's "ids"), sqlite_version, load_extension, and the rest.
    Operators look with db_list, db_describe, and db_query; theirs isn't held to this list.
 
+## Databases: loading, snapshots, and what goes away
+
+- A bulk load is a job (below) whose batch is one request: every statement it runs against one
+  database commits together or not at all, when the box answers below 500, so 137 rows into
+  50 tables of one database is all-or-nothing in one call. Across two databases it isn't: each
+  commits on its own, so load the parents' database first, keep old_id columns, and make the
+  load idempotent so a retry finishes it.
+- A column whose name looks like a reference but isn't one (an RFC Message-ID, a host event
+  id) says so, and schema_put stops warning: "message_id": {"type": "string",
+  "not-a-reference": true}.
+- Operators: db_create {tenant, database, schemas} makes a database from stored schemas before
+  any box binds it, so it can be checked empty; db_snapshot copies one database as it is
+  (before a migration), db_snapshots lists them, and db_restore_to_new makes a NEW database
+  from one, never over an existing one. db_unbound lists databases, tables, and schemas no box
+  binds or names.
+- Dropping a database or a table, or retiring a schema, is a person's act in the panel
+  (Database view), never a tool's: the host refuses while any box (active or disabled) binds
+  it, and takes a snapshot first. An agent asks a person, pointing at db_unbound's answer.
+- The From address: a mail service's "from" is fixed in the manifest, per service, and a box
+  can't choose another per call. A box sending as admin@ and another as agent@ each declare
+  their own mail service with that "from".
+
 ## Jobs: moving data, once (routes.job)
 
 When data has to change shape or move to another database (a new, unified database; a
@@ -668,7 +690,12 @@ subset: integer needs format int32 or int64; number needs float or double; strin
 maxLength, minLength, enum, and format date-time (RFC 3339 UTC) or date; objects need
 "additionalProperties": false; arrays need items and maxItems; $ref only to
 #/components/schemas/X; no oneOf/anyOf/allOf/null/recursion. Defaults are filled in, and
-int64 values reach the box as strings.
+int64 values reach the box as strings. "const" pins a string, boolean, integer, or number to
+one value ({"type": "string", "const": "signup"}; an int64's const is compared as its string of
+digits). Not supported: "pattern", since the host checks patterns only with a regex engine
+that runs in linear time on any input and it has none yet (use enum, format, minLength and
+maxLength, or check in the box); also multipleOf, exclusiveMinimum/Maximum, uniqueItems,
+patternProperties. Every refusal names the keyword and the schema.
 
 ## Shared partials (a nav, a footer)
 
