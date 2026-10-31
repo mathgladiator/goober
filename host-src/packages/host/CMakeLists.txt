@@ -16,6 +16,12 @@ add_executable(goober-host src/main.cpp)
 target_link_libraries(goober-host PRIVATE goober_host)
 target_compile_options(goober-host PRIVATE -Wall -Wextra -Wpedantic)
 
+# The real timer driver on the real clock, for minutes (014 § 8): kept out of ctest so the
+# blocking suite stays quick; run by `just temporal` and daily by tools/temporal-daily.sh.
+add_executable(goober-temporal temporal/temporal.cpp)
+target_link_libraries(goober-temporal PRIVATE goober_host)
+target_compile_options(goober-temporal PRIVATE -Wall -Wextra -Wpedantic)
+
 # The Rust binding for boxes, embedded so the rust_binding tool can hand it to a remote agent.
 file(READ "${CMAKE_SOURCE_DIR}/examples/boxes/shared/goober.rs" GOOBER_RUST_BINDING)
 configure_file(src/rust_binding.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/rust_binding.h" @ONLY)
