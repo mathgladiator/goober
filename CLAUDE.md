@@ -186,6 +186,10 @@ Read these before doing design work:
   - `design/machine/039.Flags.md`: box flags: a closed set the manifest declares (`"flags"`, defaults,
     optional values), read through `goober_flag`, set per tenant by operators with `flag_set`
     (audited, in the change log), so a freeze or kill switch needs no new version.
+  - `design/machine/040.EngineeringPractice.md`: what the engineers' feedback taught (not knowing what
+    a call does, no preview, half changes, concurrent edits, no undo), the practices per kind of change
+    (preview, review with widenings, route_try, staging, if_etag, snapshots, version_health,
+    whats_new), what was built overnight on 2026-10-31, and six decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
