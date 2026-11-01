@@ -16,6 +16,7 @@
 #include "goober/libraries/libraries.h"
 #include "goober/operations/changes.h"
 #include "goober/operations/traffic.h"
+#include "goober/sqlite/sqlite.h"
 #include "goober/panel/assets.h"
 #include "grant_usage.h"
 #include "http_util.h"
@@ -50,7 +51,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "version_diff", "version_health",
     "perf_report", "perf_statements",
     "cache_status",
-    "error_report", "box_failures",
+    "error_report", "box_failures", "service_report",
     "spec_list",       "spec_get",          "ids_status",          "approval_status",  "bus_status",      "box_render",
     "source_tree",     "source_box_history", "grant_usage",     "job_list",        "job_status",
     "mail_domain_check", "mail_route_check",
@@ -489,6 +490,111 @@ void Host::register_panel_tools() {
              failures_->report(window_of(args), arg_text(args, "tenant"), arg_text(args, "box"), now, latest));
        }});
 
+  mcp_->add_tool(
+      {"service_report",
+       "What went out to services over a window (028 § 4.4), from the egress and mail logs: boxes' calls through "
+       "goober_call and the outbox, the host's push sends, robot fetches (web), token refreshes, and every mail the "
+       "mailer sent (service mailer, method ses, smtp, or dev; box boxes or host). Answers totals and a series "
+       "(calls, failed, outbox deliveries, p50 and p99 latency), each service (kind: external, mail, web, push, or "
+       "mailer; calls, failed, n4, n5, neterr for no answer, bytes, the boxes and tenants calling it, and the "
+       "outbox's retries and dead letters from box_failures), each method per box, failure statuses, and the latest "
+       "failures (newest first, with url, request_id, or outbox_id). Also: the outbox's waiting elements over the "
+       "window and now (outbox), the mail limits (mail: daily-max, sent in the last 24 hours per tenant; bounces and "
+       "complaints aren't reported back to the host), mail in (mail_in: hook calls, refused), and, without tenant, "
+       "backups (backup_status's summary). service narrows to one. A read tool.",
+       object_schema({{"window", window_prop},
+                      {"tenant", string_property("Only this tenant.")},
+                      {"service", string_property("Only this service, like mailer, web, push, or a box's external service.")},
+                      {"latest", integer_property("How many latest failures, 1 to 200 (default 50).")}},
+                     {}),
+       [this, window_of](const bj::object& args) {
+         if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
+         int64_t now = base::now_unix_ms();
+         traffic_->catch_up(now);
+         std::string w = window_of(args), tenant = arg_text(args, "tenant"), service = arg_text(args, "service");
+         size_t latest = size_t(std::clamp<int64_t>(arg_int(args, "latest", 50), 1, 200));
+         auto out = traffic_->services(w, tenant, service, now, latest);
+         // What each service is: a box's external service (mail and web are special), or the host's.
+         std::map<std::string, std::string> kinds{{"mailer", "mailer"}, {"push", "push"}, {"web", "web"}};
+         auto active = boxes_->active();
+         for (const auto& [name, ab] : active->boxes) {
+           for (const auto& svc : ab->manifest.external) {
+             if (!svc.box.empty()) continue;  // a box adapter: an internal call, not a service
+             kinds[svc.name] = svc.mail ? "mail" : svc.web ? "web" : "external";
+           }
+         }
+         // The outbox's retries and dead letters per service, from box_failures (028 § 4.3).
+         std::map<std::string, std::pair<int64_t, int64_t>> outbox_failed;
+         if (failures_) {
+           failures_->flush(now);
+           auto r = failures_->report(w, tenant, "", now, 1);
+           for (const auto& v : r.at("routes").as_array()) {
+             const auto& o = v.as_object();
+             if (o.at("kind") != "outbox") continue;
+             std::string route(o.at("route").as_string());
+             std::string svc = route.substr(0, route.find('.'));
+             const auto& cls = o.at("classes").as_object();
+             auto count = [&](const char* k) { return cls.contains(k) ? cls.at(k).as_int64() : int64_t(0); };
+             outbox_failed[svc].first += count("delivery_retry");
+             outbox_failed[svc].second += count("delivery_dead");
+           }
+         }
+         std::set<std::string> listed;
+         for (auto& v : out["services"].as_array()) {
+           auto& o = v.as_object();
+           std::string name(o.at("service").as_string());
+           listed.insert(name);
+           o["kind"] = kinds.count(name) ? kinds[name] : "external";
+           o["retries"] = outbox_failed[name].first;
+           o["dead"] = outbox_failed[name].second;
+         }
+         // Services the active boxes declare, even with no calls in the window.
+         if (service.empty()) {
+           for (const auto& [name, kind] : kinds) {
+             if (listed.count(name) || kind == "mailer" || kind == "push" || (kind == "web" && name == "web")) continue;
+             out["services"].as_array().push_back(bj::object{{"service", name}, {"kind", kind}, {"calls", 0}, {"failed", 0},
+                                                             {"n4", 0}, {"n5", 0}, {"neterr", 0}, {"outbox", 0},
+                                                             {"retries", outbox_failed[name].first},
+                                                             {"dead", outbox_failed[name].second}});
+           }
+         }
+         out["outbox"] = traffic_->gauge_series(w, "outbox_pending", tenant, now);
+         // The mail limits: what each tenant may send a day, and what it sent in the last 24 hours.
+         auto cfg = config_.get();
+         bj::array sent;
+         try {
+           std::lock_guard lock(sent_mu_);
+           sqlite::Stmt s(sent_ledger(), "SELECT tenant, count(*) FROM sent WHERE at_ms > ? AND (? = '' OR tenant = ?) "
+                                         "GROUP BY tenant ORDER BY count(*) DESC");
+           s.bind(1, now - 86400000).bind(2, tenant).bind(3, tenant);
+           while (s.step()) sent.push_back(bj::object{{"tenant", s.text(0)}, {"sent_24h", s.int64(1)}});
+         } catch (const std::exception& e) {
+           std::cerr << "goober-host: service_report: the sent ledger: " << e.what() << "\n";
+         }
+         out["mail"] = bj::object{{"mailer", cfg->identity.mailer},
+                                  {"daily_max", cfg->mail.daily_max},
+                                  {"per_address_daily", cfg->mail.per_address_daily},
+                                  {"tenants", std::move(sent)},
+                                  {"bounces", "not reported: the host doesn't receive the mailer's bounce or complaint notices"}};
+         int64_t in_n = 0, in_n4 = 0, in_n5 = 0;
+         for (const auto& r : traffic_->routes(w, tenant, "", now)) {
+           const auto& o = r.as_object();
+           if (o.at("route") != "mail_in" || !o.at("box").as_string().empty()) continue;
+           in_n += o.at("n").as_int64(), in_n4 += o.at("n4").as_int64(), in_n5 += o.at("n5").as_int64();
+         }
+         out["mail_in"] = bj::object{{"calls", in_n}, {"n4", in_n4}, {"n5", in_n5}};
+         if (tenant.empty()) {
+           auto b = backup_status(false);
+           bj::object brief;
+           for (const char* k : {"enabled", "healthy", "note", "last_nightly_at", "last_increment_at", "assets", "last_error",
+                                 "last_error_at", "key_confirmed_at"}) {
+             if (const auto* v = b.if_contains(k)) brief[k] = *v;
+           }
+           out["backups"] = std::move(brief);
+         }
+         return ToolResult::ok(std::move(out));
+       }});
+
   mcp_->add_tool({"hot_boxes", "Boxes by heat (CPU time) over a window, with requests, server errors, fuel, and SQL calls.",
                   object_schema({{"window", window_prop}}, {}), [this, window_of](const bj::object& args) {
                     if (!traffic_) return ToolResult::fail("traffic rollups are off: see host_health's startup notes");
@@ -573,6 +679,8 @@ void Host::register_panel_tools() {
            for (const auto& c : some) a.emplace_back(c);
            return a;
          };
+         std::set<std::string> mail_services;         // service nodes that are mail
+         std::map<std::string, int64_t> mail_handed;  // mail service node -> deliveries that went
          // What one box reaches: databases (SQL calls, split evenly when it has several), their
          // tables, services, and boxes it calls.
          auto outputs = [&](const std::string& b, int column) {
@@ -617,6 +725,18 @@ void Host::register_panel_tools() {
              }
            }
            std::map<std::string, bj::object> seen_calls;
+           // The manifest's services first, so their nodes say what they are (mail, the web).
+           for (const auto& svc : m.external) {
+             std::string id = svc.box.empty() ? "svc:" + svc.name : "box:" + svc.box;
+             if (svc.box.empty()) {
+               node(id, "service", svc.name, column,
+                    bj::object{{"mail", svc.mail}, {"web", svc.web}, {"base", svc.base}});
+               if (svc.mail) mail_services.insert(id);
+             } else {
+               box_node(svc.box, column);
+             }
+             seen_calls.try_emplace(id, bj::object{{"n", 0}, {"errors", 0}, {"us", 0}, {"bytes_out", 0}, {"bytes_in", 0}});
+           }
            for (const auto& c : calls) {
              const auto& o = c.as_object();
              if (o.at("from_box").as_string() != b) continue;
@@ -632,19 +752,59 @@ void Host::register_panel_tools() {
                e[k] = (e.contains(k) ? e[k].as_int64() : 0) + o.at(k).as_int64();
              }
            }
-           for (const auto& svc : m.external) {
-             std::string id = svc.box.empty() ? "svc:" + svc.name : "box:" + svc.box;
-             if (svc.box.empty()) {
-               node(id, "service", svc.name, column,
-                    bj::object{{"mail", svc.mail}, {"web", svc.web}, {"base", svc.base}});
-             } else {
-               box_node(svc.box, column);
-             }
-             seen_calls.try_emplace(id, bj::object{{"n", 0}, {"errors", 0}, {"us", 0}, {"bytes_out", 0}, {"bytes_in", 0}});
-           }
            for (auto& [id, e] : seen_calls) {
              edge("box:" + b, id, e["n"].as_int64(), e["errors"].as_int64(), e["us"].as_int64(),
                   bj::object{{"bytes_out", e["bytes_out"]}, {"bytes_in", e["bytes_in"]}, {"what", "calls"}});
+             // Mail a box's mail service handed on, delivered to the mailer (§ 6).
+             if (mail_services.count(id)) mail_handed[id] += e["n"].as_int64() - e["errors"].as_int64();
+           }
+         };
+         // The mailer (ses, smtp, or dev) every mail goes out through, right of the services:
+         // each mail service's delivered mail, and the host's own (sign-in codes, invites) from
+         // the tenant's host routes. Each service node carries its calls, failures, and p99.
+         auto services_and_mailer = [&](int column, bool host_graph) {
+           auto svc = traffic_->services(w, "", "", now, 0);
+           std::map<std::string, const bj::object*> by_name;
+           for (const auto& s : svc.at("services").as_array()) by_name[std::string(s.at("service").as_string())] = &s.as_object();
+           int64_t host_mail = 0, host_mail_failed = 0;
+           std::map<std::string, std::pair<int64_t, int64_t>> host_mail_of;  // tenant -> sent, failed
+           for (const auto& m : svc.at("methods").as_array()) {
+             const auto& o = m.as_object();
+             if (o.at("service") != "mailer" || o.at("box") != "host") continue;
+             auto& hm = host_mail_of[std::string(o.at("tenant").as_string())];
+             hm.first += o.at("calls").as_int64() - o.at("failed").as_int64();
+             hm.second += o.at("failed").as_int64();
+             host_mail += o.at("calls").as_int64();
+             host_mail_failed += o.at("failed").as_int64();
+           }
+           bool mailer = !mail_services.empty() || (host_graph && host_mail > 0);
+           if (mailer) {
+             auto cfg = config_.get();
+             bj::object more{{"mailer", true}, {"via", cfg->identity.mailer}};
+             if (auto it = by_name.find("mailer"); it != by_name.end()) {
+               for (const char* k : {"calls", "failed", "p99_us"}) more[k] = it->second->at(k);
+             }
+             node("svc:mailer", "service", "mailer (" + cfg->identity.mailer + ")", column, std::move(more));
+             for (const auto& [id, n] : mail_handed) edge(id, "svc:mailer", n, 0, 0, bj::object{{"what", "mails handed on"}});
+             if (host_graph) {
+               for (const auto& [t, sf] : host_mail_of) {
+                 std::string from = have.count("host:" + t) ? "host:" + t : "host:_host";
+                 if (from == "host:_host") node(from, "host", "the host", column - 2);
+                 edge(from, "svc:mailer", sf.first + sf.second, sf.second, 0, bj::object{{"what", "host mails"}});
+               }
+             }
+           }
+           // Each service's calls, failures, and p99 over the window, on its node.
+           for (auto& v : nodes) {
+             auto& o = v.as_object();
+             if (o.at("kind") != "service" || o.contains("mailer")) continue;
+             std::string name(o.at("label").as_string());
+             if (auto it = by_name.find(name); it != by_name.end()) {
+               for (const char* k : {"calls", "failed", "p99_us"}) o[k] = it->second->at(k);
+             } else {
+               o["calls"] = 0;
+               o["failed"] = 0;
+             }
            }
          };
 
@@ -689,6 +849,25 @@ void Host::register_panel_tools() {
              edge("tenant:" + t, to, s[0], s[1], s[2], bj::object{{"what", "requests"}});
            }
            for (const auto& [name, ab] : active->boxes) outputs(name, 2);
+           // The host's own calls out (push sends, token refreshes, the robot's fetches): from
+           // the tenant's host routes, or from the host when no tenant is named.
+           std::map<std::pair<std::string, std::string>, std::array<int64_t, 3>> host_calls;
+           for (const auto& c : calls) {
+             const auto& o = c.as_object();
+             std::string from_box(o.at("from_box").as_string());
+             if (o.at("to_kind") != "service" || (!from_box.empty() && from_box != "operator")) continue;
+             std::string t(o.at("tenant").as_string());
+             std::string from = domains_of.count(t) ? "host:" + t : "host:_host";
+             auto& s = host_calls[{from, std::string(o.at("to_name").as_string())}];
+             s[0] += o.at("n").as_int64(), s[1] += o.at("errors").as_int64(), s[2] += o.at("us").as_int64();
+           }
+           for (const auto& [k, s] : host_calls) {
+             const auto& [from, name] = k;
+             node(from, "host", from == "host:_host" ? "the host" : "sign-in, OAuth, files, MCP", 1);
+             node("svc:" + name, "service", name, 2, bj::object{{"web", name == "web"}});
+             edge(from, "svc:" + name, s[0], s[1], s[2], bj::object{{"what", "host calls"}});
+           }
+           services_and_mailer(3, true);
          } else {
            const auto& m = active->boxes.at(only)->manifest;
            std::map<std::string, const bj::object*> stats;
@@ -731,6 +910,7 @@ void Host::register_panel_tools() {
              }
            }
            outputs(only, 2);
+           services_and_mailer(3, false);
          }
          for (auto& [key, grants] : table_grants) {
            const auto& [d, t] = key;

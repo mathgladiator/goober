@@ -804,6 +804,24 @@ The work of 2026-10-29 to 2026-10-31, reviewed (043.CodeSecurityReview.md):
 - [ ] Decisions for the human (043 § For the human): trusted proxies, roles that gate their own
       route, agents granting.
 
+### Phase 43: service graphs, external services, services in the data flow (2026-10-31)
+The human asked for key graphs of the service, a way into external services' metrics (mail
+first, then any), and the services boxes use in the data flow (028 § 4.4, § 4.5, § 6):
+- [x] Service rollups from the egress and mail logs: calls, failures (4xx, 5xx, no answer),
+      latency, bytes, outbox deliveries per service, method, and box; failures by status; the
+      newest 100 failures per service for 30 days; tests.
+- [x] The outbox's queue depth sampled every tick (gauges, the minute's largest), and the
+      mailer's line timed and naming the realm of the host's own mail; tests.
+- [x] `service_report {window, tenant?, service?, latest?}`: a read tool with a scope rule, kinds
+      (external, mail, web, push, mailer), retries and dead letters, the mail limits and what
+      each tenant sent, mail in, and backups; tests.
+- [x] The Services view, with a page per service; the Overview's key graphs (requests, error
+      rate, latency, box failures, calls out, the outbox, mail); tests.
+- [x] The data flow's service nodes carry their numbers and open their page; the host's own
+      calls come from its routes; the mailer sits behind boxes' mail services and the host's
+      own mail; tests.
+- [ ] Bounces and complaints from the mailer (SES notifications), not received by the host yet.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

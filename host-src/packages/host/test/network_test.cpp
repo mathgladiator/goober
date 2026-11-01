@@ -291,6 +291,13 @@ TEST_F(NetworkTest, ResultRoutesHearHowADeliveryWent) {
   EXPECT_NE(body.find(R"("accepted":true)"), std::string::npos) << body;
   std::string key = std::string(json::parse(body, &err)->at("key").as_string());
   EXPECT_EQ(host->outbox_tick(base::now_unix_ms()), 1);
+  // The tick sampled the queue's depth for the panel (028 § 4.4): one waiting for model, then none.
+  auto depth = host->traffic().gauge_series("1h", "outbox_pending", "", base::now_unix_ms());
+  ASSERT_EQ(depth.at("now").as_array().size(), 1u) << json::dump(depth);
+  EXPECT_EQ(depth.at("now").at(0).at("key"), "model");
+  EXPECT_EQ(depth.at("now").at(0).at("value"), 1);
+  host->outbox_tick(base::now_unix_ms());
+  EXPECT_EQ(host->traffic().gauge_series("1h", "outbox_pending", "", base::now_unix_ms()).at("now").at(0).at("value"), 0);
   // The result route heard the outcome: the key the call answered, and the service's reply.
   auto log = base::read_file(root / "storage/logs/boxes/thinker.log");
   ASSERT_TRUE(log);

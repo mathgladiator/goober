@@ -6,7 +6,9 @@
 #include <cmath>
 #include <fstream>
 #include <map>
+#include <set>
 #include <tuple>
+#include <vector>
 
 #include "goober/sqlite/sqlite.h"
 
@@ -80,11 +82,61 @@ using EdgeKey = std::tuple<int64_t, std::string, std::string, std::string, std::
 // t, tenant, status, place, box, route, error_by, ref
 using ErrorKey = std::tuple<int64_t, std::string, int64_t, std::string, std::string, std::string, std::string, std::string>;
 
+// What went out to one service method (028 § 4.4).
+struct SvcSums {
+  int64_t n = 0, failed = 0, n4 = 0, n5 = 0, neterr = 0, outbox = 0, us = 0, bytes_out = 0, bytes_in = 0;
+  Histogram hist;
+  void merge(const SvcSums& o) {
+    n += o.n, failed += o.failed, n4 += o.n4, n5 += o.n5, neterr += o.neterr, outbox += o.outbox, us += o.us;
+    bytes_out += o.bytes_out, bytes_in += o.bytes_in;
+    hist.merge(o.hist);
+  }
+};
+// t, tenant, box, service, method
+using SvcKey = std::tuple<int64_t, std::string, std::string, std::string, std::string>;
+// t, tenant, service, status
+using SvcStatusKey = std::tuple<int64_t, std::string, std::string, int64_t>;
+struct SvcFailure {
+  int64_t at_ms = 0, status = 0, outbox_id = 0;
+  std::string tenant, box, service, method, error, url, request_id;
+};
+constexpr int64_t kServiceFailuresKeptMs = 30 * 24 * kHourMs;
+constexpr int kServiceFailuresPerService = 100;
+
 struct Batch {
   std::map<RowKey, Sums> rows;
   std::map<EdgeKey, EdgeSums> edges;
   std::map<ErrorKey, int64_t> errors;
+  std::map<SvcKey, SvcSums> services;
+  std::map<SvcStatusKey, int64_t> svc_statuses;
+  std::vector<SvcFailure> svc_failures;
 };
+
+// One call out: counted under its minute and hour, and kept when it failed.
+void add_service(Batch& b, int64_t at, const std::string& tenant, const std::string& box, const std::string& service,
+                 const std::string& method, int64_t status, const std::string& error, int64_t us, int64_t bytes_out,
+                 int64_t bytes_in, bool outbox, const std::string& url, const std::string& request_id, int64_t outbox_id) {
+  SvcSums s;
+  s.n = 1;
+  bool failed = status == 0 || status >= 400 || !error.empty();
+  s.failed = failed;
+  s.n4 = status >= 400 && status < 500;
+  s.n5 = status >= 500;
+  s.neterr = status == 0 || (status < 400 && !error.empty());
+  s.outbox = outbox;
+  s.us = std::max<int64_t>(0, us);
+  s.bytes_out = bytes_out;
+  s.bytes_in = bytes_in;
+  s.hist.add(s.us);
+  int64_t minute = at / kMinuteMs * kMinuteMs, hour = at / kHourMs * kHourMs;
+  b.services[{minute, tenant, box, service, method}].merge(s);
+  b.services[{-hour - 1, tenant, box, service, method}].merge(s);
+  if (!failed) return;
+  b.svc_statuses[{minute, tenant, service, status}] += 1;
+  b.svc_statuses[{-hour - 1, tenant, service, status}] += 1;
+  b.svc_failures.push_back(SvcFailure{at, status, outbox_id, tenant, box, service, method, error.substr(0, 300),
+                                      url.substr(0, 200), request_id});
+}
 
 // Where an error happened, in as few names as the site has places (028 § 4.2).
 std::string error_place(const bj::object& line, const LineKey& key, int64_t status) {
@@ -146,6 +198,27 @@ void add_egress(Batch& b, const bj::object& line) {
   std::string tenant = text(line, "tenant"), box = text(line, "box"), service = text(line, "service");
   b.edges[{minute, tenant, box, "service", service}].merge(e);
   b.edges[{-hour - 1, tenant, box, "service", service}].merge(e);
+  int64_t outbox_id = number(line, "outbox_id");
+  add_service(b, *at, tenant, box, service, text(line, "method"), status, text(line, "error"), number(line, "us"),
+              number(line, "bytes_out"), number(line, "bytes_in"), outbox_id != 0, text(line, "url"),
+              text(line, "request_id"), outbox_id);
+}
+
+// The mailer's line for every mail it sent (logs/mail.log): service "mailer", method the mailer
+// (ses, smtp, dev). A box's mail names its tenant; the host's own (sign-in codes, invites) its
+// realm, and is from "host" rather than "boxes".
+void add_mail(Batch& b, const bj::object& line) {
+  auto at = parse_utc_ms(text(line, "at"));
+  if (!at) return;
+  std::string tenant = text(line, "tenant"), from = tenant.empty() ? "host" : "boxes";
+  if (tenant.empty()) tenant = text(line, "realm");
+  std::string via = text(line, "via");
+  if (via.empty()) via = "?";
+  bool sent = text(line, "status") == "sent";
+  std::string error = text(line, "error");
+  if (!sent && error.empty()) error = "not sent";
+  add_service(b, *at, tenant, from, "mailer", via, sent ? 250 : 0, sent ? "" : error, number(line, "us"), 0, 0, false, "", "",
+              0);
 }
 
 std::optional<std::pair<uint64_t, uint64_t>> inode_and_size(const fs::path& p) {
@@ -329,6 +402,28 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
               " box TEXT NOT NULL, route TEXT NOT NULL, error_by TEXT NOT NULL, ref TEXT NOT NULL, n INTEGER NOT NULL,"
               " PRIMARY KEY (t, tenant, status, place, box, route, error_by, ref))");
   }
+  for (const char* table : {"service_minutes", "service_hours"}) {
+    db_->exec(std::string("CREATE TABLE IF NOT EXISTS ") + table +
+              " (t INTEGER NOT NULL, tenant TEXT NOT NULL, box TEXT NOT NULL, service TEXT NOT NULL, method TEXT NOT NULL,"
+              " n INTEGER NOT NULL, failed INTEGER NOT NULL, n4 INTEGER NOT NULL, n5 INTEGER NOT NULL,"
+              " neterr INTEGER NOT NULL, outbox INTEGER NOT NULL, us INTEGER NOT NULL, bytes_out INTEGER NOT NULL,"
+              " bytes_in INTEGER NOT NULL, hist TEXT NOT NULL, PRIMARY KEY (t, tenant, box, service, method))");
+  }
+  for (const char* table : {"service_status_minutes", "service_status_hours"}) {
+    db_->exec(std::string("CREATE TABLE IF NOT EXISTS ") + table +
+              " (t INTEGER NOT NULL, tenant TEXT NOT NULL, service TEXT NOT NULL, status INTEGER NOT NULL,"
+              " n INTEGER NOT NULL, PRIMARY KEY (t, tenant, service, status))");
+  }
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS service_failures (at_ms INTEGER NOT NULL, tenant TEXT NOT NULL, box TEXT NOT NULL,"
+      " service TEXT NOT NULL, method TEXT NOT NULL, status INTEGER NOT NULL, error TEXT NOT NULL, url TEXT NOT NULL,"
+      " request_id TEXT NOT NULL, outbox_id INTEGER NOT NULL)");
+  db_->exec("CREATE INDEX IF NOT EXISTS service_failures_at ON service_failures (at_ms)");
+  for (const char* table : {"gauge_minutes", "gauge_hours"}) {
+    db_->exec(std::string("CREATE TABLE IF NOT EXISTS ") + table +
+              " (t INTEGER NOT NULL, name TEXT NOT NULL, tenant TEXT NOT NULL, key TEXT NOT NULL, value INTEGER NOT NULL,"
+              " PRIMARY KEY (t, name, tenant, key))");
+  }
   db_->exec(
       "CREATE TABLE IF NOT EXISTS cursors (name TEXT PRIMARY KEY, inode INTEGER NOT NULL, offset INTEGER NOT NULL)");
 }
@@ -337,8 +432,14 @@ Traffic::~Traffic() = default;
 
 size_t Traffic::catch_up(int64_t now_ms) {
   std::lock_guard lock(mu_);
-  size_t lines = tail("access", now_ms) + tail("egress", now_ms);
-  if (now_ms - last_drop_ms_ > 10 * kMinuteMs) drop_old(now_ms);
+  size_t lines = tail("access", now_ms) + tail("egress", now_ms) + tail("mail", now_ms);
+  flush_gauges();
+  if (now_ms - last_drop_ms_ > 10 * kMinuteMs) {
+    drop_old(now_ms);
+  } else if (service_failures_added_) {
+    trim_service_failures(now_ms);
+  }
+  service_failures_added_ = false;
   return lines;
 }
 
@@ -402,6 +503,8 @@ size_t Traffic::tail(const std::string& name, int64_t) {
         ++lines;
         if (name == "access") {
           add_access(batch, v->as_object(), tenant_of_);
+        } else if (name == "mail") {
+          add_mail(batch, v->as_object());
         } else {
           add_egress(batch, v->as_object());
         }
@@ -452,6 +555,42 @@ size_t Traffic::tail(const std::string& name, int64_t) {
           w.bind(7, by).bind(8, ref).bind(9, n);
           w.run();
         }
+        for (const auto& [k, x] : batch.services) {
+          auto [t, tenant, box, service, method] = k;
+          const char* table = t < 0 ? "service_hours" : "service_minutes";
+          SvcSums total = x;
+          {
+            sqlite::Stmt s(*db_, std::string("SELECT n, failed, n4, n5, neterr, outbox, us, bytes_out, bytes_in, hist FROM ") +
+                                     table + " WHERE t = ? AND tenant = ? AND box = ? AND service = ? AND method = ?");
+            s.bind(1, t < 0 ? -t - 1 : t).bind(2, tenant).bind(3, box).bind(4, service).bind(5, method);
+            if (s.step()) {
+              SvcSums old{s.int64(0), s.int64(1), s.int64(2), s.int64(3), s.int64(4), s.int64(5),
+                          s.int64(6), s.int64(7), s.int64(8), Histogram::decode(s.text(9))};
+              total.merge(old);
+            }
+          }
+          sqlite::Stmt w(*db_, std::string("INSERT OR REPLACE INTO ") + table +
+                                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          w.bind(1, t < 0 ? -t - 1 : t).bind(2, tenant).bind(3, box).bind(4, service).bind(5, method).bind(6, total.n);
+          w.bind(7, total.failed).bind(8, total.n4).bind(9, total.n5).bind(10, total.neterr).bind(11, total.outbox);
+          w.bind(12, total.us).bind(13, total.bytes_out).bind(14, total.bytes_in).bind(15, total.hist.encode());
+          w.run();
+        }
+        for (const auto& [k, n] : batch.svc_statuses) {
+          auto [t, tenant, service, status] = k;
+          sqlite::Stmt w(*db_, std::string("INSERT INTO ") + (t < 0 ? "service_status_hours" : "service_status_minutes") +
+                                   " VALUES (?, ?, ?, ?, ?) ON CONFLICT (t, tenant, service, status) DO UPDATE SET n = n + "
+                                   "excluded.n");
+          w.bind(1, t < 0 ? -t - 1 : t).bind(2, tenant).bind(3, service).bind(4, status).bind(5, n);
+          w.run();
+        }
+        for (const auto& f : batch.svc_failures) {
+          sqlite::Stmt w(*db_, "INSERT INTO service_failures VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          w.bind(1, f.at_ms).bind(2, f.tenant).bind(3, f.box).bind(4, f.service).bind(5, f.method).bind(6, f.status);
+          w.bind(7, f.error).bind(8, f.url).bind(9, f.request_id).bind(10, f.outbox_id);
+          w.run();
+          service_failures_added_ = true;
+        }
         sqlite::Stmt c(*db_, "INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)");
         c.bind(1, name).bind(2, int64_t(id->first)).bind(3, int64_t(next));
         c.run();
@@ -471,10 +610,75 @@ void Traffic::drop_old(int64_t now_ms) {
   last_drop_ms_ = now_ms;
   for (auto [table, keep] : {std::pair{"minutes", kMinutesKeptMs}, std::pair{"edge_minutes", kMinutesKeptMs},
                              std::pair{"error_minutes", kMinutesKeptMs}, std::pair{"hours", kHoursKeptMs},
-                             std::pair{"edge_hours", kHoursKeptMs}, std::pair{"error_hours", kHoursKeptMs}}) {
+                             std::pair{"edge_hours", kHoursKeptMs}, std::pair{"error_hours", kHoursKeptMs},
+                             std::pair{"service_minutes", kMinutesKeptMs}, std::pair{"service_hours", kHoursKeptMs},
+                             std::pair{"service_status_minutes", kMinutesKeptMs},
+                             std::pair{"service_status_hours", kHoursKeptMs}, std::pair{"gauge_minutes", kMinutesKeptMs},
+                             std::pair{"gauge_hours", kHoursKeptMs}}) {
     sqlite::Stmt s(*db_, std::string("DELETE FROM ") + table + " WHERE t < ?");
     s.bind(1, now_ms - keep);
     s.run();
+  }
+  trim_service_failures(now_ms);
+}
+
+// The newest failures per service, for 30 days (028 § 4.4).
+void Traffic::trim_service_failures(int64_t now_ms) {
+  sqlite::Stmt old(*db_, "DELETE FROM service_failures WHERE at_ms < ?");
+  old.bind(1, now_ms - kServiceFailuresKeptMs).run();
+  db_->exec("DELETE FROM service_failures WHERE rowid IN (SELECT rowid FROM (SELECT rowid, row_number() OVER "
+            "(PARTITION BY service ORDER BY at_ms DESC, rowid DESC) AS k FROM service_failures) WHERE k > " +
+            std::to_string(kServiceFailuresPerService) + ")");
+}
+
+void Traffic::gauge(int64_t at_ms, const std::string& name, const std::string& tenant,
+                    const std::map<std::string, int64_t>& values) {
+  std::lock_guard lock(gauge_mu_);
+  int64_t minute = at_ms / kMinuteMs * kMinuteMs;
+  auto set = [&](const std::string& key, int64_t value) {
+    gauge_now_[{name, tenant, key}] = {at_ms, value};
+    auto& m = gauge_pending_[{minute, name, tenant, key}];
+    m = std::max(m, value);
+  };
+  // A key sampled before and missing now is 0 now.
+  for (auto it = gauge_now_.lower_bound({name, tenant, ""});
+       it != gauge_now_.end() && std::get<0>(it->first) == name && std::get<1>(it->first) == tenant;) {
+    std::string key = std::get<2>(it->first);
+    ++it;
+    if (!values.count(key)) {
+      if (gauge_now_[{name, tenant, key}].second == 0) {
+        gauge_now_.erase({name, tenant, key});  // forgotten once it has read 0
+      } else {
+        set(key, 0);
+      }
+    }
+  }
+  for (const auto& [key, value] : values) set(key, value);
+}
+
+void Traffic::flush_gauges() {
+  decltype(gauge_pending_) pending;
+  {
+    std::lock_guard lock(gauge_mu_);
+    pending.swap(gauge_pending_);
+  }
+  if (pending.empty()) return;
+  db_->exec("BEGIN IMMEDIATE");
+  try {
+    for (const auto& [k, v] : pending) {
+      auto [minute, name, tenant, key] = k;
+      for (auto [table, t] : {std::pair{"gauge_minutes", minute}, std::pair{"gauge_hours", minute / kHourMs * kHourMs}}) {
+        sqlite::Stmt w(*db_, std::string("INSERT INTO ") + table +
+                                 " VALUES (?, ?, ?, ?, ?) ON CONFLICT (t, name, tenant, key) DO UPDATE SET value = "
+                                 "max(value, excluded.value)");
+        w.bind(1, t).bind(2, name).bind(3, tenant).bind(4, key).bind(5, v);
+        w.run();
+      }
+    }
+    db_->exec("COMMIT");
+  } catch (...) {
+    db_->exec("ROLLBACK");
+    throw;
   }
 }
 
@@ -693,6 +897,159 @@ bj::object Traffic::errors(std::string_view window, const std::string& tenant, i
                     {"statuses", std::move(sts)},
                     {"places", std::move(pls)},
                     {"referred", bj::object{{"same", same}, {"other", other}, {"none", none}}}};
+}
+
+namespace {
+
+bj::object svc_fields(const SvcSums& s) {
+  return bj::object{{"calls", s.n},           {"failed", s.failed},       {"n4", s.n4},
+                    {"n5", s.n5},             {"neterr", s.neterr},       {"outbox", s.outbox},
+                    {"us", s.us},             {"p50_us", s.hist.percentile(0.5)}, {"p99_us", s.hist.percentile(0.99)},
+                    {"bytes_out", s.bytes_out}, {"bytes_in", s.bytes_in}};
+}
+
+}  // namespace
+
+bj::object Traffic::services(std::string_view window, const std::string& tenant, const std::string& service,
+                             int64_t now_ms, size_t latest) {
+  auto w = Window::of(window).value_or(*Window::of("12h"));
+  bool minutes = std::string_view(w.table) == "minutes";
+  std::lock_guard lock(mu_);
+  int64_t from = w.from(now_ms), to = w.to(now_ms);
+  size_t count = size_t(w.span_ms / w.step_ms);
+  std::vector<SvcSums> points(count);
+  SvcSums totals;
+  struct PerService {
+    SvcSums sums;
+    std::set<std::string> tenants, boxes;
+  };
+  std::map<std::string, PerService> by_service;
+  std::map<std::tuple<std::string, std::string, std::string, std::string>, SvcSums> by_method;
+  sqlite::Stmt s(*db_, std::string("SELECT t, tenant, box, service, method, n, failed, n4, n5, neterr, outbox, us, bytes_out, "
+                                   "bytes_in, hist FROM ") +
+                           (minutes ? "service_minutes" : "service_hours") +
+                           " WHERE t >= ? AND t < ? AND (? = '' OR tenant = ?) AND (? = '' OR service = ?)");
+  s.bind(1, from).bind(2, to).bind(3, tenant).bind(4, tenant).bind(5, service).bind(6, service);
+  while (s.step()) {
+    SvcSums one{s.int64(5), s.int64(6), s.int64(7), s.int64(8), s.int64(9), s.int64(10),
+                s.int64(11), s.int64(12), s.int64(13), Histogram::decode(s.text(14))};
+    size_t i = size_t((s.int64(0) - from) / w.step_ms);
+    if (i < count) points[i].merge(one);
+    totals.merge(one);
+    auto& ps = by_service[s.text(3)];
+    ps.sums.merge(one);
+    if (!s.text(1).empty()) ps.tenants.insert(s.text(1));
+    if (!s.text(2).empty()) ps.boxes.insert(s.text(2));
+    by_method[{s.text(1), s.text(2), s.text(3), s.text(4)}].merge(one);
+  }
+  bj::array pts;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& p = points[i];
+    pts.push_back(bj::object{{"t", from + int64_t(i) * w.step_ms}, {"calls", p.n}, {"failed", p.failed},
+                             {"outbox", p.outbox}, {"p50_us", p.hist.percentile(0.5)}, {"p99_us", p.hist.percentile(0.99)}});
+  }
+  std::vector<std::pair<std::string, PerService>> svcs(by_service.begin(), by_service.end());
+  std::stable_sort(svcs.begin(), svcs.end(), [](const auto& a, const auto& b) { return a.second.sums.n > b.second.sums.n; });
+  bj::array services_out;
+  for (const auto& [name, ps] : svcs) {
+    auto o = svc_fields(ps.sums);
+    o["service"] = name;
+    bj::array ts, bs;
+    for (const auto& t : ps.tenants) ts.emplace_back(t);
+    for (const auto& b : ps.boxes) bs.emplace_back(b);
+    o["tenants"] = std::move(ts);
+    o["boxes"] = std::move(bs);
+    services_out.push_back(std::move(o));
+  }
+  std::vector<std::pair<std::tuple<std::string, std::string, std::string, std::string>, SvcSums>> ms(by_method.begin(),
+                                                                                                       by_method.end());
+  std::stable_sort(ms.begin(), ms.end(), [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
+  if (ms.size() > 500) ms.resize(500);
+  bj::array methods;
+  for (const auto& [k, x] : ms) {
+    auto o = svc_fields(x);
+    o["tenant"] = std::get<0>(k);
+    o["box"] = std::get<1>(k);
+    o["service"] = std::get<2>(k);
+    o["method"] = std::get<3>(k);
+    methods.push_back(std::move(o));
+  }
+  bj::array statuses;
+  {
+    sqlite::Stmt st(*db_, std::string("SELECT service, status, SUM(n) FROM ") +
+                              (minutes ? "service_status_minutes" : "service_status_hours") +
+                              " WHERE t >= ? AND t < ? AND (? = '' OR tenant = ?) AND (? = '' OR service = ?)"
+                              " GROUP BY service, status ORDER BY SUM(n) DESC LIMIT 200");
+    st.bind(1, from).bind(2, to).bind(3, tenant).bind(4, tenant).bind(5, service).bind(6, service);
+    while (st.step()) statuses.push_back(bj::object{{"service", st.text(0)}, {"status", st.int64(1)}, {"n", st.int64(2)}});
+  }
+  bj::array last;
+  {
+    sqlite::Stmt st(*db_, "SELECT at_ms, tenant, box, service, method, status, error, url, request_id, outbox_id FROM "
+                          "service_failures WHERE at_ms >= ? AND (? = '' OR tenant = ?) AND (? = '' OR service = ?)"
+                          " ORDER BY at_ms DESC, rowid DESC LIMIT ?");
+    st.bind(1, from).bind(2, tenant).bind(3, tenant).bind(4, service).bind(5, service).bind(6, int64_t(latest));
+    while (st.step()) {
+      bj::object o{{"at_ms", st.int64(0)}, {"tenant", st.text(1)}, {"box", st.text(2)}, {"service", st.text(3)},
+                   {"method", st.text(4)}, {"status", st.int64(5)}, {"error", st.text(6)}};
+      if (!st.text(7).empty()) o["url"] = st.text(7);
+      if (!st.text(8).empty()) o["request_id"] = st.text(8);
+      if (st.int64(9)) o["outbox_id"] = st.int64(9);
+      last.push_back(std::move(o));
+    }
+  }
+  return bj::object{{"window", std::string(window)},
+                    {"step_ms", w.step_ms},
+                    {"from_ms", from},
+                    {"to_ms", to},
+                    {"totals", svc_fields(totals)},
+                    {"points", std::move(pts)},
+                    {"services", std::move(services_out)},
+                    {"methods", std::move(methods)},
+                    {"statuses", std::move(statuses)},
+                    {"latest", std::move(last)}};
+}
+
+bj::object Traffic::gauge_series(std::string_view window, const std::string& name, const std::string& tenant,
+                                 int64_t now_ms) {
+  auto w = Window::of(window).value_or(*Window::of("12h"));
+  bool minutes = std::string_view(w.table) == "minutes";
+  std::lock_guard lock(mu_);
+  int64_t from = w.from(now_ms), to = w.to(now_ms);
+  size_t count = size_t(w.span_ms / w.step_ms);
+  std::vector<int64_t> points(count, 0);
+  std::vector<bool> seen(count, false);
+  // Each minute's (or hour's) sum over tenants and keys; a point is its largest.
+  sqlite::Stmt s(*db_, std::string("SELECT t, SUM(value) FROM ") + (minutes ? "gauge_minutes" : "gauge_hours") +
+                           " WHERE name = ? AND t >= ? AND t < ? AND (? = '' OR tenant = ?) GROUP BY t");
+  s.bind(1, name).bind(2, from).bind(3, to).bind(4, tenant).bind(5, tenant);
+  while (s.step()) {
+    size_t i = size_t((s.int64(0) - from) / w.step_ms);
+    if (i >= count) continue;
+    points[i] = std::max(points[i], s.int64(1));
+    seen[i] = true;
+  }
+  bj::array pts;
+  for (size_t i = 0; i < count; ++i) {
+    bj::object p{{"t", from + int64_t(i) * w.step_ms}, {"value", points[i]}};
+    if (!seen[i]) p["value"] = nullptr;  // not sampled: the host was down, or nothing was measured
+    pts.push_back(std::move(p));
+  }
+  bj::array now;
+  {
+    std::lock_guard g(gauge_mu_);
+    for (const auto& [k, v] : gauge_now_) {
+      const auto& [n, t, key] = k;
+      if (n != name || (!tenant.empty() && t != tenant)) continue;
+      now.push_back(bj::object{{"tenant", t}, {"key", key}, {"value", v.second}, {"at_ms", v.first}});
+    }
+  }
+  return bj::object{{"window", std::string(window)},
+                    {"step_ms", w.step_ms},
+                    {"from_ms", from},
+                    {"to_ms", to},
+                    {"points", std::move(pts)},
+                    {"now", std::move(now)}};
 }
 
 }  // namespace goober::operations

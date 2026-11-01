@@ -659,6 +659,7 @@ void Host::write_dev_mail(const identity::Mail& mail) {
   bj::object line{{"at", base::format_utc_ms(now)}, {"to", mail.to},     {"subject", mail.subject},
                   {"via", "dev"},                    {"status", "sent"}, {"file", "mail/outbox/" + name}};
   if (!mail.tenant.empty()) line["tenant"] = mail.tenant;
+  if (mail.tenant.empty() && !mail.realm.empty()) line["realm"] = mail.realm;
   if (!mail.from_address.empty()) line["from_address"] = mail.from_address;
   if (mail.test) line["test"] = true;
   log_line("mail", std::move(line));

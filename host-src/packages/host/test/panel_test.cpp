@@ -309,6 +309,76 @@ TEST_F(PanelTest, TheGraphShowsEachTableAndItsGrant) {
             std::string::npos);
 }
 
+// External services (028 § 4.4) and services in the data flow (§ 6): what went out, by service,
+// from the egress and mail logs, and the graph's service nodes, the host's calls, and the mailer.
+TEST_F(PanelTest, ServicesAreReportedAndDrawnWithTheMailer) {
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"notify","domains":["*"],
+      "external":{"mail":{"mail":{}},
+                  "pay":{"base":"https://pay.example","methods":{"charge":{"verb":"post","path":"/v1/charge"}}}},
+      "routes":{"http":{"/x":{"get":{"name":"x","public":true}}}}})",
+                                   R"((module (memory (export "memory") 1) (func (export "goober_route_x") (result i32) (i32.const 0))))",
+                                   &err))
+      << err;
+  std::string now = base::format_utc_ms(base::now_unix_ms());
+  auto egress = [&](const std::string& rest) {
+    base::append_line(root / "storage/logs/egress.log", R"({"at":")" + now + R"(",)" + rest);
+  };
+  egress(R"("tenant":"playground","box":"notify","service":"pay","method":"charge","verb":"POST","status":200,"us":1500})");
+  egress(R"("tenant":"playground","box":"notify","service":"pay","method":"charge","verb":"POST","status":502,"us":900,"url":"https://pay.example/v1/charge","request_id":"req-1"})");
+  egress(R"("tenant":"playground","box":"notify","service":"mail","method":"send","verb":"MAIL","status":200,"us":300,"outbox_id":5})");
+  egress(R"("tenant":"playground","box":"","service":"push","method":"send","verb":"POST","status":201,"us":700})");
+  base::append_line(root / "storage/logs/mail.log",
+                    R"({"at":")" + now + R"(","tenant":"playground","via":"dev","status":"sent","us":10})");
+
+  std::string cookie = sign_in("watcher@example.com");
+  ASSERT_FALSE(cookie.empty());
+  auto r = parse(api(cookie, "service_report", R"({"window":"1h"})").body)["result"].as_object();
+  std::map<std::string, bj::object> svcs;
+  for (const auto& s : r["services"].as_array()) svcs[std::string(s.at("service").as_string())] = s.as_object();
+  ASSERT_TRUE(svcs.count("pay")) << json::dump(r);
+  EXPECT_EQ(svcs["pay"].at("kind"), "external");
+  EXPECT_EQ(svcs["pay"].at("calls"), 2);
+  EXPECT_EQ(svcs["pay"].at("n5"), 1);
+  EXPECT_EQ(svcs["mail"].at("kind"), "mail");
+  EXPECT_EQ(svcs["mail"].at("outbox"), 1);
+  EXPECT_EQ(svcs["push"].at("kind"), "push");
+  ASSERT_TRUE(svcs.count("mailer"));
+  EXPECT_EQ(svcs["mailer"].at("kind"), "mailer");
+  EXPECT_GE(svcs["mailer"].at("calls").as_int64(), 2);  // the box's mail, and the watcher's sign-in code
+  EXPECT_EQ(r["latest"].at(0).at("request_id"), "req-1");
+  EXPECT_EQ(r["mail"].at("mailer"), "dev");
+  EXPECT_TRUE(r["outbox"].as_object().contains("points"));
+  EXPECT_TRUE(r.contains("backups"));
+  // One service, for a tenant: no backups (they are the host's).
+  auto pay = parse(api(cookie, "service_report", R"({"window":"1h","tenant":"playground","service":"pay"})").body)["result"];
+  EXPECT_EQ(pay.at("services").as_array().size(), 1u);
+  EXPECT_FALSE(pay.as_object().contains("backups"));
+
+  auto graph = parse(api(cookie, "box_graph", R"({"window":"1h"})").body)["result"].as_object();
+  std::map<std::string, bj::object> nodes;
+  std::set<std::pair<std::string, std::string>> edges;
+  for (const auto& n : graph["nodes"].as_array()) nodes[std::string(n.at("id").as_string())] = n.as_object();
+  for (const auto& e : graph["edges"].as_array()) {
+    edges.emplace(std::string(e.at("from").as_string()), std::string(e.at("to").as_string()));
+  }
+  ASSERT_TRUE(nodes.count("svc:pay")) << json::dump(graph);
+  EXPECT_EQ(nodes["svc:pay"].at("calls"), 2);
+  EXPECT_EQ(nodes["svc:pay"].at("failed"), 1);
+  EXPECT_EQ(nodes["svc:mail"].at("mail"), true);
+  EXPECT_TRUE(edges.count({"box:notify", "svc:pay"}));
+  EXPECT_TRUE(edges.count({"svc:mail", "svc:mailer"})) << json::dump(graph["edges"]);
+  EXPECT_TRUE(edges.count({"host:playground", "svc:push"})) << json::dump(graph["edges"]);
+  EXPECT_EQ(nodes["svc:mailer"].at("column"), 3);
+  // One box's graph has its mailer too.
+  auto one = parse(api(cookie, "box_graph", R"({"window":"1h","box":"notify"})").body)["result"].as_object();
+  EXPECT_NE(json::dump(one).find("svc:mailer"), std::string::npos);
+  auto js = fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body;
+  EXPECT_NE(js.find("async services(params)"), std::string::npos);
+  EXPECT_NE(js.find("function keyGraphs"), std::string::npos);
+  EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/", {{"cookie", cookie}}).body.find("#/services"), std::string::npos);
+}
+
 TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {
   uint16_t panel = host->panel_port();
   ASSERT_NE(panel, 0);
