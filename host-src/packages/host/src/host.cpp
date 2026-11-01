@@ -741,6 +741,8 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
       if (!line.contains("try")) {
         live_.record(base::now_unix_ms(), *tenant, path, text("route"), text("box"), status,
                      line.at("us").as_int64(), from);
+        // A monitor's own polls of /goober/ready would dilute the ratios it graphs.
+        if (req.path != "/goober/ready") pulse_.request(base::now_unix_ms(), status, line.at("us").as_int64());
       }
     }
   }
@@ -932,17 +934,21 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
   }
   // Readiness, for deploys and bots: every subsystem's status, 503 unless all are fine.
   if (path && path->path == "/goober/ready") {
-    pool_->post([this, req, finish] {
+    // ?format=prometheus, or a Prometheus scraper's Accept: the same numbers as text (028 § 4.6),
+    // always 200 with goober_ready 0 or 1, since a scraper reads a 503 as the target being down.
+    bool prometheus = ("&" + req.query + "&").find("&format=prometheus&") != std::string::npos ||
+                      req.header("accept").find("version=0.0.4") != std::string::npos;
+    pool_->post([this, req, finish, prometheus] {
       Response res;
       try {
         auto [status, body] = readiness(true);
-        res.status = status;
-        res.body = json::dump(body);
+        res.status = prometheus ? 200 : status;
+        res.body = prometheus ? prometheus_text(body) : json::dump(body);
       } catch (const std::exception& e) {
-        res.status = 503;
-        res.body = json::dump(bj::object{{"ok", false}, {"error", e.what()}});
+        res.status = prometheus ? 200 : 503;
+        res.body = prometheus ? "# readiness failed\ngoober_ready 0\n" : json::dump(bj::object{{"ok", false}, {"error", e.what()}});
       }
-      res.headers.emplace_back("content-type", "application/json");
+      res.headers.emplace_back("content-type", prometheus ? "text/plain; version=0.0.4; charset=utf-8" : "application/json");
       res.headers.emplace_back("cache-control", "no-store");
       res.head_only = req.method == "head";
       finish(std::move(res), "");
@@ -1670,7 +1676,14 @@ void Host::record_box_call(const BoxCall& call, const std::string& tenant, const
   // A cache hit ran no box.
   if (p.cache == "hit") return;
   // A try or a dry run counts in no rate; only its failures are kept, apart.
-  if (!trial) failures_->call(now_ms, tenant, p.box, p.route, p.verb);
+  if (!trial) {
+    failures_->call(now_ms, tenant, p.box, p.route, p.verb);
+    // The call failed (not a statement's error the call survived, or a mail route's answer).
+    pulse_.add(now_ms, operations::Pulse::kBoxCalls);
+    if (!call.failure.empty() && operations::Failures::group_of(call.failure) == "call") {
+      pulse_.add(now_ms, operations::Pulse::kBoxFailed);
+    }
+  }
   auto version = call.extra.if_contains("version");
   auto record = [&](const std::string& cls, const std::string& message, int64_t n) {
     if (n <= 0) return;

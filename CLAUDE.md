@@ -156,7 +156,8 @@ Read these before doing design work:
     kept out of the icicle, the Errors view of what visitors got (`error_report`), and the Box
     failures view of how boxes fail (`box_failures`) (§ 4.1 to § 4.3); the Services view of what went out
     (`service_report`: boxes' services, mail through the mailer, push, the robot; failures, latency,
-    retries, the outbox's queue) and the Overview's key graphs (§ 4.4, § 4.5); the change log from the
+    retries, the outbox's queue) and the Overview's key graphs (§ 4.4, § 4.5); `/goober/ready`'s `health`
+    for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
     and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal

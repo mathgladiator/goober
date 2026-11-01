@@ -29,6 +29,16 @@ the host runs but something is wrong:
 
 Then open the site in a browser. If health fails, go to section 5.
 
+**Watch it from outside.** `/goober/ready` also answers `health`: the last five minutes' error
+ratios and latency, box, mail, and service failure ratios, the outbox's depth and oldest age,
+free disk, and how long since each backup. Point any uptime checker at
+`https://example.com/goober/ready` (it answers 503 when something is wrong), or a Prometheus
+(Grafana Cloud's free tier has one) at `https://example.com/goober/ready?format=prometheus`
+and graph `goober_requests_5xx_ratio`, `goober_request_p99_milliseconds`,
+`goober_outbox_oldest_age_seconds`, `goober_disk_free_ratio`, and
+`goober_backup_nightly_age_seconds`. Alert on `goober_ready == 0`. It shows no request counts,
+since anyone can read it.
+
 Which code is running: `build` is the git commit the host was built from (`+dirty` if the
 tree had uncommitted changes). It should match `git log -1 --format=%h --abbrev=12` on the
 machine you deployed from. `host_health` (ask Grok) and `goober-host --version` on the

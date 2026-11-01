@@ -56,6 +56,12 @@ class BackupService {
 
   // Health is judged at now_ms (the wall clock, except in tests).
   boost::json::object status(bool with_points, int64_t now_ms);
+  // When each stream last succeeded (0 for never), for /goober/ready's health: one small read.
+  struct Times {
+    bool enabled = false;
+    int64_t nightly_ms = 0, increment_ms = 0, logs_ms = 0;
+  };
+  Times times();
   // The backup key, made on first use (keys/system/backup_key). nullopt with `error` if the
   // key store can't be written.
   std::optional<backup::Key> key(std::string* error);

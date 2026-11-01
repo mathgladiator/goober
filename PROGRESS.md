@@ -837,6 +837,17 @@ first, then any), and the services boxes use in the data flow (028 § 4.4, § 4.
       own mail; tests.
 - [ ] Bounces and complaints from the mailer (SES notifications), not received by the host yet.
 
+### Phase 45: graphable health on /goober/ready (2026-10-31)
+The human asked for health an outside observer can graph (028 § 4.6):
+- [x] A five-minute pulse in memory (operations `Pulse`): requests by status class with latency,
+      box calls and failures, mail sent and failed, calls out and failures; tests.
+- [x] `health` in `/goober/ready`: ratios, latencies, ages, and gauges (outbox depth, oldest
+      age, dead letters; workers; disk; backup ages; log archive queue and write errors), never
+      volumes, at most once a second, no log reads; tests.
+- [x] `?format=prometheus` (or a scraper's Accept): the same as Prometheus text, always 200,
+      `goober_ready` and `goober_check_ok{check}`; tests; HUMAN.md's "Watch it from outside".
+- [ ] Counts behind the operations token, if the human wants volumes graphed too.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

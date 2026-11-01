@@ -417,6 +417,74 @@ TEST_F(PanelTest, ReadySaysWhatEverySubsystemIs) {
   EXPECT_FALSE(brief.contains("checks"));
 }
 
+// Health a monitor graphs (028 § 4.6): ratios, latencies, ages, and gauges, never volumes; and
+// the same as Prometheus text.
+TEST_F(PanelTest, ReadyCarriesHealthToGraph) {
+  std::string err;
+  ASSERT_TRUE(host->content().put("playground", "x.md", "# x", &err)) << err;
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(fetch(port, "localhost", bhttp::verb::get, "/x").status, 200);
+  EXPECT_EQ(fetch(port, "localhost", bhttp::verb::get, "/no-such-page").status, 404);
+  auto ready = parse(fetch(port, "localhost", bhttp::verb::get, "/goober/ready").body);
+  const auto& h = ready["health"].as_object();
+  EXPECT_EQ(h.at("window_s"), 300);
+  EXPECT_GE(h.at("uptime_s").as_int64(), 0);
+  const auto& req = h.at("requests").as_object();
+  // One of four (the monitor's own polls aren't counted).
+  EXPECT_DOUBLE_EQ(req.at("ratio_4xx").as_double(), 0.25);
+  EXPECT_DOUBLE_EQ(req.at("ratio_5xx").as_double(), 0.0);
+  EXPECT_GT(req.at("p99_ms").as_double(), 0.0);
+  // No counts anywhere: they'd tell anyone the site's traffic.
+  for (const char* k : {"n", "count", "requests", "total"}) EXPECT_FALSE(req.contains(k)) << k;
+  for (const char* k : {"boxes", "mail", "services", "outbox", "workers", "disk", "backups", "logs"}) {
+    EXPECT_TRUE(h.contains(k)) << k;
+  }
+  EXPECT_EQ(h.at("outbox").at("depth"), 0);
+  EXPECT_TRUE(h.at("outbox").at("oldest_age_s").is_null());
+  double free_ratio = h.at("disk").at("free_ratio").as_double();
+  EXPECT_GT(free_ratio, 0.0);
+  EXPECT_LE(free_ratio, 1.0);
+  EXPECT_EQ(h.at("backups").at("enabled"), false);
+  EXPECT_EQ(h.at("logs").at("write_errors"), 0);
+
+  // Prometheus text, by query or by a scraper's Accept; 200 even when not ready.
+  auto prom = fetch(port, "localhost", bhttp::verb::get, "/goober/ready?format=prometheus");
+  ASSERT_EQ(prom.status, 200);
+  EXPECT_NE(prom.headers["content-type"].find("text/plain"), std::string::npos);
+  for (const char* want : {"goober_ready 1\n", "# TYPE goober_requests_5xx_ratio gauge\n", "goober_requests_4xx_ratio 0.25\n",
+                           "goober_check_ok{check=\"disk\"} 1\n", "goober_outbox_depth 0\n",
+                           "# TYPE goober_log_write_errors_total counter\n", "goober_disk_free_bytes "}) {
+    EXPECT_NE(prom.body.find(want), std::string::npos) << want << "\n" << prom.body;
+  }
+  EXPECT_EQ(prom.body.find("goober_outbox_oldest_age_seconds"), std::string::npos) << "unknown is left out, not 0";
+  EXPECT_EQ(prom.body.find("# TYPE goober_check_ok gauge"), prom.body.rfind("# TYPE goober_check_ok gauge"));
+  auto scraped = fetch(port, "localhost", bhttp::verb::get, "/goober/ready", {{"accept", "text/plain;version=0.0.4"}});
+  EXPECT_NE(scraped.body.find("goober_ready 1"), std::string::npos);
+  auto down = host::Host::prometheus_text(bj::object{{"ok", false}, {"checks", bj::object{{"disk", bj::object{{"ok", false}}}}}});
+  EXPECT_NE(down.find("goober_ready 0\n"), std::string::npos);
+  EXPECT_NE(down.find("goober_check_ok{check=\"disk\"} 0\n"), std::string::npos);
+}
+
+// The pulse counts box calls, mail, and calls out as they're logged.
+TEST_F(PanelTest, ThePulseCountsMailAndCallsOut) {
+  int64_t now = base::now_unix_ms();
+  host->log_line("mail", bj::object{{"to", "a@example.com"}, {"status", "sent"}});
+  host->log_line("mail", bj::object{{"to", "b@example.com"}, {"status", "failed"}, {"error", "refused"}});
+  host->log_line("mail", bj::object{{"to", "c@example.com"}, {"status", "failed"}, {"test", true}});
+  host->log_line("egress", bj::object{{"service", "api"}, {"status", 200}});
+  host->log_line("egress", bj::object{{"service", "api"}, {"status", 0}, {"error", "timed out"}});
+  host->log_line("egress", bj::object{{"service", "api"}, {"status", 503}});
+  host->log_line("egress", bj::object{{"service", "api"}, {"status", 201}});
+  auto s = host->pulse().snapshot(now);
+  using P = operations::Pulse;
+  EXPECT_EQ(s.n[P::kMailSent], 1);
+  EXPECT_EQ(s.n[P::kMailFailed], 1);
+  EXPECT_EQ(s.n[P::kServiceCalls], 4);
+  EXPECT_EQ(s.n[P::kServiceFailed], 2);
+  auto h = host->health(now + 5000);
+  EXPECT_DOUBLE_EQ(h.at("mail").at("failure_ratio").as_double(), 0.5);
+  EXPECT_DOUBLE_EQ(h.at("services").at("failure_ratio").as_double(), 0.5);
+}
+
 // The panel's stores are never a reason not to start (the 2026-10-29 outage's lesson).
 TEST(PanelStartup, AHostWhoseChangeLogCantOpenStillServes) {
   auto root = fs::path(GOOBER_TEST_TMP) / "panel_degraded";

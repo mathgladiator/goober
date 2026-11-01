@@ -11,6 +11,7 @@
 #include "goober/base/files.h"
 #include "goober/base/random.h"
 #include "goober/base/time.h"
+#include "backups.h"
 #include "build_id.h"
 #include "jobs.h"
 #include "goober/host/host.h"
@@ -352,7 +353,168 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
                   {"uptime_ms", base::now_unix_ms() - started_ms_},
                   {"checks", std::move(checks)},
                   {"startup_notes", startup_notes_.size()}};
+  body["health"] = health(base::now_unix_ms());
   return {ok ? 200 : 503, std::move(body)};
+}
+
+// What a monitor graphs (028 § 4.6). Ratios, latencies, ages, and gauges only: /goober/ready is
+// public on every domain, and request counts would tell anyone a site's traffic.
+bj::object Host::health(int64_t now_ms) {
+  std::lock_guard lock(health_mu_);
+  if (health_at_ms_ && now_ms >= health_at_ms_ && now_ms - health_at_ms_ < 1000) return health_cache_;
+  using P = operations::Pulse;
+  auto cfg = config_.get();
+  auto s = pulse_.snapshot(now_ms);
+  auto ratio = [](int64_t part, int64_t whole) { return whole > 0 ? double(part) / double(whole) : 0.0; };
+  auto ms = [](int64_t us) { return double(us) / 1000.0; };
+  auto age_s = [&](int64_t at_ms) -> bj::value { return at_ms > 0 ? bj::value(std::max<int64_t>(0, now_ms - at_ms) / 1000) : bj::value(nullptr); };
+  int64_t requests = s.n[P::kRequests];
+  bj::object out{
+      {"window_s", P::kMinutes * P::kMinuteMs / 1000},
+      {"uptime_s", (now_ms - started_ms_) / 1000},
+      {"requests",
+       bj::object{{"ratio_4xx", ratio(s.n[P::kRequests4xx], requests)},
+                  {"ratio_5xx", ratio(s.n[P::kRequests5xx], requests)},
+                  {"p50_ms", ms(s.p50_us)},
+                  {"p99_ms", ms(s.p99_us)},
+                  {"max_ms", ms(s.max_us)}}},
+      {"boxes", bj::object{{"failure_ratio", ratio(s.n[P::kBoxFailed], s.n[P::kBoxCalls])}}},
+      {"mail", bj::object{{"failure_ratio", ratio(s.n[P::kMailFailed], s.n[P::kMailSent] + s.n[P::kMailFailed])}}},
+      {"services", bj::object{{"failure_ratio", ratio(s.n[P::kServiceFailed], s.n[P::kServiceCalls])}}},
+      {"outbox",
+       bj::object{{"depth", outbox_depth_.load()}, {"oldest_age_s", age_s(outbox_oldest_ms_.load())}, {"dead", outbox_dead_.load()}}},
+      {"workers", bj::object{{"queued", int64_t(pool_ ? pool_->queued() : 0)},
+                             {"open_connections", server_ ? server_->open_connections() : 0}}}};
+  {
+    std::error_code ec;
+    auto space = fs::space(cfg->storage, ec);
+    if (!ec && space.capacity > 0) {
+      out["disk"] = bj::object{{"free_bytes", int64_t(space.available)},
+                               {"free_ratio", double(space.available) / double(space.capacity)}};
+    }
+  }
+  {
+    bj::object b{{"enabled", false}};
+    if (backups_) {
+      try {
+        auto t = backups_->times();
+        b["enabled"] = t.enabled;
+        if (t.enabled) {
+          b["nightly_age_s"] = age_s(t.nightly_ms);
+          b["increment_age_s"] = age_s(t.increment_ms);
+          b["logs_age_s"] = age_s(t.logs_ms);
+        }
+      } catch (const std::exception&) {
+      }
+    }
+    out["backups"] = std::move(b);
+  }
+  {
+    // Rotated logs waiting for their sealed upload (032 § 2), and lines the host couldn't write.
+    int64_t queued = 0;
+    std::error_code ec;
+    if (logs_) {
+      for (auto it = fs::directory_iterator(logs_->dir() / "archive", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->path().extension() == ".log") ++queued;
+      }
+    }
+    out["logs"] = bj::object{{"archive_queued", queued}, {"write_errors", log_write_errors_.load()}};
+  }
+  health_cache_ = out;
+  health_at_ms_ = now_ms;
+  return out;
+}
+
+namespace {
+
+void prom_line(std::string& out, const std::string& name, const char* type, const char* help, const bj::value* v,
+               const std::string& labels = "") {
+  if (!v || !(v->is_number() || v->is_bool())) return;
+  if (labels.empty() || out.find("# TYPE " + name + " ") == std::string::npos) {
+    out += "# HELP " + name + " " + help + "\n# TYPE " + name + " " + type + "\n";
+  }
+  std::string text;
+  if (v->is_bool()) {
+    text = v->as_bool() ? "1" : "0";
+  } else if (v->is_double()) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.6g", v->as_double());
+    text = buf;
+  } else {
+    text = std::to_string(v->to_number<int64_t>());
+  }
+  out += name + labels + " " + text + "\n";
+}
+
+const bj::value* at(const bj::object& o, std::initializer_list<const char*> path) {
+  const bj::value* v = nullptr;
+  const bj::object* cur = &o;
+  for (const char* k : path) {
+    if (!cur) return nullptr;
+    v = cur->if_contains(k);
+    if (!v) return nullptr;
+    cur = v->if_object();
+  }
+  return v;
+}
+
+}  // namespace
+
+std::string Host::prometheus_text(const bj::object& ready) {
+  std::string out;
+  bj::value ok = ready.contains("ok") ? ready.at("ok") : bj::value(false);
+  prom_line(out, "goober_ready", "gauge", "1 when every check passes (the JSON answer is 200), else 0.", &ok);
+  if (const auto* h = ready.if_contains("health"); h && h->is_object()) {
+    const auto& o = h->as_object();
+    struct M {
+      const char* name;
+      std::initializer_list<const char*> path;
+      const char* type;
+      const char* help;
+    };
+    const M metrics[] = {
+        {"goober_uptime_seconds", {"uptime_s"}, "gauge", "Seconds since the host started."},
+        {"goober_requests_4xx_ratio", {"requests", "ratio_4xx"}, "gauge", "Share of requests answered 4xx, last 5 minutes."},
+        {"goober_requests_5xx_ratio", {"requests", "ratio_5xx"}, "gauge", "Share of requests answered 5xx, last 5 minutes."},
+        {"goober_request_p50_milliseconds", {"requests", "p50_ms"}, "gauge", "Median request latency, last 5 minutes."},
+        {"goober_request_p99_milliseconds", {"requests", "p99_ms"}, "gauge", "99th percentile request latency, last 5 minutes."},
+        {"goober_request_max_milliseconds", {"requests", "max_ms"}, "gauge", "Slowest request, last 5 minutes."},
+        {"goober_box_failure_ratio", {"boxes", "failure_ratio"}, "gauge", "Share of box calls that failed, last 5 minutes."},
+        {"goober_mail_failure_ratio", {"mail", "failure_ratio"}, "gauge", "Share of mail sends that failed, last 5 minutes."},
+        {"goober_service_failure_ratio", {"services", "failure_ratio"}, "gauge", "Share of calls to outside services that failed, last 5 minutes."},
+        {"goober_outbox_depth", {"outbox", "depth"}, "gauge", "Outbox elements waiting for delivery."},
+        {"goober_outbox_oldest_age_seconds", {"outbox", "oldest_age_s"}, "gauge", "Age of the oldest waiting outbox element."},
+        {"goober_outbox_dead", {"outbox", "dead"}, "gauge", "Outbox dead letters kept."},
+        {"goober_worker_queue", {"workers", "queued"}, "gauge", "Requests waiting for a worker."},
+        {"goober_open_connections", {"workers", "open_connections"}, "gauge", "HTTP connections open."},
+        {"goober_disk_free_bytes", {"disk", "free_bytes"}, "gauge", "Free bytes on the disk holding storage."},
+        {"goober_disk_free_ratio", {"disk", "free_ratio"}, "gauge", "Free share of the disk holding storage."},
+        {"goober_backup_enabled", {"backups", "enabled"}, "gauge", "1 when backups to S3 are on."},
+        {"goober_backup_nightly_age_seconds", {"backups", "nightly_age_s"}, "gauge", "Seconds since the last nightly backup."},
+        {"goober_backup_increment_age_seconds", {"backups", "increment_age_s"}, "gauge", "Seconds since the last backup increment."},
+        {"goober_backup_logs_age_seconds", {"backups", "logs_age_s"}, "gauge", "Seconds since rotated logs were last archived."},
+        {"goober_log_archive_queued", {"logs", "archive_queued"}, "gauge", "Rotated logs waiting for their sealed upload."},
+        {"goober_log_write_errors_total", {"logs", "write_errors"}, "counter", "Log lines the host couldn't write since it started."},
+    };
+    for (const auto& m : metrics) prom_line(out, m.name, m.type, m.help, at(o, m.path));
+  }
+  if (const auto* c = ready.if_contains("checks"); c && c->is_object()) {
+    for (const auto& kv : c->as_object()) {
+      if (!kv.value().is_object()) continue;
+      prom_line(out, "goober_check_ok", "gauge", "1 when this readiness check passes.", kv.value().as_object().if_contains("ok"),
+                "{check=\"" + std::string(kv.key()) + "\"}");
+    }
+    if (const auto* loops = at(c->as_object(), {"loops", "loops"}); loops && loops->is_object()) {
+      for (const auto& kv : loops->as_object()) {
+        const auto* ago = kv.value().is_object() ? kv.value().as_object().if_contains("ago_ms") : nullptr;
+        if (!ago || !ago->is_number()) continue;
+        bj::value secs = double(ago->to_number<int64_t>()) / 1000.0;
+        prom_line(out, "goober_loop_age_seconds", "gauge", "Seconds since a background loop last came round.", &secs,
+                  "{loop=\"" + std::string(kv.key()) + "\"}");
+      }
+    }
+  }
+  return out;
 }
 
 void Host::register_tools() {

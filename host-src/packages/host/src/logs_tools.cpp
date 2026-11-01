@@ -68,6 +68,19 @@ void Host::log_line(const std::string& log, bj::object line) {
   // The envelope's own time is the write's; an event's time stays as its own field.
   // An event's own time is kept only when it differs from the write's (a box's call time, say).
   int64_t now = base::now_unix_ms();
+  // The pulse (028 § 4.6): mail sent or failed (not a template's test send), and calls out.
+  if (log == "mail" || log == "egress") {
+    auto* st = line.if_contains("status");
+    if (log == "mail" && st && st->is_string() && !line.contains("test")) {
+      bool sent = st->as_string() == "sent";
+      if (sent || st->as_string() == "failed") pulse_.add(now, sent ? operations::Pulse::kMailSent : operations::Pulse::kMailFailed);
+    }
+    if (log == "egress" && st && st->is_int64()) {
+      int64_t code = st->as_int64();
+      pulse_.add(now, operations::Pulse::kServiceCalls);
+      if (code == 0 || code >= 400 || line.contains("error")) pulse_.add(now, operations::Pulse::kServiceFailed);
+    }
+  }
   if (auto* at = line.if_contains("at"); at && at->is_string()) {
     auto t = logs::parse_at(std::string(at->as_string()));
     if (!t || std::llabs(*t - now) >= 1000) line["event_at"] = *at;
@@ -120,6 +133,7 @@ void Host::log_line(const std::string& log, bj::object line) {
   try {
     logs_->write(log, line, now);
   } catch (const std::exception& e) {
+    ++log_write_errors_;
     std::cerr << "goober-host: log " << log << ": " << e.what() << "\n";
   }
 }

@@ -150,6 +150,9 @@ each ranch's site weekly.
   - Archives are at most 5 GiB.
   - The nightly needs room on disk for one more copy of storage. `/goober/ready`'s `disk`
     check says how much is free (`low` under 10% or 2 GiB; failing under 256 MiB).
+  - Nothing outside watches yet: point an uptime checker or a Prometheus at `/goober/ready`
+    (`?format=prometheus`); its `health` has error ratios, latency, the outbox, free disk,
+    and each backup's age, to graph and alert on (HUMAN.md § 1).
 
 ## 6. Mail that arrives: yes, untried with real SES or a real MX
 

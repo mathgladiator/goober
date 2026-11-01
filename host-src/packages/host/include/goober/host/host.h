@@ -29,6 +29,7 @@
 #include "goober/operations/changes.h"
 #include "goober/operations/failures.h"
 #include "goober/operations/live.h"
+#include "goober/operations/pulse.h"
 #include "goober/operations/traffic.h"
 #include "goober/runtime_wasm/engine.h"
 #include "goober/server_http/server.h"
@@ -153,6 +154,13 @@ class Host {
   // Whether the host is ready (GET /goober/ready):
   // storage writable (when probed), identity answering, boxes loaded, the queue not full.
   std::pair<int, boost::json::object> readiness(bool probe_storage);
+  // Numbers an outside monitor graphs (028 § 4.6): ratios, latencies, ages, and gauges over the
+  // last five minutes and now, never traffic volumes. In readiness's "health"; computed from
+  // memory and a few cheap reads, at most once a second.
+  boost::json::object health(int64_t now_ms);
+  // /goober/ready as Prometheus text exposition (0.0.4): health's numbers and each check.
+  static std::string prometheus_text(const boost::json::object& ready);
+  operations::Pulse& pulse() { return pulse_; }
   // The panel's own listener (operations.listen), or 0 when there is none.
   uint16_t panel_port() const;
   // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).
@@ -422,8 +430,13 @@ class Host {
   void run_outbox();
   std::vector<std::pair<std::string, std::string>> outbox_locations();
   // `pending`, when given, gains each service's waiting elements as the tick found them.
+  // `health`, when given, gains the location's waiting elements, its oldest one's creation (the
+  // smallest), and its dead letters.
+  struct OutboxHealth {
+    int64_t depth = 0, oldest_ms = 0, dead = 0;
+  };
   int outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms,
-                     std::map<std::string, int64_t>* pending = nullptr);
+                     std::map<std::string, int64_t>* pending = nullptr, OutboxHealth* health = nullptr);
   std::mutex outbox_scan_mu_;
   int64_t outbox_scan_ms_ = 0;
   std::set<std::pair<std::string, std::string>> outbox_scanned_;
@@ -682,6 +695,13 @@ class Host {
   void logs_housekeeping(int64_t now_ms);
   std::unique_ptr<logs::Set> logs_;
   operations::LiveStats live_;
+  operations::Pulse pulse_;
+  std::atomic<int64_t> log_write_errors_{0};
+  // The outbox as the last tick found it (health): waiting elements, the oldest's creation, dead letters.
+  std::atomic<int64_t> outbox_depth_{0}, outbox_oldest_ms_{0}, outbox_dead_{0};
+  std::mutex health_mu_;
+  int64_t health_at_ms_ = 0;
+  boost::json::object health_cache_;
   // The content kit (content_tools.cpp; design/machine/031.ContentKit.md).
   void register_content_kit_tools();
   // GET a path of one of this host's sites through its own listener, signed out.

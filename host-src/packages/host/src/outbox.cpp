@@ -199,15 +199,20 @@ int Host::outbox_tick(int64_t now_ms) {
   auto cfg = config_.get();
   int delivered = 0;
   std::map<std::string, std::map<std::string, int64_t>> pending;  // tenant -> service -> waiting
+  OutboxHealth health;
   for (const auto& [tenant, database] : outbox_locations()) {
     // One bad location (busy, corrupt, gone) never holds up the others.
     try {
-      delivered += outbox_deliver(tenant, database, now_ms, &pending[tenant]);
+      delivered += outbox_deliver(tenant, database, now_ms, &pending[tenant], &health);
     } catch (const std::exception& e) {
       std::cerr << "goober-host: outbox for " << tenant << "/" << (database.empty() ? "outbox" : database) << ": "
                 << e.what() << "\n";
     }
   }
+  // For /goober/ready's health (028 § 4.6).
+  outbox_depth_ = health.depth;
+  outbox_oldest_ms_ = health.oldest_ms;
+  outbox_dead_ = health.dead;
   // The queue's depth over time (028 § 4.4), as waiting elements per tenant and service.
   if (traffic_) {
     for (const auto& [tenant, by_service] : pending) traffic_->gauge(now_ms, "outbox_pending", tenant, by_service);
@@ -360,7 +365,7 @@ sqlite::Db& Host::sent_ledger() {
 }
 
 int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms,
-                         std::map<std::string, int64_t>* pending) {
+                         std::map<std::string, int64_t>* pending, OutboxHealth* health) {
   auto cfg = config_.get();
   // A sandbox delivers nothing: its outbox fills, visibly, and waits.
   if (cfg->sandbox) return 0;
@@ -381,6 +386,17 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
     while (s.step()) {
       services.push_back(s.text(0));
       if (pending) (*pending)[s.text(0)] += s.int64(1);
+      if (health) health->depth += s.int64(1);
+    }
+  }
+  if (health) {
+    sqlite::Stmt s(*db,
+                   "SELECT coalesce((SELECT min(created_ms) FROM goober_outbox WHERE state IN ('pending', 'polling')), 0),"
+                   " (SELECT count(*) FROM goober_outbox WHERE state = 'dead')");
+    if (s.step()) {
+      int64_t oldest = s.int64(0);
+      if (oldest > 0 && (health->oldest_ms == 0 || oldest < health->oldest_ms)) health->oldest_ms = oldest;
+      health->dead += s.int64(1);
     }
   }
   int delivered = 0;

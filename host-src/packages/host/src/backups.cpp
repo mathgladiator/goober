@@ -727,6 +727,23 @@ int BackupService::run_assets(int64_t now_ms, std::string* error) {
   return uploaded;
 }
 
+BackupService::Times BackupService::times() {
+  auto cfg = config_();
+  Times t;
+  t.enabled = cfg->backup.enabled() && !cfg->sandbox;
+  if (!t.enabled || !fs::exists(cfg->storage / "backup" / "state.db")) return t;
+  // Its own connection and no lock, as status: a nightly may be uploading.
+  sqlite::Db reader(cfg->storage / "backup" / "state.db");
+  sqlite::Stmt s(reader, "SELECT k, v FROM meta WHERE k IN ('last_nightly_ms', 'last_increment_ms', 'last_logs_ms')");
+  while (s.step()) {
+    int64_t v = std::atoll(s.text(1).c_str());
+    if (s.text(0) == "last_nightly_ms") t.nightly_ms = v;
+    if (s.text(0) == "last_increment_ms") t.increment_ms = v;
+    if (s.text(0) == "last_logs_ms") t.logs_ms = v;
+  }
+  return t;
+}
+
 bj::object BackupService::status(bool with_points, int64_t now_ms) {
   auto cfg = config_();
   bj::object out{{"enabled", cfg->backup.enabled() && !cfg->sandbox}};
