@@ -64,7 +64,7 @@ TEST(ContentType, ByExtension) {
 }
 
 TEST(ContentType, DataAndFeedFiles) {
-  EXPECT_EQ(content::content_type_for("calculate/meat-macros.csv"), "text/csv; charset=utf-8");
+  EXPECT_EQ(content::content_type_for("data/prices.csv"), "text/csv; charset=utf-8");
   EXPECT_EQ(content::content_type_for("updates.atom"), "application/atom+xml; charset=utf-8");
   EXPECT_EQ(content::content_type_for("site.webmanifest"), "application/manifest+json");
   EXPECT_EQ(content::content_type_for("x.json"), "application/json");

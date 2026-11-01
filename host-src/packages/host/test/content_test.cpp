@@ -336,12 +336,12 @@ TEST_F(SiteRoutesTest, UploadsInPiecesForAgentsWithoutCode) {
 TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
   std::string doc = "<!DOCTYPE html><html><head><title>Future</title></head><body><p>Salt &amp; pepper</p></body></html>";
   // 1. A whole document can be a draft, and need a role.
-  auto put = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-meat"}, {"format", "document"}, {"body", doc},
-                               {"title", "The future of meat"},
+  auto put = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-grilling"}, {"format", "document"}, {"body", doc},
+                               {"title", "The future of grilling"},
                                {"fields", bj::object{{"draft", true}, {"requirements", bj::array{bj::array{"owner"}}}}}});
   ASSERT_FALSE(put.as_object().contains("error")) << json::dump(put);
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-meat").status, 404);  // a draft, hidden
-  auto preview = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/future-of-meat"}, {"drafts", true}});
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-grilling").status, 404);  // a draft, hidden
+  auto preview = tool("page_render", {{"verbose", true}, {"tenant", "playground"}, {"path", "/future-of-grilling"}, {"drafts", true}});
   EXPECT_EQ(preview.at("kind"), "document");
   std::string html(preview.at("body").as_string());
   EXPECT_EQ(html, doc);  // served as written: no front matter, no template
@@ -351,16 +351,16 @@ TEST_F(SiteRoutesTest, DocumentsDraftsIndexesAndWhatPageGetFinds) {
 
   // 2 and 4. A trailing slash writes the directory's index, and the old file for that URL goes,
   // so the render is the new body at once.
-  auto index = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-meat/"}, {"format", "document"},
+  auto index = tool("page_put", {{"tenant", "playground"}, {"path", "/future-of-grilling/"}, {"format", "document"},
                                  {"body", "<!DOCTYPE html><p>v2</p>"}});
-  EXPECT_EQ(index.at("file"), "future-of-meat/index.html");
-  EXPECT_EQ(index.at("replaced").at(0), "future-of-meat.html");
-  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-meat").body, "<!DOCTYPE html><p>v2</p>");
+  EXPECT_EQ(index.at("file"), "future-of-grilling/index.html");
+  EXPECT_EQ(index.at("replaced").at(0), "future-of-grilling.html");
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/future-of-grilling").body, "<!DOCTYPE html><p>v2</p>");
 
   // 3. page_get finds documents by URL, the root included.
   tool("page_put", {{"tenant", "playground"}, {"path", "/"}, {"format", "document"}, {"body", "<!DOCTYPE html><p>home</p>"}});
   EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/"}}).at("file"), "index.html");
-  EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/future-of-meat"}}).at("file"), "future-of-meat/index.html");
+  EXPECT_EQ(tool("page_get", {{"tenant", "playground"}, {"path", "/future-of-grilling"}}).at("file"), "future-of-grilling/index.html");
 
   // 5. Bodies are kept byte for byte.
   tool("page_put", {{"tenant", "playground"}, {"path", "/salt"}, {"format", "fragment"},

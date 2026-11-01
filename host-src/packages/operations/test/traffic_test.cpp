@@ -86,8 +86,8 @@ TEST(KeyLine, HostWorkIsNamedAndNoPathIsKept) {
   EXPECT_EQ(key(R"({"at":")" + t + R"(","domain":"x","path":"/goober-operations-mcp","operations":"mcp"})").route,
             "operations");
   // A timer's line names its tenant itself.
-  auto timer = key(R"({"at":")" + t + R"(","domain":"127.0.0.1","path":"timer:t","box":"b","route":"t","tenant":"meat"})");
-  EXPECT_EQ(timer.tenant, "meat");
+  auto timer = key(R"({"at":")" + t + R"(","domain":"127.0.0.1","path":"timer:t","box":"b","route":"t","tenant":"acme"})");
+  EXPECT_EQ(timer.tenant, "acme");
 }
 
 TEST_F(TrafficTest, LinesAreSummedIntoSeriesAndRoutes) {
