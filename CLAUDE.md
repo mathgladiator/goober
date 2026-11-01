@@ -207,6 +207,11 @@ Read these before doing design work:
     by one call in order (schemas, versions, content, flags) after snapshots and with what each replaced
     kept, undone in reverse when a member fails, and rolled back by one call (refused over later changes
     unless forced; schemas stay, as they only grow).
+  - `design/machine/043.CodeSecurityReview.md`: the code and security review of 2026-10-29 to
+    2026-10-31's work: six fixes (if_etag held across the write, `export get` never through a link,
+    proxied addresses checked, role changes capped, broken error pages, owner grants warned), three
+    decisions for the human (trusted proxies, roles that gate their own route, agents granting),
+    what wasn't fixed, and what was checked and sound.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

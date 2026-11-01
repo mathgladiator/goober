@@ -792,6 +792,18 @@ The human chose each as recommended:
       kept 7 days, out of backups; `goober-host export list|get|delete`; audited; never waits,
       never for observers; tests.
 
+### Phase 41: code and security review (2026-10-31)
+The work of 2026-10-29 to 2026-10-31, reviewed (043.CodeSecurityReview.md):
+- [x] `if_etag` held from check to write by one host lock across every content write; a race test.
+- [x] `goober-host export get` unseals inside storage and writes `--out` with `O_EXCL | O_NOFOLLOW`,
+      mode 0600; a link test.
+- [x] A proxied client address must be an IP literal; a rate-limit test.
+- [x] At most 16 role changes per box call; a test; a try on a granting route changes no roles.
+- [x] A broken error page serves the host's own page, never its source; a test.
+- [x] A manifest warning when a route can grant `owner`; a test.
+- [ ] Decisions for the human (043 § For the human): trusted proxies, roles that gate their own
+      route, agents granting.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),
