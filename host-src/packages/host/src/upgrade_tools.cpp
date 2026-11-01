@@ -174,6 +174,11 @@ void Host::register_upgrade_tools() {
              fs::remove_all(root, ec);
            }
          } cleanup{root};
+         {
+           std::vector<fs::path> sources;
+           for (const auto& [tenant, database] : p->databases) sources.push_back(databases_->file(tenant, database));
+           if (auto refused = copies_refused(sources, "this upgrade dry run"); !refused.empty()) return ToolResult::fail(refused);
+         }
          db::Databases copies(root);
          copies.set_id_source(next_id_);
          copies.set_schema_store(schemas_.get());

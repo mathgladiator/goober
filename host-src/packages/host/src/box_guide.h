@@ -28,6 +28,11 @@ version_upload {manifest, wat | wasm_base64, types?}
   already points here.
 - dry_run: true runs every check and stores nothing. With it, schemas: [schema, ...] checks the
   manifest against schemas you haven't stored yet (schema_check's rules; nothing is stored).
+What a try is: running a stored version (often a dark one, not live yet) once, through the real
+request path, on COPIES of the tenant's databases, so nothing live changes and nothing reaches
+anyone. The copies cost disk while the try runs: every database the box writes is copied, and
+one try's copies may hold limits.try-bytes (512 MiB unless host.json says otherwise) and must
+leave limits.free-bytes free; past either the try is refused, naming the limit.
 Try before live: store the version dark (activate: false), then call its routes with
 route_try {domain, box, version, method?, path, headers?, body?, as?} as a visitor
 ("as": "signed_out", the default) and as each kind of person ("as": {"email": "ada@example.com"},

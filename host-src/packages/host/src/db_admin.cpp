@@ -23,10 +23,6 @@ using mcp::ToolResult;
 
 namespace {
 
-// A tenant's snapshots may hold this much, in this many files; past it db_snapshot refuses, and
-// a person deletes old ones in the panel. A drop's own snapshot is always taken.
-constexpr int64_t kSnapshotBytesPerTenant = int64_t(2) << 30;
-constexpr int kSnapshotsPerTenant = 100;
 
 std::string text_arg(const bj::object& args, const char* key) {
   auto* v = args.if_contains(key);
@@ -131,6 +127,7 @@ std::optional<bj::object> Host::take_snapshot(const std::string& tenant, const s
     return *error = "tenant " + tenant + " has no database " + database, std::nullopt;
   }
   auto dir = snapshots_dir(tenant) / database;
+  std::string near_limit;
   if (!for_drop) {
     int64_t bytes = 0;
     int count = 0;
@@ -143,11 +140,26 @@ std::optional<bj::object> Host::take_snapshot(const std::string& tenant, const s
       }
     }
     int64_t size = int64_t(fs::file_size(databases_->file(tenant, database), ec));
-    if (count >= kSnapshotsPerTenant || bytes + size > kSnapshotBytesPerTenant) {
+    // A tenant's snapshots may hold limits.snapshot-files files and limits.snapshot-bytes (045);
+    // past either this refuses, and a person deletes old ones in the panel. The host never
+    // deletes a snapshot itself. A drop's own snapshot is always taken.
+    const auto& lim = config_.get()->disk;
+    if (count >= lim.snapshot_files || bytes + size > lim.snapshot_bytes) {
       return *error = "tenant " + tenant + "'s snapshots hold " + std::to_string(count) + " files and " +
-                      std::to_string(bytes) + " bytes, at the limit (" + std::to_string(kSnapshotsPerTenant) + ", " +
-                      std::to_string(kSnapshotBytesPerTenant) + " bytes): ask a person to delete old ones in the panel",
+                      std::to_string(bytes >> 20) + " MiB; one more passes limits.snapshot-files (" +
+                      std::to_string(lim.snapshot_files) + ") or limits.snapshot-bytes (" +
+                      std::to_string(lim.snapshot_bytes >> 20) + " MiB). Ask a person to delete old ones in the "
+                      "panel's Database view, or raise the limit in host.json",
              std::nullopt;
+    }
+    if (auto refused = free_space_refused(size, "a snapshot of " + database); !refused.empty()) {
+      return *error = refused, std::nullopt;
+    }
+    // Near the limit (80%), the answer says so before the refusal comes.
+    if ((count + 1) * 10 >= lim.snapshot_files * 8 || (bytes + size) * 10 >= lim.snapshot_bytes * 8) {
+      near_limit = "tenant " + tenant + "'s snapshots are near their limit (" + std::to_string(count + 1) + " of " +
+                   std::to_string(lim.snapshot_files) + " files, " + std::to_string((bytes + size) >> 20) + " of " +
+                   std::to_string(lim.snapshot_bytes >> 20) + " MiB): ask a person to delete old ones in the panel";
     }
   }
   int64_t now = base::now_unix_ms();
@@ -173,6 +185,7 @@ std::optional<bj::object> Host::take_snapshot(const std::string& tenant, const s
   if (!base::write_file_durable(dir / (id + ".json"), json::pretty(record))) {
     return *error = "can't write the snapshot's record", std::nullopt;
   }
+  if (!near_limit.empty()) record["warning"] = near_limit;
   return record;
 }
 
@@ -228,7 +241,7 @@ void Host::register_db_admin_tools() {
        "Changing tool. Copies one tenant database as it is now (SQLite's online backup, safe while boxes write) into the host's "
        "snapshots, and answers its id (DATABASE/STAMP), SHA-256, size, and tables with row counts. Before a migration "
        "or a drop. Snapshots are kept until a person deletes them in the panel, and the nightly backup carries them. A "
-       "tenant's snapshots may hold 100 files and 2 GiB; past that this refuses. db_snapshots lists them; "
+       "tenant's snapshots may hold limits.snapshot-files files and limits.snapshot-bytes (100 and 2 GiB unless host.json says otherwise); near that the answer warns, past it this refuses. db_snapshots lists them; "
        "db_restore_to_new makes a new database from one.",
        object_schema({{"tenant", tenant_prop}, {"database", db_prop}, {"note", string_property("Why, for whoever reads the list.")}},
                      {"tenant", "database"}),

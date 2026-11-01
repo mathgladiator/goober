@@ -861,6 +861,22 @@ The human asked for health an outside observer can graph (028 § 4.6):
       `goober_ready` and `goober_check_ok{check}`; tests; HUMAN.md's "Watch it from outside".
 - [ ] Counts behind the operations token, if the human wants volumes graphed too.
 
+### Phase 46: five-minute traffic and size limits (2026-10-31)
+The human: "What is Try? We should have a general rule about size limits. ... just five minute
+approximations is good. I don't want traffic storage bloating the disk." (045.Limits.md):
+- [x] Traffic and box failures in five-minute buckets kept 7 days, replacing minute (48 hours) and
+      hour (400 days) rows; windows 1h, 12h, 7d; old files migrated and vacuumed; the WAL cut
+      back; a week of a busy site measured at 11.6 MiB; tests.
+- [x] `limits` in host.json: `try-bytes`, `exports-bytes`, `traffic-bytes`, `snapshot-bytes`,
+      `snapshot-files`, `logs-bytes`, `free-bytes`, `tmp-hours`, with defaults and floors; tests.
+- [x] Tries, job and upgrade dry runs refused past `try-bytes` or `free-bytes`; exports past
+      `exports-bytes`; snapshots past their limits with a warning from 80%, never deleted;
+      `traffic.db` drops its oldest hours past its budget; tmp swept hourly; tests.
+- [x] A `limits` check in `/goober/ready` and `host_health` (tenants named only for operators);
+      what a try is, in the box guide, `route_try`, and 045; tests.
+- [ ] `logs-bytes` enforced (reported only), and a budget for the source build cache.
+- [ ] Change-set retention (90 days applied, 30 days drafts and discarded), with change sets.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

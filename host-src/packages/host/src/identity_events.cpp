@@ -84,6 +84,8 @@ void Host::identity_tick(int64_t now_ms) {
       int gone = prune_changesets(now_ms);
       if (gone > 0) std::cerr << "goober-host: deleted " << gone << " change set(s) past their keeping\n";
     });
+    // What a crash or a hang left in storage/tmp, past limits.tmp-hours (045).
+    step("tmp", [&] { sweep_tmp(now_ms); });
   }
 
   struct Delivery {

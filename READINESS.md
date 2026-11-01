@@ -234,7 +234,8 @@ each ranch's site weekly.
 - **Watch for.**
   - The change log starts when this version is deployed; earlier changes aren't in it.
   - Traffic history starts from the access logs still on disk when the panel first runs (7
-    days); after that the rollups keep minutes for 48 hours and hours for 400 days.
+    days); the rollups are five-minute buckets kept 7 days within `limits.traffic-bytes` (64
+    MiB), and no longer (`design/machine/045.Limits.md`).
 
 ## 9. An installable app: yes, untried on a phone
 

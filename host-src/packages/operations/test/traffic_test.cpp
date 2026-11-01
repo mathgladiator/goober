@@ -1,10 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <fstream>
+#include <iostream>
 
 #include "goober/base/files.h"
 #include "goober/base/time.h"
 #include "goober/operations/traffic.h"
+#include "goober/sqlite/sqlite.h"
 
 using namespace goober;
 using operations::Histogram;
@@ -111,16 +114,16 @@ TEST_F(TrafficTest, LinesAreSummedIntoSeriesAndRoutes) {
 
   auto s = t->series("1h", "acme", "acme", kNoon + 120 * 1000);
   const auto& points = s.at("points").as_array();
-  ASSERT_EQ(points.size(), 60u);
+  ASSERT_EQ(points.size(), 12u);  // five minutes each
   int64_t n = 0;
   for (const auto& p : points) n += p.as_object().at("n").as_int64();
   EXPECT_EQ(n, 11);
-  // The noon minute holds ten, the next one the failure.
+  // The noon bucket holds all eleven, the failure a minute later among them.
   int64_t from = s.at("from_ms").as_int64();
-  EXPECT_EQ(points[size_t((kNoon - from) / 60000)].as_object().at("n").as_int64(), 10);
-  EXPECT_EQ(points[size_t((kNoon + 60000 - from) / 60000)].as_object().at("n5").as_int64(), 1);
+  EXPECT_EQ(points[size_t((kNoon - from) / 300000)].as_object().at("n").as_int64(), 11);
+  EXPECT_EQ(points[size_t((kNoon - from) / 300000)].as_object().at("n5").as_int64(), 1);
 
-  // Hours were written alongside: the 7-day window sees the same requests.
+  // The 7-day window reads the same buckets.
   auto week = t->routes("7d", "acme", "", kNoon + 120 * 1000);
   ASSERT_EQ(week.size(), 2u);
   EXPECT_EQ(week[0].as_object().at("n").as_int64(), 11);
@@ -182,17 +185,76 @@ TEST_F(TrafficTest, EdgesComeFromInternalCallsAndTheEgressLog) {
   EXPECT_EQ(t->edges("1h", "geo", kNoon).size(), 1u);
 }
 
-TEST_F(TrafficTest, OldMinutesAreDroppedAndHoursKept) {
+// One resolution, kept seven days (045.Limits.md): no long-term rows.
+TEST_F(TrafficTest, BucketsAreKeptSevenDaysAndNoLonger) {
   line(R"({"at":")" + at(kNoon) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
   auto t = open();
   t->catch_up(kNoon);
+  t->gauge(kNoon, "outbox_pending", "acme", {{"mail", 3}});
   int64_t later = kNoon + 3 * 24 * 3600 * 1000LL;
   t->catch_up(later);
-  int64_t n = 0;
-  auto old = t->series("12h", "", "", kNoon);
-  for (const auto& p : old.at("points").as_array()) n += p.as_object().at("n").as_int64();
-  EXPECT_EQ(n, 0);
   EXPECT_EQ(t->routes("7d", "", "", later).size(), 1u);
+  int64_t gone = kNoon + 8 * 24 * 3600 * 1000LL;
+  t->catch_up(gone);
+  EXPECT_TRUE(t->routes("7d", "", "", kNoon + 7 * 24 * 3600 * 1000LL).empty());
+  EXPECT_FALSE(Traffic::valid_window("30d"));
+  EXPECT_TRUE(Traffic::valid_window("7d"));
+}
+
+// A file from before the change: minute and hour tables. They go, and the logs on disk are
+// counted again into five-minute buckets; the gauges, in no log, carry over.
+TEST_F(TrafficTest, TheOldMinuteAndHourTablesAreReplaced) {
+  line(R"({"at":")" + at(kNoon) + R"(","domain":"acme.example","path":"/","status":200,"us":10})");
+  {
+    sqlite::Db db(root / "traffic.db");
+    db.exec("CREATE TABLE minutes (t INTEGER, tenant TEXT, box TEXT, route TEXT, n INTEGER)");
+    db.exec("CREATE TABLE hours (t INTEGER, tenant TEXT, box TEXT, route TEXT, n INTEGER)");
+    db.exec("CREATE TABLE gauge_minutes (t INTEGER, name TEXT, tenant TEXT, key TEXT, value INTEGER)");
+    db.exec("INSERT INTO gauge_minutes VALUES (" + std::to_string(kNoon + 60000) + ", 'outbox_pending', 'acme', 'mail', 7)");
+    db.exec("CREATE TABLE cursors (name TEXT PRIMARY KEY, inode INTEGER NOT NULL, offset INTEGER NOT NULL)");
+    db.exec("INSERT INTO cursors VALUES ('access', 1, 999999)");
+    std::string filler(2000, 'x');
+    for (int i = 0; i < 2000; ++i) db.exec("INSERT INTO hours VALUES (" + std::to_string(i) + ", 'a', 'b', '" + filler + "', 1)");
+  }
+  auto before = fs::file_size(root / "traffic.db");
+  auto t = open();
+  EXPECT_EQ(t->catch_up(kNoon + 1000), 1u);  // the cursor went with the old rows
+  EXPECT_EQ(t->routes("1h", "", "", kNoon + 1000).at(0).at("n"), 1);
+  auto g = t->gauge_series("1h", "outbox_pending", "", kNoon + 1000);
+  int64_t peak = 0;
+  for (const auto& p : g.at("points").as_array()) {
+    if (!p.at("value").is_null()) peak = std::max(peak, p.at("value").as_int64());
+  }
+  EXPECT_EQ(peak, 7);
+  t.reset();
+  sqlite::Db db(root / "traffic.db");
+  sqlite::Stmt q(db, "SELECT count(*) FROM sqlite_master WHERE name IN ('minutes', 'hours', 'gauge_minutes')");
+  ASSERT_TRUE(q.step());
+  EXPECT_EQ(q.int64(0), 0);
+  EXPECT_LT(fs::file_size(root / "traffic.db"), before / 4);  // vacuumed
+}
+
+// Over its byte budget, the oldest hours go first; the newest hour always stays.
+TEST_F(TrafficTest, OverItsBudgetTheOldestHoursGo) {
+  for (int h = 0; h < 48; ++h) {
+    for (int i = 0; i < 40; ++i) {
+      line(R"({"at":")" + at(kNoon + h * 3600 * 1000LL + i) + R"(","domain":"acme.example","box":"acme","route":"r)" +
+           std::to_string(i) + R"(","status":200,"us":10})");
+    }
+  }
+  int64_t now = kNoon + 47 * 3600 * 1000LL + 30 * 60 * 1000;  // half an hour after the last
+  auto t = open();
+  t->catch_up(now);
+  int64_t full = t->size_bytes();
+  EXPECT_EQ(t->routes("7d", "", "", now).at(0).at("n"), 48);
+  t->set_budget(full / 2);
+  t->catch_up(now + 11 * 60 * 1000);  // housekeeping runs every ten minutes
+  EXPECT_LE(t->size_bytes(), full / 2);
+  EXPECT_GT(t->budget_drops(), 0);
+  int64_t kept = t->routes("7d", "", "", now).at(0).at("n").as_int64();
+  EXPECT_LT(kept, 48);
+  EXPECT_GT(kept, 0);
+  EXPECT_EQ(t->routes("1h", "", "", now).at(0).at("n"), 1);
 }
 
 // The Errors view (028 § 4.2): what visitors got, by who made it, with every path nothing
@@ -308,7 +370,7 @@ TEST_F(TrafficTest, ServiceFailuresKeepTheNewestHundredPerService) {
 }
 
 // Levels sampled over time (028 § 4.4): the outbox's pending elements per service.
-TEST_F(TrafficTest, GaugesKeepEachMinutesLargestAndTheLatest) {
+TEST_F(TrafficTest, GaugesKeepEachFiveMinutesLargestAndTheLatest) {
   auto t = open();
   t->gauge(kNoon, "outbox_pending", "acme", {{"payments", 4}, {"mail", 1}});
   t->gauge(kNoon + 2000, "outbox_pending", "acme", {{"payments", 2}});
@@ -320,12 +382,49 @@ TEST_F(TrafficTest, GaugesKeepEachMinutesLargestAndTheLatest) {
     if (p.at("value").is_null()) ++nulls;
     else peak = std::max(peak, p.at("value").as_int64());
   }
-  EXPECT_EQ(peak, 5);  // the minute's largest per key, summed: 4 + 1
-  EXPECT_GT(nulls, 50);
+  EXPECT_EQ(peak, 5);  // the five minutes' largest per key, summed: 4 + 1
+  EXPECT_EQ(nulls, 11);  // one bucket of twelve was sampled
   // payments read 0 at the last sample; mail had read 0 before and is forgotten.
   const auto& now = g.at("now").as_array();
   ASSERT_EQ(now.size(), 1u);
   EXPECT_EQ(now[0].at("key"), "payments");
   EXPECT_EQ(now[0].at("value"), 0);
   EXPECT_TRUE(t->gauge_series("1h", "outbox_pending", "other", kNoon + 61000).at("now").as_array().empty());
+}
+
+// A measurement, not a check (045.Limits.md § 3): a week of one busy site, 50 routes each
+// answering every minute, 5 services each called every minute. Run with
+// --gtest_also_run_disabled_tests --gtest_filter='*SizeOfAWeek*'.
+TEST_F(TrafficTest, DISABLED_SizeOfAWeek) {
+  int64_t start = kNoon;
+  int64_t week = 7 * 24 * 3600 * 1000LL;
+  std::string access, egress;
+  for (int64_t at_ms = start; at_ms < start + week; at_ms += 60 * 1000) {
+    for (int r = 0; r < 50; ++r) {
+      access += R"({"at":")" + at(at_ms + r) + R"(","domain":"acme.example","box":"acme","route":"r)" + std::to_string(r) +
+                R"(","status":)" + (r == 7 ? "500" : r == 8 ? "404" : "200") + R"(,"us":)" + std::to_string(100 + r * 37) +
+                "}\n";
+    }
+    for (int s = 0; s < 5; ++s) {
+      egress += R"({"at":")" + at(at_ms + s) + R"(","tenant":"acme","box":"acme","service":"svc)" + std::to_string(s) +
+                R"(","method":"m","status":200,"us":5000})" + "\n";
+    }
+  }
+  fs::create_directories(root / "logs");
+  base::write_file_durable(root / "logs" / "access.log", access);
+  base::write_file_durable(root / "logs" / "egress.log", egress);
+  auto t = open();
+  auto began = std::chrono::steady_clock::now();
+  t->catch_up(start + week);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+  t.reset();
+  auto wal = fs::exists(root / "traffic.db-wal") ? fs::file_size(root / "traffic.db-wal") : 0;
+  std::cout << "a week: " << access.size() / 1024 / 1024 << " MiB of access log, counted in " << ms << " ms; traffic.db "
+            << fs::file_size(root / "traffic.db") / 1024 << " KiB, wal " << wal / 1024 << " KiB\n";
+  sqlite::Db db(root / "traffic.db");
+  for (const char* table : {"route_5m", "service_5m", "edge_5m", "error_5m"}) {
+    sqlite::Stmt q(db, std::string("SELECT count(*) FROM ") + table);
+    q.step();
+    std::cout << "  " << table << ": " << q.int64(0) << " rows\n";
+  }
 }

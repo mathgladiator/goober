@@ -126,9 +126,28 @@ std::string to_csv(const bj::object& result) {
 
 std::optional<Meta> write(const fs::path& storage, const vault::Key& vault_key, const std::string& tenant,
                           const std::string& database, const std::string& sql, const std::string& operator_name,
-                          const bj::object& result, int64_t now_ms, std::string* error) {
-  list(storage, now_ms);  // the expired go first
+                          const bj::object& result, int64_t now_ms, std::string* error, const Budget& budget) {
+  auto kept = list(storage, now_ms);  // the expired go first
   std::string csv = to_csv(result);
+  // limits.exports-bytes, for every export kept, and limits.free-bytes left on the disk (045).
+  int64_t held = 0;
+  for (const auto& k : kept) held += k.bytes;
+  if (budget.bytes > 0 && held + int64_t(csv.size()) > budget.bytes) {
+    return *error = "this export is " + std::to_string(csv.size() >> 20) + " MiB and the " + std::to_string(kept.size()) +
+                    " kept hold " + std::to_string(held >> 20) + " MiB, past limits.exports-bytes (" +
+                    std::to_string(budget.bytes >> 20) + " MiB). A person deletes fetched ones (goober-host export delete "
+                    "ID), or they go after 7 days; or narrow the query, or raise the limit in host.json",
+           std::nullopt;
+  }
+  {
+    std::error_code ec;
+    auto space = fs::space(storage, ec);
+    if (!ec && int64_t(space.available) - int64_t(csv.size()) < budget.free_bytes) {
+      return *error = "this export would leave less than limits.free-bytes (" + std::to_string(budget.free_bytes >> 20) +
+                      " MiB) free on the disk",
+             std::nullopt;
+    }
+  }
   Meta m;
   char id[17];
   std::snprintf(id, sizeof id, "%016llx", static_cast<unsigned long long>(base::os_random_u64()));

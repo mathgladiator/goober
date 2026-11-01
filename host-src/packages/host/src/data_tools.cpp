@@ -917,7 +917,8 @@ void Host::register_data_tools() {
          auto root = hex ? backup::parse_key(*hex) : std::nullopt;
          if (!root) return ToolResult::fail("keys/system/vault_key isn't readable");
          auto m = exports::write(config_.get()->storage, *root, *tenant, *database, *sql, current_operator(), *r,
-                                 base::now_unix_ms(), &err);
+                                 base::now_unix_ms(), &err,
+                                 exports::Budget{config_.get()->disk.exports_bytes, config_.get()->disk.free_bytes});
          audit("db.export", current_operator(), *tenant + "/" + *database, m ? "ok" : "error",
                bj::object{{"export", m ? m->id : ""}, {"sql", *sql}, {"rows", m ? m->rows : 0}, {"error", m ? "" : err}});
          if (!m) return ToolResult::fail(err);

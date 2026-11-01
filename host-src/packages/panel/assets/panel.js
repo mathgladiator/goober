@@ -131,7 +131,7 @@ function segmented(options, value, onChange) {
 }
 
 function windowPicker(onChange) {
-  return h('span', {}, h('label', {}, 'Window '), segmented(['1h', '12h', '7d', '30d'], state.window, (w) => {
+  return h('span', {}, h('label', {}, 'Window '), segmented(['1h', '12h', '7d'], state.window, (w) => {
     state.window = w; store.set('window', w); onChange();
   }));
 }
@@ -450,7 +450,7 @@ function manifestDiff(beforeText, afterText) {
 
 // ------------------------------------------------------------------ views
 
-const state = { window: store.get('window', '12h'), me: null, refresh: null };
+const state = { window: ['1h', '12h', '7d'].includes(store.get('window', '12h')) ? store.get('window', '12h') : '12h', me: null, refresh: null };
 
 // A focused operator (030) sees only their tenants: host-wide views narrow to the first of them.
 function focus() { return state.me && state.me.focus && state.me.focus.length ? state.me.focus : null; }
@@ -580,7 +580,7 @@ const views = {
     const by = { host: 'the host (no box ran)', box: 'a box answered', box_failed: 'a box failed' };
     const placeOf = (p) => p.box ? h('span', {}, h('a', { href: '#/box/' + encodeURIComponent(p.box) }, p.box), ' · ', h('span', { class: 'mono' }, p.route))
       : p.place.startsWith('(') ? h('span', { class: 'muted' }, p.place) : h('span', { class: 'mono' }, p.place);
-    const logLink = (p) => h('a', { href: '#/logs?' + new URLSearchParams({ log: 'access', since: state.window === '30d' ? '7d' : state.window === '12h' ? '24h' : state.window,
+    const logLink = (p) => h('a', { href: '#/logs?' + new URLSearchParams({ log: 'access', since: state.window === '12h' ? '24h' : state.window,
       pattern: '"status":' + p.status }) }, 'lines →');
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Errors'), windowPicker(render),

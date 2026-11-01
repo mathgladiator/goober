@@ -784,3 +784,88 @@ TEST_F(DataRoutesTest, ExportsSealRowsForAPersonToFetch) {
   EXPECT_FALSE(fs::exists(storage / "exports" / (id2 + ".csv.sealed")));
   EXPECT_FALSE(fs::exists(storage / "exports" / (id2 + ".json")));
 }
+
+// Disk limits (045.Limits.md): a try, an export, and a snapshot past their budget are refused
+// with the limit's name; a snapshot near it warns; /goober/ready and host_health report each
+// budget's use; tmp is swept of what's old.
+TEST_F(DataRoutesTest, DiskLimitsRefuseWorkPastThemAndReportUse) {
+  host.reset();
+  std::string err;
+  auto cfg = config::parse_config(R"({
+      "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
+      "domains": {"localhost": {"tenant": "playground"}},
+      "operations": {"token": "test-token-0123456789"},
+      "threads": {"network": 1, "boxes": 2},
+      "limits": {"try-bytes": 1048576, "exports-bytes": 1048576, "snapshot-files": 3, "free-bytes": 0}})",
+                                  root, &err);
+  ASSERT_TRUE(cfg) << err;
+  host = std::make_unique<host::Host>(config::local_mode(cfg));
+  port = host->start();
+  tool("schema_put", {{"schema", bj::object{{"schema", "notes1"},
+                                            {"tables", bj::object{{"notes", bj::object{{"columns", bj::object{
+                                                {"text", bj::object{{"type", "string"}}}}}}}}}}}});
+  ASSERT_TRUE(host->boxes().upload(kNotesManifest, kNotesWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/notes").status, 201);
+
+  // Small: a write's try and an export fit.
+  auto small = tool("route_try", {{"domain", "localhost"}, {"box", "notes"}, {"path", "/notes"}, {"method", "post"}});
+  ASSERT_FALSE(small.as_object().contains("error")) << json::dump(small);
+  auto first = tool("db_export", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "SELECT text FROM notes"}});
+  ASSERT_FALSE(first.as_object().contains("error")) << json::dump(first);
+
+  // Two MiB of rows: past limits.try-bytes and limits.exports-bytes, each named.
+  tool("db_exec", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "INSERT INTO notes (text) VALUES (?)"},
+                   {"params", bj::array{std::string(2 << 20, 'x')}}});
+  auto big = tool("route_try", {{"domain", "localhost"}, {"box", "notes"}, {"path", "/notes"}, {"method", "post"}});
+  ASSERT_TRUE(big.as_object().contains("error")) << json::dump(big);
+  EXPECT_NE(std::string(big.at("error").as_string()).find("limits.try-bytes"), std::string::npos) << json::dump(big);
+  EXPECT_FALSE(fs::exists(root / "storage/tmp/tries") && !fs::is_empty(root / "storage/tmp/tries"));
+  // A GET's try reads live data and copies nothing: still fine.
+  EXPECT_FALSE(tool("route_try", {{"domain", "localhost"}, {"box", "notes"}, {"path", "/notes"}}).as_object().contains("error"));
+  auto ex = tool("db_export", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "SELECT text FROM notes"}});
+  ASSERT_TRUE(ex.as_object().contains("error")) << json::dump(ex);
+  EXPECT_NE(std::string(ex.at("error").as_string()).find("limits.exports-bytes"), std::string::npos);
+
+  // Snapshots: the third of three (80% or more) warns, the fourth is refused, and none is ever deleted.
+  auto s1 = tool("db_snapshot", {{"tenant", "playground"}, {"database", "notes"}});
+  ASSERT_FALSE(s1.as_object().contains("error")) << json::dump(s1);
+  EXPECT_FALSE(s1.as_object().contains("warning"));
+  EXPECT_FALSE(tool("db_snapshot", {{"tenant", "playground"}, {"database", "notes"}}).as_object().contains("warning"));
+  auto s3 = tool("db_snapshot", {{"tenant", "playground"}, {"database", "notes"}});
+  EXPECT_TRUE(s3.as_object().contains("warning")) << json::dump(s3);
+  auto s4 = tool("db_snapshot", {{"tenant", "playground"}, {"database", "notes"}});
+  ASSERT_TRUE(s4.as_object().contains("error"));
+  EXPECT_NE(std::string(s4.at("error").as_string()).find("limits.snapshot-files"), std::string::npos);
+  EXPECT_EQ(tool("db_snapshots", {{"tenant", "playground"}}).at("snapshots").as_array().size(), 3u);
+
+  // /goober/ready: a limits entry for each budget, tenants unnamed; host_health names them.
+  auto ready = fetch(port, bhttp::verb::get, "/goober/ready");
+  auto doc = json::parse(ready.body, &err);
+  ASSERT_TRUE(doc) << ready.body;
+  const auto& limits = doc->at("checks").at("limits").as_object();
+  EXPECT_EQ(limits.at("ok"), true);
+  for (const char* k : {"tries", "exports", "traffic", "snapshots", "logs", "tmp"}) {
+    EXPECT_TRUE(limits.contains(k)) << k;
+  }
+  EXPECT_EQ(limits.at("exports").at("key"), "limits.exports-bytes");
+  EXPECT_EQ(limits.at("snapshots").at("files"), 3);
+  EXPECT_EQ(limits.at("snapshots").at("tenant"), "");
+  EXPECT_NE(json::dump(limits.at("near")).find("a tenant's snapshots"), std::string::npos) << json::dump(limits);
+  auto health = tool("host_health", {});
+  EXPECT_EQ(health.at("ready").at("checks").at("limits").at("snapshots").at("tenant"), "playground");
+
+  // tmp: what's older than limits.tmp-hours goes; what's new and jobs' copies stay.
+  fs::create_directories(root / "storage/tmp/tries/stale");
+  fs::create_directories(root / "storage/tmp/jobs/7");
+  base::write_file_durable(root / "storage/tmp/left-behind", "x");
+  base::write_file_durable(root / "storage/tmp/fresh", "x");
+  auto old = fs::file_time_type::clock::now() - std::chrono::hours(48);
+  for (const char* p : {"storage/tmp/tries/stale", "storage/tmp/jobs/7", "storage/tmp/left-behind"}) {
+    fs::last_write_time(root / p, old);
+  }
+  EXPECT_EQ(host->sweep_tmp(base::now_unix_ms()), 2);
+  EXPECT_FALSE(fs::exists(root / "storage/tmp/tries/stale"));
+  EXPECT_FALSE(fs::exists(root / "storage/tmp/left-behind"));
+  EXPECT_TRUE(fs::exists(root / "storage/tmp/fresh"));
+  EXPECT_TRUE(fs::exists(root / "storage/tmp/jobs/7"));
+}

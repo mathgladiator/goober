@@ -33,11 +33,18 @@ std::filesystem::path dir(const std::filesystem::path& storage);
 // line break. Nulls are empty cells; blobs are their base64.
 std::string to_csv(const boost::json::object& result);
 
+// What exports may hold all together, and what they must leave free (045.Limits.md); 0: no limit.
+struct Budget {
+  int64_t bytes = 0, free_bytes = 0;
+};
+
 // Seals one query result ({columns, rows}, as Databases::operate answers) under the tenant's
 // sealing key, bound to its id, and keeps its record. Nothing in the clear is written.
+
 std::optional<Meta> write(const std::filesystem::path& storage, const vault::Key& vault_key, const std::string& tenant,
                           const std::string& database, const std::string& sql, const std::string& operator_name,
-                          const boost::json::object& result, int64_t now_ms, std::string* error);
+                          const boost::json::object& result, int64_t now_ms, std::string* error,
+                          const Budget& budget = {});
 
 // The kept exports, newest first. Expired ones are deleted on the way.
 std::vector<Meta> list(const std::filesystem::path& storage, int64_t now_ms);
