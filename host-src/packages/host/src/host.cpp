@@ -1303,6 +1303,66 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       return value;
     };
   }
+  // Roles the box grants or revokes (013.Identity.md § Granting and revoking roles): checked now
+  // against the route's options, applied below once the call commits.
+  struct RoleRequest {
+    bool grant = true;
+    std::string role;
+    int64_t to = 0;
+  };
+  std::vector<RoleRequest> role_requests;
+  if (route.grantable.on || route.revocable.on) {
+    input.role = [this, &route, &doc, &tenant, &who, &role_requests](bool grant, std::string_view asked) -> std::string {
+      const auto& rc = grant ? route.grantable : route.revocable;
+      std::string role(asked);
+      if (!rc.on) return std::string("this route declares no ") + (grant ? "grantable" : "revocable") + " roles";
+      if (!who) return "no one is signed in";
+      if (who->host) return "a host identity's call can't change this realm's roles";
+      if (who->agent) return "an agent's call can't change roles; a person's own call does";
+      std::map<std::string, std::string> params;
+      if (const auto* p = doc.if_contains("params"); p && p->is_object()) {
+        for (const auto& kv : p->as_object()) {
+          if (kv.value().is_string()) params[std::string(kv.key())] = std::string(kv.value().as_string());
+        }
+      }
+      std::string caller_id = std::to_string(who->user.user_id);
+      auto value_of = [&](const std::string& name) -> std::string {
+        if (name == "!tenant") return tenant;
+        if (name == "!user_id") return caller_id;
+        auto it = params.find(name);
+        return it == params.end() ? "" : it->second;
+      };
+      std::string target = value_of(rc.to.substr(1, rc.to.size() - 2));
+      int64_t to = 0;
+      for (char c : target) to = (c >= '0' && c <= '9' && to < (int64_t(1) << 58)) ? to * 10 + (c - '0') : -1;
+      if (target.empty() || to <= 0) return rc.to + " is \"" + target + "\", not a user id";
+      bool allowed = false;
+      for (const auto& option : rc.options) {
+        std::string want;
+        bool bad = false;
+        for (size_t i = 0; i < option.size(); ++i) {
+          if (option[i] != '{') {
+            want += option[i];
+            continue;
+          }
+          size_t close = option.find('}', i);
+          std::string v = value_of(option.substr(i + 1, close - i - 1));
+          // No substituted value may smuggle in a scope or a namespace (013 § Scoping roles).
+          bad = bad || v.empty() || v.find_first_of("/:") != std::string::npos;
+          want += v;
+          i = close;
+        }
+        allowed = allowed || (!bad && want == role);
+      }
+      if (!allowed) return role + " isn't one of this route's " + (grant ? "grantable" : "revocable") + " options";
+      if (!grant && to == who->user.user_id && !rc.allow_self_revoke) {
+        return "this route can't revoke the caller's own roles (it would need allow-self-revoke)";
+      }
+      if (!identity_->user(tenant, to)) return "no user " + target + " in this realm";
+      role_requests.push_back(RoleRequest{grant, role, to});
+      return "";
+    };
+  }
   // Where the call's time goes (037 § 7.1): inside goober_sql and in calls out, apart from the box's own.
   int64_t sql_us = 0, out_us = 0;
   int64_t call_started_us = base::monotonic_us();
@@ -1485,6 +1545,35 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                                        {"level", "host"},
                                                        {"text", "commit failed: " + err}}));
     }
+  }
+  // Roles change only once the call's writes landed, and never in a dry run (a try, a job's dry
+  // run): each is in the realm's own audit with the box as "by", and in the host's audit log.
+  if (!role_requests.empty()) {
+    bool landed = ok && (committed || !session || session->statements() == 0);
+    bj::array roles;
+    for (const auto& c : role_requests) {
+      bj::object o{{c.grant ? "grant" : "revoke", c.role}, {"user_id", std::to_string(c.to)}};
+      if (!landed || options.dry_run) {
+        o["applied"] = false;
+        o["why"] = options.dry_run ? "a dry run changes no roles" : "the call didn't commit";
+        roles.push_back(std::move(o));
+        continue;
+      }
+      std::string why, by = "box:" + m.box + "/" + route.name;
+      auto user = identity_->user(tenant, c.to);
+      bool done = user && (c.grant ? identity_->grant(tenant, user->email, c.role, by, base::now_unix_ms(), &why)
+                                   : identity_->revoke(tenant, user->email, c.role, by, base::now_unix_ms(), &why));
+      if (!user) why = "the user is gone";
+      // Revoking a role the user no longer holds leaves them as wanted.
+      if (!done && !c.grant && why == "the user doesn't hold that role") done = true;
+      o["applied"] = done;
+      if (!done) o["why"] = why;
+      audit(c.grant ? "role.grant" : "role.revoke", "box:" + m.box, "role:" + tenant + "/" + c.role, done ? "ok" : "failed",
+            bj::object{{"tenant", tenant}, {"user_id", std::to_string(c.to)}, {"route", route.name},
+                       {"request_id", request_id}, {"why", why}});
+      roles.push_back(std::move(o));
+    }
+    extra["roles"] = std::move(roles);
   }
   // The bus (040, design/machine/036.Bus.md): a strategy's topic moves when, and only when, its
   // writes committed. Topics are the request's tenant's.

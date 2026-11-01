@@ -53,6 +53,10 @@ struct CallInput {
   // A flag's value for goober_flag (design/machine/039.Flags.md), or nullopt when the manifest
   // doesn't declare it. Without it, every flag is undeclared.
   std::function<std::optional<std::string>(std::string_view)> flag = {};
+  // goober_role_grant / goober_role_revoke (013.Identity.md § Granting and revoking roles): (grant,
+  // role) to "" when the route's options allow it (applied when the call commits), or why not.
+  // Without it, every grant and revoke is refused.
+  std::function<std::string(bool, std::string_view)> role = {};
 };
 
 struct LogLine {

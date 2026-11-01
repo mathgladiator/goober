@@ -89,6 +89,31 @@ bool reachable(const std::string& kind) {
 
 std::string opt(const std::optional<int64_t>& v) { return v ? std::to_string(*v) : "(default)"; }
 
+// A route's grantable or revocable roles, as a sentence's list: "admin, member/{!tenant} to {to}".
+std::string role_change_text(const manifest::RoleChange& rc) {
+  if (!rc.on) return "";
+  return join(rc.options) + (rc.to == "{!user_id}" ? " (the caller's own)" : " to the user " + rc.to + " names") +
+         (rc.allow_self_revoke ? ", the caller's own too" : "");
+}
+
+void compare_roles(const std::string& what, const manifest::RoleChange* x, const manifest::RoleChange& y, bool grant,
+                   Changes& out) {
+  std::string f = grant ? "grantable" : "revocable";
+  std::string before = x ? role_change_text(*x) : "", after = role_change_text(y);
+  if (before == after) return;
+  // More strings, another target, or self-revoke is more power; fewer is less.
+  bool widens = false;
+  if (y.on) {
+    widens = !x || !x->on || x->to != y.to || (y.allow_self_revoke && !x->allow_self_revoke);
+    for (const auto& o : y.options) {
+      widens = widens || !x || std::find(x->options.begin(), x->options.end(), o) == x->options.end();
+    }
+  }
+  std::string verb = grant ? "grant" : "revoke";
+  out.add("routes", what, x ? "changed" : "added", widens ? "widens" : "narrows",
+          y.on ? what + " may now " + verb + " " + after : what + " no longer " + verb + "s roles", f, before, after);
+}
+
 void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
   std::map<std::string, Named> before = a ? routes_of(*a) : std::map<std::string, Named>{};
   std::map<std::string, Named> after = routes_of(b);
@@ -103,6 +128,8 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
         out.add("routes", what, "added", "widens", "new " + what + " receives each caller's IP address (client-ip)",
                 "client-ip", "false", "true");
       }
+      if (n.route->grantable.on) compare_roles(what, nullptr, n.route->grantable, true, out);
+      if (n.route->revocable.on) compare_roles(what, nullptr, n.route->revocable, false, out);
       continue;
     }
     const HttpRoute& x = *it->second.route;
@@ -151,6 +178,8 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
       }
     }
     // What browsers may keep, and the rest of the cache.
+    compare_roles(what, &x.grantable, y.grantable, true, out);
+    compare_roles(what, &x.revocable, y.revocable, false, out);
     if (x.client_ip != y.client_ip) {
       field("client-ip", x.client_ip ? "true" : "false", y.client_ip ? "true" : "false", y.client_ip ? "widens" : "narrows",
             y.client_ip ? what + " now receives each caller's IP address (client-ip)"

@@ -90,7 +90,8 @@ Read these before doing design work:
   - `design/machine/005.FirstVersion.md`: the v1 decisions from the human's answers: wasmtime,
     CMake, the two thread pools, the v1 ABI, storage and the host WAL, HTTP rules, MCP tools.
   - `design/machine/006.LocalIdentity.md`: v1 identity (emailed codes, cookie sessions, realms
-    per tenant, route requirements), local mode, operator tokens, setup, and the justfile.
+    per tenant, route requirements), local mode, operator tokens, setup, and the justfile; roles
+    a box grants and revokes through a route's `grantable` and `revocable` (§ 3.1).
   - `design/machine/007.Content.md`: content as its own vector: pages (markdown, fragments,
     documents), Mustache templates with layouts, listings and feeds, and attachments at
     `/attachment/$id.$ext` with uploads and MCP tools; error pages (§ 13): `error-message/404.html`

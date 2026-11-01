@@ -771,6 +771,22 @@ From the data engineers and a site's engineers, the items outside schemas:
 - [x] `operator_scope` names the operator every log records, and tells a holder of the shared
       `operations.token` to get its own; HUMAN.md says to mint one token per agent; tests.
 
+### Phase 39: four decisions from the engineers' asks (2026-10-31)
+The human chose each as recommended:
+- [x] Roles a box grants and revokes (013 § Granting and revoking roles; 006 § 3.1): `grantable`
+      and `revocable` on HTTP write routes with requirements, `goober_role_grant` and
+      `goober_role_revoke` (Rust `role_grant`, `role_revoke`), applied after the commit, refused
+      for agents and host identities, bound scopes checked at upload, self-revoke opt-in;
+      widenings in the review; realm and host audits; pages gate on them; tests.
+- [x] Named savepoints in box SQL (008 § 6.1): `SAVEPOINT`, `ROLLBACK TO`, `RELEASE` inside the
+      host's transaction; `goober_` names and unopened ones refused; a job step undoing its
+      writes and committing a FAILED marker; tests.
+- [x] `"client-ip": true` on write routes (011 § 3.1): `client_ip` in the request document, a
+      widening in the review, an audit line per call with the address hashed; tests.
+- [x] Column `description` and `references` (008 § 11): checked, annotation steps,
+      `db_describe` and the panel's database view; tests.
+- [ ] MCP tools that grant or revoke (accepted, not built: an agent's call isn't a person's act).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

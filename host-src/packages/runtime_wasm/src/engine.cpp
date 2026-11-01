@@ -103,7 +103,8 @@ const std::vector<std::string>& abi_imports() {
   static const std::vector<std::string> kImports = {
       "goober_request_size", "goober_request_read", "goober_respond", "goober_header_set",
       "goober_now_ms",       "goober_random_fill",  "goober_log",        "goober_sql",
-      "goober_result_read",  "goober_call",          "goober_lib",       "goober_flag"};
+      "goober_result_read",  "goober_call",          "goober_lib",       "goober_flag",
+      "goober_role_grant",   "goober_role_revoke"};
   return kImports;
 }
 
@@ -338,6 +339,33 @@ struct Engine::Impl {
                             return int32_t(st.result.size());
                           }),
          "goober_flag");
+    // A role to grant or revoke (013.Identity.md § Granting and revoking roles), to the user the
+    // route's "to" names: 0 when accepted (applied when the call commits), else the length of why
+    // not in the result buffer, or -1 for a bad pointer.
+    for (bool grant : {true, false}) {
+      const char* name = grant ? "goober_role_grant" : "goober_role_revoke";
+      must(linker.func_wrap("goober", name,
+                            [grant](wasmtime::Caller caller, int32_t role_ptr, int32_t role_len) -> int32_t {
+                              auto& st = state_of(caller);
+                              auto mem = memory_of(caller);
+                              auto role = view(mem, role_ptr, role_len);
+                              if (!role || role_len > kMaxName) return -1;
+                              std::string why;
+                              if (!st.input->role) {
+                                why = "this route declares no grantable or revocable roles";
+                              } else {
+                                try {
+                                  why = st.input->role(grant, std::string(*role));
+                                } catch (...) {
+                                  why = "the host couldn't take the role change";
+                                }
+                              }
+                              if (why.empty()) return 0;
+                              st.result = std::move(why);
+                              return int32_t(st.result.size());
+                            }),
+           name);
+    }
     must(linker.func_wrap("goober", "goober_result_read",
                           [](wasmtime::Caller caller, int32_t ptr, int32_t len) -> int32_t {
                             auto& st = state_of(caller);

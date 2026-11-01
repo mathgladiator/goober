@@ -95,6 +95,8 @@ Import only from module "goober":
 | goober_call | (service_ptr, service_len, method_ptr, method_len, request_ptr, request_len) -> i32 | Calls a declared external service; returns the result's length. |
 | goober_lib | (library_ptr, library_len, function_ptr, function_len, argument_ptr, argument_len) -> i32 | Calls a host library the manifest imports; returns the result's length. |
 | goober_flag | (name_ptr, name_len) -> i32 | A declared flag's value for this tenant into the result (length), or -1 when undeclared. |
+| goober_role_grant | (role_ptr, role_len) -> i32 | Grants a role the route's "grantable" options allow, to the user its "to" names, once the call commits: 0, or why not's length in the result. |
+| goober_role_revoke | (role_ptr, role_len) -> i32 | The same for "revocable". |
 
 Export `memory`, and one function per route, tool, and timer: `goober_route_$name`, taking
 nothing and returning i32 (0 means it ran; anything else is a 500 and rolls back). A bad
@@ -436,6 +438,29 @@ place by hand.
   the copies. Three failed batches in a row stop a run: a dry run fails, a real run pauses,
   and job_start goes on from its cursor once fixed. job_status {run} and job_list {tenant}
   say where it stands.
+
+## Roles a box grants: gates on pages and routes
+
+A route may hand out or take away tenant roles, and only the strings its manifest lists, so a
+page can require "signed the consent" or "joined the club":
+   "/consent": {"post": {"name": "consent", "requirements": [],
+                         "grantable": {"options": ["consented"], "to": "{!user_id}"}},
+                "delete": {"name": "withdraw", "requirements": [],
+                           "revocable": {"options": ["consented"], "to": "{!user_id}",
+                                         "allow-self-revoke": true}}}
+In the box: goober_role_grant("consented") (Rust: goober::role_grant("consented")?), applied
+when the call commits; a 5xx or a failed commit changes no roles, and a try changes none.
+- Only post, put, patch, or delete routes with requirements; never public, never a GET.
+- options are tenant roles (role or role/scope, never host:). A route parameter in one must be
+  checked by every requirements clause ("admin/project_{p}" needs [["admin/project_{p}"],
+  ["owner"]]), so a caller only hands out scope they hold.
+- "to" is "{!user_id}" (the caller) or "{param}", a route parameter holding a user id.
+- Revoking the caller's own role needs "allow-self-revoke": true.
+- Agents' calls can't change roles; a person's own call does.
+- Pages name the role in their requirements as any other: page_put {..., fields:
+  {"requirements": [["consented"]]}}. The next request sees the change.
+- The upload's review lists each new option as a widening; the realm's audit and the host's
+  audit log name the box. Removing an option keeps the roles people hold; role_revoke takes one.
 
 ## Flags: switches an operator flips without a new version
 

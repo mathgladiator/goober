@@ -21,6 +21,34 @@ unsafe extern "C" {
     fn goober_call(sv_ptr: *const u8, sv_len: i32, m_ptr: *const u8, m_len: i32, r_ptr: *const u8, r_len: i32) -> i32;
     fn goober_lib(l_ptr: *const u8, l_len: i32, f_ptr: *const u8, f_len: i32, a_ptr: *const u8, a_len: i32) -> i32;
     fn goober_flag(name_ptr: *const u8, name_len: i32) -> i32;
+    fn goober_role_grant(role_ptr: *const u8, role_len: i32) -> i32;
+    fn goober_role_revoke(role_ptr: *const u8, role_len: i32) -> i32;
+}
+
+fn role_change(n: i32) -> Result<(), String> {
+    if n == 0 {
+        return Ok(());
+    }
+    if n < 0 {
+        return Err("bad role".to_string());
+    }
+    let mut buf = vec![0u8; n as usize];
+    let got = unsafe { goober_result_read(buf.as_mut_ptr(), n) };
+    buf.truncate(got.max(0) as usize);
+    Err(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Grants a role the route's "grantable" options allow, to the user its "to" names
+/// (013.Identity.md § Granting and revoking roles). Applied when the call commits; Err says why
+/// the host refused it (not an option, no such user, an agent's call).
+pub fn role_grant(role: &str) -> Result<(), String> {
+    role_change(unsafe { goober_role_grant(role.as_ptr(), role.len() as i32) })
+}
+
+/// Revokes a role the route's "revocable" options allow, from the user its "to" names; the
+/// caller's own only with "allow-self-revoke". Applied when the call commits.
+pub fn role_revoke(role: &str) -> Result<(), String> {
+    role_change(unsafe { goober_role_revoke(role.as_ptr(), role.len() as i32) })
 }
 
 /// A flag the manifest declares ("flags": {"frozen": {"default": "false"}};

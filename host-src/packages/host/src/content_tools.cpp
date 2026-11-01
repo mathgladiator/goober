@@ -72,7 +72,8 @@ Three formats:
 page_put takes path (the URL), format, body, and optional title, template, and fields. Fields
 become front matter. Useful fields:
   title, date (YYYY-MM-DD), summary, image (/attachment/ID.png), tags (["news"]), order (number),
-  draft (true hides the page), requirements ([["owner"]] to restrict it; public otherwise),
+  draft (true hides the page), requirements ([["owner"]] to restrict it; public otherwise; a
+  role a box grants works too, like [["consented"]] from a consent route's "grantable"),
   redirect (/new) with redirect-status (301, 302, 307, 308, or 410).
 Preview anything, drafts included, with page_render before telling a person it is done: it
 answers status, hashes, and the deploy checks; add verbose: true for the HTML. page_get answers

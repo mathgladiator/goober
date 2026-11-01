@@ -50,8 +50,7 @@ const std::set<std::string> kLaterTopLevel = {"pins",    "policy",   "deployment
                                               "rewrites", "counters", "working-set", "content-security"};
 const std::set<std::string> kLaterBehavior = {"mode", "owned-by", "lease-ms", "boundary", "lifecycle", "budget",
                                               "instances"};
-const std::set<std::string> kLaterRoute = {"headers", "callers", "signal", "timeout-ms", "grantable", "revocable",
-                                           "queue",   "shadow-calls"};
+const std::set<std::string> kLaterRoute = {"headers", "callers", "signal", "timeout-ms", "queue", "shadow-calls"};
 const std::set<std::string> kResponses = {"json", "text", "html", "markdown", "empty"};
 
 bool is_header_name(std::string_view h) {
@@ -1322,6 +1321,87 @@ bool check_role_template(std::string_view role, const router::RoutePattern& patt
 
 }  // namespace
 
+// "grantable" or "revocable" on an HTTP route (013.Identity.md § Granting and revoking roles, §
+// Scoping roles by substitution): {"options": [...], "to": "{to}" | "{!user_id}",
+// "allow-self-revoke"?}. Only a signed-in caller's route that records something: never public, a
+// GET, or a subscription. Options are tenant roles; a route parameter in one must be the target's
+// or bound by every requirements clause (a clause using it, or a realm-wide role like owner).
+static bool parse_role_change(const bj::value& v, const std::string& key, const HttpRoute& route, const std::string& where,
+                       RoleChange* out, std::vector<std::string>* warnings, std::string* error) {
+  std::string at = where + "." + key;
+  if (route.is_public) return *error = at + ": a public route has no caller to check, so it hands out no roles", false;
+  if (route.verb == "get" || route.verb == "subscribe") {
+    return *error = at + ": a GET changes nothing; grant and revoke from a post, put, patch, or delete route", false;
+  }
+  if (!v.is_object()) return *error = at + " is {\"options\": [roles], \"to\": \"{param}\" or \"{!user_id}\"}", false;
+  const auto& o = v.as_object();
+  for (const auto& f : o) {
+    std::string k(f.key());
+    if (k == "options" || k == "to") continue;
+    if (k == "allow-self-revoke" && key == "revocable") continue;
+    return *error = at + ": unknown field \"" + k + "\"", false;
+  }
+  std::string err;
+  auto to = get_string(o, "to", &err);
+  if (!to || to->size() < 3 || to->front() != '{' || to->back() != '}') {
+    return *error = at + ".to names whose roles change: \"{!user_id}\" (the caller) or \"{param}\", a route parameter", false;
+  }
+  std::string target = to->substr(1, to->size() - 2);
+  if (target.starts_with("!")) {
+    if (target != "!user_id") return *error = at + ".to: of the reserved identifiers only {!user_id} is a user", false;
+  } else {
+    bool found = false;
+    for (const auto& seg : route.pattern.segments) found = found || (!seg.literal && seg.text == target);
+    if (!found) return *error = at + ".to: {" + target + "} is not a parameter of " + route.pattern.source, false;
+  }
+  out->to = *to;
+  const auto* options = o.if_contains("options");
+  if (!options || !options->is_array() || options->as_array().empty() || options->as_array().size() > 16) {
+    return *error = at + ".options is a list of 1 to 16 roles", false;
+  }
+  for (const auto& r : options->as_array()) {
+    if (!r.is_string()) return *error = at + ".options holds role strings", false;
+    std::string role(r.as_string()), why;
+    if (role.starts_with("host:")) return *error = at + ": no route hands out a host role (" + role + ")", false;
+    if (!check_role_template(role, route.pattern, &why)) return *error = at + ".options: " + why, false;
+    // Every route parameter in the option is the target's, or bound by the requirements.
+    for (size_t i = role.find('{'); i != std::string::npos; i = role.find('{', i + 1)) {
+      std::string name = role.substr(i + 1, role.find('}', i) - i - 1);
+      if (name.starts_with("!") || name == target) continue;
+      bool bound = !route.requirements.empty();
+      for (const auto& clause : route.requirements) {
+        bool uses = false, realm_wide = false;
+        for (const auto& req : clause) {
+          uses = uses || req.find("{" + name + "}") != std::string::npos;
+          realm_wide = realm_wide || (req.find('/') == std::string::npos && req.find('{') == std::string::npos);
+        }
+        bound = bound && (uses || realm_wide);
+      }
+      if (!bound) {
+        return *error = at + ".options: {" + name + "} in " + role + " is chosen by the caller and no requirements "
+                            "clause checks it; name it in every clause (like admin/project_{" + name + "}) or in a "
+                            "realm-wide role (like owner)",
+               false;
+      }
+    }
+    out->options.push_back(std::move(role));
+  }
+  out->allow_self_revoke = goober::json::get_bool(o, "allow-self-revoke", &err).value_or(false);
+  if (!err.empty()) return *error = at + ": " + err, false;
+  out->on = true;
+  bool anyone = false;
+  for (const auto& clause : route.requirements) anyone = anyone || clause.empty();
+  if (anyone && target != "!user_id") {
+    warnings->push_back(at + ": any signed-in user may " + (key == "grantable" ? "grant" : "revoke") +
+                        " these roles " + (key == "grantable" ? "to" : "from") + " any user named by {" + target + "}");
+  }
+  if (out->allow_self_revoke) {
+    warnings->push_back(at + ".allow-self-revoke: the caller may lose access to this very route, and revoking an "
+                        "owner role can leave the realm with no owner, which only a host owner can repair");
+  }
+  return true;
+}
+
 bool parse_requirements(const bj::value& v, const router::RoutePattern& pattern,
                         std::vector<std::vector<std::string>>* out, std::string* why) {
   if (!v.is_array()) return *why = "requirements must be a list", false;
@@ -1704,11 +1784,13 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             std::string key(f.key());
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
-                key == "response" || key == "cors" || key == "includes" || key == "cache" || key == "client-ip") {
+                key == "response" || key == "cors" || key == "includes" || key == "cache" || key == "client-ip" ||
+                key == "grantable" || key == "revocable") {
               // A subscription answers its own page's EventSource: no body, no template or
               // partials (the events are the box's bytes), and no cross-origin readers.
               if (sse && (key == "body" || key == "max-body-bytes" || key == "template" || key == "includes" ||
-                          key == "cors" || key == "cache" || key == "client-ip")) {
+                          key == "cors" || key == "cache" || key == "client-ip" || key == "grantable" ||
+                          key == "revocable")) {
                 return *error = where + "." + key + " doesn't apply to a subscription", std::nullopt;
               }
               continue;
@@ -1795,6 +1877,12 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             return *error = where + ": needs \"public\": true or \"requirements\" ([] is any signed-in user); "
                                     "a route with neither is denied to everyone",
                    std::nullopt;
+          }
+          for (const char* k : {"grantable", "revocable"}) {
+            auto* g = def.if_contains(k);
+            if (!g) continue;
+            RoleChange& rc = std::string_view(k) == "grantable" ? route.grantable : route.revocable;
+            if (!parse_role_change(*g, k, route, where, &rc, &m.warnings, error)) return std::nullopt;
           }
           m.routes.push_back(std::move(route));
         }

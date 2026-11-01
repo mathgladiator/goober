@@ -14,6 +14,15 @@
 
 namespace goober::manifest {
 
+// A route's power to hand out or take away tenant roles (013.Identity.md § Granting and revoking
+// roles): the only strings it may grant or revoke, and whose roles they are.
+struct RoleChange {
+  bool on = false;
+  std::vector<std::string> options;  // role templates: {!tenant}, {!user_id}, and bound route parameters
+  std::string to;                    // "{!user_id}" (the caller) or "{param}", a route parameter
+  bool allow_self_revoke = false;    // revocable only: the caller may revoke their own roles
+};
+
 struct HttpRoute {
   std::string verb;  // get, post, put, patch, delete
   std::string name;  // the route name; the box exports goober_route_$name
@@ -34,6 +43,9 @@ struct HttpRoute {
   // that records something: post, put, patch, or delete, never a GET (2026-10-31). Every call that
   // receives it is in the audit log; everywhere else the box sees only client_key.
   bool client_ip = false;
+  // "grantable" and "revocable" (013 § Granting and revoking roles): the box grants or revokes
+  // one of these roles with goober_role_grant / goober_role_revoke, applied when the call commits.
+  RoleChange grantable, revocable;
   // What the request may carry (037.Http.md § Everything a request can carry). The host
   // checks all of it before the box wakes up.
   std::string body;  // "", "json:$Type", "text", or "binary"
