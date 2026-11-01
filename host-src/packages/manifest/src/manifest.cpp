@@ -1399,6 +1399,13 @@ static bool parse_role_change(const bj::value& v, const std::string& key, const 
     warnings->push_back(at + ".allow-self-revoke: the caller may lose access to this very route, and revoking an "
                         "owner role can leave the realm with no owner, which only a host owner can repair");
   }
+  // owner is the realm's own authority (it grants, and realm-wide clauses accept it): handing it
+  // out from a route is allowed, but never quietly.
+  if (key == "grantable" && std::find(out->options.begin(), out->options.end(), "owner") != out->options.end()) {
+    warnings->push_back(at + ": owner is an option, so whoever this route lets in can make " +
+                        (target == "!user_id" ? std::string("themselves") : "the user {" + target + "} names") +
+                        " an owner of the realm");
+  }
   return true;
 }
 

@@ -625,3 +625,19 @@ TEST(Manifest, Flags) {
   for (int i = 0; i < 33; ++i) many += std::string(i ? "," : "") + "\"f" + std::to_string(i) + "\":{\"default\":\"\"}";
   refused(many + "}", "at most 32");
 }
+
+// A route that hands out owner says so at upload, even to the caller alone.
+TEST(Manifest, GrantingOwnerIsNeverQuiet) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"x","domains":["*"],"routes":{"http":{
+      "/claim":{"post":{"name":"claim","requirements":[],"grantable":{"options":["owner","fan"],"to":"{!user_id}"}}}}}})",
+                          &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->warnings.size(), 1u);
+  EXPECT_NE(m->warnings.at(0).find("make themselves an owner"), std::string::npos) << m->warnings.at(0);
+  auto quiet = parse_manifest(R"({"box":"x","domains":["*"],"routes":{"http":{
+      "/claim":{"post":{"name":"claim","requirements":[],"grantable":{"options":["fan"],"to":"{!user_id}"}}}}}})",
+                              &err);
+  ASSERT_TRUE(quiet) << err;
+  EXPECT_TRUE(quiet->warnings.empty());
+}
