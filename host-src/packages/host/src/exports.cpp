@@ -210,6 +210,12 @@ bool open_to(const fs::path& storage, const vault::Key& vault_key, const std::st
   }
   auto csv = base::read_file(opening);
   if (!csv) return *error = "can't read " + opening.string(), false;
+  // "-" is standard output, so a person can fetch it over ssh into a file on their own machine.
+  if (out == "-") {
+    std::fwrite(csv->data(), 1, csv->size(), stdout);
+    std::fflush(stdout);
+    return true;
+  }
   // A new file, never an existing one or a link, readable only by whoever runs this.
   int fd = ::open(out.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (fd < 0) {

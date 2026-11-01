@@ -804,6 +804,21 @@ The work of 2026-10-29 to 2026-10-31, reviewed (043.CodeSecurityReview.md):
 - [ ] Decisions for the human (043 § For the human): trusted proxies, roles that gate their own
       route, agents granting.
 
+### Phase 42: performance and operations review (2026-10-31)
+The last two days' work measured and reviewed (`design/machine/044.PerformanceOperations.md`):
+- [x] The log dive reads each file back from its end: the newest 200 of a 115 MB day in 10 ms,
+      not 5.5 s (`log_search`, `access_log`, the Logs view, `version_health`); tests.
+- [x] Try and upgrade copies a crash left behind are swept at start; an upgrade dry run's
+      copies go on a throw too; tests.
+- [x] `/goober/ready` has a `disk` check (free and total; low under 10% or 2 GiB; failing under
+      256 MiB); tests.
+- [x] Expired exports go in the hourly housekeeping; `export get --out -` writes to standard
+      output for fetching over ssh; tests. HUMAN.md and READINESS.md corrected.
+- [ ] Alerts that reach the human (044 § 4.1), a cap on try sizes (§ 4.2), retention for change
+      sets (§ 4.3), and restore drills (§ 4.4): waiting on the human.
+- [ ] The access-log writer's lock (§ 3.1), the tailer's first run (§ 3.2), and an index for
+      `changeset_list` (§ 3.4): found, not built.
+
 ### Phase 43: service graphs, external services, services in the data flow (2026-10-31)
 The human asked for key graphs of the service, a way into external services' metrics (mail
 first, then any), and the services boxes use in the data flow (028 § 4.4, § 4.5, § 6):

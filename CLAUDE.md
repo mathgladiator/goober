@@ -215,6 +215,11 @@ Read these before doing design work:
     proxied addresses checked, role changes capped, broken error pages, owner grants warned), three
     decisions for the human (trusted proxies, roles that gate their own route, agents granting),
     what wasn't fixed, and what was checked and sound.
+  - `design/machine/044.PerformanceOperations.md`: the performance and operations review of
+    2026-10-29 to 31: measurements, what was fixed (the log dive reads back from the end, swept
+    try copies, a `disk` check in `/goober/ready`, export housekeeping and `--out -`), what wasn't
+    (the access-log lock, the tailer's first run, whole-database copies for tries, unpruned change
+    sets), and four decisions for the human (alerts, try size, retention, restore drills).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

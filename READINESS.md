@@ -148,7 +148,8 @@ each ranch's site weekly.
   - **Copy the backup key off the machine** (`goober-host backup key`), or the backups can't
     be read.
   - Archives are at most 5 GiB.
-  - The nightly needs room on disk for one more copy of storage.
+  - The nightly needs room on disk for one more copy of storage. `/goober/ready`'s `disk`
+    check says how much is free (`low` under 10% or 2 GiB; failing under 256 MiB).
 
 ## 6. Mail that arrives: yes, untried with real SES or a real MX
 
@@ -227,7 +228,8 @@ each ranch's site weekly.
   Then sign in with your operator address. Locally it is `http://ops.localhost:8080/`.
 - **Watch for.**
   - The change log starts when this version is deployed; earlier changes aren't in it.
-  - Traffic history comes from the access logs still on disk (four files of 64 MiB).
+  - Traffic history starts from the access logs still on disk when the panel first runs (7
+    days); after that the rollups keep minutes for 48 hours and hours for 400 days.
 
 ## 9. An installable app: yes, untried on a phone
 

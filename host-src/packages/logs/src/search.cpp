@@ -1,10 +1,10 @@
 // The log dive (design/machine/032.Logs.md § 5): newest first, across one log or several, within
 // a time window, by substring, regex, fields, or an address's hash, reading only the files whose
-// span overlaps the window and at most max_read bytes.
+// span overlaps the window and at most max_read bytes. Each file is read back from its end, so
+// the newest lines cost only what's after them.
 
 #include "goober/base/time.h"
 #include <algorithm>
-#include <deque>
 #include <fstream>
 
 #include "goober/logs/logs.h"
@@ -21,6 +21,52 @@ std::optional<int64_t> at_of_line(std::string_view line) {
   return parse_at(line.substr(k + 6, 24));
 }
 
+// A file's lines from the last to the first, read in 1 MiB chunks from the end. Empty lines
+// (the file's final newline among them) come back empty.
+class ReverseLines {
+ public:
+  explicit ReverseLines(const fs::path& file) : in_(file, std::ios::binary) {
+    if (in_) {
+      in_.seekg(0, std::ios::end);
+      pos_ = uint64_t(std::max<std::streamoff>(0, std::streamoff(in_.tellg())));
+    }
+  }
+  // The next line back, without its newline; false past the file's first line.
+  bool next(std::string* line) {
+    while (true) {
+      // buf_ runs from pos_ to just before a newline already passed (or the file's end), so
+      // whatever follows its last newline is a whole line.
+      auto nl = buf_.rfind('\n');
+      if (nl != std::string::npos) {
+        line->assign(buf_, nl + 1);
+        buf_.resize(nl);
+        return true;
+      }
+      if (pos_ == 0) {
+        if (done_) return false;
+        done_ = true;
+        *line = std::move(buf_);
+        buf_.clear();
+        return true;
+      }
+      uint64_t n = std::min<uint64_t>(pos_, kChunk);
+      pos_ -= n;
+      std::string chunk(size_t(n), '\0');
+      in_.seekg(std::streamoff(pos_));
+      in_.read(chunk.data(), std::streamsize(n));
+      if (!in_) return false;
+      buf_.insert(0, chunk);
+    }
+  }
+
+ private:
+  static constexpr uint64_t kChunk = 1 << 20;
+  std::ifstream in_;
+  uint64_t pos_ = 0;
+  std::string buf_;
+  bool done_ = false;
+};
+
 std::string text_of(const bj::value& v) {
   if (v.is_string()) return std::string(v.as_string());
   return json::dump(v);
@@ -33,7 +79,7 @@ Found search(const fs::path& dir, const std::vector<std::string>& names, const Q
   std::vector<Hit> all;
   for (const auto& name : names) {
     auto files = files_of(dir, name);
-    std::deque<Hit> mine;  // this log's newest matches, oldest first
+    std::vector<Hit> mine;  // this log's newest matches, newest first
     for (auto it = files.rbegin(); it != files.rend(); ++it) {
       if (mine.size() >= q.limit) {
         found.truncated = true;  // older files may hold more
@@ -45,10 +91,12 @@ Found search(const fs::path& dir, const std::vector<std::string>& names, const Q
       std::getline(probe, first);
       auto first_at = at_of_line(first);
       if (first_at && *first_at > q.until_ms) continue;
-      std::ifstream in(*it, std::ios::binary);
-      std::deque<Hit> file_hits;
+      // Back from the end, newest first: a search for the latest lines stops once it has them,
+      // instead of reading a day's log through to keep its tail.
+      ReverseLines in(*it);
       std::string line;
-      while (std::getline(in, line)) {
+      bool full = false;
+      while (in.next(&line)) {
         found.bytes_read += line.size() + 1;
         if (found.bytes_read > q.max_read) {
           found.truncated = true;
@@ -62,8 +110,8 @@ Found search(const fs::path& dir, const std::vector<std::string>& names, const Q
         }
         if (q.regex && !std::regex_search(line.begin(), line.begin() + std::min(line.size(), kRegexLineBytes), *q.regex)) continue;
         auto at = at_of_line(line);
-        if (!at || *at < q.since_ms) continue;
-        if (*at > q.until_ms) break;
+        if (!at || *at > q.until_ms) continue;
+        if (*at < q.since_ms) break;
         std::string err;
         auto v = json::parse(line, &err);
         if (!v || !v->is_object()) continue;
@@ -88,20 +136,14 @@ Found search(const fs::path& dir, const std::vector<std::string>& names, const Q
           match = any;
         }
         if (!match || (q.allow && !q.allow(name, o))) continue;
-        file_hits.push_back(Hit{name, seq, *at, line});
-        if (file_hits.size() > q.limit) {
-          file_hits.pop_front();
+        if (mine.size() >= q.limit) {
           found.truncated = true;  // more matched than the limit: a cursor reaches them
+          full = true;
+          break;
         }
+        mine.push_back(Hit{name, seq, *at, line});
       }
-      // This file is newer than what's already in mine: its hits go after them... but mine
-      // holds newer files' hits, so this older file's go before.
-      for (auto h = file_hits.rbegin(); h != file_hits.rend(); ++h) mine.push_front(std::move(*h));
-      while (mine.size() > q.limit) {
-        mine.pop_front();
-        found.truncated = true;
-      }
-      if (found.bytes_read > q.max_read) break;
+      if (full || found.bytes_read > q.max_read) break;
       // Older files are older still: once this one starts before the window, stop.
       if (first_at && *first_at < q.since_ms) break;
     }

@@ -166,6 +166,14 @@ void Host::register_upgrade_tools() {
          auto p = plan(args, &err);
          if (!p) return ToolResult::fail(err);
          auto root = config_.get()->storage / "tmp" / "upgrades" / random_id();
+         // Gone however this returns, a throw included (they're copies of private rows).
+         struct Cleanup {
+           fs::path root;
+           ~Cleanup() {
+             std::error_code ec;
+             fs::remove_all(root, ec);
+           }
+         } cleanup{root};
          db::Databases copies(root);
          copies.set_id_source(next_id_);
          copies.set_schema_store(schemas_.get());

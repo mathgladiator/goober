@@ -77,7 +77,7 @@ constexpr const char* kUsage =
     "       goober-host vault key [--create] [--config host.json]   (prints the key that seals people's secrets;\n"
     "                                    --create makes it now if there is none, never replacing one)\n"
     "       goober-host backup list [--config host.json]\n"
-    "       goober-host export list|get ID [--out FILE]|delete ID [--config host.json]   (db_export's sealed CSVs)\n"
+    "       goober-host export list|get ID [--out FILE or -]|delete ID [--config host.json]   (db_export's sealed CSVs)\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
     "       goober-host ids bump [--config host.json]   (after a restore, with the host stopped: no id is minted twice)\n"
@@ -297,7 +297,8 @@ int run_export(const std::vector<std::string>& args, const std::string& config_p
     cli_log(*config, "audit", bj::object{{"action", "export.get"}, {"actor", "cli"}, {"target", "export:" + args[2]},
                                          {"outcome", ok ? "ok" : "error"}, {"error", ok ? "" : err}});
     if (!ok) return std::cerr << "goober-host: " << err << "\n", 1;
-    std::cout << "wrote " << out << " (" << m->rows << " rows, " << m->bytes << " bytes, sha256 " << m->sha256
+    // With --out -, the CSV went to standard output; the summary goes to standard error.
+    (out == "-" ? std::cerr : std::cout) << "wrote " << out << " (" << m->rows << " rows, " << m->bytes << " bytes, sha256 " << m->sha256
               << ", readable only by you); delete it when you're done\n";
     return 0;
   }

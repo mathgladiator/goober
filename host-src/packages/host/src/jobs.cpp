@@ -203,6 +203,12 @@ bj::array JobRuns::tries(const std::string& box, const std::string& version) {
 fs::path Host::job_copies(int64_t run) const { return config_.get()->storage / "tmp" / "jobs" / std::to_string(run); }
 
 void Host::init_jobs() {
+  // Copies a try or an upgrade dry run made live only for that call; ones a stop cut off
+  // would hold private rows on disk for good, and fill it, so they go before anything runs.
+  for (const char* dir : {"tries", "upgrades"}) {
+    std::error_code ec;
+    fs::remove_all(config_.get()->storage / "tmp" / dir, ec);
+  }
   try {
     job_runs_ = std::make_unique<JobRuns>(config_.get()->storage / "operations" / "jobs.db");
     // A dry run's copies were in tmp: one cut off by a restart can't go on.

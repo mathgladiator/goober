@@ -16,6 +16,9 @@ curl -s https://example.com/goober/ready         # storage, identity, boxes, sto
 An empty 503 from Caddy (no body, `server: Caddy`) means the host isn't answering at all: go
 to section 5. `/goober/ready` answers 503 with `"ok":false` and names the failing check when
 the host runs but something is wrong:
+- `disk` says how much room is left where storage lives. `"low": true` (under 10% or 2 GiB)
+  is a warning; under 256 MiB fails the check, since every write (data, logs, backups) is
+  about to. `sudo du -sh /srv/goober/host/storage/*` shows what holds it.
 - `boxes` lists any box with an active version that isn't served (`not_loaded`).
 - `stores` lists any shared file that wouldn't open at start (`consent`, `web`, `source`). A
   broken web or source store was moved aside (`*.unreadable-<time>`, kept) and a fresh one
@@ -57,7 +60,7 @@ tell it what the error says, or ask it to read `box_logs`.
 ## 3. Is anything broken?
 
 ```sh
-sudo grep -c '"status":5' /srv/goober/host/storage/logs/access.log   # server errors, all time
+sudo grep -c '"status":5' /srv/goober/host/storage/logs/access.log   # server errors today (UTC); earlier ones are in access.log.1, .2, ... (7 days)
 sudo grep '"status":5' /srv/goober/host/storage/logs/access.log | tail -n 5
 sudo journalctl -u goober-host --since today | grep -iE 'error|failed' | tail -n 20
 ```
@@ -329,11 +332,15 @@ list what could go (`db_unbound`) and ask you.
 ## Fetch an export Grok made
 
 When Grok needs private rows to reach you (a list of emails, say), it runs `db_export` and
-gives you an id; the rows never pass through Grok. On the server:
-`sudo -u goober goober-host export list --config /srv/goober/host/host.json`, then
-`sudo -u goober goober-host export get ID --out /tmp/rows.csv --config /srv/goober/host/host.json`
-(readable only by the goober user; copy it off with `scp`, then delete it). Exports go away
-after 7 days, or now with `export delete ID`.
+gives you an id; the rows never pass through Grok. From your laptop, straight into a file
+there (`--out -` writes the CSV to standard output, so nothing unsealed stays on the server):
+
+```sh
+ssh customer@example.com 'sudo -u goober goober-host export list --config /srv/goober/host/host.json'
+ssh customer@example.com 'sudo -u goober goober-host export get ID --out - --config /srv/goober/host/host.json' > rows.csv
+```
+
+Exports go away after 7 days, or now with `export delete ID`.
 
 ## Someone asks to be deleted
 

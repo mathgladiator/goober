@@ -251,7 +251,24 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
     }
     check("storage", good, why.empty() ? bj::object{} : bj::object{{"why", why}});
   }
-  // Identity and OAuth: the host realm answers (its database opens and reads).
+  // Disk: a full disk fails every write at once (databases, logs, the outbox, backups), so it is
+  // said before it happens. Under 256 MiB free fails the check; under 10% or 2 GiB is "low",
+  // a warning that doesn't (a deploy shouldn't roll back over it).
+  {
+    std::error_code ec;
+    auto space = fs::space(cfg->storage, ec);
+    if (ec) {
+      check("disk", true, bj::object{{"why", "can't read the free space: " + ec.message()}});
+    } else {
+      auto free = int64_t(space.available), total = int64_t(space.capacity);
+      bool good = free >= (int64_t(256) << 20);
+      bool low = free < (int64_t(2) << 30) || (total > 0 && free * 10 < total);
+      bj::object detail{{"free_bytes", free}, {"total_bytes", total}};
+      if (low) detail["low"] = true;
+      if (!good) detail["why"] = "under 256 MiB free on the disk holding " + cfg->storage.string();
+      check("disk", good, std::move(detail));
+    }
+  }
   // Identity and OAuth: the host realm and every tenant's realm answer (their databases open and
   // read), since a site's /mcp signs in and refreshes in its own realm.
   {

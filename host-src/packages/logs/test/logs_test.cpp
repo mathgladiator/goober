@@ -210,6 +210,51 @@ TEST(Logs, SearchIsNewestFirstWithinTheWindowAndScope) {
   EXPECT_TRUE(logs::search(dir, {"access"}, small).truncated);
 }
 
+// The newest lines are found without reading the whole day: the search reads back from the end
+// (and across a chunk's edge, and into the rotation before it, in order).
+TEST(Logs, SearchReadsBackOnlyAsFarAsItNeeds) {
+  auto dir = fresh("logs_search_back");
+  logs::Set set(dir, "h");
+  std::string pad(300, 'x');
+  for (int i = 0; i < 20000; ++i) {
+    set.write("access", bj::object{{"path", "/n" + std::to_string(i)}, {"pad", pad}}, kT0 + i);
+  }
+  uint64_t size = fs::file_size(dir / "access.log");
+  ASSERT_GT(size, uint64_t(6) << 20);
+  logs::Query q;
+  q.limit = 5;
+  auto f = logs::search(dir, {"access"}, q);
+  ASSERT_EQ(f.hits.size(), 5u);
+  EXPECT_TRUE(f.truncated);
+  EXPECT_NE(f.hits[0].line.find("\"/n19999\""), std::string::npos);
+  EXPECT_NE(f.hits[4].line.find("\"/n19995\""), std::string::npos);
+  EXPECT_LT(f.bytes_read, uint64_t(64) << 10) << "read " << f.bytes_read << " of " << size;
+  // Every line is found once, newest first, across the 1 MiB chunks.
+  logs::Query all;
+  all.limit = 100000;
+  auto every = logs::search(dir, {"access"}, all);
+  ASSERT_EQ(every.hits.size(), 20000u);
+  EXPECT_FALSE(every.truncated);
+  for (size_t i = 0; i < every.hits.size(); ++i) {
+    ASSERT_NE(every.hits[i].line.find("\"/n" + std::to_string(19999 - i) + "\""), std::string::npos) << i;
+  }
+  // A window in the middle, and one older than a rotation's start.
+  logs::Query mid;
+  mid.since_ms = kT0 + 100;
+  mid.until_ms = kT0 + 109;
+  auto m = logs::search(dir, {"access"}, mid);
+  ASSERT_EQ(m.hits.size(), 10u);
+  EXPECT_NE(m.hits[0].line.find("\"/n109\""), std::string::npos);
+  set.write("access", bj::object{{"path", "/tomorrow"}}, kT0 + kDay);  // rotates by day
+  ASSERT_TRUE(fs::exists(dir / "access.log.1"));
+  logs::Query two;
+  two.limit = 2;
+  auto t = logs::search(dir, {"access"}, two);
+  ASSERT_EQ(t.hits.size(), 2u);
+  EXPECT_NE(t.hits[0].line.find("/tomorrow"), std::string::npos);
+  EXPECT_NE(t.hits[1].line.find("\"/n19999\""), std::string::npos);
+}
+
 TEST(Logs, NamesAndTimes) {
   EXPECT_TRUE(logs::valid_name("access"));
   EXPECT_TRUE(logs::valid_name("boxes/shop-1"));
