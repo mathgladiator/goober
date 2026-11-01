@@ -641,3 +641,30 @@ TEST(Manifest, GrantingOwnerIsNeverQuiet) {
   ASSERT_TRUE(quiet) << err;
   EXPECT_TRUE(quiet->warnings.empty());
 }
+
+// A role a route hands out that also gates one of the box's own routes or tools says so (043).
+TEST(Manifest, GrantingARoleThatGatesThisBoxIsNeverQuiet) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"x","domains":["*"],"routes":{"http":{
+      "/claim":{"post":{"name":"claim","requirements":[],"grantable":{"options":["editor","fan"],"to":"{!user_id}"}}},
+      "/projects/{p : string}/join":{"post":{"name":"join","requirements":[["invited/project_{p}"]],
+        "grantable":{"options":["member/project_{p}"],"to":"{!user_id}"}}},
+      "/admin":{"get":{"name":"admin","requirements":[["editor"]]}},
+      "/projects/{id : string}":{"get":{"name":"project","requirements":[["member/project_{id}"]]}}}}})",
+                          &err);
+  ASSERT_TRUE(m) << err;
+  ASSERT_EQ(m->warnings.size(), 2u) << m->warnings.at(0);
+  std::string all = m->warnings.at(0) + "\n" + m->warnings.at(1);
+  EXPECT_NE(all.find("claim can grant editor, which this box also requires for admin"), std::string::npos) << all;
+  EXPECT_NE(all.find("join can grant member/project_{p}, which this box also requires for project"), std::string::npos) << all;
+  EXPECT_NE(all.find("trusted roles"), std::string::npos) << all;
+  EXPECT_EQ(all.find("fan"), std::string::npos) << all;
+  // Delegation is quiet: an admin of a project making another admin of it hands out nothing new.
+  auto delegated = parse_manifest(R"({"box":"x","domains":["*"],"routes":{"http":{
+      "/p/{p : string}/{to : int64}":{"post":{"name":"a","requirements":[["admin/{p}"],["owner"]],
+        "grantable":{"options":["admin/{p}"],"to":"{to}"}}},
+      "/p/{p : string}":{"get":{"name":"b","requirements":[["admin/{p}"]]}}}}})",
+                                  &err);
+  ASSERT_TRUE(delegated) << err;
+  EXPECT_TRUE(delegated->warnings.empty()) << delegated->warnings.at(0);
+}

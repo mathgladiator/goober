@@ -40,7 +40,9 @@
     (template `site`) and `source_deploy` it.
   - A built Astro or Next.js site works as it is.
 - **Deploy.** `just deploy you@server` on Ubuntu 24.04+ or Debian 13+ sets up Caddy (TLS), a
-  `goober` user, systemd, and local nightly copies. Setup asks for SES and an S3 bucket.
+  `goober` user, systemd, and local nightly copies. Setup asks for SES and an S3 bucket. Behind
+  Caddy the host listens on loopback only: with `listen.behind-proxy` it refuses to start on any
+  other address, since it believes the proxy's `X-Forwarded-For`.
   Another site later: `just deploy you@server --add-tenant newsite.com` asks for just that
   tenant (owner, postal address, www.) and gives it a Caddy site of its own.
 - **Watch for.** The deploy script has been dry-run here, never against a real machine.

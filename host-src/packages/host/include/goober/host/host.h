@@ -165,6 +165,9 @@ class Host {
   uint16_t panel_port() const;
   // Tools that read and change nothing: all a host:observer, and the panel, may call (§ 7).
   static bool is_read_tool(std::string_view tool);
+  // Change sets past their keeping (042 § 9): applied, failed, and rolled-back ones 90 days after
+  // their last change, drafts and discarded ones 30. Run by the hourly housekeeping; the count.
+  int prune_changesets(int64_t now_ms);
   // Whether this call, with these arguments, only looks: a read tool, except mail_unsubscribed
   // with "set" (it blocks an address); and version_upload {dry_run: true}, which stores nothing.
   static bool is_read_call(std::string_view tool, const boost::json::object& args);

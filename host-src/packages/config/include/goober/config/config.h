@@ -207,6 +207,9 @@ struct HostConfig {
   std::string base_url() const;
 };
 
+// 127.0.0.0/8 or ::1: the only addresses a host behind a proxy may listen on.
+bool is_loopback_address(std::string_view address);
+
 // A copy of the config for playing on one machine: listen on 127.0.0.1, plain
 // (not Secure) session cookies, the dev mailer, and the local domain aliases.
 std::shared_ptr<const HostConfig> local_mode(std::shared_ptr<const HostConfig> config);

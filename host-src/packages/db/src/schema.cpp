@@ -220,12 +220,15 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
       keys += col.primary_key ? 1 : 0;
       std::string where = table.name + "." + col.name;
       if (col.primary_key && col.type == "int64") {
-        s.warnings.push_back(where + " is an int64 primary key: new rows get this database's rowids, not host ids; "
-                             "declare {\"type\": \"id\", \"primary-key\": true} (design/machine/038.Ids.md)");
+        s.warnings.push_back(where + " is an int64 primary key: new rows get this database's rowids, not host ids, so one "
+                             "id can name different rows in two databases or after a restore. Declare {\"type\": \"id\", "
+                             "\"primary-key\": true} (design/machine/038.Ids.md)");
       } else if (!col.primary_key && !col.not_a_reference && col.references.empty() && looks_like_reference(col.name) &&
                  (col.type == "string" || col.type == "int32" || col.type == "int64")) {
         s.warnings.push_back(where + " looks like a reference to a user or a row, but is " + col.type +
-                             ": a reference is {\"type\": \"id\"}; ids are never text and never emails. If it isn't "
+                             ", so the host can't check what it points at, and an email or name kept here goes stale "
+                             "when the person changes it. A reference is {\"type\": \"id\"} (add \"references\": "
+                             "\"<table>\" for a row of this schema); ids are never text and never emails. If it isn't "
                              "one (an RFC Message-ID, a host event id), say so: \"not-a-reference\": true");
       }
       table.columns.push_back(std::move(col));
@@ -240,7 +243,8 @@ std::optional<Schema> parse_schema(std::string_view text, std::string* error) {
       id.primary_key = true;
       table.columns.insert(table.columns.begin(), std::move(id));
       s.warnings.push_back(table.name + " names no primary key, so it gets an int64 id: new rows get this database's "
-                           "rowids, not host ids; declare \"id\": {\"type\": \"id\", \"primary-key\": true}");
+                           "rowids, not host ids, so one id can name different rows in two databases or after a "
+                           "restore. Declare \"id\": {\"type\": \"id\", \"primary-key\": true}");
     }
     if (const auto* idx = json::get_object(to, "indexes", &err)) {
       for (const auto& i : *idx) {

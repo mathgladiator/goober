@@ -281,3 +281,38 @@ TEST_F(ChangeSetTest, ASchemasNextVersionIsNotAMember) {
   EXPECT_TRUE(refused(r)) << json::dump(r);
   EXPECT_NE(json::dump(r).find("goes through schema_put"), std::string::npos);
 }
+
+// Keeping (042 § 9): drafts and discarded ones go 30 days after their last change; applied ones 90.
+TEST_F(ChangeSetTest, OldChangeSetsAreDeleted) {
+  std::string draft = create("an idea");
+  std::string dropped = create("a dropped idea");
+  ASSERT_EQ(ok(tool("changeset_discard", {{"id", dropped}})), "");
+  std::string done = create("a page");
+  ASSERT_EQ(ok(tool("changeset_add",
+                    {{"id", done},
+                     {"content", bj::array{bj::object{{"tenant", "playground"},
+                                                      {"files", bj::array{bj::object{{"path", "kept.txt"}, {"text", "hi"}}}}}}}})),
+            "");
+  auto applied = tool("changeset_apply", {{"id", done}});
+  ASSERT_EQ(ok(applied), "");
+  ASSERT_TRUE(applied.at("ok").as_bool()) << json::dump(applied);
+
+  // Each says when it goes.
+  auto shown = tool("changeset_show", {{"id", done}});
+  ASSERT_TRUE(shown.as_object().contains("deletes_at")) << json::dump(shown);
+  auto listed = tool("changeset_list", {});
+  for (const auto& row : listed.at("changesets").as_array()) EXPECT_TRUE(row.as_object().contains("deletes_at"));
+
+  constexpr int64_t kDay = 24LL * 3600 * 1000;
+  int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  EXPECT_EQ(host->prune_changesets(now + 29 * kDay), 0);
+  EXPECT_EQ(host->prune_changesets(now + 31 * kDay), 2);
+  EXPECT_TRUE(refused(tool("changeset_show", {{"id", draft}})));
+  EXPECT_TRUE(refused(tool("changeset_show", {{"id", dropped}})));
+  EXPECT_EQ(ok(tool("changeset_show", {{"id", done}})), "");
+  EXPECT_EQ(host->prune_changesets(now + 89 * kDay), 0);
+  EXPECT_EQ(host->prune_changesets(now + 91 * kDay), 1);
+  EXPECT_TRUE(refused(tool("changeset_show", {{"id", done}})));
+  // What it applied stays: deleting the record undoes nothing.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/kept.txt").body, "hi");
+}

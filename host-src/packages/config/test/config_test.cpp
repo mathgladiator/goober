@@ -271,3 +271,27 @@ TEST(Config, RedirectDomainsSendEverythingToTheirPrimary) {
   refused(R"({"domains":{"example.com":{"tenant":"shop"},"ops.example.com":{"redirect-to":"example.com"}},
               "operations":{"domain":"ops.example.com"}})", "redirect domain");
 }
+
+// Behind a proxy the host believes X-Forwarded-For, so only loopback may reach it (043).
+TEST(Config, BehindAProxyListensOnLoopbackOnly) {
+  std::string err;
+  auto with = [&](const std::string& address) {
+    err.clear();
+    return parse_config(R"({"operations":{"token":"0123456789abcdef"},"listen":{"address":")" + address +
+                            R"(","behind-proxy":true}})",
+                        "/", &err);
+  };
+  EXPECT_TRUE(with("127.0.0.1")) << err;
+  EXPECT_TRUE(with("127.0.1.1")) << err;
+  EXPECT_TRUE(with("::1")) << err;
+  for (const char* bad : {"0.0.0.0", "10.0.0.5", "::", "localhost", "127.0.0", "127.0.0.256", "127.0.0.1x"}) {
+    EXPECT_FALSE(with(bad)) << bad;
+    EXPECT_NE(err.find("listen.behind-proxy is on"), std::string::npos) << err;
+    EXPECT_NE(err.find("127.0.0.1"), std::string::npos) << err;
+  }
+  // Without a proxy any address is the operator's choice.
+  err.clear();
+  EXPECT_TRUE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"listen":{"address":"0.0.0.0"}})", "/", &err)) << err;
+  EXPECT_TRUE(is_loopback_address("127.0.0.1"));
+  EXPECT_FALSE(is_loopback_address("128.0.0.1"));
+}
