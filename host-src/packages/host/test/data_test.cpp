@@ -742,6 +742,12 @@ TEST_F(DataRoutesTest, ExportsSealRowsForAPersonToFetch) {
   ASSERT_TRUE(host::exports::open_to(storage, *key, id, root / "out.csv", now, &err)) << err;
   EXPECT_EQ(base::read_file(root / "out.csv"), "text\r\nhi\r\n\"pat@example.com, \"\"quoted\"\"\"\r\n");
   EXPECT_EQ(fs::status(root / "out.csv").permissions() & fs::perms::all, fs::perms::owner_read | fs::perms::owner_write);
+  // "-" writes it to standard output (for `ssh ... export get ID --out - > rows.csv`), leaving
+  // nothing unsealed behind on the server.
+  testing::internal::CaptureStdout();
+  ASSERT_TRUE(host::exports::open_to(storage, *key, id, "-", now, &err)) << err;
+  EXPECT_EQ(testing::internal::GetCapturedStdout(), *base::read_file(root / "out.csv"));
+  EXPECT_FALSE(fs::exists(storage / "tmp" / ("export-" + id + ".csv")));
   // Never over a file that's there, and never with another key.
   EXPECT_FALSE(host::exports::open_to(storage, *key, id, root / "out.csv", now, &err));
   EXPECT_FALSE(host::exports::open_to(storage, backup::new_key(), id, root / "other.csv", now, &err));
@@ -760,4 +766,12 @@ TEST_F(DataRoutesTest, ExportsSealRowsForAPersonToFetch) {
   // An agent's export never waits for approval, but observers can't make one.
   EXPECT_TRUE(host::Host::is_read_call("db_export", {}));
   EXPECT_FALSE(host::Host::is_read_tool("db_export"));
+
+  // The hourly housekeeping deletes one past its 7 days, though nobody lists or makes another.
+  auto again = tool("db_export", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "SELECT text FROM notes"}});
+  std::string id2(again.at("export").as_string());
+  ASSERT_TRUE(fs::exists(storage / "exports" / (id2 + ".csv.sealed")));
+  host->identity_tick(base::now_unix_ms() + host::exports::kKeepMs + 3600 * 1000);
+  EXPECT_FALSE(fs::exists(storage / "exports" / (id2 + ".csv.sealed")));
+  EXPECT_FALSE(fs::exists(storage / "exports" / (id2 + ".json")));
 }

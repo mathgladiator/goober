@@ -188,16 +188,32 @@ bool open_to(const fs::path& storage, const vault::Key& vault_key, const std::st
   auto m = find(storage, id, now_ms);
   if (!m) return *error = "no export " + id + " (exports are kept 7 days; `goober-host export list` shows them)", false;
   std::error_code ec;
-  if (fs::exists(out, ec)) return *error = out.string() + " exists already; name another file with --out", false;
+  // "-" is standard output, so a person can fetch it over ssh into a file on their own machine
+  // (unsealed into tmp, owner-only, and removed at once).
+  bool to_stdout = out == "-";
+  fs::path target = to_stdout ? storage / "tmp" / ("export-" + id + ".csv") : out;
+  if (to_stdout) {
+    fs::create_directories(target.parent_path(), ec);
+    fs::remove(target, ec);
+  } else if (fs::exists(out, ec)) {
+    return *error = out.string() + " exists already; name another file with --out", false;
+  }
   mode_t old = ::umask(077);
-  bool ok = backup::unseal_file(vault::tenant_key(vault_key, m->tenant), dir(storage) / (id + ".csv.sealed"), out, error,
+  bool ok = backup::unseal_file(vault::tenant_key(vault_key, m->tenant), dir(storage) / (id + ".csv.sealed"), target, error,
                                 context(m->tenant, id));
   ::umask(old);
   if (!ok) {
     *error = "export " + id + " doesn't open: the vault key changed, or the file was altered (" + *error + ")";
     return false;
   }
-  fs::permissions(out, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+  fs::permissions(target, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+  if (to_stdout) {
+    auto text = base::read_file(target);
+    fs::remove(target, ec);
+    if (!text) return *error = "can't read the unsealed export back", false;
+    std::fwrite(text->data(), 1, text->size(), stdout);
+    std::fflush(stdout);
+  }
   return true;
 }
 

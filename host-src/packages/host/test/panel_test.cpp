@@ -323,9 +323,13 @@ TEST_F(PanelTest, ReadySaysWhatEverySubsystemIs) {
   ASSERT_EQ(r.status, 200) << r.body;
   auto ready = parse(r.body);
   EXPECT_EQ(ready["ok"], true);
-  for (const char* k : {"storage", "identity", "boxes", "mcp", "change_log", "traffic", "queue"}) {
+  for (const char* k : {"storage", "disk", "identity", "boxes", "mcp", "change_log", "traffic", "queue"}) {
     EXPECT_TRUE(ready["checks"].as_object().contains(k)) << k;
   }
+  // The disk the storage is on: free and total, so a filling disk is seen before writes fail.
+  const auto& disk = ready["checks"].as_object()["disk"].as_object();
+  EXPECT_GT(disk.at("total_bytes").as_int64(), 0);
+  EXPECT_GE(disk.at("total_bytes").as_int64(), disk.at("free_bytes").as_int64());
   EXPECT_EQ(ready["checks"].as_object()["change_log"].as_object()["on"], true);
   EXPECT_FALSE(ready["build"].as_string().empty());
   EXPECT_TRUE(ready["deploy"].is_null());

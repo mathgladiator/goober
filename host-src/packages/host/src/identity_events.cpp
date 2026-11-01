@@ -14,6 +14,7 @@
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 #include "timer_state.h"
+#include "exports.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -76,6 +77,8 @@ void Host::identity_tick(int64_t now_ms) {
     step("consent", [&] { consent_->prune(now_ms); });
     // Quiet logs rotate, and rotated files past 7 days leave the machine (032 § 2).
     step("logs", [&] { logs_housekeeping(now_ms); });
+    // Exports past their 7 days go even when nobody makes or lists another (008 § 7.1).
+    step("exports", [&] { exports::list(config_.get()->storage, now_ms); });
   }
 
   struct Delivery {

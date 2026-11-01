@@ -227,6 +227,25 @@ TEST_F(RouteTryTest, AWriteRunsOnCopiesAndChangesNoRealData) {
   for (auto it = fs::directory_iterator(root / "storage" / "tmp" / "tries", ec); !ec && it != fs::directory_iterator(); ++it) ++left;
   EXPECT_EQ(left, 0);  // the copies are gone
 
+  // Copies a stop cut off (a crash mid-try) are swept when the host starts again.
+  host.reset();
+  fs::create_directories(root / "storage" / "tmp" / "tries" / "cut-off" / "playground");
+  fs::create_directories(root / "storage" / "tmp" / "upgrades" / "cut-off");
+  {
+    std::string err;
+    auto cfg = config::parse_config(R"({
+        "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
+        "domains": {"localhost": {"tenant": "playground"}, "example.com": {"tenant": "playground"}},
+        "operations": {"token": "test-token-0123456789"},
+        "threads": {"network": 1, "boxes": 2}})",
+                                    root, &err);
+    ASSERT_TRUE(cfg) << err;
+    host = std::make_unique<host::Host>(config::local_mode(cfg));
+  }
+  EXPECT_FALSE(fs::exists(root / "storage" / "tmp" / "tries" / "cut-off"));
+  EXPECT_FALSE(fs::exists(root / "storage" / "tmp" / "upgrades" / "cut-off"));
+  port = host->start();
+
   // The access log marks it a try, so traffic and performance leave it out.
   std::ifstream in(root / "storage" / "logs" / "access.log");
   std::string line;
