@@ -226,7 +226,9 @@ Read these before doing design work:
     has a time limit and a byte budget in one table, set under host.json's `limits`; over budget
     the derived and expiring are dropped oldest first, new tries, exports, and snapshots are
     refused naming the limit, and snapshots are never deleted by the host; what a try is; the
-    `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days.
+    `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
+    box versions no longer live archived after 30 days and deleted after 400, leaving a
+    tombstone, never the newest three that were live (§ 3.1).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

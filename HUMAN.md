@@ -313,6 +313,11 @@ the grant (two parties holding one grant), and Grok must sign in again.
   `version_promote` the one before; or do it yourself with a token
   (`goober-host token create --name me`, then from the repo:
   `GOOBER_URL=https://example.com GOOBER_TOKEN=… host-src/tools/goober.py call version_promote box=NAME version=ID`).
+  The 3 versions that were live most recently are always there. An older one is archived 30
+  days after it stopped being live: the promote answers that, and
+  `host-src/tools/goober.py call version_restore box=NAME version=ID why="roll back"` brings it
+  back first. After 400 days it is deleted; `version_list` still names it, who uploaded it, and
+  when it was live, but it can't come back.
 - **Source:** `source_log` and `source_revert` on the project. The panel's **Source** view shows
   every revision's diff, its files, and each build's log; a box's page says which revision
   each version came from.

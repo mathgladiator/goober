@@ -141,6 +141,12 @@ struct HostConfig {
     int64_t logs_bytes = int64_t(4) << 30;        // logs on the machine, archive queue included
     int64_t free_bytes = int64_t(1) << 30;        // what new work must leave free on the disk
     int64_t tmp_hours = 24;                       // a file in storage/tmp older than this goes
+    // Box versions no longer live (045 § 3.1): archived (no try or promote until a person
+    // restores one) this many days after going inactive, deleted (a tombstone stays) after
+    // this many, never the newest version_keep that were live before.
+    int64_t version_archive_days = 30;
+    int64_t version_delete_days = 400;
+    int64_t version_keep = 3;
   } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.

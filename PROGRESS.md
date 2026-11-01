@@ -877,6 +877,19 @@ approximations is good. I don't want traffic storage bloating the disk." (045.Li
 - [ ] `logs-bytes` enforced (reported only), and a budget for the source build cache.
 - [ ] Change-set retention (90 days applied, 30 days drafts and discarded), with change sets.
 
+### Phase 47: box versions archived, then deleted after 400 days inactive (2026-11-01)
+The human: "box versions archive for liability, they get deleted if inactive after 400 days."
+(045 § 3.1):
+- [x] A life record per version (stored, stored_by, live periods, inactive since, archived),
+      written through the WAL with the change that caused it; versions from before start their
+      time at the first pruning; the change log skips life records and tombstones; tests.
+- [x] Archived 30 days inactive (kept, read by version_get and version_diff, refused by tries,
+      dry runs, and promotion), deleted 400 days inactive with a tombstone; never the live
+      version, a disabled box's, the newest 3 that were live, or a kept change set's; hourly;
+      audit lines; `limits.version-*`; tests.
+- [x] `version_restore {box, version, why}`; version_list's state and dates; version_get's
+      tombstone; the panel's box page; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

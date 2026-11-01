@@ -891,11 +891,15 @@ void Host::register_tools() {
        }});
 
   mcp_->add_tool({"version_list",
-                  "Read tool. A box's stored versions, each {version, active, stored_at}: active is true for the one "
+                  "Read tool. A box's versions, each {version, active, state, stored_at}: active is true for the one "
                   "live now, false for older versions and versions stored dark (activate: false); versions are named "
-                  "by hash, so stored_at says which is newest. A box taken out by box_disable marks the version it had "
-                  "with disabled and why. source {project, rev, job} names the source deploy that uploaded a version. "
-                  "version_diff compares two of them.",
+                  "by hash, so stored_at says which is newest. state is live, stored, archived (kept for the record; "
+                  "version_restore before trying or promoting it), or deleted (only a tombstone: module_sha256, "
+                  "who stored it, when it was live). A version no longer live has inactive_since, and archives_at "
+                  "and deletes_at (30 and 400 days on, 045 § 3.1), or kept saying why it is kept (the newest that "
+                  "were live, a disabled box's, a change set's). live lists when it was live. A box taken out by "
+                  "box_disable marks the version it had with disabled and why. source {project, rev, job} names the "
+                  "source deploy that uploaded a version. version_diff compares two of them.",
                   object_schema({{"box", string_property("The box name.")}}, {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
@@ -903,9 +907,32 @@ void Host::register_tools() {
                     bj::array out;
                     auto disabled = boxes_->disabled(*box);
                     for (const auto& v : boxes_->versions(*box)) {
-                      bj::object o{{"version", v.version}, {"active", v.active}};
+                      bj::object o{{"version", v.version}, {"active", v.active}, {"state", v.state}};
                       // Versions are named by hash; when each was stored says which is newest.
                       if (v.stored_ms) o["stored_at"] = base::format_utc_ms(v.stored_ms);
+                      if (!v.stored_by.empty()) o["stored_by"] = v.stored_by;
+                      // Its keeping (045 § 3.1).
+                      if (v.inactive_since_ms) o["inactive_since"] = base::format_utc_ms(v.inactive_since_ms);
+                      if (v.archived_ms) o["archived_at"] = base::format_utc_ms(v.archived_ms);
+                      if (v.deleted_ms) o["deleted_at"] = base::format_utc_ms(v.deleted_ms);
+                      if (v.archive_at_ms) o["archives_at"] = base::format_utc_ms(v.archive_at_ms);
+                      if (v.delete_at_ms) o["deletes_at"] = base::format_utc_ms(v.delete_at_ms);
+                      if (!v.kept.empty()) o["kept"] = v.kept;
+                      if (!v.module_sha256.empty()) o["module_sha256"] = v.module_sha256;
+                      if (!v.live.empty()) {
+                        bj::array live;
+                        for (const auto& p : v.live) {
+                          if (!p.is_object()) continue;
+                          bj::object period;
+                          for (const char* k : {"from_ms", "until_ms"}) {
+                            if (const auto* t = p.as_object().if_contains(k); t && t->is_int64()) {
+                              period[std::string(k).substr(0, std::string(k).size() - 3)] = base::format_utc_ms(t->as_int64());
+                            }
+                          }
+                          live.push_back(std::move(period));
+                        }
+                        o["live"] = std::move(live);
+                      }
                       if (disabled && disabled->version == v.version) {
                         o["disabled"] = true;  // box_disable took it out; box_enable puts it back
                         if (!disabled->why.empty()) o["why"] = disabled->why;
@@ -933,7 +960,18 @@ void Host::register_tools() {
                     auto version = arg(args, "version");
                     if (!box || !version) return ToolResult::fail("box and version are required");
                     auto files = boxes_->files(*box, *version);
-                    if (!files) return ToolResult::fail("no such version");
+                    if (!files) {
+                      // Deleted 400 days after it stopped being live: its tombstone says it existed (045 § 3.1).
+                      if (auto t = boxes_->tombstone(*box, *version)) {
+                        bj::object out{{"box", *box}, {"version", *version}, {"state", "deleted"}};
+                        for (auto& kv : *t) {
+                          if (!out.contains(kv.key())) out[kv.key()] = kv.value();
+                        }
+                        out["note"] = "deleted; only this tombstone is kept: the manifest and module are gone";
+                        return ToolResult::ok(std::move(out));
+                      }
+                      return ToolResult::fail("no such version");
+                    }
                     std::string err;
                     auto v = json::parse(files->manifest_text, &err);
                     return ToolResult::ok(bj::object{{"box", *box},

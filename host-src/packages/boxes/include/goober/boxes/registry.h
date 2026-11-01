@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include <boost/json.hpp>
+
 #include "goober/boxes/review.h"
 #include "goober/manifest/manifest.h"
 #include "goober/router/table.h"
@@ -60,6 +62,27 @@ struct VersionInfo {
   std::string version;
   bool active = false;
   int64_t stored_ms = 0;  // when it was stored (its manifest's time on disk); versions are named by hash
+  // Its life (design/machine/045.Limits.md § 3.1): "live", "stored", "archived", or "deleted".
+  std::string state;
+  int64_t inactive_since_ms = 0;  // when it stopped being live, or was stored dark; 0 while live
+  int64_t archived_ms = 0, deleted_ms = 0;
+  int64_t archive_at_ms = 0, delete_at_ms = 0;  // when the host will; 0 while live or kept
+  std::string kept;                             // why it is kept from both, or empty
+  boost::json::array live;                      // when it was live: [{from_ms?, until_ms?}]
+  std::string module_sha256;                    // a deleted version's, from its tombstone
+  std::string stored_by;                        // who stored it, when known
+};
+
+// How long a version no longer live is kept (045 § 3.1).
+struct Retention {
+  int64_t archive_after_ms = 30LL * 86400000;
+  int64_t delete_after_ms = 400LL * 86400000;
+  int64_t keep = 3;  // the newest versions that were live before, kept for rollback
+};
+
+struct PruneReport {
+  std::vector<std::pair<std::string, std::string>> archived;  // box, version
+  std::vector<boost::json::object> deleted;                   // each tombstone
 };
 
 // Box versions on disk (storage/boxes/$box/...), and which one is active.
@@ -118,10 +141,50 @@ class BoxRegistry {
   std::optional<std::string> types_text(const std::string& box, const std::string& version) const;
   // Any stored version, compiled and ready to call, live or not (route_try runs a dark one).
   std::shared_ptr<const ActiveBox> load(const std::string& box, const std::string& version, std::string* error) const;
-  // A stored version's files, for reviewing it against another (review.h).
+  // A stored version's files, for reviewing it against another (review.h). An archived
+  // version's too: archiving keeps them for the record.
   std::optional<VersionFiles> files(const std::string& box, const std::string& version) const;
 
+  // ---- Keeping versions (045 § 3.1) ----
+  //
+  // A version is inactive from when it stops being live (promoted over, disabled) or, never
+  // live, from when it was stored. After retention.archive_after_ms inactive it is archived: its
+  // files stay and version_get and version_diff read them, but nothing tries, dry-runs, or
+  // promotes it until restore(). After retention.delete_after_ms it is deleted, leaving a
+  // tombstone at boxes/$box/deleted/$version.json. Never either: the live version, a disabled
+  // box's version, the newest retention.keep versions that were live before, and what the
+  // host's protector names (versions a kept change set may roll back to).
+  void set_retention(const Retention& r);
+  // Versions of a box kept for the host's reasons, each with why.
+  using Protector = std::function<std::map<std::string, std::string>(const std::string& box)>;
+  void set_protector(Protector p);
+  // Who is storing a version now (the operator), kept in its life record as stored_by.
+  void set_actor(std::function<std::string()> actor);
+  // Fields the host adds to a tombstone, like who uploaded the version.
+  using Annotate = std::function<boost::json::object(const std::string& box, const std::string& version)>;
+  // Archives and deletes what is due. A version with no record yet (stored before records were
+  // kept) starts its inactive time now.
+  PruneReport prune(int64_t now_ms, const Annotate& annotate = {});
+  // An archived version back to stored, its inactive time started again.
+  bool restore(const std::string& box, const std::string& version, std::string* error);
+  // A deleted version's tombstone, or nullopt.
+  std::optional<boost::json::object> tombstone(const std::string& box, const std::string& version) const;
+
  private:
+  // The version's life record (life.json beside its files), or an empty object.
+  boost::json::object life(const std::string& box, const std::string& version) const;
+  std::string life_path(const std::string& box, const std::string& version) const;
+  // Adds to the bundle what a change of live version means for both lives: the old one's live
+  // time ends and its inactive time starts; the new one's (in `next`) starts. False when the
+  // version is live already, and nothing moves.
+  bool live_moves(wal::Bundle& bundle, const std::string& box, const std::string& version, boost::json::object* next,
+                  int64_t now_ms) const;
+  // Why each version is kept from archiving and deleting.
+  std::map<std::string, std::string> kept(const std::string& box,
+                                          const std::map<std::string, boost::json::object>& lives) const;
+  Retention retention() const;
+  bool archived(const std::string& box, const std::string& version, std::string* error) const;
+
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;
   // Checks the candidate against every other active box, then swaps it in.
   bool activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
@@ -137,6 +200,10 @@ class BoxRegistry {
   mutable std::mutex mu_;  // serializes uploads and promotions
   mutable std::mutex snapshot_mu_;
   std::shared_ptr<const ActiveSet> active_;
+  mutable std::mutex policy_mu_;
+  Retention retention_;
+  Protector protector_;
+  std::function<std::string()> actor_;
 };
 
 }  // namespace goober::boxes

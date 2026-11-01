@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
+#include "goober/base/time.h"
 #include "goober/host/backup.h"
 #include "goober/host/host.h"
 #include "goober/ids/ids.h"
@@ -253,6 +257,72 @@ TEST_F(HostTest, DarkVersionsAndDisabledBoxes) {
   // Enabled again, it isn't disabled any more: enabling twice says so.
   EXPECT_EQ(tool("box_enable", {{"box", "hello"}}).at("result").at("isError"), true);
   (void)v1;
+}
+
+// Versions no longer live are archived after 30 days and deleted after 400, leaving a tombstone;
+// the newest 3 that were live stay (045 § 3.1).
+TEST_F(HostTest, OldVersionsAreArchivedThenDeleted) {
+  auto sc = [](const bj::value& v) { return v.at("result").at("structuredContent"); };
+  std::vector<std::string> v;
+  for (int i = 1; i <= 6; ++i) {
+    bj::object manifest{{"box", "hello"},
+                        {"domains", bj::array{"*"}},
+                        {"routes", bj::object{{"http", bj::object{{"/v" + std::to_string(i) + "/{thing : string}",
+                                                                   bj::object{{"get", bj::object{{"name", "echo"}, {"public", true}}}}}}}}}};
+    auto up = tool("version_upload", {{"manifest", manifest}, {"wat", kHelloWat}});
+    ASSERT_EQ(up.at("result").at("isError"), false) << json::dump(up);
+    v.push_back(std::string(sc(up).at("version").as_string()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  auto state = [&](const std::string& version) -> bj::object {
+    std::string err;
+    auto listed = json::parse(tool("version_list", {{"box", "hello"}}).at("result").at("content").at(0).at("text").as_string(), &err);
+    for (const auto& o : listed->as_array()) {
+      if (o.at("version").as_string() == version) return o.as_object();
+    }
+    return {};
+  };
+  EXPECT_EQ(state(v[5]).at("state"), "live");
+  EXPECT_TRUE(state(v[4]).contains("kept"));
+  EXPECT_EQ(state(v[0]).at("state"), "stored");
+  EXPECT_TRUE(state(v[0]).contains("archives_at"));
+  EXPECT_TRUE(state(v[0]).contains("deletes_at"));
+  EXPECT_EQ(state(v[0]).at("stored_by"), "config");
+  auto rows = [&] {
+    return tool("changes", {{"limit", 500}}).at("result").at("structuredContent").at("changes").as_array().size();
+  };
+  size_t before = rows();
+
+  constexpr int64_t kDay = 86400000;
+  int64_t now = base::now_unix_ms();
+  auto month = host->prune_versions(now + 31 * kDay);
+  EXPECT_EQ(month.archived.size(), 2u);  // v1, v2; v3 to v5 are the newest three that were live
+  EXPECT_EQ(state(v[0]).at("state"), "archived");
+  auto promote = tool("version_promote", {{"box", "hello"}, {"version", v[0]}});
+  EXPECT_EQ(promote.at("result").at("isError"), true);
+  EXPECT_NE(json::dump(promote).find("version_restore"), std::string::npos) << json::dump(promote);
+  // Still on record: its manifest and digest read back.
+  EXPECT_EQ(sc(tool("version_get", {{"box", "hello"}, {"version", v[0]}})).at("module_sha256").as_string().size(), 64u);
+  EXPECT_EQ(tool("version_restore", {{"box", "hello"}, {"version", v[1]}}).at("result").at("isError"), true);  // why
+  auto back = tool("version_restore", {{"box", "hello"}, {"version", v[1]}, {"why", "compare an old bug"}});
+  ASSERT_EQ(back.at("result").at("isError"), false) << json::dump(back);
+  EXPECT_EQ(state(v[1]).at("state"), "stored");
+
+  auto year = host->prune_versions(now + 401 * kDay);
+  EXPECT_EQ(year.deleted.size(), 2u);
+  EXPECT_EQ(state(v[0]).at("state"), "deleted");
+  auto gone = sc(tool("version_get", {{"box", "hello"}, {"version", v[0]}}));
+  EXPECT_EQ(gone.at("state"), "deleted");
+  EXPECT_EQ(gone.at("stored_by"), "config");
+  EXPECT_EQ(gone.at("module_sha256").as_string().size(), 64u);
+  EXPECT_FALSE(fs::exists(root / "storage/boxes/hello/versions" / v[0]));
+  auto audit = base::read_file(root / "storage/logs/audit.log");
+  ASSERT_TRUE(audit);
+  for (const char* a : {"version.archive", "version.restore", "version.delete"}) {
+    EXPECT_NE(audit->find(a), std::string::npos) << a;
+  }
+  // Archiving, restoring, and deleting add no rows to the change log (they are audit lines).
+  EXPECT_EQ(rows(), before);
 }
 
 TEST_F(HostTest, BadUploadsExplainThemselves) {

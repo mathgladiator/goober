@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <stdexcept>
+#include <tuple>
 
 #include "goober/base/files.h"
+#include "goober/base/time.h"
 #include "goober/base/hash.h"
 #include "goober/base/names.h"
 #include "goober/json/json.h"
@@ -102,6 +105,7 @@ std::shared_ptr<const ActiveSet> BoxRegistry::active() const {
 
 std::shared_ptr<const ActiveBox> BoxRegistry::load(const std::string& box, const std::string& version,
                                                   std::string* error) const {
+  if (archived(box, version, error)) return nullptr;
   auto loaded = load_version(box, version, error);
   if (!loaded) return nullptr;
   return std::make_shared<const ActiveBox>(std::move(*loaded));
@@ -304,6 +308,30 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
     }
   }
   if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
+  if (mode != Mode::kCheck) {
+    // Its life (045 § 3.1): stored now, unless it was before; uploading an archived version
+    // again brings it back, its inactive time started again.
+    int64_t now = base::now_unix_ms();
+    auto life = this->life(box, version);
+    if (!life.contains("stored_ms")) {
+      life["stored_ms"] = now;
+      std::function<std::string()> actor;
+      {
+        std::lock_guard plock(policy_mu_);
+        actor = actor_;
+      }
+      if (actor) {
+        if (auto by = actor(); !by.empty()) life["stored_by"] = by;
+      }
+    }
+    bool live_now = base::read_file(wal_.root() / "boxes" / box / "active").value_or("") == version;
+    if (!live_now && (life.contains("archived_ms") || !life.contains("inactive_since_ms"))) {
+      life.erase("archived_ms");
+      life["inactive_since_ms"] = now;
+    }
+    if (mode == Mode::kActivate) live_moves(bundle, box, version, &life, now);
+    bundle.push_back({wal::FileChange::Kind::kWrite, life_path(box, version), json::dump(life)});
+  }
   UploadResult result{version, m->warnings};
   auto candidate = std::make_shared<const ActiveBox>(ActiveBox{version, std::move(*m), compiled, *t});
   // Every mode checks the candidate against the active boxes as if it went live now. A version
@@ -338,6 +366,7 @@ std::optional<std::string> BoxRegistry::disable(const std::string& box, const st
   std::string record = json::dump(boost::json::object{{"version", version}, {"why", why.substr(0, 500)}});
   wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
                         {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
+  live_moves(bundle, box, "", nullptr, base::now_unix_ms());
   if (!wal_.commit(bundle, error)) return std::nullopt;
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
@@ -365,6 +394,7 @@ bool BoxRegistry::promote(const std::string& box, const std::string& version, st
     *error = "bad box or version";
     return false;
   }
+  if (archived(box, version, error)) return false;
   auto loaded = load_version(box, version, error);
   if (!loaded) return false;
   if (check_ && !check_(loaded->manifest, error)) return false;
@@ -372,6 +402,13 @@ bool BoxRegistry::promote(const std::string& box, const std::string& version, st
   std::error_code ec;
   if (fs::exists(wal_.root() / "boxes" / box / "disabled", ec)) {
     bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
+  }
+  auto life = this->life(box, version);
+  int64_t now = base::now_unix_ms();
+  if (!life.contains("stored_ms")) life["stored_ms"] = now;
+  // Promoting the version already live changes no life.
+  if (live_moves(bundle, box, version, &life, now)) {
+    bundle.push_back({wal::FileChange::Kind::kWrite, life_path(box, version), json::dump(life)});
   }
   return activate(std::make_shared<const ActiveBox>(std::move(*loaded)), bundle, error);
 }
@@ -387,25 +424,293 @@ std::vector<std::string> BoxRegistry::box_names() const {
   return out;
 }
 
+namespace {
+
+int64_t num(const boost::json::object& o, const char* k) {
+  const auto* v = o.if_contains(k);
+  return v && v->is_int64() ? v->as_int64() : 0;
+}
+
+int64_t mtime_ms(const fs::path& p) {
+  std::error_code ec;
+  auto t = fs::last_write_time(p, ec);
+  if (ec) return 0;
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch())
+      .count();
+}
+
+bool valid_version(const std::string& v) {
+  return !v.empty() && v.size() <= 64 && v.find('/') == std::string::npos && v.find("..") == std::string::npos;
+}
+
+// The stored versions of a box: directories holding a manifest (a deleted one's is empty).
+std::vector<std::string> stored_versions(const fs::path& root, const std::string& box) {
+  std::vector<std::string> out;
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(root / "boxes" / box / "versions", ec)) {
+    std::error_code e2;
+    if (fs::exists(entry.path() / "manifest.json", e2)) out.push_back(entry.path().filename().string());
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+}  // namespace
+
 std::vector<VersionInfo> BoxRegistry::versions(const std::string& box) const {
   std::vector<VersionInfo> out;
   if (!base::is_valid_name(box)) return out;
   auto active = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes" / box / "versions", ec)) {
-    std::string v = entry.path().filename().string();
-    int64_t stored = 0;
-    std::error_code tec;
-    auto t = fs::last_write_time(entry.path() / "manifest.json", tec);
-    if (!tec) {
-      stored = std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch())
-                   .count();
+  auto r = retention();
+  std::map<std::string, boost::json::object> lives;
+  for (const auto& v : stored_versions(wal_.root(), box)) lives[v] = life(box, v);
+  auto keep = kept(box, lives);
+  for (const auto& [v, l] : lives) {
+    VersionInfo info;
+    info.version = v;
+    info.active = v == active;
+    info.stored_ms = num(l, "stored_ms");
+    if (!info.stored_ms) info.stored_ms = mtime_ms(wal_.root() / "boxes" / box / "versions" / v / "manifest.json");
+    if (const auto* p = l.if_contains("live"); p && p->is_array()) info.live = p->as_array();
+    if (const auto* b = l.if_contains("stored_by"); b && b->is_string()) info.stored_by = std::string(b->as_string());
+    info.archived_ms = num(l, "archived_ms");
+    info.state = info.active ? "live" : info.archived_ms ? "archived" : "stored";
+    if (!info.active) {
+      // No record yet: its inactive time starts at the host's next pruning.
+      info.inactive_since_ms = num(l, "inactive_since_ms");
+      if (auto k = keep.find(v); k != keep.end()) {
+        info.kept = k->second;
+      } else if (info.inactive_since_ms) {
+        if (!info.archived_ms) info.archive_at_ms = info.inactive_since_ms + r.archive_after_ms;
+        info.delete_at_ms = info.inactive_since_ms + r.delete_after_ms;
+      }
     }
-    out.push_back(VersionInfo{v, v == active, stored});
+    out.push_back(std::move(info));
+  }
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes" / box / "deleted", ec)) {
+    if (entry.path().extension() != ".json") continue;
+    std::string v = entry.path().stem().string();
+    if (lives.count(v)) continue;  // uploaded again since
+    auto t = tombstone(box, v);
+    if (!t) continue;
+    VersionInfo info;
+    info.version = v;
+    info.state = "deleted";
+    info.stored_ms = num(*t, "stored_ms");
+    info.inactive_since_ms = num(*t, "inactive_since_ms");
+    info.archived_ms = num(*t, "archived_ms");
+    info.deleted_ms = num(*t, "deleted_ms");
+    if (const auto* p = t->if_contains("live"); p && p->is_array()) info.live = p->as_array();
+    if (const auto* s = t->if_contains("module_sha256"); s && s->is_string()) info.module_sha256 = std::string(s->as_string());
+    if (const auto* b = t->if_contains("stored_by"); b && b->is_string()) info.stored_by = std::string(b->as_string());
+    out.push_back(std::move(info));
   }
   std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.version < b.version; });
   return out;
+}
+
+std::string BoxRegistry::life_path(const std::string& box, const std::string& version) const {
+  return "boxes/" + box + "/versions/" + version + "/life.json";
+}
+
+boost::json::object BoxRegistry::life(const std::string& box, const std::string& version) const {
+  if (!base::is_valid_name(box) || !valid_version(version)) return {};
+  auto text = base::read_file(wal_.root() / life_path(box, version));
+  if (!text) return {};
+  std::string err;
+  auto v = json::parse(*text, &err);
+  return v && v->is_object() ? v->as_object() : boost::json::object{};
+}
+
+bool BoxRegistry::live_moves(wal::Bundle& bundle, const std::string& box, const std::string& version,
+                             boost::json::object* next, int64_t now_ms) const {
+  auto old = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");
+  if (!version.empty() && old == version) return false;
+  if (!old.empty() && valid_version(old)) {
+    auto l = life(box, old);
+    if (!l.contains("stored_ms")) l["stored_ms"] = mtime_ms(wal_.root() / "boxes" / box / "versions" / old / "manifest.json");
+    auto& live = l["live"];
+    if (!live.is_array()) live = boost::json::array{};
+    auto& periods = live.as_array();
+    if (!periods.empty() && periods.back().is_object() && !periods.back().as_object().contains("until_ms")) {
+      periods.back().as_object()["until_ms"] = now_ms;
+    } else {
+      periods.push_back(boost::json::object{{"until_ms", now_ms}});  // live since before records were kept
+    }
+    l["inactive_since_ms"] = now_ms;
+    l.erase("first_seen");
+    bundle.push_back({wal::FileChange::Kind::kWrite, life_path(box, old), json::dump(l)});
+  }
+  if (next) {
+    auto& live = (*next)["live"];
+    if (!live.is_array()) live = boost::json::array{};
+    live.as_array().push_back(boost::json::object{{"from_ms", now_ms}});
+    next->erase("inactive_since_ms");
+    next->erase("archived_ms");
+    next->erase("first_seen");
+  }
+  return true;
+}
+
+void BoxRegistry::set_retention(const Retention& r) {
+  std::lock_guard lock(policy_mu_);
+  retention_ = r;
+}
+
+void BoxRegistry::set_protector(Protector p) {
+  std::lock_guard lock(policy_mu_);
+  protector_ = std::move(p);
+}
+
+void BoxRegistry::set_actor(std::function<std::string()> actor) {
+  std::lock_guard lock(policy_mu_);
+  actor_ = std::move(actor);
+}
+
+Retention BoxRegistry::retention() const {
+  std::lock_guard lock(policy_mu_);
+  return retention_;
+}
+
+std::map<std::string, std::string> BoxRegistry::kept(const std::string& box,
+                                                     const std::map<std::string, boost::json::object>& lives) const {
+  Protector protector;
+  {
+    std::lock_guard lock(policy_mu_);
+    protector = protector_;
+  }
+  std::map<std::string, std::string> out;
+  if (protector) out = protector(box);
+  if (auto d = disabled(box); d && !d->version.empty()) {
+    out[d->version] = "the version of the disabled box: box_enable serves it again";
+  }
+  // The newest versions that were live before, by when they stopped: rollback targets.
+  auto active = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");
+  // A version stored before records were kept may have been live: it counts too, the newest
+  // stored first among those.
+  std::vector<std::tuple<int64_t, int64_t, std::string>> were_live;
+  for (const auto& [v, l] : lives) {
+    const auto* p = l.if_contains("live");
+    bool was = p && p->is_array() && !p->as_array().empty();
+    if (v == active || !(was || l.contains("first_seen"))) continue;
+    // By when it was last live (a restore restarts its inactive time, not this).
+    int64_t until = num(l, "inactive_since_ms");
+    if (was && p->as_array().back().is_object()) {
+      if (int64_t u = num(p->as_array().back().as_object(), "until_ms")) until = u;
+    }
+    were_live.emplace_back(until, num(l, "stored_ms"), v);
+  }
+  std::sort(were_live.rbegin(), were_live.rend());
+  int64_t keep = retention().keep;
+  for (size_t i = 0; i < were_live.size() && int64_t(i) < keep; ++i) {
+    out.emplace(std::get<2>(were_live[i]),
+                "one of the newest " + std::to_string(keep) + " versions that were live: a rollback target");
+  }
+  return out;
+}
+
+bool BoxRegistry::archived(const std::string& box, const std::string& version, std::string* error) const {
+  auto l = life(box, version);
+  int64_t at = num(l, "archived_ms");
+  if (!at) return false;
+  *error = "version " + version + " of " + box + " is archived (inactive since " +
+           base::format_utc_ms(num(l, "inactive_since_ms")) +
+           "): it can't be tried or promoted until a person restores it with version_restore {box, version, why}";
+  return true;
+}
+
+PruneReport BoxRegistry::prune(int64_t now_ms, const Annotate& annotate) {
+  std::lock_guard lock(mu_);
+  PruneReport report;
+  auto r = retention();
+  for (const auto& box : box_names()) {
+    auto active = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");
+    std::map<std::string, boost::json::object> lives;
+    for (const auto& v : stored_versions(wal_.root(), box)) {
+      auto l = life(box, v);
+      // Stored before records were kept: its inactive time starts now, whatever its age.
+      if (v != active && !l.contains("inactive_since_ms")) {
+        if (!l.contains("stored_ms")) l["stored_ms"] = mtime_ms(wal_.root() / "boxes" / box / "versions" / v / "manifest.json");
+        l["inactive_since_ms"] = now_ms;
+        l["first_seen"] = true;
+        std::string err;
+        if (!wal_.commit({{wal::FileChange::Kind::kWrite, life_path(box, v), json::dump(l)}}, &err)) {
+          throw std::runtime_error("recording " + box + " " + v + ": " + err);
+        }
+      }
+      lives[v] = std::move(l);
+    }
+    auto keep = kept(box, lives);
+    for (auto& [v, l] : lives) {
+      if (v == active || keep.count(v)) continue;
+      int64_t inactive = num(l, "inactive_since_ms");
+      if (!inactive) continue;
+      std::string err;
+      if (now_ms - inactive >= r.delete_after_ms) {
+        fs::path dir = wal_.root() / "boxes" / box / "versions" / v;
+        auto wasm = base::read_file(dir / "box.wasm").value_or("");
+        boost::json::object t{{"box", box},
+                              {"version", v},
+                              {"module_sha256", base::sha256_hex(wasm)},
+                              {"module_bytes", int64_t(wasm.size())},
+                              {"stored_ms", num(l, "stored_ms")},
+                              {"stored_by", l.contains("stored_by") ? l.at("stored_by") : boost::json::value(nullptr)},
+                              {"live", l.contains("live") ? l.at("live") : boost::json::array{}},
+                              {"inactive_since_ms", inactive},
+                              {"archived_ms", num(l, "archived_ms")},
+                              {"deleted_ms", now_ms}};
+        if (annotate) {
+          for (auto& kv : annotate(box, v)) {
+            if (!t.contains(kv.key())) t[kv.key()] = std::move(kv.value());
+          }
+        }
+        std::string rel = "boxes/" + box + "/versions/" + v + "/";
+        wal::Bundle b = {{wal::FileChange::Kind::kWrite, "boxes/" + box + "/deleted/" + v + ".json", json::dump(t)}};
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+          if (entry.is_regular_file()) b.push_back({wal::FileChange::Kind::kDelete, rel + entry.path().filename().string(), ""});
+        }
+        if (!wal_.commit(b, &err)) throw std::runtime_error("deleting " + box + " " + v + ": " + err);
+        fs::remove(dir, ec);  // empty now
+        report.deleted.push_back(std::move(t));
+      } else if (now_ms - inactive >= r.archive_after_ms && !l.contains("archived_ms")) {
+        l["archived_ms"] = now_ms;
+        if (!wal_.commit({{wal::FileChange::Kind::kWrite, life_path(box, v), json::dump(l)}}, &err)) {
+          throw std::runtime_error("archiving " + box + " " + v + ": " + err);
+        }
+        report.archived.emplace_back(box, v);
+      }
+    }
+  }
+  return report;
+}
+
+bool BoxRegistry::restore(const std::string& box, const std::string& version, std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box) || !valid_version(version)) return *error = "bad box or version", false;
+  if (!manifest_text(box, version)) {
+    if (tombstone(box, version)) {
+      return *error = "version " + version + " of " + box + " was deleted; only its tombstone is left (version_get shows it)", false;
+    }
+    return *error = "no version " + version + " of " + box, false;
+  }
+  auto l = life(box, version);
+  if (!l.contains("archived_ms")) return *error = "version " + version + " of " + box + " isn't archived", false;
+  l.erase("archived_ms");
+  l["inactive_since_ms"] = base::now_unix_ms();
+  return wal_.commit({{wal::FileChange::Kind::kWrite, life_path(box, version), json::dump(l)}}, error);
+}
+
+std::optional<boost::json::object> BoxRegistry::tombstone(const std::string& box, const std::string& version) const {
+  if (!base::is_valid_name(box) || !valid_version(version)) return std::nullopt;
+  auto text = base::read_file(wal_.root() / "boxes" / box / "deleted" / (version + ".json"));
+  if (!text) return std::nullopt;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  if (!v || !v->is_object()) return std::nullopt;
+  return v->as_object();
 }
 
 std::optional<std::string> BoxRegistry::manifest_text(const std::string& box, const std::string& version) const {

@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include "goober/base/files.h"
+#include "goober/base/time.h"
 #include "goober/boxes/registry.h"
 
 using namespace goober;
@@ -121,4 +125,100 @@ TEST_F(RegistryTest, MailAddressesAreClaimedOnce) {
   EXPECT_FALSE(reg->upload(mail("inbox2", "acme.example", "*@", "inbox2_all"), module_for({"inbox2_all"}), &err));
   // A route without its export is refused like any other.
   EXPECT_FALSE(reg->upload(mail("x", "x.example", "x@", "x_route"), module_for({}), &err));
+}
+
+// Versions no longer live are archived, then deleted with a tombstone (045 § 3.1).
+TEST_F(RegistryTest, OldVersionsAreArchivedThenDeleted) {
+  constexpr int64_t kDay = 86400000;
+  reg->set_retention({30 * kDay, 400 * kDay, 2});
+  std::string err;
+  std::vector<std::string> v;
+  for (int i = 1; i <= 6; ++i) {
+    auto r = reg->upload(manifest_for("hello", "*", "/p" + std::to_string(i), "say_hello"), module_for({"say_hello"}), &err);
+    ASSERT_TRUE(r) << err;
+    v.push_back(r->version);
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  auto dark = reg->store(manifest_for("hello", "*", "/dark", "say_hello"), module_for({"say_hello"}), "", &err);
+  ASSERT_TRUE(dark) << err;
+  // v[2] is named by a kept change set.
+  std::string protect = v[2];
+  reg->set_protector([protect](const std::string&) { return std::map<std::string, std::string>{{protect, "change set 7"}}; });
+  auto state = [&](const std::string& version) {
+    for (const auto& i : reg->versions("hello")) {
+      if (i.version == version) return i.state + (i.kept.empty() ? "" : "+kept");
+    }
+    return std::string("missing");
+  };
+  EXPECT_EQ(state(v[5]), "live");
+  EXPECT_EQ(state(v[4]), "stored+kept");  // the newest two that were live
+  EXPECT_EQ(state(v[3]), "stored+kept");
+  EXPECT_EQ(state(v[2]), "stored+kept");  // the change set's
+  EXPECT_EQ(state(v[0]), "stored");
+
+  int64_t now = base::now_unix_ms();
+  auto none = reg->prune(now);
+  EXPECT_TRUE(none.archived.empty() && none.deleted.empty());
+
+  auto month = reg->prune(now + 31 * kDay);
+  EXPECT_EQ(month.archived.size(), 3u);  // v[0], v[1], and the dark one
+  EXPECT_EQ(state(v[0]), "archived");
+  EXPECT_EQ(state(dark->version), "archived");
+  // Archived: kept for the record, but not tried or promoted until restored.
+  EXPECT_FALSE(reg->load("hello", v[0], &err));
+  EXPECT_NE(err.find("version_restore"), std::string::npos) << err;
+  EXPECT_FALSE(reg->promote("hello", v[0], &err));
+  EXPECT_TRUE(reg->files("hello", v[0]));
+  ASSERT_TRUE(reg->restore("hello", v[1], &err)) << err;
+  EXPECT_EQ(state(v[1]), "stored");
+  EXPECT_TRUE(reg->load("hello", v[1], &err)) << err;
+  EXPECT_FALSE(reg->restore("hello", v[1], &err));  // not archived now
+
+  // A disabled box's version is kept however long it is off.
+  ASSERT_TRUE(reg->disable("hello", "maintenance", &err)) << err;
+  auto later = reg->prune(now + 401 * kDay, [](const std::string&, const std::string&) {
+    return boost::json::object{{"uploaded_by", "token:ci"}};
+  });
+  // v[0], v[1] (its time started again at restore, still past 400 days by then), v[3], and the
+  // dark one go; v[5] (disabled), v[4] (now among the newest two), and v[2] (the change set) stay.
+  EXPECT_EQ(later.deleted.size(), 4u);
+  EXPECT_EQ(state(v[0]), "deleted");
+  EXPECT_EQ(state(v[3]), "deleted");
+  EXPECT_EQ(state(v[5]), "stored+kept");
+  EXPECT_EQ(state(v[4]), "stored+kept");
+  EXPECT_EQ(state(v[2]), "stored+kept");
+  EXPECT_FALSE(fs::exists(root / "boxes/hello/versions" / v[0]));
+  auto t = reg->tombstone("hello", v[0]);
+  ASSERT_TRUE(t);
+  EXPECT_EQ(t->at("module_sha256").as_string().size(), 64u);
+  EXPECT_EQ(t->at("uploaded_by"), "token:ci");
+  EXPECT_EQ(t->at("live").as_array().size(), 1u);
+  EXPECT_FALSE(reg->restore("hello", v[0], &err));
+  EXPECT_NE(err.find("deleted"), std::string::npos) << err;
+
+  // Uploading the same bytes again stores it again; the tombstone stays for the record.
+  ASSERT_TRUE(reg->upload(manifest_for("hello", "*", "/p1", "say_hello"), module_for({"say_hello"}), &err)) << err;
+  EXPECT_EQ(state(v[0]), "live");
+  EXPECT_TRUE(reg->tombstone("hello", v[0]));
+}
+
+// A version stored before records were kept starts its inactive time at the first pruning.
+TEST_F(RegistryTest, VersionsWithoutARecordStartTheirTimeAtTheFirstPruning) {
+  constexpr int64_t kDay = 86400000;
+  reg->set_retention({30 * kDay, 400 * kDay, 1});
+  std::string err;
+  auto a = reg->upload(manifest_for("hello", "*", "/a", "say_hello"), module_for({"say_hello"}), &err);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  auto b = reg->upload(manifest_for("hello", "*", "/b", "say_hello"), module_for({"say_hello"}), &err);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  auto c = reg->upload(manifest_for("hello", "*", "/c", "say_hello"), module_for({"say_hello"}), &err);
+  ASSERT_TRUE(a && b && c) << err;
+  for (const auto& v : {a->version, b->version}) fs::remove(root / "boxes/hello/versions" / v / "life.json");
+  int64_t now = base::now_unix_ms() + 1000 * kDay;
+  auto first = reg->prune(now);
+  EXPECT_TRUE(first.archived.empty() && first.deleted.empty());
+  auto later = reg->prune(now + 31 * kDay);
+  // b, the newest stored, may have been live: kept; a is archived.
+  ASSERT_EQ(later.archived.size(), 1u);
+  EXPECT_EQ(later.archived[0].second, a->version);
 }

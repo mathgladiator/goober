@@ -86,6 +86,14 @@ void Host::identity_tick(int64_t now_ms) {
     });
     // What a crash or a hang left in storage/tmp, past limits.tmp-hours (045).
     step("tmp", [&] { sweep_tmp(now_ms); });
+    // Box versions no longer live: archived, then deleted with a tombstone (045 § 3.1).
+    step("versions", [&] {
+      auto r = prune_versions(now_ms);
+      if (!r.archived.empty() || !r.deleted.empty()) {
+        std::cerr << "goober-host: archived " << r.archived.size() << " and deleted " << r.deleted.size()
+                  << " box version(s) no longer live\n";
+      }
+    });
   }
 
   struct Delivery {

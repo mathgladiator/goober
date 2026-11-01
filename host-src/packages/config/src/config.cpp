@@ -427,7 +427,8 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   if (const auto* limits = get_object(root, "limits", &err)) {
     if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute",
                               "outbox-daily-per-service", "try-bytes", "exports-bytes", "traffic-bytes", "snapshot-bytes",
-                              "snapshot-files", "logs-bytes", "free-bytes", "tmp-hours"},
+                              "snapshot-files", "logs-bytes", "free-bytes", "tmp-hours", "version-archive-days",
+                              "version-delete-days", "version-keep"},
                     "limits", &err)) {
       return *error = err, nullptr;
     }
@@ -445,7 +446,10 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
                              DiskKey{"snapshot-files", &cfg->disk.snapshot_files, 1, 100000},
                              DiskKey{"logs-bytes", &cfg->disk.logs_bytes, 64 * kMiB, kTiB},
                              DiskKey{"free-bytes", &cfg->disk.free_bytes, 0, kTiB},
-                             DiskKey{"tmp-hours", &cfg->disk.tmp_hours, 1, 24 * 30}}) {
+                             DiskKey{"tmp-hours", &cfg->disk.tmp_hours, 1, 24 * 30},
+                             DiskKey{"version-archive-days", &cfg->disk.version_archive_days, 1, 3650},
+                             DiskKey{"version-delete-days", &cfg->disk.version_delete_days, 90, 36500},
+                             DiskKey{"version-keep", &cfg->disk.version_keep, 1, 100}}) {
       if (auto v = get_int(*limits, d.key, &err)) {
         if (*v < d.min || *v > d.max) {
           return *error = "limits." + std::string(d.key) + " must be " + std::to_string(d.min) + " to " + std::to_string(d.max),
@@ -454,6 +458,9 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
         *d.field = *v;
       }
       if (!err.empty()) return *error = err, nullptr;
+    }
+    if (cfg->disk.version_delete_days <= cfg->disk.version_archive_days) {
+      return *error = "limits.version-delete-days must be more than limits.version-archive-days", nullptr;
     }
     if (auto v = get_int(*limits, "body-max-bytes", &err)) cfg->body_max_bytes = *v;
     if (auto v = get_int(*limits, "outbox-daily-per-service", &err)) {

@@ -106,6 +106,20 @@ TEST_F(ChangesTest, AnUploadBundleIsOneDeployRow) {
   EXPECT_TRUE(first.at("uploaded").as_bool());
   EXPECT_EQ(rows[2].as_object().at("target"), "acme");
   EXPECT_EQ(log->list("", "", 0, 10).size(), 3u);
+
+  // Life records ride along with a promotion, and are no upload (045 § 3.1); archiving and
+  // deleting a version make no rows at all (they are audit lines).
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "boxes/acme/active", "v2"},
+                      {FileChange::Kind::kWrite, "boxes/acme/versions/v1/life.json", "{}"},
+                      {FileChange::Kind::kWrite, "boxes/acme/versions/v2/life.json", "{}"}}));
+  auto again = log->list("deploy", "", 0, 10);
+  ASSERT_EQ(again.size(), 4u);
+  EXPECT_FALSE(again[0].as_object().at("detail").as_object().at("uploaded").as_bool());
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "boxes/acme/versions/v1/life.json", "{\"archived_ms\":1}"}}));
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "boxes/acme/deleted/v1.json", "{}"},
+                      {FileChange::Kind::kDelete, "boxes/acme/versions/v1/manifest.json", ""},
+                      {FileChange::Kind::kDelete, "boxes/acme/versions/v1/box.wasm", ""}}));
+  EXPECT_EQ(log->list("", "", 0, 20).size(), 4u);
 }
 
 TEST_F(ChangesTest, ActionsListTheChangesTheyCaused) {

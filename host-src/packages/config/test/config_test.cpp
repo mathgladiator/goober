@@ -65,6 +65,16 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   EXPECT_NE(err.find("limits.traffic-bytes"), std::string::npos) << err;
   err.clear();
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"try-bytes":"big"}})", "/", &err));
+  // Box versions: archived after 30 days inactive, deleted after 400, the newest 3 kept.
+  EXPECT_EQ(plain->disk.version_archive_days, 30);
+  EXPECT_EQ(plain->disk.version_delete_days, 400);
+  EXPECT_EQ(plain->disk.version_keep, 3);
+  err.clear();
+  EXPECT_FALSE(parse_config(
+      R"({"operations":{"token":"0123456789abcdef"},"limits":{"version-archive-days":500,"version-delete-days":400}})", "/", &err));
+  EXPECT_NE(err.find("version-delete-days must be more"), std::string::npos) << err;
+  err.clear();
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"version-delete-days":30}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

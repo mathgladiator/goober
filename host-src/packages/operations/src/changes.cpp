@@ -55,7 +55,12 @@ PathKind classify_path(std::string_view path) {
     if (parts.size() == 3 && parts[2] == "active") {
       k.active = true;
     } else if (parts.size() >= 4 && parts[2] == "versions") {
+      // A version's life record (045 § 3.1) changes when another goes live, or it's archived:
+      // not an upload. Archiving and deleting are audit lines instead.
+      if (parts.size() >= 5 && parts[4] == "life.json") return PathKind{};
       k.version = parts[3];
+    } else if (parts[2] == "deleted") {
+      return PathKind{};  // a deleted version's tombstone
     }
     return k;
   }
@@ -164,7 +169,7 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
         auto& b = boxes[k.target];
         if (k.active && !del) b.first = trim(change.data);
         if (k.active && del) disabled.insert(k.target);
-        if (!k.version.empty()) b.second = k.version;
+        if (!k.version.empty() && !del) b.second = k.version;  // a deleted version's files are no upload
         continue;
       }
       uint64_t old_size = 0;

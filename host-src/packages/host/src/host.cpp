@@ -314,6 +314,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_source_tools();
   register_whats_new_tool();
   register_review_tools();
+  setup_version_keeping();
+  register_version_keeping_tools();
   register_job_tools();
   register_upgrade_tools();
   register_try_tools();
@@ -564,6 +566,7 @@ std::string Host::reload() {
   if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
   set_outbound_sandbox(next->sandbox);
+  setup_version_keeping();  // limits.version-* (045 § 3.1)
   audit("config.reload", "signal", "host.json", "ok", bj::object{{"notes", notes}});
   return "config reloaded. " + notes;
 }

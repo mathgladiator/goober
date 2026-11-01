@@ -859,7 +859,11 @@ const views = {
       h('div', { class: 'grid' },
         card('Versions', table([
           { label: 'Version', get: (v) => h('code', {}, v.version.slice(0, 16)) },
-          { label: '', get: (v) => v.active ? h('span', { class: 'pill deploy' }, 'active') : '' },
+          { label: '', get: (v) => v.active ? h('span', { class: 'pill deploy' }, 'active')
+            : (v.state === 'archived' || v.state === 'deleted') ? h('span', { class: 'pill' }, v.state) : '' },
+          // Keeping (045 § 3.1): why it's kept, or when it will be archived or deleted.
+          { label: 'Kept', get: (v) => v.kept ? 'kept' : v.archives_at ? 'archives ' + v.archives_at.slice(0, 10)
+            : v.deletes_at ? 'deletes ' + v.deletes_at.slice(0, 10) : '', cls: () => 'muted' },
           { label: 'Activated', get: (v) => deployedAt[v.version] ? fmt.time(deployedAt[v.version]) : '', cls: () => 'muted' },
           { label: 'Source', get: (v) => v.source ? h('a', { href: '#/project/' + encodeURIComponent(v.source.project) + '?rev=' + v.source.rev },
             v.source.project + ' r' + v.source.rev) : '' },

@@ -49,7 +49,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     }
     for (const char* t : {"user_delete", "deletions"}) m[t] = Rule::kTenant;
     for (const char* t : {"flag_set", "flag_list"}) m[t] = Rule::kTenant;
-    for (const char* t : {"box_disable", "box_enable"}) m[t] = Rule::kBox;
+    for (const char* t : {"box_disable", "box_enable", "version_restore"}) m[t] = Rule::kBox;
     for (const char* t : {"db_snapshot", "db_snapshots", "db_restore_to_new", "db_create", "db_unbound", "schema_apply"}) {
       m[t] = Rule::kTenant;
     }

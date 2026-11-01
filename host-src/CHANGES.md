@@ -4,6 +4,10 @@ Served by the `whats_new` tool, built into the binary: each entry is something a
 engineers can do now, newest first, with the tools to use. A host has every entry up to its
 build (`host_health`'s `build`). Add an entry with every change agents should know about.
 
+## 2026-11-01
+
+- Box versions no longer live are archived 30 days after they stop being live (or after being stored dark and never promoted) and deleted 400 days after, leaving a tombstone (045 § 3.1). Never the live version, a disabled box's, the newest 3 that were live (rollback targets), or one a kept change set names. version_list answers state (live, stored, archived, deleted), stored_by, live (when), inactive_since, archives_at, deletes_at, or kept with why. An archived version still answers version_get and version_diff, but route_try, job_dry_run, and version_promote refuse it until version_restore {box, version, why} brings it back (its 30 days start again). A deleted one's version_get answers its tombstone (module_sha256, who stored it, when it was live). limits.version-archive-days, version-delete-days, and version-keep change the numbers.
+
 ## 2026-10-31
 
 - /goober/ready answers health: numbers to graph over time, for the last five minutes and now (requests' 4xx and 5xx ratios and p50/p99/max latency; box, mail, and service failure ratios; the outbox's depth, oldest age, and dead letters; workers and open connections; free disk; each backup's age; the log archive queue and write errors). Ratios, latencies, ages, and gauges only, never counts: anyone can read it. /goober/ready?format=prometheus gives the same as Prometheus text (goober_*, goober_check_ok{check}), always 200 with goober_ready 0 or 1.

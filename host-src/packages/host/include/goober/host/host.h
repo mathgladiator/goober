@@ -168,6 +168,9 @@ class Host {
   // Change sets past their keeping (042 § 9): applied, failed, and rolled-back ones 90 days after
   // their last change, drafts and discarded ones 30. Run by the hourly housekeeping; the count.
   int prune_changesets(int64_t now_ms);
+  // Box versions no longer live (045 § 3.1; version_keeping.cpp): archived, then deleted with a
+  // tombstone, by limits.version-*; each an audit line. Run by the hourly housekeeping.
+  boxes::PruneReport prune_versions(int64_t now_ms);
   // Whether this call, with these arguments, only looks: a read tool, except mail_unsubscribed
   // with "set" (it blocks an address); and version_upload {dry_run: true}, which stores nothing.
   static bool is_read_call(std::string_view tool, const boost::json::object& args);
@@ -891,6 +894,12 @@ class Host {
   // of an upload (against the box's live version), which version_upload answers and a held
   // upload shows the person approving it.
   void register_review_tools();
+  // Keeping box versions (version_keeping.cpp): the retention from the config, what kept change
+  // sets may roll back to, and version_restore.
+  void setup_version_keeping();
+  void register_version_keeping_tools();
+  // Each version of a box a kept change set names (it may roll back to it), with why.
+  std::map<std::string, std::string> changeset_versions(const std::string& box);
   std::optional<boost::json::object> review_upload(const boost::json::object& args, std::string* error);
   // Operators and databases (db_admin.cpp): snapshots, restoring to a new database, db_create,
   // db_unbound.
