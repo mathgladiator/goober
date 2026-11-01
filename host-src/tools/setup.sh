@@ -83,6 +83,8 @@ is_name() {
     { warn "names are [a-z][a-z0-9_]*, at most 63, not starting with goober_"; return 1; }
 }
 is_domain() { [[ "$1" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { warn "use a lowercase domain, like example.com"; return 1; }; }
+# Behind the proxy only loopback may reach the host: it believes X-Forwarded-For (043).
+is_loopback() { [[ "$1" == "::1" || "$1" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || { warn "behind a proxy the host listens on loopback only: 127.0.0.1 or ::1"; return 1; }; }
 is_port() { [[ "$1" =~ ^[0-9]+$ ]] && (($1 >= 1 && $1 <= 65535)) || { warn "a port is 1 to 65535"; return 1; }; }
 is_count() { [[ "$1" =~ ^[0-9]+$ ]] && (($1 >= 1)) || { warn "a whole number, at least 1"; return 1; }; }
 is_url() { [[ "$1" =~ ^https?://[^/[:space:]]+$ ]] || { warn "like https://goober.example.com, with no path"; return 1; }; }
@@ -147,8 +149,9 @@ EMAIL="${EMAIL,,}"
 step "Network"
 if [[ $PROD == 1 ]]; then
   note "The host speaks plain HTTP. TLS, HTTP/2, and certificates belong to a proxy in front"
-  note "(099.TheSystem.md: rent the edge). Keep the host on 127.0.0.1 and let the proxy reach it."
-  ask ADDRESS "Listen address:" "127.0.0.1"
+  note "(099.TheSystem.md: rent the edge). The host listens on loopback and the proxy reaches it there;"
+  note "it trusts the proxy's X-Forwarded-For, so it refuses to start on any other address."
+  ask ADDRESS "Listen address:" "127.0.0.1" is_loopback
 else
   note "A dev box listens on 127.0.0.1 only; nothing outside this machine can reach it."
   ADDRESS="127.0.0.1"

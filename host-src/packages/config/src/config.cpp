@@ -80,6 +80,27 @@ std::string HostConfig::base_url() const {
   return "http://" + addr + ":" + std::to_string(listen_port);
 }
 
+bool is_loopback_address(std::string_view address) {
+  // The listener takes an address literal (make_address), so "localhost" isn't one.
+  if (address == "::1") return true;
+  // 127.0.0.0/8, written as four decimal octets.
+  if (!address.starts_with("127.")) return false;
+  int parts = 0, digits = 0, value = 0;
+  for (char c : address) {
+    if (c == '.') {
+      if (digits == 0) return false;
+      ++parts;
+      digits = value = 0;
+    } else if (c >= '0' && c <= '9') {
+      value = value * 10 + (c - '0');
+      if (++digits > 3 || value > 255) return false;
+    } else {
+      return false;
+    }
+  }
+  return parts == 3 && digits > 0;
+}
+
 std::shared_ptr<const HostConfig> local_mode(std::shared_ptr<const HostConfig> config) {
   auto out = std::make_shared<HostConfig>(*config);
   out->local = true;
@@ -202,6 +223,15 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (auto v = get_int(*listen, "port", &err)) {
       if (*v < 0 || *v > 65535) return *error = "listen.port must be 0 (any free port) to 65535", nullptr;
       cfg->listen_port = uint16_t(*v);
+    }
+    // Behind a proxy the host believes X-Forwarded-For (rate limits, client_ip). Only the proxy
+    // may reach it then, so it listens on loopback only (043 § For the human, 1).
+    if (cfg->behind_proxy && !is_loopback_address(cfg->listen_address)) {
+      return *error = "listen.behind-proxy is on, so listen.address must be loopback (127.0.0.1 or ::1), not \"" +
+                      cfg->listen_address +
+                      "\": the host trusts X-Forwarded-For, and anyone reaching it directly could choose their own "
+                      "address. Set listen.address to 127.0.0.1 and let the proxy (Caddy) reach it there.",
+             nullptr;
     }
   }
   if (auto v = get_string(root, "storage", &err)) cfg->storage = *v;
