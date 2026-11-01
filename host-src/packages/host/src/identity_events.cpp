@@ -79,6 +79,11 @@ void Host::identity_tick(int64_t now_ms) {
     step("logs", [&] { logs_housekeeping(now_ms); });
     // Exports past their 7 days go even when nobody makes or lists another (008 § 7.1).
     step("exports", [&] { exports::list(config_.get()->storage, now_ms); });
+    // Change sets past 90 days (applied) or 30 (drafts, discarded) (042 § 9).
+    step("changesets", [&] {
+      int gone = prune_changesets(now_ms);
+      if (gone > 0) std::cerr << "goober-host: deleted " << gone << " change set(s) past their keeping\n";
+    });
   }
 
   struct Delivery {

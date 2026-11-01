@@ -209,7 +209,8 @@ Read these before doing design work:
     content, and flag values previewed together (each member's dry run, one list of widenings), applied
     by one call in order (schemas, versions, content, flags) after snapshots and with what each replaced
     kept, undone in reverse when a member fails, and rolled back by one call (refused over later changes
-    unless forced; schemas stay, as they only grow).
+    unless forced; schemas stay, as they only grow); kept 90 days after their last change, drafts
+    and discarded ones 30 (§ 9).
   - `design/machine/043.CodeSecurityReview.md`: the code and security review of 2026-10-29 to
     2026-10-31's work: six fixes (if_etag held across the write, `export get` never through a link,
     proxied addresses checked, role changes capped, broken error pages, owner grants warned), three

@@ -65,7 +65,51 @@ struct Called {
   std::string error;
 };
 
+// Keeping (042 § 9): a record of something that went live is kept 90 days after its last change,
+// so it can be read and rolled back; a draft or a discarded one, 30.
+constexpr int64_t kDayMs = 24LL * 3600 * 1000;
+constexpr int64_t kKeptAppliedMs = 90 * kDayMs;
+constexpr int64_t kKeptDraftMs = 30 * kDayMs;
+
+int64_t last_change_ms(const bj::object& cs) {
+  int64_t last = 0;
+  for (const char* k : {"created_ms", "updated_ms"}) {
+    if (const auto* v = cs.if_contains(k); v && v->is_int64()) last = std::max(last, v->as_int64());
+  }
+  for (const char* k : {"applied", "rolled_back"}) {
+    if (const auto* a = cs.if_contains(k); a && a->is_object()) {
+      if (const auto* at = a->as_object().if_contains("at_ms"); at && at->is_int64()) last = std::max(last, at->as_int64());
+    }
+  }
+  return last;
+}
+
+int64_t deletes_at_ms(const bj::object& cs) {
+  const auto* s = cs.if_contains("state");
+  std::string state = s && s->is_string() ? std::string(s->as_string()) : "";
+  return last_change_ms(cs) + (state == "draft" || state == "discarded" ? kKeptDraftMs : kKeptAppliedMs);
+}
+
 }  // namespace
+
+int Host::prune_changesets(int64_t now_ms) {
+  std::lock_guard lock(changesets_mu_);
+  int gone = 0;
+  std::error_code ec;
+  std::vector<fs::path> files;
+  for (const auto& e : fs::directory_iterator(changeset_file("0").parent_path(), ec)) files.push_back(e.path());
+  for (const auto& f : files) {
+    if (f.extension() != ".json") continue;
+    auto cs = load_changeset(f.stem().string());
+    if (!cs || deletes_at_ms(*cs) > now_ms) continue;
+    if (fs::remove(f, ec)) {
+      ++gone;
+      audit("changeset.delete", "host", "changeset:" + f.stem().string(), "ok",
+            bj::object{{"state", cs->at("state")}, {"last_change", base::format_utc_ms(last_change_ms(*cs))}});
+    }
+  }
+  return gone;
+}
 
 fs::path Host::changeset_file(const std::string& id) const {
   return config_.get()->storage / "operations" / "changesets" / (id + ".json");
@@ -666,7 +710,8 @@ void Host::register_changeset_tools() {
        "Read tool. One change set: its title, why, who made it, state (draft, applied, failed: an apply that stopped "
        "and was undone, rolled_back, or discarded), its members (content items without their bodies), and for an "
        "applied one each step with what it replaced (before), what it made (after), and the snapshots taken; for a "
-       "rolled-back one, what the rollback did.",
+       "rolled-back one, what the rollback did; deletes_at says when the record goes (90 days after its last change, "
+       "30 for a draft or a discarded one; what it applied stays).",
        object_schema({{"id", id_prop}}, {"id"}),
        [this](const bj::object& args) {
          std::lock_guard lock(changesets_mu_);
@@ -715,13 +760,15 @@ void Host::register_changeset_tools() {
              }
            }
          }
+         (*cs)["deletes_at"] = base::format_utc_ms(deletes_at_ms(*cs));
          return ToolResult::ok(std::move(*cs));
        }});
 
   mcp_->add_tool(
       {"changeset_list",
        "Read tool. Change sets, newest first: id, title, state, by, members (their keys), and when each was made, "
-       "applied, or rolled back. A focused operator sees their own.",
+       "applied, or rolled back, and deletes_at: when the record goes (90 days after its last change, 30 for a draft "
+       "or a discarded one). A focused operator sees their own.",
        object_schema({{"state", string_property("Only this state: draft, applied, failed, rolled_back, or discarded.")}}, {}),
        [this](const bj::object& args) {
          std::string only = text(args, "state");
@@ -742,6 +789,7 @@ void Host::register_changeset_tools() {
                row[std::string(k) + "_at"] = base::format_utc_ms(a->as_object().at("at_ms").as_int64());
              }
            }
+           row["deletes_at"] = base::format_utc_ms(deletes_at_ms(*cs));
            row["created_ms"] = cs->at("created_ms");
            rows.push_back(std::move(row));
          }

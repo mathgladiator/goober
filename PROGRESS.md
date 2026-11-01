@@ -801,8 +801,9 @@ The work of 2026-10-29 to 2026-10-31, reviewed (043.CodeSecurityReview.md):
 - [x] At most 16 role changes per box call; a test; a try on a granting route changes no roles.
 - [x] A broken error page serves the host's own page, never its source; a test.
 - [x] A manifest warning when a route can grant `owner`; a test.
-- [ ] Decisions for the human (043 § For the human): trusted proxies, roles that gate their own
-      route, agents granting.
+- [x] Decisions for the human (043 § For the human): trusted proxies and roles that gate their
+      own route decided and built in phase 44.
+- [ ] Agents granting roles: still refused; the human's call.
 
 ### Phase 42: performance and operations review (2026-10-31)
 The last two days' work measured and reviewed (`design/machine/044.PerformanceOperations.md`):
@@ -836,6 +837,18 @@ first, then any), and the services boxes use in the data flow (028 § 4.4, § 4.
       calls come from its routes; the mailer sits behind boxes' mail services and the host's
       own mail; tests.
 - [ ] Bounces and complaints from the mailer (SES notifications), not received by the host yet.
+
+### Phase 44: proxies on loopback, clearer warnings, change-set retention (2026-10-31)
+The human decided 043's first two items and 044's retention:
+- [x] With `listen.behind-proxy`, `listen.address` must be loopback (127.0.0.0/8 or ::1): the
+      config is refused otherwise, so `goober-host check` and a deploy stop before starting;
+      setup asks only for loopback in production; a test.
+- [x] A warning when a route can grant a role the box itself requires, quiet for delegation
+      (006 § 3.1); the role, schema-key, and dark-upload warnings each say the risk, the
+      consequence, and the fix; tests.
+- [x] Change sets kept 90 days after their last change (applied, failed, rolled back), drafts
+      and discarded ones 30; pruned hourly with an audit line; `deletes_at` in show and list
+      (042 § 9); a test.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
