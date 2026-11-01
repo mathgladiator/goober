@@ -396,9 +396,34 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   }
   if (const auto* limits = get_object(root, "limits", &err)) {
     if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute",
-                              "outbox-daily-per-service"},
+                              "outbox-daily-per-service", "try-bytes", "exports-bytes", "traffic-bytes", "snapshot-bytes",
+                              "snapshot-files", "logs-bytes", "free-bytes", "tmp-hours"},
                     "limits", &err)) {
       return *error = err, nullptr;
+    }
+    // Disk budgets (045.Limits.md): each at least a floor that keeps the host working.
+    struct DiskKey {
+      const char* key;
+      int64_t* field;
+      int64_t min, max;
+    };
+    constexpr int64_t kMiB = int64_t(1) << 20, kTiB = int64_t(1) << 40;
+    for (const DiskKey& d : {DiskKey{"try-bytes", &cfg->disk.try_bytes, 1 * kMiB, kTiB},
+                             DiskKey{"exports-bytes", &cfg->disk.exports_bytes, 1 * kMiB, kTiB},
+                             DiskKey{"traffic-bytes", &cfg->disk.traffic_bytes, 4 * kMiB, kTiB},
+                             DiskKey{"snapshot-bytes", &cfg->disk.snapshot_bytes, 1 * kMiB, kTiB},
+                             DiskKey{"snapshot-files", &cfg->disk.snapshot_files, 1, 100000},
+                             DiskKey{"logs-bytes", &cfg->disk.logs_bytes, 64 * kMiB, kTiB},
+                             DiskKey{"free-bytes", &cfg->disk.free_bytes, 0, kTiB},
+                             DiskKey{"tmp-hours", &cfg->disk.tmp_hours, 1, 24 * 30}}) {
+      if (auto v = get_int(*limits, d.key, &err)) {
+        if (*v < d.min || *v > d.max) {
+          return *error = "limits." + std::string(d.key) + " must be " + std::to_string(d.min) + " to " + std::to_string(d.max),
+                 nullptr;
+        }
+        *d.field = *v;
+      }
+      if (!err.empty()) return *error = err, nullptr;
     }
     if (auto v = get_int(*limits, "body-max-bytes", &err)) cfg->body_max_bytes = *v;
     if (auto v = get_int(*limits, "outbox-daily-per-service", &err)) {

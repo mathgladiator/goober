@@ -191,6 +191,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
           if (auto r = config_.get()->resolve_host(domain)) return r->second.tenant;
           return std::nullopt;
         });
+    traffic_->set_budget(config->disk.traffic_bytes);
   } catch (const std::exception& e) {
     startup_notes_.push_back(std::string("traffic rollups off: ") + e.what());
   }

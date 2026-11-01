@@ -129,7 +129,7 @@ void Host::register_try_tools() {
        "exactly as for a real call; a tool always acts for somebody. A try's mail sender is never verified: verifying "
        "takes a real DKIM signature, so from_user_id is null and sender_why says why. It reaches no one and changes no "
        "real data: an HTTP GET or HEAD runs read-only against live data, as every GET does; anything else (writes, "
-       "tools, mail, timers) runs on copies of the tenant's databases, thrown away after (calls to other boxes refused, "
+       "tools, mail, timers) runs on copies of the tenant's databases, thrown away after (at most limits.try-bytes of copies, 512 MiB by default, or the try is refused; calls to other boxes refused, "
        "deliveries kept in the copies, nothing published). Nothing is cached, it isn't counted as traffic, and the "
        "access log marks it \"try\". Answers the status (or the tool's result, or the SMTP reply), the box's log "
        "lines, the statements run, what each table's grant was used for, and for a run on copies the rows each table "
@@ -244,6 +244,16 @@ void Host::register_try_tools() {
          std::unique_ptr<db::Databases> copies;
          std::map<std::string, int64_t> before;
          if (!read) {
+           // Every copy at once is held to limits.try-bytes and limits.free-bytes (045).
+           std::vector<fs::path> sources;
+           for (const auto& d : box->manifest.data) {
+             if (!d.applies_schema()) continue;
+             std::string t = d.tenant_for(tenant), database = d.database_for(tenant);
+             if (databases_->exists(t, database)) sources.push_back(databases_->file(t, database));
+           }
+           std::sort(sources.begin(), sources.end());
+           sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+           if (auto refused = copies_refused(sources, "this try"); !refused.empty()) return ToolResult::fail(refused);
            copies = std::make_unique<db::Databases>(copies_root);
            copies->set_id_source(next_id_);
            copies->set_schema_store(schemas_.get());

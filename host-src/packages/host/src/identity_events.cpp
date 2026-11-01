@@ -79,6 +79,8 @@ void Host::identity_tick(int64_t now_ms) {
     step("logs", [&] { logs_housekeeping(now_ms); });
     // Exports past their 7 days go even when nobody makes or lists another (008 § 7.1).
     step("exports", [&] { exports::list(config_.get()->storage, now_ms); });
+    // What a crash or a hang left in storage/tmp, past limits.tmp-hours (045).
+    step("tmp", [&] { sweep_tmp(now_ms); });
   }
 
   struct Delivery {

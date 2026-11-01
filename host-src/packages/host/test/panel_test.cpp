@@ -206,7 +206,7 @@ TEST_F(PanelTest, TheChangeLogNamesTheOperatorAndTheRollupsCountThePanel) {
   bool saw_operations = false;
   for (const auto& r : traffic["routes"].as_array()) saw_operations |= r.as_object().at("route") == "operations";
   EXPECT_TRUE(saw_operations);
-  EXPECT_EQ(traffic["series"].as_object()["points"].as_array().size(), 60u);
+  EXPECT_EQ(traffic["series"].as_object()["points"].as_array().size(), 12u);
   auto graph = parse(api(cookie, "box_graph").body)["result"].as_object();
   bool tenant_node = false;
   for (const auto& n : graph["nodes"].as_array()) tenant_node |= n.as_object().at("id") == "tenant:playground";

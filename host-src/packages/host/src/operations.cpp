@@ -269,6 +269,16 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
       check("disk", good, std::move(detail));
     }
   }
+  // Limits (045): what each thing the host grows on its disk holds against its budget. A
+  // budget near or past is a warning (in "near"), never a failure: the host drops or refuses on
+  // its own, and only a nearly full disk (the disk check) fails readiness.
+  try {
+    auto report = limits_report(!probe_storage);  // probed: the public /goober/ready
+    report["ok"] = true;
+    checks["limits"] = std::move(report);
+  } catch (const std::exception& e) {
+    checks["limits"] = bj::object{{"ok", true}, {"why", std::string("can't measure: ") + e.what()}};
+  }
   // Identity and OAuth: the host realm and every tenant's realm answer (their databases open and
   // read), since a site's /mcp signs in and refreshes in its own realm.
   {

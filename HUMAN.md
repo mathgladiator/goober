@@ -342,6 +342,29 @@ ssh customer@example.com 'sudo -u goober goober-host export get ID --out - --con
 
 Exports go away after 7 days, or now with `export delete ID`.
 
+## Something is "near its limit"
+
+The host keeps a budget for everything it grows on its disk: tries' copies, exports, the
+panel's traffic numbers, snapshots, logs, and temporary files (`design/machine/045.Limits.md`).
+See how full each one is:
+
+```sh
+curl -s https://example.com/goober/ready | jq '.checks.limits'
+```
+
+`near` lists anything at 80% or more. Usually the host handles it itself: it drops old traffic
+numbers, and it refuses a try or an export that wouldn't fit, saying which limit. Snapshots are
+yours: delete old ones in the panel's **Database** view. To raise a limit, set it in host.json
+and reload:
+
+```json
+"limits": {"try-bytes": 1073741824, "snapshot-files": 200}
+```
+
+```sh
+sudo systemctl reload goober-host
+```
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone

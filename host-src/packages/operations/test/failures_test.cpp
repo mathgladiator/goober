@@ -98,9 +98,13 @@ TEST(Failures, OldRowsAndMessagesAreDropped) {
   f.call(kNoon, "example", "places", "list", "get");
   f.failure(event(kNoon, "list", "trap", "trap"));
   f.flush(kNoon);
-  int64_t later = kNoon + 40LL * 24 * 3600 * 1000;
+  // Five-minute counts and messages are kept seven days (045.Limits.md): at three days, still there.
+  int64_t soon = kNoon + 3LL * 24 * 3600 * 1000;
+  f.flush(soon);
+  EXPECT_EQ(f.report("7d", "", "", soon).at("totals").at("calls").as_int64(), 1);
+  int64_t later = kNoon + 8LL * 24 * 3600 * 1000;
   f.flush(later);
-  auto r = f.report("30d", "", "", later);
+  auto r = f.report("7d", "", "", kNoon + 6LL * 24 * 3600 * 1000);  // a window that holds noon
   EXPECT_EQ(r.at("totals").at("calls").as_int64(), 0);
   EXPECT_TRUE(r.at("latest").as_array().empty());
   EXPECT_EQ(Failures::group_of("delivery_dead"), "outbox");

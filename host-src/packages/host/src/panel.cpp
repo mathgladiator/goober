@@ -375,6 +375,7 @@ void Host::run_traffic() {
   while (!timers_stopping_) {
     lock.unlock();
     try {
+      traffic_->set_budget(config_.get()->disk.traffic_bytes);  // limits.traffic-bytes, as reloaded
       traffic_->catch_up(base::now_unix_ms());
       if (failures_) failures_->flush(base::now_unix_ms());
       loop_beat("traffic");
@@ -422,7 +423,7 @@ void Host::register_panel_tools() {
   using mcp::object_schema;
   using mcp::string_property;
 
-  auto window_prop = enum_property("The window: 1h, 12h (the default), 7d, or 30d.", {"1h", "12h", "7d", "30d"});
+  auto window_prop = enum_property("The window: 1h, 12h (the default), or 7d (five-minute buckets, kept seven days).", {"1h", "12h", "7d"});
   auto window_of = [](const bj::object& args) {
     std::string w = arg_text(args, "window");
     return operations::Traffic::valid_window(w) ? w : std::string("12h");

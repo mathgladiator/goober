@@ -323,6 +323,15 @@ void Host::job_step(JobRun& r) {
     if (r.calls == 0) {
       std::error_code ec;
       fs::remove_all(root, ec);
+      std::vector<fs::path> sources;
+      for (const auto& d : box->manifest.data) {
+        if (!d.applies_schema()) continue;
+        std::string tenant = d.tenant_for(r.tenant), database = d.database_for(r.tenant);
+        if (databases_->exists(tenant, database)) sources.push_back(databases_->file(tenant, database));
+      }
+      std::sort(sources.begin(), sources.end());
+      sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+      if (auto refused = copies_refused(sources, "this dry run"); !refused.empty()) return finish("failed", refused);
       for (const auto& d : box->manifest.data) {
         if (!d.applies_schema()) continue;
         std::string tenant = d.tenant_for(r.tenant), database = d.database_for(r.tenant);

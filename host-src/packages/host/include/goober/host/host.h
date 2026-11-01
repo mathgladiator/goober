@@ -927,6 +927,23 @@ class Host {
   void job_step(struct JobRun& run);
   void access_log_job(const struct JobRun& run, const std::string& request_id, const BoxCall& call);
   std::filesystem::path job_copies(int64_t run) const;
+
+  // Disk limits (limits.cpp; design/machine/045.Limits.md).
+ public:
+  // Each budget's use: {name: {used_bytes, limit_bytes, share, key, warn?}} plus what nears or
+  // passes its limit, for /goober/ready's limits check and host_health. Tenants are named only
+  // for operators: /goober/ready is public.
+  boost::json::object limits_report(bool name_tenants);
+  // Files in storage/tmp older than limits.tmp-hours go (jobs' copies aside, which their run
+  // removes). Returns how many went.
+  int sweep_tmp(int64_t now_ms);
+  // Why copying these databases for `what` (a try, a dry run) would pass limits.try-bytes or
+  // leave less than limits.free-bytes free, or "" when it fits.
+  std::string copies_refused(const std::vector<std::filesystem::path>& files, const std::string& what) const;
+  // Why writing `bytes` more would leave less than limits.free-bytes on the disk, or "".
+  std::string free_space_refused(int64_t bytes, const std::string& what) const;
+
+ private:
   // Last, so it is destroyed first: no build runs while the rest of the host goes away.
   std::unique_ptr<class BuildJobs> jobs_;
 };

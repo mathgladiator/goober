@@ -129,6 +129,19 @@ struct HostConfig {
   // Outbox calls a tenant's boxes may queue to one service in a day (a model API, a payment
   // API): what stops a looping box from spending. Mail has its own limits.
   int64_t outbox_daily_per_service = 1000;
+  // What the host grows on its own disk (design/machine/045.Limits.md): a byte budget for each
+  // thing, sized for a small server, set in host.json's "limits". Over one, the host drops the
+  // oldest of what is derived or expiring, and refuses new work that would pass it.
+  struct Disk {
+    int64_t try_bytes = int64_t(512) << 20;       // one try's (or dry run's) database copies
+    int64_t exports_bytes = int64_t(1) << 30;     // every sealed export kept
+    int64_t traffic_bytes = int64_t(64) << 20;    // the panel's rollups (traffic.db)
+    int64_t snapshot_bytes = int64_t(2) << 30;    // one tenant's database snapshots
+    int64_t snapshot_files = 100;                 // and how many
+    int64_t logs_bytes = int64_t(4) << 30;        // logs on the machine, archive queue included
+    int64_t free_bytes = int64_t(1) << 30;        // what new work must leave free on the disk
+    int64_t tmp_hours = 24;                       // a file in storage/tmp older than this goes
+  } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.
   bool behind_proxy = false;

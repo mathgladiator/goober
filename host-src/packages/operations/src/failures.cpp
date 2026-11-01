@@ -14,22 +14,22 @@ namespace {
 
 constexpr int64_t kMinuteMs = 60 * 1000;
 constexpr int64_t kHourMs = 60 * kMinuteMs;
-constexpr int64_t kMinutesKeptMs = 48 * kHourMs;
-constexpr int64_t kHoursKeptMs = 400 * 24 * kHourMs;
-constexpr int64_t kEventsKeptMs = 30 * 24 * kHourMs;
+// Five-minute counts kept seven days, like the traffic's (045.Limits.md).
+constexpr int64_t kBucketMs = 5 * kMinuteMs;
+constexpr int64_t kKeptMs = 7 * 24 * kHourMs;
+constexpr int64_t kEventsKeptMs = kKeptMs;
 constexpr int64_t kEventsPerBox = 200;
 constexpr int64_t kTrialsPerBox = 100;
 constexpr size_t kPendingEvents = 1000;  // between flushes; past it, counted but not kept
 constexpr size_t kMessageBytes = 300;
 
 struct Window {
-  const char* table;
+  static constexpr const char* table = "count_5m";
   int64_t span_ms, step_ms;
   static std::optional<Window> of(std::string_view w) {
-    if (w == "1h") return Window{"minutes", kHourMs, kMinuteMs};
-    if (w == "12h") return Window{"minutes", 12 * kHourMs, 10 * kMinuteMs};
-    if (w == "7d") return Window{"hours", 7 * 24 * kHourMs, kHourMs};
-    if (w == "30d") return Window{"hours", 30 * 24 * kHourMs, 6 * kHourMs};
+    if (w == "1h") return Window{kHourMs, kBucketMs};
+    if (w == "12h") return Window{12 * kHourMs, 2 * kBucketMs};
+    if (w == "7d") return Window{7 * 24 * kHourMs, kHourMs};
     return std::nullopt;
   }
   int64_t to(int64_t now) const { return (now / step_ms + 1) * step_ms; }
@@ -64,10 +64,23 @@ Failures::Failures(fs::path db_file) {
   fs::create_directories(db_file.parent_path());
   db_ = std::make_unique<sqlite::Db>(db_file);
   db_->exec("PRAGMA synchronous=NORMAL;");
-  for (const char* table : {"minutes", "hours"}) {
-    db_->exec(std::string("CREATE TABLE IF NOT EXISTS ") + table +
-              " (t INTEGER NOT NULL, tenant TEXT NOT NULL, box TEXT NOT NULL, route TEXT NOT NULL, kind TEXT NOT NULL,"
-              " class TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (t, tenant, box, route, kind, class))");
+  bool old = false;
+  {
+    sqlite::Stmt q(*db_, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'minutes'");
+    old = q.step() && q.int64(0) > 0;
+  }
+  db_->exec("PRAGMA auto_vacuum = INCREMENTAL");
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS count_5m (t INTEGER NOT NULL, tenant TEXT NOT NULL, box TEXT NOT NULL, route TEXT NOT NULL,"
+      " kind TEXT NOT NULL, class TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (t, tenant, box, route, kind, class))");
+  // Before 2026-10-31: minute rows kept 48 hours and hour rows kept 400 days. The minutes are
+  // carried over as five-minute counts; the hours go (045.Limits.md).
+  if (old) {
+    std::string b = std::to_string(kBucketMs);
+    db_->exec("INSERT OR REPLACE INTO count_5m SELECT t / " + b + " * " + b +
+              ", tenant, box, route, kind, class, SUM(n) FROM minutes GROUP BY 1, 2, 3, 4, 5, 6");
+    db_->exec("DROP TABLE IF EXISTS minutes");
+    db_->exec("DROP TABLE IF EXISTS hours");
   }
   db_->exec(
       "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, tenant TEXT NOT NULL,"
@@ -81,17 +94,20 @@ Failures::Failures(fs::path db_file) {
       " box TEXT NOT NULL, version TEXT NOT NULL, route TEXT NOT NULL, kind TEXT NOT NULL, class TEXT NOT NULL,"
       " message TEXT NOT NULL, request_id TEXT NOT NULL, n INTEGER NOT NULL, trial TEXT NOT NULL)");
   db_->exec("CREATE INDEX IF NOT EXISTS trials_by_box ON trials (box, id)");
+  if (old) {
+    db_->exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db_->exec("VACUUM");
+  }
+  db_->exec("PRAGMA journal_size_limit = 1048576");
 }
 
 Failures::~Failures() = default;
 
 void Failures::add(int64_t at_ms, const std::string& tenant, const std::string& box, const std::string& route,
                    const std::string& kind, const std::string& cls, int64_t n) {
-  int64_t minute = at_ms / kMinuteMs * kMinuteMs;
-  int64_t hour = at_ms / kHourMs * kHourMs;
+  int64_t bucket = at_ms / kBucketMs * kBucketMs;
   std::lock_guard lock(pending_mu_);
-  pending_[{minute, tenant, box, route, kind, cls}] += n;
-  pending_[{-hour - 1, tenant, box, route, kind, cls}] += n;
+  pending_[{bucket, tenant, box, route, kind, cls}] += n;
 }
 
 void Failures::call(int64_t at_ms, const std::string& tenant, const std::string& box, const std::string& route,
@@ -130,10 +146,10 @@ void Failures::flush(int64_t now_ms) {
       std::set<std::string> boxes;
       for (const auto& [k, n] : counts) {
         auto [t, tenant, box, route, kind, cls] = k;
-        sqlite::Stmt w(*db_, std::string("INSERT INTO ") + (t < 0 ? "hours" : "minutes") +
+        sqlite::Stmt w(*db_, std::string("INSERT INTO count_5m") +
                                  " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (t, tenant, box, route, kind, class) DO "
                                  "UPDATE SET n = n + excluded.n");
-        w.bind(1, t < 0 ? -t - 1 : t).bind(2, tenant).bind(3, box).bind(4, route).bind(5, kind).bind(6, cls).bind(7, n);
+        w.bind(1, t).bind(2, tenant).bind(3, box).bind(4, route).bind(5, kind).bind(6, cls).bind(7, n);
         w.run();
       }
       for (const auto& e : events) {
@@ -178,14 +194,15 @@ void Failures::flush(int64_t now_ms) {
   }
   if (now_ms - last_drop_ms_ > 10 * kMinuteMs) {
     last_drop_ms_ = now_ms;
-    for (auto [sql, keep] : {std::pair{"DELETE FROM minutes WHERE t < ?", kMinutesKeptMs},
-                             std::pair{"DELETE FROM hours WHERE t < ?", kHoursKeptMs},
+    for (auto [sql, keep] : {std::pair{"DELETE FROM count_5m WHERE t < ?", kKeptMs},
                              std::pair{"DELETE FROM events WHERE at_ms < ?", kEventsKeptMs},
                              std::pair{"DELETE FROM trials WHERE at_ms < ?", kEventsKeptMs}}) {
       sqlite::Stmt s(*db_, sql);
       s.bind(1, now_ms - keep);
       s.run();
     }
+    db_->exec("PRAGMA incremental_vacuum");
+    db_->exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 }
 

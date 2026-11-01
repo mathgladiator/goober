@@ -6,6 +6,7 @@
 // line is counted exactly once, across crashes and rotations.
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -67,11 +68,18 @@ class Traffic {
   Traffic(const Traffic&) = delete;
   Traffic& operator=(const Traffic&) = delete;
 
+  // The bytes the rollups hold (free pages left out), and the budget past which the oldest
+  // hours go (0: none). Safe from any thread.
+  int64_t size_bytes();
+  void set_budget(int64_t bytes);
+  // Hours dropped to keep within the budget since the host started.
+  int64_t budget_drops() const { return budget_drops_; }
+
   // Counts what the logs gained since the cursors, and drops rows past retention. Returns
   // the lines read. Safe from any thread.
   size_t catch_up(int64_t now_ms);
 
-  // A window name: 1h, 12h, 7d, or 30d.
+  // A window name: 1h, 12h, or 7d. Rows are five-minute buckets kept seven days (045.Limits.md).
   static bool valid_window(std::string_view window);
 
   // {window, step_ms, from_ms, to_ms, points: [{t, n, n3, n4, n5, us, p50_us, p99_us}]}.
@@ -108,10 +116,10 @@ class Traffic {
 
   // A sampled level (028 § 4.4): name (like outbox_pending), a tenant, and its value per key
   // (like a service), all of them: a key sampled before and missing now reads 0. Kept in memory
-  // and written by catch_up as each minute's and hour's largest value. Safe from any thread.
+  // and written by catch_up as each five minutes' largest value. Safe from any thread.
   void gauge(int64_t at_ms, const std::string& name, const std::string& tenant, const std::map<std::string, int64_t>& values);
   // {window, step_ms, from_ms, to_ms, points: [{t, value}], now: [{tenant, key, value, at_ms}]}:
-  // per point, the largest sum over every tenant and key in one minute (or hour); now holds the
+  // per point, the largest sum over every tenant and key in five minutes; now holds the
   // latest sample of each. Empty tenant means every one.
   bj::object gauge_series(std::string_view window, const std::string& name, const std::string& tenant, int64_t now_ms);
 
@@ -119,6 +127,9 @@ class Traffic {
   struct Window;
   size_t tail(const std::string& name, int64_t now_ms);
   void drop_old(int64_t now_ms);
+  int64_t size_bytes_locked();
+  int64_t budget_bytes_ = 0;
+  std::atomic<int64_t> budget_drops_{0};
 
   std::filesystem::path logs_;
   TenantOf tenant_of_;
@@ -127,7 +138,7 @@ class Traffic {
   bool service_failures_added_ = false;
   std::mutex mu_;
   std::unique_ptr<sqlite::Db> db_;
-  // (name, tenant, key) -> (at_ms, value), the latest sample; and each minute's largest, unwritten.
+  // (name, tenant, key) -> (at_ms, value), the latest sample; and each five minutes' largest, unwritten.
   std::mutex gauge_mu_;
   std::map<std::tuple<std::string, std::string, std::string>, std::pair<int64_t, int64_t>> gauge_now_;
   std::map<std::tuple<int64_t, std::string, std::string, std::string>, int64_t> gauge_pending_;

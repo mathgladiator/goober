@@ -46,6 +46,27 @@ TEST(Config, RefusesUnknownFieldsAndBadValues) {
       R"({"operations":{"token":"0123456789abcdef"},"limits":{"fuel":{"default":10,"max":5}}})", "/", &err));
 }
 
+// Disk budgets (045.Limits.md): defaults for a small server, each overridable, each floored.
+TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
+  std::string err;
+  auto plain = parse_config(R"({"operations":{"token":"0123456789abcdef"}})", "/", &err);
+  ASSERT_TRUE(plain) << err;
+  EXPECT_EQ(plain->disk.try_bytes, int64_t(512) << 20);
+  EXPECT_EQ(plain->disk.traffic_bytes, int64_t(64) << 20);
+  EXPECT_EQ(plain->disk.tmp_hours, 24);
+  auto set = parse_config(
+      R"({"operations":{"token":"0123456789abcdef"},"limits":{"try-bytes":2147483648,"snapshot-files":20,"tmp-hours":6}})", "/",
+      &err);
+  ASSERT_TRUE(set) << err;
+  EXPECT_EQ(set->disk.try_bytes, int64_t(2) << 30);
+  EXPECT_EQ(set->disk.snapshot_files, 20);
+  EXPECT_EQ(set->disk.tmp_hours, 6);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"traffic-bytes":1000}})", "/", &err));
+  EXPECT_NE(err.find("limits.traffic-bytes"), std::string::npos) << err;
+  err.clear();
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"try-bytes":"big"}})", "/", &err));
+}
+
 TEST(Config, ReloadKeepsRestartOnlyFields) {
   std::string err;
   ConfigHolder holder(parse_config(kGood, "/srv", &err));

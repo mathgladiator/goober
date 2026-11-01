@@ -2,9 +2,9 @@
 
 // How boxes fail (design/machine/028.Panel.md § 4.3): the host's own record of every box call,
 // whatever started it (a request, a tool, a timer, mail, a job, another box), and of each way it
-// went wrong, kept in storage/operations/failures.db. Counts per minute (48 hours) and per hour
-// (400 days) by tenant, box, route, kind, and class, and the latest messages per box (200, for
-// 30 days). Recorded in memory as calls finish and written by the traffic loop, so a call never
+// went wrong, kept in storage/operations/failures.db. Counts per five minutes, for seven days
+// (045.Limits.md), by tenant, box, route, kind, and class, and the latest messages per box (200,
+// for 7 days). Recorded in memory as calls finish and written by the traffic loop, so a call never
 // waits on this database; what wasn't written yet is lost on a crash, as live statistics are.
 
 #include <cstdint>
@@ -69,12 +69,12 @@ class Failures {
   // box, route, kind, calls, failures, classes}] (most failures first), latest: [{at_ms, tenant,
   // box, version, route, kind, class, message, request_id}] (newest first, at most `latest`),
   // tries: the same for failures of tries and dry runs, each with trial (route_try, job_dry_run)}.
-  // Windows are 1h, 12h, 7d, and 30d. Empty tenant or box means every one.
+  // Windows are 1h, 12h, and 7d. Empty tenant or box means every one.
   bj::object report(std::string_view window, const std::string& tenant, const std::string& box, int64_t now_ms,
                     size_t latest = 50);
 
  private:
-  // t (a minute, or -hour-1), tenant, box, route, kind, class ("" counts calls)
+  // t (five minutes), tenant, box, route, kind, class ("" counts calls)
   using Key = std::tuple<int64_t, std::string, std::string, std::string, std::string, std::string>;
   void add(int64_t at_ms, const std::string& tenant, const std::string& box, const std::string& route,
            const std::string& kind, const std::string& cls, int64_t n);
