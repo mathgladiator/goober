@@ -154,7 +154,12 @@ each ranch's site weekly.
     check says how much is free (`low` under 10% or 2 GiB; failing under 256 MiB).
   - Nothing outside watches yet: point an uptime checker or a Prometheus at `/goober/ready`
     (`?format=prometheus`); its `health` has error ratios, latency, the outbox, free disk,
-    and each backup's age, to graph and alert on (HUMAN.md § 1).
+    each backup's age, and how fast each log grows, to graph and alert on (HUMAN.md § 1).
+  - Uploads are held to `limits.upload-bytes-per-day` (1 GiB): past it, log archives and
+    increments wait a day, the nightly and attachments never do (019 § 9). A site whose
+    nightly alone is bigger than the budget leans on that rule every day; the panel's **Logs
+    and uploads** view shows it, and a log growing three times its usual day warns in
+    `/goober/ready` (032 § 10).
 
 ## 6. Mail that arrives: yes, untried with real SES or a real MX
 

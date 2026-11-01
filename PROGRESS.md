@@ -890,6 +890,26 @@ The human: "box versions archive for liability, they get deleted if inactive aft
 - [x] `version_restore {box, version, why}`; version_list's state and dates; version_get's
       tombstone; the panel's box page; tests.
 
+### Phase 48: log velocity and upload volume (2026-11-01)
+The human: "a velocity check on logs such that there is a dashboard when log volume grows.
+Ultimately, I don't want too much uploaded." (032 § 10, 019 § 9, 028 § 4.7):
+- [x] Every log line counted by log, tenant, box, and route: five-minute rows 7 days, a total
+      per log per day 90 days, days before counting seeded from the rotated files; tests.
+- [x] `log_velocity {window?, log?}`: growth over the median of the 7 days before, `grew` at 3×
+      and 1 MiB, who writes the most, and the 7-day projection against `limits.logs-bytes`; a
+      read tool for host operators; tests.
+- [x] Warnings in /goober/ready's `limits` (a box's log unnamed for the public); `health.logs`
+      growth ratios and the projection's share; `goober_log_growth_ratio{log}` and
+      `goober_logs_projected_budget_ratio`; tests.
+- [x] Uploads counted per UTC day and stream; `limits.upload-bytes-per-day` (1 GiB; 0 off):
+      past it, log archives (unless queued a week), increments, and the source mirror wait for
+      the next day, the nightly and attachments never; an `uploads` limit warning from 80%;
+      `backup_status` answers `uploads` with 30 days and what the bucket held; tests.
+- [x] The panel's live statistics (`traffic.db`, `failures.db`) left out of backups; tests.
+- [x] The panel's **Logs and uploads** view; a test that it loads for an observer.
+- [ ] The view checked in a browser.
+- [ ] zstd or `gzip -9` for nightlies and log archives (a format change: the human's call).
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

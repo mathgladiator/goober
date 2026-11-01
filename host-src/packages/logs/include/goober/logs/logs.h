@@ -59,8 +59,9 @@ class Writer {
   Writer& operator=(const Writer&) = delete;
   // Appends one line: at, log, seq, and host first, then `fields` (theirs never overwrite the
   // envelope), then the chain. Rotates first when the file is from an earlier UTC day or the
-  // line would pass max_bytes. Returns what it rotated, if anything.
-  std::optional<Rotated> write(const bj::object& fields, int64_t now_ms, bool* ok = nullptr);
+  // line would pass max_bytes. Returns what it rotated, if anything; `bytes` gets the line's size
+  // as written (0 when nothing was).
+  std::optional<Rotated> write(const bj::object& fields, int64_t now_ms, bool* ok = nullptr, size_t* bytes = nullptr);
   // Rotates a non-empty file from an earlier UTC day (the hourly tick, for quiet logs).
   std::optional<Rotated> rotate_if_stale(int64_t now_ms);
   const std::string& name() const { return name_; }
@@ -86,7 +87,7 @@ class Writer {
 class Set {
  public:
   Set(std::filesystem::path dir, std::string host, uint64_t max_bytes = kMaxBytes);
-  std::optional<Rotated> write(const std::string& name, const bj::object& fields, int64_t now_ms);
+  std::optional<Rotated> write(const std::string& name, const bj::object& fields, int64_t now_ms, size_t* bytes = nullptr);
   std::vector<Rotated> rotate_stale(int64_t now_ms);
   // The logs on disk: every name with a current or rotated file.
   std::vector<std::string> names() const;

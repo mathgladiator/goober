@@ -131,7 +131,18 @@ void Host::log_line(const std::string& log, bj::object line) {
     }
   }
   try {
-    logs_->write(log, line, now);
+    size_t bytes = 0;
+    logs_->write(log, line, now, &bytes);
+    // Log volume (032 § 10): who made the log grow, by the tenant, box, and route the line names.
+    if (traffic_ && bytes > 0) {
+      auto text = [&](const char* k) {
+        const auto* v = line.if_contains(k);
+        return v && v->is_string() ? std::string(v->as_string()) : std::string();
+      };
+      std::string box = text("box");
+      if (box.empty() && log.starts_with("boxes/")) box = log.substr(6);
+      traffic_->log_written(now, log, text("tenant"), box, text("route"), int64_t(bytes));
+    }
   } catch (const std::exception& e) {
     ++log_write_errors_;
     std::cerr << "goober-host: log " << log << ": " << e.what() << "\n";
@@ -177,6 +188,77 @@ void Host::logs_housekeeping(int64_t now_ms) {
       fs::remove(it->path(), ec);
     }
   }
+}
+
+bj::object Host::log_velocity_report(const std::string& window, const std::string& log, bool cached) {
+  int64_t now = base::now_unix_ms();
+  if (cached) {
+    std::lock_guard lock(log_velocity_mu_);
+    if (now - log_velocity_at_ms_ < 60000 && !log_velocity_cache_.empty()) return log_velocity_cache_;
+  }
+  auto cfg = config_.get();
+  bj::object out = traffic_ ? traffic_->log_velocity(window, log, now)
+                            : bj::object{{"logs", bj::array{}}, {"note", "the traffic store is off, so log volume isn't counted"}};
+  auto mib = [](int64_t b) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f MiB", double(b) / double(1 << 20));
+    return std::string(buf);
+  };
+  bj::array warnings;
+  int64_t per_day = 0;
+  for (const auto& l : out.at("logs").as_array()) {
+    const auto& o = l.as_object();
+    per_day += o.at("last_24h_bytes").as_int64();
+    if (o.at("grew").as_bool()) {
+      std::string name(o.at("log").as_string());
+      warnings.push_back(bj::object{
+          {"log", name},
+          {"kind", "grew"},
+          {"growth", o.at("growth")},
+          {"text", name + " wrote " + mib(o.at("last_24h_bytes").as_int64()) + " in the last 24 hours, " +
+                       json::dump(o.at("growth")) + " times its usual " + mib(o.at("median_day_bytes").as_int64()) +
+                       " a day: log_velocity's top names who writes it"}});
+    }
+  }
+  // The projection (032 § 10): rotated files stay 7 days, so at today's rate the directory settles at
+  // 8 days of lines (7 rotated and today's), plus what waits in the archive queue for upload.
+  if (log.empty()) {
+    int64_t on_disk = 0, queued = 0;
+    std::error_code ec;
+    fs::path dir = cfg->storage / "logs";
+    for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      std::error_code e2;
+      if (!it->is_regular_file(e2)) continue;
+      int64_t size = int64_t(it->file_size(e2));
+      on_disk += size;
+      if (it->path().parent_path() == dir / "archive" && it->path().extension() == ".log") queued += size;
+    }
+    int64_t projected = per_day * (kLocalKeepMs / kDay + 1) + queued;
+    int64_t budget = cfg->disk.logs_bytes;
+    out["disk"] = bj::object{{"on_disk_bytes", on_disk},
+                             {"archive_queued_bytes", queued},
+                             {"per_day_bytes", per_day},
+                             {"projected_bytes", projected},
+                             {"budget_bytes", budget},
+                             {"projected_share", budget > 0 ? std::round(double(projected) * 1000 / double(budget)) / 1000 : 0.0},
+                             {"key", "limits.logs-bytes"}};
+    if (budget > 0 && projected >= budget) {
+      warnings.push_back(bj::object{
+          {"log", ""},
+          {"kind", "budget"},
+          {"text", "at today's rate of " + mib(per_day) + " a day the logs would hold " + mib(projected) +
+                       " within 7 days, past limits.logs-bytes (" + mib(budget) +
+                       "): find who writes the most with log_velocity, or raise limits.logs-bytes in host.json"}});
+    }
+  }
+  out["warnings"] = std::move(warnings);
+  if (cached) {
+    std::lock_guard lock(log_velocity_mu_);
+    log_velocity_cache_ = out;
+    log_velocity_at_ms_ = now;
+  }
+  return out;
 }
 
 void Host::register_log_tools() {
@@ -334,6 +416,26 @@ void Host::register_log_tools() {
                     return ToolResult::ok(bj::object{{"logs", std::move(logs)}, {"archive", std::move(archive)},
                                                      {"local_days", 7}, {"archive_days", 400}});
                   }});
+
+  mcp_->add_tool(
+      {"log_velocity",
+       "Read tool. How fast each log grows (032 § 10): per log, the bytes and lines of the last 24 hours, today's "
+       "bytes, the median day of the 7 before, and growth (the last 24 hours over that median; grew when 3 times or "
+       "more and at least 1 MiB). series: bytes per step over the window for each log; days: a total per log per "
+       "day for 90 days (days before the host counted come from the rotated files: bytes only); top: who wrote "
+       "the most over the window (tenant, box, route, share of its log). disk: the logs directory now, the archive "
+       "queue, and the projection in 7 days against limits.logs-bytes. warnings: what /goober/ready warns about.",
+       object_schema({{"window", mcp::enum_property("1h, 12h, or 7d (the default).", {"1h", "12h", "7d"})},
+                      {"log", string_property("One log, like access or boxes/shop; default every log.")}},
+                     {}),
+       [this](const bj::object& args) {
+         std::string window = field(args, "window");
+         if (window.empty()) window = "7d";
+         if (!operations::Traffic::valid_window(window)) return ToolResult::fail("window is 1h, 12h, or 7d");
+         std::string log = field(args, "log");
+         if (!log.empty() && !logs::valid_name(log)) return ToolResult::fail("not a log: " + log);
+         return ToolResult::ok(log_velocity_report(window, log, false));
+       }});
 
   mcp_->add_tool(
       {"uri_stats",

@@ -324,9 +324,10 @@ std::vector<Rotated> finish_pending(const fs::path& archive) {
   return out;
 }
 
-std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, bool* ok) {
+std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, bool* ok, size_t* bytes) {
   std::lock_guard lock(mu_);
   if (ok) *ok = false;
+  if (bytes) *bytes = 0;
   std::optional<Rotated> rotated;
   // The lock comes off when this returns or goes round again, the file stays open.
   // (Not after a close: the number may already be another file's.)
@@ -419,6 +420,7 @@ std::optional<Rotated> Writer::write(const bj::object& fields, int64_t now_ms, b
       seen_size_ = -1;
     }
     if (ok) *ok = good;
+    if (bytes && good) *bytes = out.size();
     return rotated;
   }
   return rotated;
@@ -459,9 +461,10 @@ Writer& Set::writer(const std::string& name) {
   return ref;
 }
 
-std::optional<Rotated> Set::write(const std::string& name, const bj::object& fields, int64_t now_ms) {
+std::optional<Rotated> Set::write(const std::string& name, const bj::object& fields, int64_t now_ms, size_t* bytes) {
+  if (bytes) *bytes = 0;
   if (!valid_name(name)) return std::nullopt;
-  return writer(name).write(fields, now_ms);
+  return writer(name).write(fields, now_ms, nullptr, bytes);
 }
 
 std::vector<std::string> Set::names() const {

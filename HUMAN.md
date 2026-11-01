@@ -380,6 +380,30 @@ and reload:
 sudo systemctl reload goober-host
 ```
 
+**A log is growing fast.** `near` says "access wrote 40 MiB in the last 24 hours, 6 times its
+usual 7 MiB a day", or that the logs would pass `limits.logs-bytes` within 7 days. Open the
+panel's **Logs and uploads** view (or have Grok run `log_velocity`). Its "Who writes the most"
+table names the tenant, box, and route behind it. Then:
+- **A box logging too much:** Grok ships a version that logs less.
+- **A burst of real visitors:** nothing to do; it passes.
+- **A scanner hammering one path:** block it at Caddy.
+
+The warning clears once a day's volume falls back under three times the usual. If the logs are
+just bigger now, raise `"logs-bytes"` in `limits`.
+
+**Uploads past the daily budget.** Backups count what they put in the bucket each UTC day.
+Past `limits.upload-bytes-per-day` (1 GiB unless set), log archives, increments, and the source
+mirror wait for the next day. The nightly and attachments always go, and a log archive waiting
+a week goes anyway, so nothing is lost. `near` warns from 80%. The **Logs and uploads** view
+shows each day by stream. If the budget is just too small for your site, raise it in `limits`:
+
+```json
+"limits": {"upload-bytes-per-day": 4294967296}
+```
+
+`0` turns the budget off. To upload less, keep fewer days (`backup.keep-days` only changes
+what the bucket holds), back up databases less often (`backup.databases-every-ms`), or log less.
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone

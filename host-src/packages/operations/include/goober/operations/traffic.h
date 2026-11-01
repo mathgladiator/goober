@@ -123,6 +123,26 @@ class Traffic {
   // latest sample of each. Empty tenant means every one.
   bj::object gauge_series(std::string_view window, const std::string& name, const std::string& tenant, int64_t now_ms);
 
+  // Log volume (032 § 10): a line of `bytes` was written to `log` at at_ms, by the tenant, box, and
+  // route the line names ("" when it names none). Kept in memory and written by catch_up: five-
+  // minute rows for seven days, and one row per log per UTC day for 90 days. Safe from any thread.
+  void log_written(int64_t at_ms, const std::string& log, const std::string& tenant, const std::string& box,
+                   const std::string& route, int64_t bytes);
+  // Each log's bytes per UTC day from the rotated files still in the logs directory, for days
+  // before today the host didn't count (lines unknown). Run once as the store opens. Returns the
+  // rows added.
+  int seed_log_days(int64_t now_ms);
+  // How fast each log grows (032 § 10): {window, step_ms, from_ms, to_ms, logs: [{log, last_24h_bytes,
+  // last_24h_lines, today_bytes, median_day_bytes, days_known, growth, grew}], series: [{log,
+  // points: [bytes per step]}], days: [{day, log, bytes, lines, counted}] (90 days, newest first),
+  // top: [{log, tenant, box, route, bytes, lines, share}] (over the window, most first, at most
+  // `top`)}. growth is the last 24 hours over the median of the seven UTC days before today
+  // (null with fewer than three known); grew when it is at least kGrowthFactor and the last 24
+  // hours hold at least kGrowthFloorBytes. Empty log means every one.
+  static constexpr double kGrowthFactor = 3.0;
+  static constexpr int64_t kGrowthFloorBytes = int64_t(1) << 20;
+  bj::object log_velocity(std::string_view window, const std::string& log, int64_t now_ms, size_t top = 20);
+
  private:
   struct Window;
   size_t tail(const std::string& name, int64_t now_ms);
@@ -142,6 +162,10 @@ class Traffic {
   std::mutex gauge_mu_;
   std::map<std::tuple<std::string, std::string, std::string>, std::pair<int64_t, int64_t>> gauge_now_;
   std::map<std::tuple<int64_t, std::string, std::string, std::string>, int64_t> gauge_pending_;
+  // (bucket, log, tenant, box, route) -> (bytes, lines), unwritten.
+  void flush_logs();
+  std::mutex log_mu_;
+  std::map<std::tuple<int64_t, std::string, std::string, std::string, std::string>, std::pair<int64_t, int64_t>> log_pending_;
   int64_t last_drop_ms_ = 0;
 };
 

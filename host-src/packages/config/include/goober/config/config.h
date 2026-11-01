@@ -147,6 +147,10 @@ struct HostConfig {
     int64_t version_archive_days = 30;
     int64_t version_delete_days = 400;
     int64_t version_keep = 3;
+    // What backups put in the bucket per UTC day before increments, log archives, and the
+    // source mirror wait for the next day (019 § 9); the nightly and attachments never wait.
+    // 0: no budget.
+    int64_t upload_bytes_per_day = int64_t(1) << 30;
   } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.

@@ -428,7 +428,33 @@ bj::object Host::health(int64_t now_ms) {
         if (it->path().extension() == ".log") ++queued;
       }
     }
-    out["logs"] = bj::object{{"archive_queued", queued}, {"write_errors", log_write_errors_.load()}};
+    bj::object logs{{"archive_queued", queued}, {"write_errors", log_write_errors_.load()}};
+    // Log velocity (032 § 10), as ratios only: each host log's last 24 hours over its usual day
+    // (boxes' logs as one, their largest, since box names aren't for the public), and the 7-day
+    // projection over limits.logs-bytes. Computed at most once a minute.
+    try {
+      auto v = log_velocity_report("7d", "", true);
+      bj::object growth;
+      double boxes = -1;
+      for (const auto& l : v.at("logs").as_array()) {
+        const auto& o = l.as_object();
+        if (!o.at("growth").is_number()) continue;
+        double g = o.at("growth").to_number<double>();
+        std::string name(o.at("log").as_string());
+        if (name.starts_with("boxes/")) {
+          boxes = std::max(boxes, g);
+        } else {
+          growth[name] = g;
+        }
+      }
+      if (boxes >= 0) growth["boxes"] = boxes;
+      logs["growth"] = std::move(growth);
+      if (const auto* disk = v.if_contains("disk"); disk && disk->is_object()) {
+        logs["projected_budget_ratio"] = disk->as_object().at("projected_share");
+      }
+    } catch (const std::exception&) {
+    }
+    out["logs"] = std::move(logs);
   }
   health_cache_ = out;
   health_at_ms_ = now_ms;
@@ -505,8 +531,17 @@ std::string Host::prometheus_text(const bj::object& ready) {
         {"goober_backup_logs_age_seconds", {"backups", "logs_age_s"}, "gauge", "Seconds since rotated logs were last archived."},
         {"goober_log_archive_queued", {"logs", "archive_queued"}, "gauge", "Rotated logs waiting for their sealed upload."},
         {"goober_log_write_errors_total", {"logs", "write_errors"}, "counter", "Log lines the host couldn't write since it started."},
+        {"goober_logs_projected_budget_ratio", {"logs", "projected_budget_ratio"}, "gauge",
+         "The logs directory in 7 days at today's rate, over limits.logs-bytes."},
     };
     for (const auto& m : metrics) prom_line(out, m.name, m.type, m.help, at(o, m.path));
+    if (const auto* g = at(o, {"logs", "growth"}); g && g->is_object()) {
+      for (const auto& kv : g->as_object()) {
+        prom_line(out, "goober_log_growth_ratio", "gauge",
+                  "A log's last 24 hours over the median of its 7 days before (boxes: their largest).", &kv.value(),
+                  "{log=\"" + std::string(kv.key()) + "\"}");
+      }
+    }
   }
   if (const auto* c = ready.if_contains("checks"); c && c->is_object()) {
     for (const auto& kv : c->as_object()) {

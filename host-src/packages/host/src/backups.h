@@ -45,8 +45,9 @@ class BackupService {
   // Uploads what's queued and due; returns how many went up.
   int run_assets(int64_t now_ms, std::string* error);
   // Rotated logs queued under logs/archive/ (design/machine/032.Logs.md § 2): each packed,
-  // sealed, and put under logs/, its manifest beside it, then its queue link removed.
-  int run_logs(int64_t now_ms, std::string* error);
+  // sealed, and put under logs/, its manifest beside it, then its queue link removed. With
+  // older_than_ms, only those queued at least that long (the day's upload budget is spent).
+  int run_logs(int64_t now_ms, std::string* error, int64_t older_than_ms = 0);
   // The source mirror (020 § 10): what the source store has yet to put in the bucket, a
   // revision's patch or a deployed revision's tree, sealed; at most 25 a call. Returns how many
   // went up, or -1 with `error` (the next try then waits, from 10 s doubling to an hour).
@@ -62,6 +63,8 @@ class BackupService {
     int64_t nightly_ms = 0, increment_ms = 0, logs_ms = 0;
   };
   Times times();
+  // Bytes put in the bucket on now_ms's UTC day, every stream (019 § 9): one small read.
+  int64_t uploaded_today(int64_t now_ms);
   // The backup key, made on first use (keys/system/backup_key). nullopt with `error` if the
   // key store can't be written.
   std::optional<backup::Key> key(std::string* error);
@@ -76,6 +79,11 @@ class BackupService {
   bool seal_and_put(aws::S3& s3, const backup::Key& key, const std::filesystem::path& file, const std::string& object,
                     std::string* error);
   void scan_ledgers(int64_t now_ms);
+  // The upload budget (019 § 9): each object put counted by its stream on now_ms_'s day.
+  void record_upload(const std::string& object, int64_t bytes);
+  static int64_t uploaded_on_day(sqlite::Db& db, int64_t now_ms);
+  bool over_budget(int64_t now_ms);
+  int64_t now_ms_ = 0;  // the clock of the stream running now (tests bring their own)
   void rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t now_ms);
 
   ConfigFn config_;

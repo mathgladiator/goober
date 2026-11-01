@@ -10,6 +10,7 @@
 #include <tuple>
 #include <vector>
 
+#include "goober/base/time.h"
 #include "goober/sqlite/sqlite.h"
 
 namespace goober::operations {
@@ -418,6 +419,13 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
   db_->exec("CREATE INDEX IF NOT EXISTS service_failures_at ON service_failures (at_ms)");
   db_->exec(
       "CREATE TABLE IF NOT EXISTS cursors (name TEXT PRIMARY KEY, inode INTEGER NOT NULL, offset INTEGER NOT NULL)");
+  // Log volume (032 § 10): five-minute rows by who wrote, and a day's total per log for 90 days.
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS log_5m (t INTEGER NOT NULL, log TEXT NOT NULL, tenant TEXT NOT NULL, box TEXT NOT NULL,"
+      " route TEXT NOT NULL, bytes INTEGER NOT NULL, lines INTEGER NOT NULL, PRIMARY KEY (t, log, tenant, box, route))");
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS log_day (day INTEGER NOT NULL, log TEXT NOT NULL, bytes INTEGER NOT NULL,"
+      " lines INTEGER NOT NULL, counted INTEGER NOT NULL, PRIMARY KEY (day, log))");
   if (old) {
     {
       sqlite::Stmt q(*db_, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'gauge_minutes'");
@@ -446,6 +454,7 @@ size_t Traffic::catch_up(int64_t now_ms) {
   std::lock_guard lock(mu_);
   size_t lines = tail("access", now_ms) + tail("egress", now_ms) + tail("mail", now_ms);
   flush_gauges();
+  flush_logs();
   if (now_ms - last_drop_ms_ > 10 * kMinuteMs) {
     drop_old(now_ms);
   } else if (service_failures_added_) {
@@ -619,7 +628,10 @@ size_t Traffic::tail(const std::string& name, int64_t) {
 }
 
 namespace {
-constexpr const char* kRollups[] = {"route_5m", "edge_5m", "error_5m", "service_5m", "service_status_5m", "gauge_5m"};
+constexpr const char* kRollups[] = {"route_5m", "edge_5m", "error_5m", "service_5m", "service_status_5m", "gauge_5m", "log_5m"};
+constexpr int64_t kDayMs = 24 * kHourMs;
+constexpr int64_t kLogDaysKeptMs = 90 * kDayMs;
+std::string base_day(int64_t ms) { return base::format_utc_ms(ms).substr(0, 10); }
 }  // namespace
 
 void Traffic::drop_old(int64_t now_ms) {
@@ -628,6 +640,10 @@ void Traffic::drop_old(int64_t now_ms) {
     sqlite::Stmt s(*db_, std::string("DELETE FROM ") + table + " WHERE t < ?");
     s.bind(1, now_ms - kKeptMs);
     s.run();
+  }
+  {
+    sqlite::Stmt s(*db_, "DELETE FROM log_day WHERE day < ?");
+    s.bind(1, now_ms - kLogDaysKeptMs).run();
   }
   trim_service_failures(now_ms);
   // Over its byte budget (045.Limits.md), the oldest hour goes, until it fits or only the
@@ -1097,6 +1113,211 @@ bj::object Traffic::gauge_series(std::string_view window, const std::string& nam
                     {"to_ms", to},
                     {"points", std::move(pts)},
                     {"now", std::move(now)}};
+}
+
+// ---- Log volume (032 § 10) ----
+
+void Traffic::log_written(int64_t at_ms, const std::string& log, const std::string& tenant, const std::string& box,
+                          const std::string& route, int64_t bytes) {
+  if (bytes <= 0) return;
+  std::lock_guard lock(log_mu_);
+  auto& v = log_pending_[{at_ms / kBucketMs * kBucketMs, log, tenant, box, route}];
+  v.first += bytes;
+  v.second += 1;
+}
+
+void Traffic::flush_logs() {
+  decltype(log_pending_) pending;
+  {
+    std::lock_guard lock(log_mu_);
+    pending.swap(log_pending_);
+  }
+  if (pending.empty()) return;
+  std::map<std::pair<int64_t, std::string>, std::pair<int64_t, int64_t>> days;
+  db_->exec("BEGIN IMMEDIATE");
+  try {
+    for (const auto& [k, v] : pending) {
+      const auto& [t, log, tenant, box, route] = k;
+      sqlite::Stmt w(*db_,
+                     "INSERT INTO log_5m VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (t, log, tenant, box, route) DO UPDATE SET "
+                     "bytes = bytes + excluded.bytes, lines = lines + excluded.lines");
+      w.bind(1, t).bind(2, log).bind(3, tenant).bind(4, box).bind(5, route).bind(6, v.first).bind(7, v.second);
+      w.run();
+      auto& d = days[{t / kDayMs * kDayMs, log}];
+      d.first += v.first;
+      d.second += v.second;
+    }
+    // A day the files seeded becomes a counted one only from nothing: the counts never add to a seed.
+    for (const auto& [k, v] : days) {
+      sqlite::Stmt d(*db_,
+                     "INSERT INTO log_day VALUES (?, ?, ?, ?, 1) ON CONFLICT (day, log) DO UPDATE SET "
+                     "bytes = CASE WHEN counted THEN bytes + excluded.bytes ELSE bytes END, "
+                     "lines = CASE WHEN counted THEN lines + excluded.lines ELSE lines END");
+      d.bind(1, k.first).bind(2, k.second).bind(3, v.first).bind(4, v.second);
+      d.run();
+    }
+    db_->exec("COMMIT");
+  } catch (...) {
+    db_->exec("ROLLBACK");
+    throw;
+  }
+}
+
+int Traffic::seed_log_days(int64_t now_ms) {
+  int64_t today = now_ms / kDayMs * kDayMs;
+  // (day, log) -> bytes, from name.log.N files: each holds lines from the day its first line has
+  // (a log rotates at each UTC day, and within one by size).
+  std::map<std::pair<int64_t, std::string>, int64_t> days;
+  auto scan = [&](const fs::path& dir, const std::string& prefix) {
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      std::string file = it->path().filename().string();
+      auto dot = file.find(".log.");
+      if (dot == std::string::npos || dot == 0) continue;
+      std::string n = file.substr(dot + 5);
+      if (n.empty() || !std::all_of(n.begin(), n.end(), [](char c) { return c >= '0' && c <= '9'; })) continue;
+      std::ifstream in(it->path());
+      std::string first;
+      if (!std::getline(in, first)) continue;
+      auto a = first.find("\"at\":\"");
+      if (a == std::string::npos) continue;
+      auto at = parse_utc_ms(first.substr(a + 6, 24));
+      if (!at) continue;
+      std::error_code e2;
+      auto size = fs::file_size(it->path(), e2);
+      if (e2) continue;
+      int64_t day = *at / kDayMs * kDayMs;
+      if (day >= today || day < today - kLogDaysKeptMs) continue;
+      days[{day, prefix + file.substr(0, dot)}] += int64_t(size);
+    }
+  };
+  scan(logs_, "");
+  scan(logs_ / "boxes", "boxes/");
+  if (days.empty()) return 0;
+  std::lock_guard lock(mu_);
+  int added = 0;
+  for (const auto& [k, bytes] : days) {
+    sqlite::Stmt s(*db_, "INSERT OR IGNORE INTO log_day VALUES (?, ?, ?, 0, 0)");
+    s.bind(1, k.first).bind(2, k.second).bind(3, bytes);
+    s.run();
+    added += db_->changes() > 0 ? 1 : 0;
+  }
+  return added;
+}
+
+bj::object Traffic::log_velocity(std::string_view window, const std::string& log, int64_t now_ms, size_t top) {
+  auto w = Window::of(window).value_or(*Window::of("7d"));
+  std::lock_guard lock(mu_);
+  int64_t from = w.from(now_ms), to = w.to(now_ms);
+  int64_t today = now_ms / kDayMs * kDayMs;
+  size_t count = size_t(w.span_ms / w.step_ms);
+  auto wanted = [&](const std::string& l) { return log.empty() || l == log; };
+
+  struct Stat {
+    int64_t last_bytes = 0, last_lines = 0, today_bytes = 0;
+    std::vector<int64_t> history;  // the seven days before today that are known
+    std::vector<int64_t> points;
+  };
+  std::map<std::string, Stat> stats;
+  {
+    sqlite::Stmt s(*db_, "SELECT log, sum(bytes), sum(lines) FROM log_5m WHERE t >= ? GROUP BY log");
+    s.bind(1, now_ms - kDayMs);
+    while (s.step()) {
+      if (!wanted(s.text(0))) continue;
+      auto& st = stats[s.text(0)];
+      st.last_bytes = s.int64(1);
+      st.last_lines = s.int64(2);
+    }
+  }
+  bj::array days;
+  {
+    sqlite::Stmt s(*db_, "SELECT day, log, bytes, lines, counted FROM log_day WHERE day >= ? ORDER BY day DESC, log");
+    s.bind(1, today - kLogDaysKeptMs);
+    while (s.step()) {
+      std::string l = s.text(1);
+      if (!wanted(l)) continue;
+      int64_t day = s.int64(0), bytes = s.int64(2);
+      auto& st = stats[l];
+      if (day == today) st.today_bytes = bytes;
+      if (day < today && day >= today - 7 * kDayMs) st.history.push_back(bytes);
+      bj::object row{{"day", base_day(day)}, {"log", l}, {"bytes", bytes}, {"counted", s.int64(4) != 0}};
+      row["lines"] = s.int64(4) ? bj::value(s.int64(3)) : bj::value(nullptr);
+      days.push_back(std::move(row));
+    }
+  }
+  {
+    sqlite::Stmt s(*db_, "SELECT t, log, sum(bytes) FROM log_5m WHERE t >= ? AND t < ? GROUP BY t, log");
+    s.bind(1, from).bind(2, to);
+    while (s.step()) {
+      if (!wanted(s.text(1))) continue;
+      auto& st = stats[s.text(1)];
+      if (st.points.empty()) st.points.assign(count, 0);
+      size_t i = size_t((s.int64(0) - from) / w.step_ms);
+      if (i < count) st.points[i] += s.int64(2);
+    }
+  }
+  bj::array logs, series;
+  for (auto& [l, st] : stats) {
+    bj::object o{{"log", l}, {"last_24h_bytes", st.last_bytes}, {"last_24h_lines", st.last_lines},
+                 {"today_bytes", st.today_bytes}, {"days_known", int64_t(st.history.size())}};
+    bj::value median = nullptr, growth = nullptr;
+    bool grew = false;
+    if (!st.history.empty()) {
+      auto h = st.history;
+      std::sort(h.begin(), h.end());
+      int64_t m = h.size() % 2 ? h[h.size() / 2] : (h[h.size() / 2 - 1] + h[h.size() / 2]) / 2;
+      median = m;
+      if (h.size() >= 3 && m > 0) {
+        double g = double(st.last_bytes) / double(m);
+        growth = std::round(g * 100) / 100;
+        grew = g >= kGrowthFactor && st.last_bytes >= kGrowthFloorBytes;
+      }
+    }
+    o["median_day_bytes"] = median;
+    o["growth"] = growth;
+    o["grew"] = grew;
+    logs.push_back(std::move(o));
+    if (st.points.empty()) st.points.assign(count, 0);
+    bj::array pts;
+    for (auto v : st.points) pts.push_back(v);
+    series.push_back(bj::object{{"log", l}, {"points", std::move(pts)}});
+  }
+  // Biggest first.
+  std::sort(logs.begin(), logs.end(), [](const bj::value& a, const bj::value& b) {
+    return a.at("last_24h_bytes").as_int64() > b.at("last_24h_bytes").as_int64();
+  });
+  bj::array tops;
+  {
+    std::map<std::string, int64_t> per_log;
+    struct Row {
+      std::string log, tenant, box, route;
+      int64_t bytes, lines;
+    };
+    std::vector<Row> rows;
+    sqlite::Stmt s(*db_, "SELECT log, tenant, box, route, sum(bytes), sum(lines) FROM log_5m WHERE t >= ? AND t < ? "
+                         "GROUP BY log, tenant, box, route");
+    s.bind(1, from).bind(2, to);
+    while (s.step()) {
+      if (!wanted(s.text(0))) continue;
+      rows.push_back({s.text(0), s.text(1), s.text(2), s.text(3), s.int64(4), s.int64(5)});
+      per_log[rows.back().log] += rows.back().bytes;
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.bytes > b.bytes; });
+    for (size_t i = 0; i < rows.size() && i < top; ++i) {
+      const auto& r = rows[i];
+      int64_t all = per_log[r.log];
+      tops.push_back(bj::object{{"log", r.log}, {"tenant", r.tenant}, {"box", r.box}, {"route", r.route}, {"bytes", r.bytes},
+                                {"lines", r.lines}, {"share", all > 0 ? std::round(double(r.bytes) * 1000 / double(all)) / 1000 : 0.0}});
+    }
+  }
+  return bj::object{{"window", std::string(window)},
+                    {"step_ms", w.step_ms},
+                    {"from_ms", from},
+                    {"to_ms", to},
+                    {"logs", std::move(logs)},
+                    {"series", std::move(series)},
+                    {"days", std::move(days)},
+                    {"top", std::move(tops)}};
 }
 
 }  // namespace goober::operations

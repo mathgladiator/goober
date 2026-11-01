@@ -45,7 +45,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "library_list",    "library_get",       "operator_scope",   "invite_list",     "invite_get",
     "mail_preferences", "mail_lists",       "list_etags",       "url_check",       "page_lint",
     "approval_verify", "approval_list",     "tool_schemas",     "log_search",      "log_verify",
-    "log_status",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
+    "log_status",      "log_velocity",      "uri_stats",         "uri_tree",         "uri_flow",        "agent_audit",
     "source_checkout",
     "whats_new",
     "version_diff", "version_health",
