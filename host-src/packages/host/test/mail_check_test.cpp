@@ -240,7 +240,7 @@ TEST_F(MailCheckTest, AMailRouteMovesBetweenBoxesAndBack) {
   // Stored dark, with the conflict as a warning.
   auto dark = tool("version_upload", {{"manifest", agent_manifest}, {"wat", kAgentWat}, {"activate", false}});
   ASSERT_FALSE(dark.as_object().contains("error")) << json::dump(dark);
-  EXPECT_NE(json::dump(dark.at("warnings")).find("box_disable the other box first"), std::string::npos) << json::dump(dark);
+  EXPECT_NE(json::dump(dark.at("warnings")).find("box_disable it (or move its route) first"), std::string::npos) << json::dump(dark);
   std::string v(dark.at("version").as_string());
   EXPECT_EQ(tool("mail_route_check", {{"domain", "shop.test"}, {"address", "support"}}).at("box"), "desk");
   // Promoting it while desk holds the address is refused, saying by whom.

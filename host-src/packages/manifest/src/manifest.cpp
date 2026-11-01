@@ -5,6 +5,7 @@
 #include "goober/router/table.h"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 #include "goober/base/encoding.h"
@@ -1393,18 +1394,22 @@ static bool parse_role_change(const bj::value& v, const std::string& key, const 
   for (const auto& clause : route.requirements) anyone = anyone || clause.empty();
   if (anyone && target != "!user_id") {
     warnings->push_back(at + ": any signed-in user may " + (key == "grantable" ? "grant" : "revoke") +
-                        " these roles " + (key == "grantable" ? "to" : "from") + " any user named by {" + target + "}");
+                        " these roles " + (key == "grantable" ? "to" : "from") + " any user named by {" + target +
+                        "}, so anyone with an account can change another person's roles. Unless that is meant, "
+                        "require a role in this route's requirements.");
   }
   if (out->allow_self_revoke) {
     warnings->push_back(at + ".allow-self-revoke: the caller may lose access to this very route, and revoking an "
-                        "owner role can leave the realm with no owner, which only a host owner can repair");
+                        "owner role can leave the realm with no owner, which only a host owner can repair. Leave it "
+                        "off unless people must be able to leave a role on their own.");
   }
   // owner is the realm's own authority (it grants, and realm-wide clauses accept it): handing it
   // out from a route is allowed, but never quietly.
   if (key == "grantable" && std::find(out->options.begin(), out->options.end(), "owner") != out->options.end()) {
     warnings->push_back(at + ": owner is an option, so whoever this route lets in can make " +
                         (target == "!user_id" ? std::string("themselves") : "the user {" + target + "} names") +
-                        " an owner of the realm");
+                        " an owner of the realm, with every power over the site's people and roles. Grant a "
+                        "narrower role, or have an operator grant owner with role_grant.");
   }
   return true;
 }
@@ -1920,6 +1925,53 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
     if (!t.at_field.empty() && st->active_field.empty()) {
       return *error = "routes.timer: " + t.name + " fires once per row, so " + st->name +
                           " needs an active-field the host can turn off after the fire", std::nullopt;
+    }
+  }
+  // A role this box hands out that also gates one of its own routes is authority handed out by
+  // a route (043 § For the human, 2): allowed, never quietly. owner has its own warning above.
+  // Parameters compare as wildcards: admin/project_{id} gates what admin/project_{p} grants.
+  {
+    auto shape = [](const std::string& role) {
+      std::string out;
+      for (size_t i = 0; i < role.size(); ++i) {
+        if (role[i] == '{') {
+          out += "{}";
+          i = role.find('}', i);
+          if (i == std::string::npos) break;
+        } else {
+          out += role[i];
+        }
+      }
+      return out;
+    };
+    std::map<std::string, std::string> gates;  // a required role's shape -> the first route it gates
+    for (const auto* list : {&m.routes, &m.tools, &m.internal}) {
+      for (const auto& r : *list) {
+        for (const auto& clause : r.requirements) {
+          for (const auto& req : clause) gates.emplace(shape(req), r.name);
+        }
+      }
+    }
+    for (const auto& r : m.routes) {
+      if (!r.grantable.on) continue;
+      for (const auto& option : r.grantable.options) {
+        if (option == "owner") continue;
+        auto g = gates.find(shape(option));
+        if (g == gates.end()) continue;
+        // Delegation is quiet: when every clause that lets a caller in already asks for this role
+        // (or owner), granting it hands out nothing the caller doesn't hold.
+        bool delegation = true;
+        for (const auto& clause : r.requirements) {
+          bool holds = false;
+          for (const auto& req : clause) holds = holds || req == "owner" || shape(req) == shape(option);
+          delegation = delegation && holds;
+        }
+        if (delegation) continue;
+        m.warnings.push_back("routes: " + r.name + " can grant " + option + ", which this box also requires for " +
+                             g->second + ": whoever " + r.name + " lets in can open " + g->second +
+                             " (and any page that requires " + option + ") to the user they grant it to. If " + option +
+                             " is authority, grant it only from a route that trusted roles reach.");
+      }
     }
   }
   // An upgrade box is a pure function (420): only upgrade routes, all for one step, and nothing

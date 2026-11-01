@@ -314,7 +314,8 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
     std::string conflict;
     if (!activate(candidate, bundle, &conflict, true)) {
       result.warnings.push_back("not live-able while the active boxes are as they are: " + conflict +
-                                "; version_promote checks again (box_disable the other box first)");
+                                ". Stored dark, but version_promote will refuse it until the other box gives way: "
+                                "box_disable it (or move its route) first, then promote this one.");
     }
     if (!wal_.commit(bundle, error)) return std::nullopt;
     return result;
