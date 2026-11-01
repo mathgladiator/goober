@@ -46,6 +46,7 @@
 #include "goober/host/backup.h"
 #include "build_id.h"
 #include "goober/host/host.h"
+#include "../src/exports.h"
 #include "goober/host/operator_tokens.h"
 #include "../src/backups.h"
 #include "../src/keys.h"
@@ -76,6 +77,7 @@ constexpr const char* kUsage =
     "       goober-host vault key [--create] [--config host.json]   (prints the key that seals people's secrets;\n"
     "                                    --create makes it now if there is none, never replacing one)\n"
     "       goober-host backup list [--config host.json]\n"
+    "       goober-host export list|get ID [--out FILE]|delete ID [--config host.json]   (db_export's sealed CSVs)\n"
     "       goober-host toolchain [--config host.json]   (builds a Rust box as source_deploy would)\n"
     "       goober-host audit [--config host.json] [--caddyfile PATH] [--json]   (how the host is run: panel, mail, backups)\n"
     "       goober-host ids bump [--config host.json]   (after a restore, with the host stopped: no id is minted twice)\n"
@@ -254,10 +256,54 @@ int run_db(const std::vector<std::string>& args, const std::string& config_path)
 }
 
 struct Flags {
-  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts, project;
+  std::string tenant, at, from, bucket, region, endpoint, prefix, key_file, hosts, project, out;
   bool confirm = false, keep_keys = false, create = false;
   uint16_t port = 8080;
 };
+
+// db_export's sealed CSVs (008 § 7.1): only someone with this machine's shell opens one.
+int run_export(const std::vector<std::string>& args, const std::string& config_path, const Flags& flags) {
+  namespace ex = goober::host::exports;
+  std::string err;
+  auto config = goober::config::load_config(config_path, &err);
+  if (!config) return std::cerr << "goober-host: " << err << "\n", 1;
+  int64_t now = goober::base::now_unix_ms();
+  if (args.size() == 2 && args[1] == "list") {
+    auto all = ex::list(config->storage, now);
+    if (all.empty()) std::cout << "no exports (an agent makes one with db_export; each is kept 7 days)\n";
+    for (const auto& m : all) {
+      std::cout << m.id << "  " << m.tenant << "/" << m.database << "  " << m.rows << " rows, " << m.bytes << " bytes  by "
+                << m.operator_name << "  " << goober::base::format_utc_ms(m.created_ms) << "  expires "
+                << goober::base::format_utc_ms(m.expires_ms) << "\n    " << m.sql << "\n";
+    }
+    return 0;
+  }
+  if (args.size() == 3 && args[1] == "delete") {
+    bool gone = ex::remove(config->storage, args[2]);
+    cli_log(*config, "audit", bj::object{{"action", "export.delete"}, {"actor", "cli"}, {"target", "export:" + args[2]},
+                                         {"outcome", gone ? "ok" : "missing"}});
+    std::cout << (gone ? "deleted " : "no export ") << args[2] << "\n";
+    return gone ? 0 : 1;
+  }
+  if (args.size() == 3 && args[1] == "get") {
+    auto m = ex::find(config->storage, args[2], now);
+    if (!m) return std::cerr << "goober-host: no export " << args[2] << " (goober-host export list shows them)\n", 1;
+    goober::host::KeyStore keys(config->storage);
+    auto hex = keys.resolve("keys/system/vault_key", "");
+    auto root = hex ? goober::backup::parse_key(*hex) : std::nullopt;
+    if (!root) return std::cerr << "goober-host: no vault key on this host, so no export opens\n", 1;
+    std::string out = flags.out.empty() ? m->tenant + "-" + m->database + "-" + m->id + ".csv" : flags.out;
+    bool ok = ex::open_to(config->storage, *root, args[2], out, now, &err);
+    cli_log(*config, "audit", bj::object{{"action", "export.get"}, {"actor", "cli"}, {"target", "export:" + args[2]},
+                                         {"outcome", ok ? "ok" : "error"}, {"error", ok ? "" : err}});
+    if (!ok) return std::cerr << "goober-host: " << err << "\n", 1;
+    std::cout << "wrote " << out << " (" << m->rows << " rows, " << m->bytes << " bytes, sha256 " << m->sha256
+              << ", readable only by you); delete it when you're done\n";
+    return 0;
+  }
+  std::cerr << kUsage;
+  return 2;
+}
 
 std::string read_stdin() {
   std::string value, line;
@@ -459,7 +505,7 @@ int main(int argc, char** argv) {
     } else if (a == "--keep-keys") {
       flags.keep_keys = true;
     } else if ((a == "--hosts" || a == "--tenant" || a == "--at" || a == "--from" || a == "--bucket" || a == "--region" ||
-                a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port" || a == "--project") &&
+                a == "--endpoint" || a == "--prefix" || a == "--key-file" || a == "--port" || a == "--project" || a == "--out") &&
                i + 1 < argc) {
       std::string v = argv[++i];
       if (a == "--tenant") flags.tenant = v;
@@ -472,6 +518,7 @@ int main(int argc, char** argv) {
       if (a == "--prefix") flags.prefix = v;
       if (a == "--key-file") flags.key_file = v;
       if (a == "--project") flags.project = v;
+      if (a == "--out") flags.out = v;
       if (a == "--port") flags.port = uint16_t(std::atoi(v.c_str()));
     } else if (a == "--version") {
       std::cout << "goober-host " << goober::host::kVersion << " (" << kBuildCommit << ")\n";
@@ -488,6 +535,7 @@ int main(int argc, char** argv) {
   if (!positional.empty() && positional[0] == "key") return run_key(positional, config_path, flags);
   if (!positional.empty() && positional[0] == "rehydrate") return run_rehydrate(positional, flags);
   if (!positional.empty() && positional[0] == "source-mirror") return run_source_mirror(positional, flags);
+  if (!positional.empty() && positional[0] == "export") return run_export(positional, config_path, flags);
   // After restoring storage any way but rehydrate (038 § 6), with the host stopped.
   if (positional.size() == 2 && positional[0] == "ids" && positional[1] == "bump") {
     std::string err;

@@ -31,7 +31,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     for (const char* t :
          {"agent_token_mint", "attachment_delete", "attachment_get", "attachment_list", "attachment_put",
           "attachment_upload_url", "changes", "client_list", "client_put", "client_remove", "content_delete",
-          "content_get", "content_list", "content_put", "db_describe", "db_exec", "db_list", "db_query", "key_delete",
+          "content_get", "content_list", "content_put", "db_describe", "db_exec", "db_export", "db_list", "db_query", "key_delete",
           "key_set", "mail_activity", "mail_template_get", "mail_template_list", "mail_template_preview", "mail_template_send_test",
           "mail_template_put", "mail_template_remove", "mail_unsubscribed", "outbox_discard", "outbox_retry",
           "page_get", "page_list", "page_put", "page_render", "partial_delete", "partial_get", "partial_list",

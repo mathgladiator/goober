@@ -98,7 +98,7 @@ Read these before doing design work:
     as a template in the site's layout, never a page itself, and a box's empty 4xx gets it.
   - `design/machine/008.Databases.md`: tenant databases: JSON schemas that only expand,
     `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
-    the operator's db tools and CLI, and grants as a box's whole reach with `grant_usage`
+    the operator's db tools and CLI, sealed CSV exports a person fetches (§ 7.1), and grants as a box's whole reach with `grant_usage`
     (§ 4.1); snapshots, restoring to a new database, `db_create`, and drops only a person
     makes in the panel (§ 11).
   - `design/machine/009.OAuth.md`: OAuth 2.1 for the terminal and agents: person and agent

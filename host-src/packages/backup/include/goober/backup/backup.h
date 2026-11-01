@@ -32,6 +32,9 @@ Key new_key();
 // one, fails its check.
 bool seal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error,
                std::string_view context = {});
+// The same, from bytes in memory: nothing in the clear touches the disk.
+bool seal_bytes(const Key& key, std::string_view data, const std::filesystem::path& out, std::string* error,
+                std::string_view context = {});
 // Checks the tag before writing a byte: out appears only if the whole file is authentic.
 bool unseal_file(const Key& key, const std::filesystem::path& in, const std::filesystem::path& out, std::string* error,
                  std::string_view context = {});

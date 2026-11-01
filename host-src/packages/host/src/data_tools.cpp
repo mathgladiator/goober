@@ -11,6 +11,8 @@
 #include "grant_usage.h"
 #include "rust_binding.h"
 #include "keys.h"
+#include "exports.h"
+#include "goober/backup/backup.h"
 #include "goober/host/host.h"
 #include "timer_state.h"
 #include "goober/libraries/libraries.h"
@@ -886,6 +888,45 @@ void Host::register_data_tools() {
          auto r = databases_->operate(*tenant, *database, *sql, params, limit, false, &err);
          if (!r) return ToolResult::fail(err);
          return ToolResult::ok(std::move(*r));
+       }});
+
+  mcp_->add_tool(
+      {"db_export",
+       "Runs one read-only SQL statement like db_query, but returns no rows: the result (up to 100000 rows) is "
+       "written as a CSV sealed on the server, kept 7 days, and a person with the server's shell fetches it with "
+       "`goober-host export get <export>`. Use it for private rows (emails, names) that shouldn't pass through an "
+       "agent. Answers {export, rows, columns, bytes, sha256, expires, fetch}. Audited. Never waits for approval.",
+       object_schema({{"tenant", tenant_prop},
+                      {"database", db_prop},
+                      {"sql", string_property("One SELECT (or other read-only) statement.")},
+                      {"params", params_prop}},
+                     {"tenant", "database", "sql"}),
+       [this](const bj::object& args) {
+         auto tenant = arg(args, "tenant");
+         auto database = arg(args, "database");
+         auto sql = arg(args, "sql");
+         if (!tenant || !database || !sql) return ToolResult::fail("tenant, database, and sql are required");
+         auto it = args.find("params");
+         bj::value params = it == args.end() ? bj::value(nullptr) : it->value();
+         std::string err;
+         auto r = databases_->operate(*tenant, *database, *sql, params, exports::kMaxRows, false, &err);
+         if (!r) return ToolResult::fail(err);
+         // The vault key, made if none exists yet: the same one people's sealed secrets use.
+         if (!vault_tenant_key(*tenant, &err)) return ToolResult::fail(err);
+         auto hex = keys_->resolve("keys/system/vault_key", "");
+         auto root = hex ? backup::parse_key(*hex) : std::nullopt;
+         if (!root) return ToolResult::fail("keys/system/vault_key isn't readable");
+         auto m = exports::write(config_.get()->storage, *root, *tenant, *database, *sql, current_operator(), *r,
+                                 base::now_unix_ms(), &err);
+         audit("db.export", current_operator(), *tenant + "/" + *database, m ? "ok" : "error",
+               bj::object{{"export", m ? m->id : ""}, {"sql", *sql}, {"rows", m ? m->rows : 0}, {"error", m ? "" : err}});
+         if (!m) return ToolResult::fail(err);
+         auto out = m->to_json();
+         out.erase("sql");
+         out.erase("created_ms");
+         out.erase("expires_ms");
+         out["fetch"] = "goober-host export get " + m->id + " --out " + *tenant + "-" + *database + ".csv";
+         return ToolResult::ok(std::move(out));
        }});
 
   mcp_->add_tool(

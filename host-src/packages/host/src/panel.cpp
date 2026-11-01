@@ -119,6 +119,9 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   // one sees until a content_deploy (which waits) writes it.
   if (tool == "content_deploy") return flag("dry_run");
   if (tool == "content_stage") return true;
+  // An export hands the agent no rows: they're sealed for a person to fetch (008 § 7.1). Not a
+  // read tool, though, so observers and the look-only panel can't make one.
+  if (tool == "db_export") return true;
   // A change set's draft is the same: nothing is live until changeset_apply (which waits).
   if (tool == "changeset_create" || tool == "changeset_add" || tool == "changeset_discard") return true;
   // A try only looks when it is an HTTP GET or HEAD (read-only on live data); a write's, a

@@ -787,6 +787,11 @@ The human chose each as recommended:
       `db_describe` and the panel's database view; tests.
 - [ ] MCP tools that grant or revoke (accepted, not built: an agent's call isn't a person's act).
 
+### Phase 40: exports for a person (2026-10-31)
+- [x] `db_export` (008 § 7.1): a query's rows as a CSV sealed under the vault key on the server,
+      kept 7 days, out of backups; `goober-host export list|get|delete`; audited; never waits,
+      never for observers; tests.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

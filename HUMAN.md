@@ -326,6 +326,15 @@ type its name, and say why. The host refuses while any box uses it, and snapshot
 (the answer names the snapshot; `db_snapshots` lists them). Grok can't drop anything; it can
 list what could go (`db_unbound`) and ask you.
 
+## Fetch an export Grok made
+
+When Grok needs private rows to reach you (a list of emails, say), it runs `db_export` and
+gives you an id; the rows never pass through Grok. On the server:
+`sudo -u goober goober-host export list --config /srv/goober/host/host.json`, then
+`sudo -u goober goober-host export get ID --out /tmp/rows.csv --config /srv/goober/host/host.json`
+(readable only by the goober user; copy it off with `scp`, then delete it). Exports go away
+after 7 days, or now with `export delete ID`.
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone

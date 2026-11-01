@@ -8,8 +8,12 @@
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
+#include "goober/base/time.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
+#include "goober/backup/backup.h"
+#include "../src/exports.h"
+#include "../src/keys.h"
 
 using namespace goober;
 namespace asio = boost::asio;
@@ -705,4 +709,55 @@ TEST_F(DataRoutesTest, AJobStepUndoesItsWritesWithASavepoint) {
   };
   EXPECT_EQ(q("SELECT count(*) FROM members"), "[[0]]");
   EXPECT_EQ(q("SELECT name FROM legacy ORDER BY rowid"), R"([["a"],["b"],["FAILED step 1"]])");
+}
+
+// db_export (008 § 7.1): the rows go into a sealed CSV on the server, never into the answer.
+TEST_F(DataRoutesTest, ExportsSealRowsForAPersonToFetch) {
+  std::string err;
+  tool("schema_put", {{"schema", bj::object{{"schema", "notes1"},
+                                            {"tables", bj::object{{"notes", bj::object{{"columns", bj::object{
+                                                {"text", bj::object{{"type", "string"}}}}}}}}}}}});
+  ASSERT_TRUE(host->boxes().upload(kNotesManifest, kNotesWat, &err)) << err;
+  ASSERT_EQ(fetch(port, bhttp::verb::post, "/notes").status, 201);
+  tool("db_exec", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "INSERT INTO notes (text) VALUES (?)"},
+                   {"params", bj::array{"pat@example.com, \"quoted\""}}});
+
+  auto e = tool("db_export", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "SELECT text FROM notes ORDER BY rowid"}});
+  ASSERT_FALSE(e.as_object().contains("error")) << json::dump(e);
+  EXPECT_EQ(e.at("rows"), 2);
+  EXPECT_EQ(json::dump(e).find("pat@example.com"), std::string::npos) << "rows never reach the caller";
+  std::string id(e.at("export").as_string());
+  EXPECT_NE(std::string(e.at("fetch").as_string()).find("goober-host export get " + id), std::string::npos);
+
+  fs::path storage = root / "storage";
+  auto sealed = base::read_file(storage / "exports" / (id + ".csv.sealed"));
+  ASSERT_TRUE(sealed);
+  EXPECT_EQ(sealed->find("pat@example.com"), std::string::npos);
+
+  auto hex = host->keys().resolve("keys/system/vault_key", "");
+  ASSERT_TRUE(hex);
+  auto key = backup::parse_key(*hex);
+  ASSERT_TRUE(key);
+  int64_t now = base::now_unix_ms();
+  ASSERT_TRUE(host::exports::open_to(storage, *key, id, root / "out.csv", now, &err)) << err;
+  EXPECT_EQ(base::read_file(root / "out.csv"), "text\r\nhi\r\n\"pat@example.com, \"\"quoted\"\"\"\r\n");
+  EXPECT_EQ(fs::status(root / "out.csv").permissions() & fs::perms::all, fs::perms::owner_read | fs::perms::owner_write);
+  // Never over a file that's there, and never with another key.
+  EXPECT_FALSE(host::exports::open_to(storage, *key, id, root / "out.csv", now, &err));
+  EXPECT_FALSE(host::exports::open_to(storage, backup::new_key(), id, root / "other.csv", now, &err));
+  EXPECT_FALSE(fs::exists(root / "other.csv"));
+
+  // Listed while kept, gone after 7 days; audited; refused for a write.
+  EXPECT_EQ(host::exports::list(storage, now).size(), 1u);
+  EXPECT_TRUE(host::exports::list(storage, now + host::exports::kKeepMs + 1).empty());
+  EXPECT_FALSE(fs::exists(storage / "exports" / (id + ".csv.sealed")));
+  auto audit = base::read_file(storage / "logs/audit.log");
+  ASSERT_TRUE(audit);
+  EXPECT_NE(audit->find("db.export"), std::string::npos);
+  EXPECT_TRUE(tool("db_export", {{"tenant", "playground"}, {"database", "notes"}, {"sql", "DELETE FROM notes"}})
+                  .as_object()
+                  .contains("error"));
+  // An agent's export never waits for approval, but observers can't make one.
+  EXPECT_TRUE(host::Host::is_read_call("db_export", {}));
+  EXPECT_FALSE(host::Host::is_read_tool("db_export"));
 }

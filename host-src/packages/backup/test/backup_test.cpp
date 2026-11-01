@@ -67,6 +67,21 @@ TEST(Seal, RoundTripsAndRefusesTheWrongKeyOrATamperedFile) {
   EXPECT_EQ(base::read_file(d / "empty.back"), "");
 }
 
+TEST(Seal, BytesSealLikeAFileAndKeepTheirName) {
+  auto d = dir("seal-bytes");
+  Key key = new_key();
+  std::string data = "id,email\r\n1,a@example.com\r\n";
+  std::string err;
+  ASSERT_TRUE(seal_bytes(key, data, d / "sealed", &err, "export/acme/1")) << err;
+  auto sealed = base::read_file(d / "sealed");
+  ASSERT_TRUE(sealed);
+  EXPECT_EQ(sealed->find("a@example.com"), std::string::npos);
+  ASSERT_TRUE(unseal_file(key, d / "sealed", d / "back", &err, "export/acme/1")) << err;
+  EXPECT_EQ(base::read_file(d / "back"), data);
+  EXPECT_FALSE(unseal_file(key, d / "sealed", d / "other", &err, "export/acme/2"));
+  EXPECT_FALSE(fs::exists(d / "other"));
+}
+
 TEST(Seal, KeysAreHex) {
   Key k = new_key();
   EXPECT_EQ(parse_key(key_hex(k)), k);

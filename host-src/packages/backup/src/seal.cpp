@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <sstream>
 
 #include "goober/backup/backup.h"
 #include "goober/base/chacha20.h"
@@ -64,10 +65,10 @@ void bind_context(base::HmacSha256& mac, std::string_view context) {
   mac.update(context);
 }
 
-bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error,
-               std::string_view context) {
-  std::ifstream in(in_path, std::ios::binary);
-  if (!in) return *error = "can't read " + in_path.string(), false;
+namespace {
+
+bool seal_stream(const Key& key, std::istream& in, const std::string& in_name, const fs::path& out_path, std::string* error,
+                 std::string_view context) {
   std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
   if (!out) return *error = "can't write " + out_path.string(), false;
   std::array<uint8_t, kSalt> salt_bytes{};
@@ -91,12 +92,27 @@ bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path
     mac.update(std::string_view(buf.data(), n));
     out.write(buf.data(), std::streamsize(n));
   }
-  if (in.bad()) return *error = "reading " + in_path.string() + " failed", false;
+  if (in.bad()) return *error = "reading " + in_name + " failed", false;
   auto tag = mac.finish();
   out.write(reinterpret_cast<const char*>(tag.data()), tag.size());
   out.flush();
   if (!out) return *error = "writing " + out_path.string() + " failed", false;
   return true;
+}
+
+}  // namespace
+
+bool seal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error,
+               std::string_view context) {
+  std::ifstream in(in_path, std::ios::binary);
+  if (!in) return *error = "can't read " + in_path.string(), false;
+  return seal_stream(key, in, in_path.string(), out_path, error, context);
+}
+
+bool seal_bytes(const Key& key, std::string_view data, const fs::path& out_path, std::string* error,
+                std::string_view context) {
+  std::istringstream in{std::string(data)};
+  return seal_stream(key, in, "the data", out_path, error, context);
 }
 
 bool unseal_file(const Key& key, const fs::path& in_path, const fs::path& out_path, std::string* error,
