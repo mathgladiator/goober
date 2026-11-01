@@ -323,6 +323,10 @@ class Host {
   void register_try_tools();
   std::mutex trying_mu_;
   std::set<std::string> trying_;  // operators with a route_try running: one at a time each
+  // Held by every content write that checks if_etag, across the check and the write, so two
+  // writers who read the same file_etag can't both land (recursive: content_deploy and change
+  // sets write through the same tools).
+  std::recursive_mutex content_writes_mu_;
   // Content: pages, templates, listings, and static files (007.Content.md).
   void serve_content(const server::http::Request& req, const Finish& finish, const std::string& tenant,
                      const std::string& path);

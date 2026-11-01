@@ -67,6 +67,13 @@ const char* kWat = R"wat((module
   (func (export "goober_route_withdraw") (result i32) (call $answer (call $revoke (i32.const 32) (i32.const 9))))
   (func (export "goober_route_sneak") (result i32) (call $answer (call $grant (i32.const 64) (i32.const 5))))
   (func (export "goober_route_promote") (result i32) (call $answer (call $grant (i32.const 96) (i32.const 6))))
+  (func (export "goober_route_flood") (result i32)
+    (local $i i32) (local $rc i32)
+    (loop $again
+      (local.set $rc (call $grant (i32.const 32) (i32.const 9)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $again (i32.lt_u (local.get $i) (i32.const 17))))
+    (call $answer (local.get $rc)))
   (func (export "goober_route_failing") (result i32)
     (drop (call $grant (i32.const 32) (i32.const 9)))
     (drop (call $respond (i32.const 500) (i32.const 0) (i32.const 10) (i32.const 0) (i32.const 0)))
@@ -79,6 +86,7 @@ const char* kManifest = R"({"box":"gate","domains":["*"],"routes":{"http":{
     "delete":{"name":"withdraw","requirements":[],
               "revocable":{"options":["consented"],"to":"{!user_id}","allow-self-revoke":true}}},
   "/sneak":{"post":{"name":"sneak","requirements":[],"grantable":{"options":["consented"],"to":"{!user_id}"}}},
+  "/flood":{"post":{"name":"flood","requirements":[],"grantable":{"options":["consented"],"to":"{!user_id}"}}},
   "/failing":{"post":{"name":"failing","requirements":[],"grantable":{"options":["consented"],"to":"{!user_id}"}}},
   "/members/{to : int64}/promote":{"post":{"name":"promote","requirements":[["owner"]],
                                            "grantable":{"options":["member"],"to":"{to}"}}}}}})";
@@ -242,4 +250,22 @@ TEST(RoleChanges, TheManifestSaysWhoMayGrantWhat) {
   ASSERT_TRUE(anyone) << err;
   ASSERT_EQ(anyone->warnings.size(), 1u);
   EXPECT_NE(anyone->warnings.at(0).find("any signed-in user may grant"), std::string::npos);
+}
+
+// A call asks for at most 16 changes: the 17th is refused, so a loop in a box can't turn one
+// request into a flood of realm writes and audit lines. A try asks too, but changes nothing.
+TEST_F(RolesTest, ACallChangesAFewRolesAndATryNone) {
+  auto up = tool("version_upload", {{"manifest", kManifest}, {"wat", kWat}});
+  ASSERT_FALSE(up.as_object().contains("error")) << json::dump(up);
+  std::string ann = sign_in("ann@example.com");
+  ASSERT_FALSE(ann.empty());
+  EXPECT_EQ(post("/flood", ann), 409);
+
+  std::string bob = sign_in("bob@example.com");
+  ASSERT_FALSE(bob.empty());
+  auto tried = tool("route_try", {{"domain", "shop.example.com"}, {"box", "gate"}, {"path", "/consent"}, {"method", "post"},
+                                  {"as", bj::object{{"email", "bob@example.com"}}}});
+  ASSERT_FALSE(tried.as_object().contains("error")) << json::dump(tried);
+  EXPECT_EQ(tried.at("status"), 204) << json::dump(tried);
+  EXPECT_TRUE(roles_of("bob@example.com").empty());
 }

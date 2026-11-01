@@ -467,6 +467,7 @@ void Host::register_tools() {
                                                   "only a new file.")}},
                      {"tenant", "path"}),
        [this](const bj::object& args) {
+         std::lock_guard writes(content_writes_mu_);  // if_etag holds until the write lands
          auto tenant = arg(args, "tenant");
          auto path = arg(args, "path");
          if (!tenant || !path) return ToolResult::fail("tenant and path are required");

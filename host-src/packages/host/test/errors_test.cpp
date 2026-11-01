@@ -148,6 +148,18 @@ TEST_F(ErrorsTest, ErrorPagesWearTheSiteLayoutAndArentPagesOfTheirOwn) {
   EXPECT_NE(refused.body.find("content_put"), std::string::npos) << refused.body;
 }
 
+// An error page that doesn't render gives way to the host's own, never its template's text.
+TEST_F(ErrorsTest, ABrokenErrorPageFallsBackToTheHostsOwn) {
+  std::string err;
+  ASSERT_TRUE(host->content().put("example", "error-message/404.html",
+                                  "---\nlayout: no_such_layout\n---\n<p>{{#unclosed}} secret-template-text</p>", &err));
+  auto r = fetch(port, bhttp::verb::get, "/no/such/page", {{"accept", "text/html"}});
+  EXPECT_EQ(r.status, 404);
+  EXPECT_NE(r.body.find("404 Not Found"), std::string::npos) << r.body;
+  EXPECT_EQ(r.body.find("secret-template-text"), std::string::npos) << r.body;
+  EXPECT_EQ(r.body.find("layout:"), std::string::npos) << r.body;
+}
+
 // A box's 4xx with nothing in it gets the site's error page; one with a body keeps its own.
 TEST_F(ErrorsTest, ABoxsEmpty404GetsTheSitesPage) {
   std::string err;

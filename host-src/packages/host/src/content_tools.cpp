@@ -574,6 +574,7 @@ void Host::register_content_tools() {
                                                   "wrote it since you read it: page_get it again.")}},
                      {"tenant", "path", "format", "body"}),
        [this, known_tenant](const bj::object& args) {
+         std::lock_guard writes(content_writes_mu_);  // if_etag holds until the write lands
          auto tenant = arg(args, "tenant");
          auto path = arg(args, "path");
          auto format = arg(args, "format");
@@ -686,6 +687,7 @@ void Host::register_content_tools() {
                                                   "partial_list, list_etags); \"none\" writes only a new one.")}},
                      {"tenant", "name", "html"}),
        [this, partial_file, versions_of, check_name](const bj::object& args) {
+         std::lock_guard writes(content_writes_mu_);  // if_etag holds until the write lands
          auto tenant = arg(args, "tenant");
          auto name = arg(args, "name");
          auto html = arg(args, "html");
@@ -782,6 +784,7 @@ void Host::register_content_tools() {
                       {"if_etag", string_property("Delete only if the stored partial's file_etag is this.")}},
                      {"tenant", "name"}),
        [this, partial_file, check_name](const bj::object& args) {
+         std::lock_guard writes(content_writes_mu_);  // if_etag holds until the delete lands
          auto tenant = arg(args, "tenant");
          auto name = arg(args, "name");
          if (!tenant || !name || !check_name(*name)) return ToolResult::fail("tenant and a partial's name are required");
@@ -1142,6 +1145,7 @@ void Host::register_content_tools() {
                                                   "new one.")}},
                      {"tenant", "name", "template"}),
        [this](const bj::object& args) {
+         std::lock_guard writes(content_writes_mu_);  // if_etag holds until the write lands
          auto tenant = arg(args, "tenant");
          auto name = arg(args, "name");
          auto text = arg(args, "template");
@@ -1169,6 +1173,7 @@ void Host::register_content_tools() {
                                  {"if_etag", string_property("Delete only if the stored template's file_etag is this.")}},
                                 {"tenant", "name"}),
                   [this](const bj::object& args) {
+                    std::lock_guard writes(content_writes_mu_);  // if_etag holds until the delete lands
                     auto tenant = arg(args, "tenant");
                     auto name = arg(args, "name");
                     if (!tenant || !name || !valid_template_name(*name)) return ToolResult::fail("tenant and a template name are required");
@@ -1683,6 +1688,7 @@ void Host::register_content_kit_tools() {
                                                  "items given here on top.")}},
                      {"tenant"}),
        [this, known_tenant, check_path, preview_path](const bj::object& given) {
+         std::lock_guard writes(content_writes_mu_);  // every item's if_etag holds until it's written
          bj::object args = given;
          auto tenant = arg(args, "tenant");
          if (!tenant || !known_tenant(*tenant)) return ToolResult::fail("no domain in the host config serves that tenant");

@@ -40,6 +40,9 @@ using server::http::Response;
 
 namespace {
 
+// Roles one box call may grant or revoke (013 § Granting and revoking roles).
+constexpr size_t kMaxRoleChanges = 16;
+
 std::string new_request_id() {
   uint8_t bytes[8];
   base::os_random_fill(bytes);
@@ -768,14 +771,17 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
     auto html = site_->render_named(tenant.empty() ? std::string(content::kHostTree) : tenant, "goober-error-page",
                                     std::move(data), &inline_templates, &err);
     if (!html) {
+      // Never the template's own text (its front matter, its tags): the built-in page below.
       std::cerr << "goober-host: error page " << file << " for " << tenant << ": " << err << "\n";
-      res.body = std::move(page->data);
     } else if (!tenant.empty()) {
       res.body = site::expand_includes(*content_, tenant, *html, "", false).html;
+      return res;
     } else {
       res.body = std::move(*html);
+      return res;
     }
-  } else if (status == 401) {
+  }
+  if (status == 401) {
     res.body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Uh Oh!</title>"
                "<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem}"
                "code{color:#666}</style></head><body><h1>Uh Oh!</h1><p>401 Unauthorized: this page needs you to "
@@ -1164,7 +1170,14 @@ std::string Host::client_address(const Request& req) const {
     std::string last = comma == std::string::npos ? xff : xff.substr(comma + 1);
     while (!last.empty() && last.front() == ' ') last.erase(0, 1);
     while (!last.empty() && last.back() == ' ') last.pop_back();
-    if (!last.empty() && last.size() <= 64) return last;
+    // Only an address: a box that declares client-ip is handed this string as the caller's
+    // address, and rate limits key on it, so nothing else a header can say passes as one.
+    in6_addr a6;
+    in_addr a4;
+    if (!last.empty() && last.size() <= 45 &&
+        (inet_pton(AF_INET, last.c_str(), &a4) == 1 || inet_pton(AF_INET6, last.c_str(), &a6) == 1)) {
+      return last;
+    }
   }
   return req.remote;
 }
@@ -1316,6 +1329,11 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       const auto& rc = grant ? route.grantable : route.revocable;
       std::string role(asked);
       if (!rc.on) return std::string("this route declares no ") + (grant ? "grantable" : "revocable") + " roles";
+      // Each accepted change is a realm write and an audit line after the commit: a call takes a
+      // handful, not a loop's worth.
+      if (role_requests.size() >= kMaxRoleChanges) {
+        return "a call changes at most " + std::to_string(kMaxRoleChanges) + " roles";
+      }
       if (!who) return "no one is signed in";
       if (who->host) return "a host identity's call can't change this realm's roles";
       if (who->agent) return "an agent's call can't change roles; a person's own call does";

@@ -5,6 +5,8 @@
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
+#include <atomic>
+#include <thread>
 
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
@@ -1015,4 +1017,19 @@ TEST_F(SiteRoutesTest, PagesCarryADeepLinksFragmentThroughReturnFlows) {
   // The fragment the script carries survives in the sign-in page's return field.
   auto sign_in = fetch(port, bhttp::verb::get, "/identity/sign-in?return=%2Fguide%23install", {{"accept", "text/html"}});
   EXPECT_NE(sign_in.body.find("value=\"/guide#install\""), std::string::npos) << sign_in.body;
+}
+
+// Writers who read the same file_etag race: exactly one lands, whatever the threads do.
+TEST_F(SiteRoutesTest, IfEtagLetsOneOfManyRacingWritersLand) {
+  std::atomic<int> landed{0};
+  std::vector<std::thread> writers;
+  for (int i = 0; i < 8; ++i) {
+    writers.emplace_back([&, i] {
+      auto r = tool("partial_put", {{"tenant", "playground"}, {"name", "raced"},
+                                    {"html", "<p>writer " + std::to_string(i) + "</p>"}, {"if_etag", "none"}});
+      if (!r.as_object().contains("error")) ++landed;
+    });
+  }
+  for (auto& t : writers) t.join();
+  EXPECT_EQ(landed.load(), 1);
 }

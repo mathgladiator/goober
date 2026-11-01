@@ -746,6 +746,15 @@ TEST_F(DataRoutesTest, ExportsSealRowsForAPersonToFetch) {
   EXPECT_FALSE(host::exports::open_to(storage, *key, id, root / "out.csv", now, &err));
   EXPECT_FALSE(host::exports::open_to(storage, backup::new_key(), id, root / "other.csv", now, &err));
   EXPECT_FALSE(fs::exists(root / "other.csv"));
+  // A link made ahead of time at out (in a shared /tmp, say) is never written through, even a
+  // dangling one, and no plaintext is left beside out or in the exports directory.
+  fs::create_symlink(root / "victim", root / "link.csv");
+  EXPECT_FALSE(host::exports::open_to(storage, *key, id, root / "link.csv", now, &err));
+  EXPECT_FALSE(fs::exists(root / "victim"));
+  EXPECT_FALSE(fs::exists(root / "link.csv.unsealing"));
+  for (const auto& e : fs::directory_iterator(storage / "exports")) {
+    EXPECT_TRUE(e.path().extension() == ".sealed" || e.path().extension() == ".json") << e.path();
+  }
 
   // Listed while kept, gone after 7 days; audited; refused for a write.
   EXPECT_EQ(host::exports::list(storage, now).size(), 1u);

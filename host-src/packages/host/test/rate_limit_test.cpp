@@ -83,4 +83,12 @@ TEST(RateLimits, SignInGuessingIsSlowedPerAddress) {
   EXPECT_EQ(post(port, "/identity/email/verify", "email=a%40b.c&code=000000",
                  {{"x-forwarded-for", "198.51.100.9, 203.0.113.7"}}),
             429);
+  // A last hop that isn't an address is no one's: such requests share the connection's own
+  // address, so varying junk can't mint a fresh bucket per request.
+  int junk_limited = 0;
+  for (int i = 0; i < 15; ++i) {
+    std::string junk = "not-an-address-" + std::to_string(i);
+    if (post(port, "/identity/email/verify", "email=a%40b.c&code=000000", {{"x-forwarded-for", junk}}) == 429) ++junk_limited;
+  }
+  EXPECT_EQ(junk_limited, 5);
 }

@@ -2,10 +2,14 @@
 
 #include "exports.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 
 #include "goober/backup/backup.h"
 #include "goober/base/files.h"
@@ -187,17 +191,45 @@ bool open_to(const fs::path& storage, const vault::Key& vault_key, const std::st
              std::string* error) {
   auto m = find(storage, id, now_ms);
   if (!m) return *error = "no export " + id + " (exports are kept 7 days; `goober-host export list` shows them)", false;
-  std::error_code ec;
-  if (fs::exists(out, ec)) return *error = out.string() + " exists already; name another file with --out", false;
-  mode_t old = ::umask(077);
-  bool ok = backup::unseal_file(vault::tenant_key(vault_key, m->tenant), dir(storage) / (id + ".csv.sealed"), out, error,
-                                context(m->tenant, id));
-  ::umask(old);
-  if (!ok) {
+  // The plaintext appears first inside the exports directory, which only the host's user can
+  // enter, never beside out: out's directory may be shared (/tmp), where a name made ahead of
+  // this (a link to a file the host's user owns) would be written through.
+  fs::path opening = dir(storage) / (id + ".csv.opening");
+  struct Cleanup {
+    fs::path p;
+    ~Cleanup() {
+      std::error_code ec;
+      fs::remove(p, ec);
+      fs::remove(p.string() + ".unsealing", ec);
+    }
+  } cleanup{opening};
+  if (!backup::unseal_file(vault::tenant_key(vault_key, m->tenant), dir(storage) / (id + ".csv.sealed"), opening, error,
+                           context(m->tenant, id))) {
     *error = "export " + id + " doesn't open: the vault key changed, or the file was altered (" + *error + ")";
     return false;
   }
-  fs::permissions(out, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+  auto csv = base::read_file(opening);
+  if (!csv) return *error = "can't read " + opening.string(), false;
+  // A new file, never an existing one or a link, readable only by whoever runs this.
+  int fd = ::open(out.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    if (errno == EEXIST || errno == ELOOP) return *error = out.string() + " exists already; name another file with --out", false;
+    return *error = "can't create " + out.string() + ": " + std::strerror(errno), false;
+  }
+  size_t done = 0;
+  while (done < csv->size()) {
+    ssize_t n = ::write(fd, csv->data() + done, csv->size() - done);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    done += size_t(n);
+  }
+  bool ok = done == csv->size() && ::fsync(fd) == 0;
+  ::close(fd);
+  if (!ok) {
+    std::error_code ec;
+    fs::remove(out, ec);
+    return *error = "writing " + out.string() + " failed", false;
+  }
   return true;
 }
 
