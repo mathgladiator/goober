@@ -238,6 +238,44 @@ function latencyChart(series) {
     h('span', {}, h('i', { class: 'l50' }), 'p50'), h('span', {}, h('i', { class: 'l99' }), 'p99')));
 }
 
+// A sampled level per point (the outbox's waiting elements), on a linear scale; a gap where the
+// host took no sample.
+function levelChart(series, label) {
+  const pts = series.points, W = 900, H = 120, L = 44, B = 22, T = 8;
+  const vals = pts.map((p) => p.value).filter((v) => v !== null && v !== undefined);
+  const g = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': label + ' over time' });
+  if (!vals.length) {
+    g.appendChild(s('text', { x: W / 2, y: H / 2, 'text-anchor': 'middle' }, 'no samples in this window'));
+    return g;
+  }
+  const max = niceMax(Math.max(1, ...vals));
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const bw = (W - L) / pts.length;
+  for (const f of [0, 0.5, 1]) {
+    g.appendChild(s('line', { class: 'axis', x1: L, x2: W, y1: y(max * f), y2: y(max * f) }));
+    g.appendChild(s('text', { x: L - 6, y: y(max * f) + 4, 'text-anchor': 'end' }, fmt.n(max * f)));
+  }
+  let d = '';
+  pts.forEach((p, i) => {
+    if (p.value === null || p.value === undefined) return;
+    const prev = pts[i - 1];
+    d += (d && prev && prev.value !== null && prev.value !== undefined ? 'L' : 'M') +
+      (L + i * bw + bw / 2).toFixed(1) + ' ' + y(p.value).toFixed(1);
+    const hover = s('rect', { class: 'hover', x: L + i * bw, width: bw, y: T, height: H - T - B });
+    hover.appendChild(s('title', {}, `${fmt.clock(p.t, series.step_ms)} · at most ${fmt.n(p.value)} ${label}`));
+    g.appendChild(hover);
+  });
+  g.appendChild(s('path', { class: 'l99', d }));
+  timeAxis(g, series, L, W, H - 6);
+  return h('div', {}, g, h('div', { class: 'legend' }, h('span', {}, h('i', { class: 'l99' }), label + ' (the most at once)')));
+}
+
+// A service_report's series as the stacked and latency charts read them: calls that went and
+// failed, and n for "had calls".
+function serviceSeries(r) {
+  return { ...r, points: r.points.map((p) => ({ ...p, n: p.calls, ok: p.calls - p.failed })) };
+}
+
 function timeAxis(g, series, L, W, y) {
   const pts = series.points, ticks = 6, bw = (W - L) / pts.length;
   for (let i = 0; i < ticks; i++) {
@@ -302,7 +340,7 @@ function flowGraph(graph, onNode) {
   }
   for (const n of graph.nodes) {
     const p = at[n.id];
-    const clickable = n.kind === 'box' && onNode;
+    const clickable = (n.kind === 'box' || n.kind === 'service') && onNode;
     const grp = s('g', { class: 'node ' + n.kind + (clickable ? ' click' : ''), transform: `translate(${p.x},${p.y})` });
     grp.appendChild(s('rect', { width: NW, height: NH, rx: 8 }));
     if (n.kind === 'box') {
@@ -317,6 +355,12 @@ function flowGraph(graph, onNode) {
   return h('div', { class: 'scroll' }, g);
 }
 
+// A box opens its page; a service its page in Services.
+function openNode(n) {
+  if (n.kind === 'service') location.hash = '#/services?service=' + encodeURIComponent(n.mailer ? 'mailer' : n.label);
+  else location.hash = '#/box/' + encodeURIComponent(n.label);
+}
+
 function nodeSub(n) {
   switch (n.kind) {
     case 'tenant': return (n.domains || []).join(', ') || 'tenant';
@@ -324,7 +368,11 @@ function nodeSub(n) {
     case 'route': return `${fmt.n(n.n || 0)} · p99 ${fmt.us(n.p99_us)}` + (n.n5 ? ` · ${fmt.n(n.n5)} 5xx` : '');
     case 'database': return 'database';
     case 'table': return 'table in ' + (n.database || '');
-    case 'service': return n.mail ? 'mail' : n.web ? 'the web (robot)' : (n.base || 'service');
+    case 'service': {
+      const what = n.mailer ? 'sends every mail' : n.mail ? 'mail' : n.web ? 'the web (robot)' : (n.base || 'service');
+      if (!n.calls) return what;
+      return `${fmt.n(n.calls)} calls` + (n.failed ? ` · ${fmt.n(n.failed)} failed` : '') + (n.p99_us ? ` · p99 ${fmt.us(n.p99_us)}` : '');
+    }
     case 'pages': return 'pages and files';
     case 'host': return 'host routes';
     default: return n.kind;
@@ -411,6 +459,47 @@ function focusNote(what) {
     ' An owner can widen your scope in ', h('a', { href: '#/operators' }, 'Operators'), '.');
 }
 
+// The service's key graphs (028 § 4.5): requests, the error rate, latency, box failures, calls
+// out to services, the outbox (deliveries and the queue), and mail, over the window.
+async function keyGraphs(tenant, traffic) {
+  const args = tenant ? { window: state.window, tenant } : { window: state.window };
+  const [failures, services, mailer] = await Promise.all([
+    api('box_failures', { ...args, latest: 1 }), api('service_report', { ...args, latest: 1 }),
+    api('service_report', { ...args, service: 'mailer', latest: 1 })]);
+  const svc = serviceSeries(services), mail = serviceSeries(mailer);
+  const t = traffic.series.points.reduce((a, p) => ({ n: a.n + p.n, n4: a.n4 + p.n4, n5: a.n5 + p.n5 }), { n: 0, n4: 0, n5: 0 });
+  const waiting = (services.outbox.now || []).reduce((a, x) => a + x.value, 0);
+  const more = (href, text) => h('p', {}, h('a', { href }, text));
+  return [
+    h('h2', { class: 'section' }, 'Key graphs'),
+    h('div', { class: 'stats' },
+      stat(fmt.n(t.n), 'requests'), stat(fmt.pct(t.n4, t.n), '4xx'), stat(fmt.pct(t.n5, t.n), '5xx'),
+      stat(fmt.pct(failures.totals.failures, failures.totals.calls), 'box calls failed'),
+      stat(fmt.n(services.totals.calls - mailer.totals.calls), 'calls out'),
+      stat(fmt.pct(services.totals.failed - mailer.totals.failed, services.totals.calls - mailer.totals.calls), 'of them failed'),
+      stat(fmt.n(waiting), 'waiting in the outbox'),
+      stat(fmt.n(mailer.totals.calls - mailer.totals.failed), 'mails sent'), stat(fmt.n(mailer.totals.failed), 'mails failed')),
+    h('div', { class: 'grid' },
+      card('Requests', requestsChart(traffic.series)),
+      card('Error rate', stackedChart(traffic.series, [
+        { key: 'n4', cls: 's4', label: '4xx' }, { key: 'n5', cls: 's5', label: '5xx' }], 'n', 'requests', 'Errors over time'),
+        more('#/errors', 'Errors →')),
+      card('Latency', latencyChart(traffic.series)),
+      card('Box failures', stackedChart(failures, [
+        { key: 'failures', cls: 's5', label: 'failed calls' }, { key: 'sql', cls: 's4', label: 'SQL' },
+        { key: 'outbox', cls: 'fp', label: 'deliveries' }, { key: 'internal', cls: 's3', label: 'calls to boxes' }],
+        'calls', 'box calls', 'Box failures over time'), more('#/failures', 'Box failures →')),
+      card('Calls out to services', stackedChart(svc, [
+        { key: 'ok', cls: 's2', label: 'answered' }, { key: 'failed', cls: 's5', label: 'failed' }],
+        'calls', 'calls (mail included)', 'Calls out over time'), latencyChart(svc), more('#/services', 'Services →')),
+      card('Outbox', stackedChart(svc, [{ key: 'outbox', cls: 'fp', label: 'deliveries' }], 'calls', 'calls out', 'Outbox deliveries over time'),
+        levelChart(services.outbox, 'waiting')),
+      card('Mail', stackedChart(mail, [
+        { key: 'ok', cls: 's2', label: 'sent' }, { key: 'failed', cls: 's5', label: 'failed' }], 'calls', 'mails', 'Mail over time'),
+        more('#/services?service=mailer', 'The mailer →'))),
+  ];
+}
+
 const views = {
   async overview() {
     if (focus()) {
@@ -420,9 +509,7 @@ const views = {
       return [
         h('div', { class: 'bar' }, h('h1', {}, 'Overview of ' + tenant), h('span', { class: 'muted' }, '·'), windowPicker(render)),
         focusNote('The host\'s health and heat are left out.'),
-        h('div', { class: 'grid' },
-          wideCard('Requests', requestsChart(traffic.series)),
-          wideCard('Latency', latencyChart(traffic.series))),
+        ...await keyGraphs(tenant, traffic),
         h('div', { class: 'grid' },
           wideCard('Newest changes', changes.changes.length ? changesTable(changes.changes) : h('p', { class: 'muted' }, 'No changes recorded yet.'),
             h('p', {}, h('a', { href: '#/changes' }, 'All changes →')))),
@@ -431,6 +518,7 @@ const views = {
     const [health, traffic, hot, changes] = await Promise.all([
       api('host_health'), api('traffic', { window: state.window }), api('hot_boxes', { window: state.window }),
       api('changes', { limit: 8 })]);
+    const graphs = await keyGraphs('', traffic);
     const pts = traffic.series.points;
     const total = pts.reduce((a, p) => a + p.n, 0), errs = pts.reduce((a, p) => a + p.n5, 0);
     const notes = health.startup_notes || [];
@@ -444,9 +532,7 @@ const views = {
           stat(health.mail, 'mail'), stat(health.backups && health.backups.enabled ? (health.backups.healthy === false ? 'failing' : 'on') : 'off', 'backups'),
           health.sandbox ? stat('yes', 'sandbox') : null)),
         card('Hot boxes', heatmap(hot.boxes))),
-      h('div', { class: 'grid' },
-        wideCard('Requests', requestsChart(traffic.series)),
-        wideCard('Latency', latencyChart(traffic.series))),
+      ...graphs,
       h('div', { class: 'grid' },
         wideCard('Newest changes', changes.changes.length ? changesTable(changes.changes) : h('p', { class: 'muted' }, 'No changes recorded yet: the log starts with this version of the host.'), h('p', {}, h('a', { href: '#/changes' }, 'All changes →')))),
     ];
@@ -595,17 +681,123 @@ const views = {
     ];
   },
 
+  // What went out to services (028 § 4.4): the mailer, push, the robot, and every service boxes
+  // call; one service's methods, statuses, and latest failures when one is picked.
+  async services(params) {
+    const tenants = state.me.tenants || [];
+    const tenant = params.get('tenant') || (focus() ? focus()[0] : ''), service = params.get('service') || '';
+    const args = { window: state.window, latest: 100 };
+    if (tenant) args.tenant = tenant;
+    if (service) args.service = service;
+    const r = await api('service_report', args);
+    const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); location.hash = '#/services' + (params.toString() ? '?' + params : ''); };
+    const t = r.totals, series = serviceSeries(r);
+    const kinds = { mailer: 'the host\'s mailer', mail: 'a box\'s mail', web: 'the web (robot)', push: 'web push', external: 'external' };
+    const fail = (x) => x.failed ? fmt.n(x.failed) + ' (' + fmt.pct(x.failed, x.calls) + ')' : '';
+    const outboxNow = (r.outbox.now || []).filter((x) => !service || x.key === service);
+    const logLink = (e) => e.request_id && e.service !== 'mailer'
+      ? h('a', { href: '#/logs?' + new URLSearchParams({ log: 'egress', pattern: e.request_id, since: '7d' }) }, 'log →')
+      : e.outbox_id ? h('a', { href: '#/logs?' + new URLSearchParams({ log: 'egress', pattern: '"outbox_id":' + e.outbox_id, since: '7d' }) }, 'log →') : '';
+    const pick = h('select', { onchange: (ev) => go('tenant', ev.target.value) }, focus() ? null : h('option', { value: '' }, 'all tenants'),
+      tenants.map((x) => h('option', { value: x, selected: x === tenant }, x)));
+    const cards = [
+      h('div', { class: 'bar' }, h('h1', {}, service ? 'Service: ' + service : 'Services'), windowPicker(render), pick,
+        service ? h('a', { href: '#/services' + (tenant ? '?tenant=' + encodeURIComponent(tenant) : '') }, '← all services') : null),
+      h('p', { class: 'muted small' }, 'Everything that went out: boxes\' calls through goober_call and the outbox, the host\'s push sends, ' +
+        'the robot\'s fetches, token refreshes, and every mail the mailer sent. A failure is no answer, an error, or a status of 400 or more.'),
+      h('div', { class: 'stats' },
+        stat(fmt.n(t.calls), 'calls'), stat(fmt.pct(t.failed, t.calls), 'failed'), stat(fmt.n(t.n4), '4xx'), stat(fmt.n(t.n5), '5xx'),
+        stat(fmt.n(t.neterr), 'no answer'), stat(fmt.n(t.outbox), 'outbox deliveries'), stat(fmt.us(t.p50_us), 'p50'),
+        stat(fmt.us(t.p99_us), 'p99'), stat(fmt.bytes(t.bytes_out) + ' / ' + fmt.bytes(t.bytes_in), 'out / in')),
+      h('div', { class: 'grid' },
+        card('Calls', stackedChart(series, [{ key: 'ok', cls: 's2', label: 'answered' }, { key: 'failed', cls: 's5', label: 'failed' }],
+          'calls', 'calls', 'Calls over time')),
+        card('Latency', latencyChart(series))),
+    ];
+    if (!service) {
+      cards.push(wideCard('By service', r.services.length ? table([
+        { label: 'Service', get: (x) => x.service, cls: () => 'mono' },
+        { label: 'Kind', get: (x) => kinds[x.kind] || x.kind, cls: () => 'muted' },
+        { label: 'Calls', num: true, get: (x) => fmt.n(x.calls) },
+        { label: 'Failed', num: true, get: fail, cls: (x) => x.failed ? 'err' : '' },
+        { label: '4xx', num: true, get: (x) => x.n4 ? fmt.n(x.n4) : '' },
+        { label: '5xx', num: true, get: (x) => x.n5 ? fmt.n(x.n5) : '' },
+        { label: 'No answer', num: true, get: (x) => x.neterr ? fmt.n(x.neterr) : '' },
+        { label: 'Retries', num: true, get: (x) => x.retries ? fmt.n(x.retries) : '', cls: (x) => x.retries ? 'warn' : '' },
+        { label: 'Dead', num: true, get: (x) => x.dead ? fmt.n(x.dead) : '', cls: (x) => x.dead ? 'err' : '' },
+        { label: 'p50', num: true, get: (x) => fmt.us(x.p50_us) },
+        { label: 'p99', num: true, get: (x) => fmt.us(x.p99_us) },
+        { label: 'Boxes', get: (x) => (x.boxes || []).join(', '), cls: () => 'muted' },
+      ], r.services, (x) => go('service', x.service)) : h('p', { class: 'muted' }, 'Nothing went out in this window, and no box declares a service.')));
+    }
+    cards.push(wideCard(service ? 'By method and box' : 'By method', r.methods.length ? table([
+      { label: 'Tenant', get: (m) => m.tenant || '–', cls: () => 'muted' },
+      { label: 'Box', get: (m) => !m.box ? h('span', { class: 'muted' }, 'host') : m.box === 'host' || m.box === 'boxes' || m.box === 'operator'
+        ? h('span', { class: 'muted' }, m.box) : h('a', { href: '#/box/' + encodeURIComponent(m.box) }, m.box) },
+      { label: 'Service', get: (m) => m.service, cls: () => 'mono' },
+      { label: 'Method', get: (m) => m.method, cls: () => 'mono' },
+      { label: 'Calls', num: true, get: (m) => fmt.n(m.calls) },
+      { label: 'Failed', num: true, get: fail, cls: (m) => m.failed ? 'err' : '' },
+      { label: 'Outbox', num: true, get: (m) => m.outbox ? fmt.n(m.outbox) : '' },
+      { label: 'p50', num: true, get: (m) => fmt.us(m.p50_us) },
+      { label: 'p99', num: true, get: (m) => fmt.us(m.p99_us) },
+    ], r.methods, service ? null : (m) => go('service', m.service)) : h('p', { class: 'muted' }, 'No calls in this window.')));
+    cards.push(h('div', { class: 'grid' },
+      card('Failures by status', r.statuses.length ? table([
+        { label: 'Service', get: (x) => x.service, cls: () => 'mono' },
+        { label: 'Status', get: (x) => x.status ? String(x.status) : 'no answer', cls: (x) => x.status >= 500 || !x.status ? 'err' : 'warn' },
+        { label: 'Count', num: true, get: (x) => fmt.n(x.n) },
+      ], r.statuses) : h('p', { class: 'muted' }, 'Nothing failed in this window.')),
+      card('Outbox', levelChart(r.outbox, 'waiting'), outboxNow.length ? table([
+        { label: 'Tenant', get: (x) => x.tenant },
+        { label: 'Service', get: (x) => x.key, cls: () => 'mono' },
+        { label: 'Waiting now', num: true, get: (x) => fmt.n(x.value), cls: (x) => x.value ? 'warn' : '' },
+      ], outboxNow) : h('p', { class: 'muted small' }, 'Nothing is waiting.'),
+        h('p', { class: 'muted small' }, 'Retries and dead letters are each box\'s: ', h('a', { href: '#/failures' }, 'Box failures →'), ' outbox_dead_letters lists what gave up.'))));
+    cards.push(wideCard('Latest failures', r.latest.length ? table([
+      { label: 'When', get: (e) => fmt.time(e.at_ms), cls: () => 'muted' },
+      { label: 'Tenant', get: (e) => e.tenant || '–', cls: () => 'muted' },
+      { label: 'Box', get: (e) => e.box || 'host' },
+      { label: 'Call', get: (e) => e.service + '.' + e.method, cls: () => 'mono' },
+      { label: 'Status', get: (e) => e.status ? String(e.status) : 'no answer', cls: (e) => e.status >= 500 || !e.status ? 'err' : 'warn' },
+      { label: 'Error', get: (e) => clip(e.error || '', 140), cls: () => 'mono' },
+      { label: 'URL', get: (e) => clip(e.url || '', 60), cls: () => 'mono muted' },
+      { label: 'Request', get: (e) => e.request_id || (e.outbox_id ? 'outbox ' + e.outbox_id : ''), cls: () => 'mono muted' },
+      { label: '', get: logLink },
+    ], r.latest) : h('p', { class: 'muted' }, 'Nothing failed in this window.')));
+    if (!service || service === 'mailer') {
+      const m = r.mail;
+      cards.push(h('div', { class: 'grid' },
+        card('Mail', h('div', { class: 'stats' }, stat(m.mailer, 'mailer'), stat(fmt.n(m.daily_max), 'a tenant may send a day'),
+          stat(fmt.n(m.per_address_daily), 'to one address a day'), stat(fmt.n(r.mail_in.calls), 'mail in'),
+          stat(fmt.n(r.mail_in.n4 + r.mail_in.n5), 'mail in refused')),
+          m.tenants.length ? table([
+            { label: 'Tenant', get: (x) => x.tenant },
+            { label: 'Sent, last 24 hours', num: true, get: (x) => fmt.n(x.sent_24h) },
+            { label: 'Of the day\'s limit', num: true, get: (x) => fmt.pct(x.sent_24h, m.daily_max), cls: (x) => x.sent_24h >= 0.8 * m.daily_max ? 'warn' : '' },
+          ], m.tenants) : h('p', { class: 'muted small' }, 'No box mail in the last 24 hours.'),
+          h('p', { class: 'muted small' }, 'Bounces and complaints: ' + m.bounces + '.')),
+        r.backups ? card('Backups', h('div', { class: 'stats' },
+          stat(r.backups.enabled ? (r.backups.healthy === false ? 'failing' : 'on') : 'off', 'backups'),
+          stat(r.backups.last_nightly_at || '–', 'last nightly'), stat(r.backups.last_increment_at || '–', 'last increment')),
+          r.backups.last_error ? h('div', { class: 'notice bad' }, r.backups.last_error) : null,
+          r.backups.note ? h('p', { class: 'muted small' }, r.backups.note) : null) : null));
+    }
+    return cards;
+  },
+
   async flow() {
     if (focus()) return [h('h1', {}, 'Data flow'), focusNote('The whole host\'s graph is left out; open a box for its own.'), h('p', {}, h('a', { href: '#/boxes' }, 'Boxes →'))];
     const g = await api('box_graph', { window: state.window });
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Data flow'), windowPicker(render)),
       wideCard('', h('p', { class: 'muted small' },
-        'Tenants on the left, then their pages and boxes, then the databases, services, and boxes those reach, and ' +
-        'each database\'s tables on the right: the letters are what boxes may do there (read, insert, update, delete), and a ' +
-        'dashed table edge is a grant no statement has used since the host started. Width is traffic; a box\'s bar is its ' +
-        'share of CPU time; red edges fail 5% or more. Click a box to open it.'),
-      flowGraph(g, (n) => { location.hash = '#/box/' + encodeURIComponent(n.label); })),
+        'Tenants on the left, then their pages, host routes, and boxes, then the databases, services, and boxes those reach, and ' +
+        'each database\'s tables and the mailer on the right: the letters are what boxes may do there (read, insert, update, delete), and a ' +
+        'dashed table edge is a grant no statement has used since the host started. Services show their calls, failures, and p99; ' +
+        'the host\'s own calls out (push, the robot, token refreshes) come from its routes, and every mail goes through the mailer. ' +
+        'Width is traffic; a box\'s bar is its share of CPU time; red edges fail 5% or more. Click a box or a service to open it.'),
+      flowGraph(g, (n) => openNode(n))),
     ];
   },
 
@@ -648,7 +840,7 @@ const views = {
       h('div', { class: 'bar' }, h('h1', {}, name), h('code', { class: 'muted' }, (active.version || '').slice(0, 12)), windowPicker(render),
         h('a', { href: '#/traffic?box=' + encodeURIComponent(name) }, 'Traffic →')),
       manifest && manifest.manifest.mission ? h('p', { class: 'muted' }, manifest.manifest.mission) : null,
-      wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) location.hash = '#/box/' + encodeURIComponent(n.label); })),
+      wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) openNode(n); })),
       grantsCard(grants[0]),
       jobsCard(jobs),
       flagsCard(flags),
@@ -1634,7 +1826,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

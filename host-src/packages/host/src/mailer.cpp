@@ -203,6 +203,7 @@ MailOutcome MailQueue::deliver(const identity::Mail& mail) {
   uint8_t rnd[12];
   base::os_random_fill(rnd);
   std::string id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
+  int64_t started_us = base::monotonic_us();
   if (cfg->identity.mailer == "ses") {
     out.via = "ses";
     auto creds = credentials_ ? credentials_() : std::nullopt;
@@ -230,9 +231,12 @@ MailOutcome MailQueue::deliver(const identity::Mail& mail) {
                   {"to", mail.to},
                   {"subject", mail.subject},
                   {"via", out.via},
-                  {"status", out.sent ? "sent" : "failed"}};
+                  {"status", out.sent ? "sent" : "failed"},
+                  {"us", base::monotonic_us() - started_us}};
   if (!out.message_id.empty()) line["message_id"] = out.message_id;
   if (!mail.tenant.empty()) line["tenant"] = mail.tenant;
+  // The host's own mail (sign-in codes, invites): whose realm, for the panel's mailer (028 § 4.4).
+  if (mail.tenant.empty() && !mail.realm.empty()) line["realm"] = mail.realm;
   if (mail.test) line["test"] = true;
   // The tenant's own sending address, not a person's: kept as it is.
   if (!mail.from_address.empty()) line["from_address"] = mail.from_address;

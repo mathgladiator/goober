@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 
 #include "goober/json/json.h"
 
@@ -59,7 +61,7 @@ std::optional<LineKey> key_line(const bj::object& line, const TenantOf& tenant_o
 
 class Traffic {
  public:
-  // `logs` holds access.log and egress.log (and their rotations, .1 to .3).
+  // `logs` holds access.log, egress.log, and mail.log (and their rotations).
   Traffic(std::filesystem::path db_file, std::filesystem::path logs, TenantOf tenant_of);
   ~Traffic();
   Traffic(const Traffic&) = delete;
@@ -90,6 +92,29 @@ class Traffic {
   // "(not found)" for every path nothing answers, so a scan can't push out the rest.
   bj::object errors(std::string_view window, const std::string& tenant, int64_t now_ms);
 
+  // What went out to services (028 § 4.4), from the egress log (boxes' calls and outbox
+  // deliveries, the host's push, robot fetches, and token refreshes) and the mail log (every
+  // mail the mailer sent, as service "mailer", method the mailer: ses, smtp, or dev; tenant ""
+  // for the host's own mail). {window, step_ms, from_ms, to_ms, totals: {calls, failed, n4, n5,
+  // neterr, outbox, us, p50_us, p99_us, bytes_out, bytes_in}, points: [{t, calls, failed,
+  // outbox, p50_us, p99_us}], services: [{service, ...the totals' fields, tenants, boxes}]
+  // (most calls first), methods: [{tenant, box, service, method, ...the totals' fields}],
+  // statuses: [{service, status, n}] (failures only; 0 is no answer), latest: [{at_ms, tenant,
+  // box, service, method, status, error, url, request_id, outbox_id}] (failures, newest first,
+  // at most `latest`)}. A failure is no answer, an error, or a status of 400 or more. Empty
+  // tenant or service means every one.
+  bj::object services(std::string_view window, const std::string& tenant, const std::string& service, int64_t now_ms,
+                      size_t latest = 50);
+
+  // A sampled level (028 § 4.4): name (like outbox_pending), a tenant, and its value per key
+  // (like a service), all of them: a key sampled before and missing now reads 0. Kept in memory
+  // and written by catch_up as each minute's and hour's largest value. Safe from any thread.
+  void gauge(int64_t at_ms, const std::string& name, const std::string& tenant, const std::map<std::string, int64_t>& values);
+  // {window, step_ms, from_ms, to_ms, points: [{t, value}], now: [{tenant, key, value, at_ms}]}:
+  // per point, the largest sum over every tenant and key in one minute (or hour); now holds the
+  // latest sample of each. Empty tenant means every one.
+  bj::object gauge_series(std::string_view window, const std::string& name, const std::string& tenant, int64_t now_ms);
+
  private:
   struct Window;
   size_t tail(const std::string& name, int64_t now_ms);
@@ -97,8 +122,15 @@ class Traffic {
 
   std::filesystem::path logs_;
   TenantOf tenant_of_;
+  void flush_gauges();
+  void trim_service_failures(int64_t now_ms);
+  bool service_failures_added_ = false;
   std::mutex mu_;
   std::unique_ptr<sqlite::Db> db_;
+  // (name, tenant, key) -> (at_ms, value), the latest sample; and each minute's largest, unwritten.
+  std::mutex gauge_mu_;
+  std::map<std::tuple<std::string, std::string, std::string>, std::pair<int64_t, int64_t>> gauge_now_;
+  std::map<std::tuple<int64_t, std::string, std::string, std::string>, int64_t> gauge_pending_;
   int64_t last_drop_ms_ = 0;
 };
 

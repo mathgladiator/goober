@@ -198,14 +198,19 @@ std::unique_ptr<sqlite::Db> Host::open_outbox(const std::string& tenant, const s
 int Host::outbox_tick(int64_t now_ms) {
   auto cfg = config_.get();
   int delivered = 0;
+  std::map<std::string, std::map<std::string, int64_t>> pending;  // tenant -> service -> waiting
   for (const auto& [tenant, database] : outbox_locations()) {
     // One bad location (busy, corrupt, gone) never holds up the others.
     try {
-      delivered += outbox_deliver(tenant, database, now_ms);
+      delivered += outbox_deliver(tenant, database, now_ms, &pending[tenant]);
     } catch (const std::exception& e) {
       std::cerr << "goober-host: outbox for " << tenant << "/" << (database.empty() ? "outbox" : database) << ": "
                 << e.what() << "\n";
     }
+  }
+  // The queue's depth over time (028 § 4.4), as waiting elements per tenant and service.
+  if (traffic_) {
+    for (const auto& [tenant, by_service] : pending) traffic_->gauge(now_ms, "outbox_pending", tenant, by_service);
   }
   return delivered;
 }
@@ -354,7 +359,8 @@ sqlite::Db& Host::sent_ledger() {
   return *sent_db_;
 }
 
-int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms) {
+int Host::outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms,
+                         std::map<std::string, int64_t>* pending) {
   auto cfg = config_.get();
   // A sandbox delivers nothing: its outbox fills, visibly, and waits.
   if (cfg->sandbox) return 0;
@@ -370,8 +376,12 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
   };
   std::vector<std::string> services;
   {
-    sqlite::Stmt s(*db, "SELECT DISTINCT service FROM goober_outbox WHERE state IN ('pending', 'polling')");
-    while (s.step()) services.push_back(s.text(0));
+    // Each service's waiting elements, also the queue's depth for the panel (028 § 4.4).
+    sqlite::Stmt s(*db, "SELECT service, count(*) FROM goober_outbox WHERE state IN ('pending', 'polling') GROUP BY service");
+    while (s.step()) {
+      services.push_back(s.text(0));
+      if (pending) (*pending)[s.text(0)] += s.int64(1);
+    }
   }
   int delivered = 0;
   // One outbox gets a few seconds a tick, so a slow service can't hold up every other

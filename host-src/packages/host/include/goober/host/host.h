@@ -417,7 +417,9 @@ class Host {
   std::thread outbox_thread_;
   void run_outbox();
   std::vector<std::pair<std::string, std::string>> outbox_locations();
-  int outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms);
+  // `pending`, when given, gains each service's waiting elements as the tick found them.
+  int outbox_deliver(const std::string& tenant, const std::string& database, int64_t now_ms,
+                     std::map<std::string, int64_t>* pending = nullptr);
   std::mutex outbox_scan_mu_;
   int64_t outbox_scan_ms_ = 0;
   std::set<std::pair<std::string, std::string>> outbox_scanned_;

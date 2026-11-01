@@ -235,3 +235,97 @@ TEST_F(TrafficTest, ErrorsFromOutsideAreCountedByPlaceAndMaker) {
   // The 7-day window reads the hours, written alongside.
   EXPECT_EQ(t->errors("7d", "", kNoon + 60000).at("totals").at("n4").as_int64(), 5);
 }
+
+// External services (028 § 4.4): every call out and every mail the mailer sent, by service and
+// method, with failures by status and the latest ones kept with their request ids.
+TEST_F(TrafficTest, ServicesAreCountedFromTheEgressAndMailLogs) {
+  auto egress = [&](const std::string& json) { base::append_line(root / "logs" / "egress.log", json); };
+  egress(R"({"at":")" + at(kNoon) + R"(","tenant":"acme","box":"shop","service":"payments","method":"charge","status":200,"us":1000,"bytes_out":10,"bytes_in":20,"request_id":"r1"})");
+  egress(R"({"at":")" + at(kNoon) + R"(","tenant":"acme","box":"shop","service":"payments","method":"charge","status":503,"us":2000,"url":"https://pay.example/v1/charge","request_id":"r2"})");
+  egress(R"({"at":")" + at(kNoon + 1000) + R"(","tenant":"acme","box":"shop","service":"payments","method":"refund","status":0,"us":30000000,"error":"timed out","outbox_id":7})");
+  egress(R"({"at":")" + at(kNoon) + R"(","tenant":"acme","box":"","service":"push","method":"send","status":201,"us":500})");
+  auto mail = [&](const std::string& json) { base::append_line(root / "logs" / "mail.log", json); };
+  mail(R"({"at":")" + at(kNoon) + R"(","tenant":"acme","via":"ses","status":"sent","us":40000})");
+  mail(R"({"at":")" + at(kNoon) + R"(","realm":"acme","via":"ses","status":"failed","error":"throttled"})");
+  auto t = open();
+  EXPECT_EQ(t->catch_up(kNoon + 2000), 6u);
+
+  auto all = t->services("1h", "", "", kNoon + 2000);
+  EXPECT_EQ(all.at("totals").at("calls"), 6);
+  EXPECT_EQ(all.at("totals").at("failed"), 3);
+  const auto& first = all.at("services").at(0).as_object();
+  EXPECT_EQ(first.at("service"), "payments");
+  EXPECT_EQ(first.at("calls"), 3);
+  EXPECT_EQ(first.at("n5"), 1);
+  EXPECT_EQ(first.at("neterr"), 1);
+  EXPECT_EQ(first.at("outbox"), 1);
+  EXPECT_GE(first.at("p99_us").as_int64(), 16000000);  // the last bucket: everything past about 16 s
+  // The mailer: a box's mail is from "boxes", the host's own from "host".
+  bool boxes = false, host = false;
+  for (const auto& m : all.at("methods").as_array()) {
+    const auto& o = m.as_object();
+    if (o.at("service") != "mailer") continue;
+    EXPECT_EQ(o.at("method"), "ses");
+    if (o.at("box") == "boxes") boxes = o.at("failed") == 0;
+    if (o.at("box") == "host") host = o.at("failed") == 1;
+  }
+  EXPECT_TRUE(boxes && host) << json::dump(all.at("methods"));
+
+  // One service: its methods, statuses, and latest failures, newest first.
+  auto pay = t->services("1h", "acme", "payments", kNoon + 2000);
+  EXPECT_EQ(pay.at("methods").as_array().size(), 2u);
+  EXPECT_EQ(pay.at("statuses").as_array().size(), 2u);
+  const auto& latest = pay.at("latest").as_array();
+  ASSERT_EQ(latest.size(), 2u);
+  EXPECT_EQ(latest[0].at("method"), "refund");
+  EXPECT_EQ(latest[0].at("outbox_id"), 7);
+  EXPECT_EQ(latest[1].at("request_id"), "r2");
+  EXPECT_EQ(latest[1].at("url"), "https://pay.example/v1/charge");
+  // Counted once, across a restart.
+  t.reset();
+  auto again = open();
+  again->catch_up(kNoon + 3000);
+  EXPECT_EQ(again->services("1h", "", "", kNoon + 3000).at("totals").at("calls"), 6);
+  // Hours keep it after minutes go.
+  int64_t later = kNoon + 3 * 24 * 3600 * 1000LL;
+  again->catch_up(later);
+  EXPECT_EQ(again->services("7d", "", "payments", later).at("totals").at("calls"), 3);
+}
+
+TEST_F(TrafficTest, ServiceFailuresKeepTheNewestHundredPerService) {
+  for (int i = 0; i < 130; ++i) {
+    base::append_line(root / "logs" / "egress.log",
+                      R"({"at":")" + at(kNoon + i) +
+                          R"(","tenant":"acme","box":"b","service":"flaky","method":"m","status":500,"request_id":"r)" +
+                          std::to_string(i) + R"("})");
+  }
+  auto t = open();
+  t->catch_up(kNoon + 1000);
+  auto r = t->services("1h", "", "flaky", kNoon + 1000, 500);
+  EXPECT_EQ(r.at("totals").at("failed"), 130);
+  EXPECT_EQ(r.at("latest").as_array().size(), 100u);
+  EXPECT_EQ(r.at("latest").at(0).at("request_id"), "r129");
+}
+
+// Levels sampled over time (028 § 4.4): the outbox's pending elements per service.
+TEST_F(TrafficTest, GaugesKeepEachMinutesLargestAndTheLatest) {
+  auto t = open();
+  t->gauge(kNoon, "outbox_pending", "acme", {{"payments", 4}, {"mail", 1}});
+  t->gauge(kNoon + 2000, "outbox_pending", "acme", {{"payments", 2}});
+  t->gauge(kNoon + 61000, "outbox_pending", "acme", {});
+  t->catch_up(kNoon + 61000);
+  auto g = t->gauge_series("1h", "outbox_pending", "", kNoon + 61000);
+  int64_t peak = 0, nulls = 0;
+  for (const auto& p : g.at("points").as_array()) {
+    if (p.at("value").is_null()) ++nulls;
+    else peak = std::max(peak, p.at("value").as_int64());
+  }
+  EXPECT_EQ(peak, 5);  // the minute's largest per key, summed: 4 + 1
+  EXPECT_GT(nulls, 50);
+  // payments read 0 at the last sample; mail had read 0 before and is forgotten.
+  const auto& now = g.at("now").as_array();
+  ASSERT_EQ(now.size(), 1u);
+  EXPECT_EQ(now[0].at("key"), "payments");
+  EXPECT_EQ(now[0].at("value"), 0);
+  EXPECT_TRUE(t->gauge_series("1h", "outbox_pending", "other", kNoon + 61000).at("now").as_array().empty());
+}
