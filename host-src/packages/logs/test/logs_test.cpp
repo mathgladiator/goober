@@ -60,6 +60,19 @@ TEST(Logs, EveryLineIsEnvelopedAndChained) {
   EXPECT_EQ(v.lines, 2);
 }
 
+TEST(Logs, AWriteSaysHowManyBytesItAdded) {
+  auto dir = fresh("logs_bytes");
+  logs::Set set(dir, "acme.example.com");
+  size_t a = 99, b = 99;
+  set.write("access", bj::object{{"path", "/"}}, kT0 + 1000, &a);
+  set.write("access", bj::object{{"path", "/longer/path"}}, kT0 + 2000, &b);
+  EXPECT_GT(a, 0u);
+  EXPECT_EQ(a + b, fs::file_size(dir / "access.log"));
+  size_t bad = 99;
+  set.write("Not A Name", bj::object{{"x", 1}}, kT0 + 3000, &bad);
+  EXPECT_EQ(bad, 0u);
+}
+
 TEST(Logs, AnEditADeletionOrAnInsertionBreaksTheChain) {
   auto dir = fresh("logs_tamper");
   logs::Set set(dir, "h");

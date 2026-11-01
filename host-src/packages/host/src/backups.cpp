@@ -5,6 +5,8 @@
 #include <pwd.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <cmath>
 #include <iostream>
 #include <set>
 
@@ -43,7 +45,18 @@ CREATE TABLE IF NOT EXISTS assets (tenant TEXT NOT NULL, id INTEGER NOT NULL, ex
                                    attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER NOT NULL DEFAULT 0,
                                    queued_ms INTEGER NOT NULL, uploaded_ms INTEGER, gone_ms INTEGER, last_error TEXT,
                                    PRIMARY KEY (tenant, id));
+-- What went up per UTC day and stream (nightly, increments, logs, source, assets), for the daily
+-- upload budget (019 § 9); kept 90 days.
+CREATE TABLE IF NOT EXISTS upload_days (day INTEGER NOT NULL, stream TEXT NOT NULL, bytes INTEGER NOT NULL,
+                                        objects INTEGER NOT NULL, PRIMARY KEY (day, stream));
+-- What the bucket held under each prefix the last time rotation listed it.
+CREATE TABLE IF NOT EXISTS bucket_held (prefix TEXT PRIMARY KEY, bytes INTEGER NOT NULL, objects INTEGER NOT NULL,
+                                        at_ms INTEGER NOT NULL);
 )sql";
+
+// A rotated log waiting longer than this goes up whatever the day's budget says: deferring must
+// never let the archive queue's 30 days run out (032 § 2).
+constexpr int64_t kLogsDeferAtMostMs = 7 * kDayMs;
 
 std::string hashes_hex(const backup::PageMap& map) {
   std::string out;
@@ -164,8 +177,44 @@ bool BackupService::seal_and_put(aws::S3& s3, const backup::Key& key, const fs::
   fs::path sealed = file.string() + ".sealed";
   bool ok = backup::seal_file(key, file, sealed, error, object) && s3.put_file(object, sealed, error);
   std::error_code ec;
+  if (ok) {
+    auto size = fs::file_size(sealed, ec);
+    if (!ec) record_upload(object, int64_t(size));
+  }
   fs::remove(sealed, ec);
   return ok;
+}
+
+void BackupService::record_upload(const std::string& object, int64_t bytes) {
+  // The stream is the object's first path segment: nightly, increments, logs, source, assets.
+  std::string stream = object.substr(0, object.find('/'));
+  int64_t day = now_ms_ / kDayMs * kDayMs;
+  sqlite::Stmt s(state(), "INSERT INTO upload_days VALUES (?, ?, ?, 1) ON CONFLICT (day, stream) DO UPDATE SET "
+                          "bytes = bytes + excluded.bytes, objects = objects + 1");
+  s.bind(1, day).bind(2, stream).bind(3, bytes).run();
+  sqlite::Stmt old(state(), "DELETE FROM upload_days WHERE day < ?");
+  old.bind(1, day - 90 * kDayMs).run();
+}
+
+int64_t BackupService::uploaded_on_day(sqlite::Db& db, int64_t now_ms) {
+  sqlite::Stmt s(db, "SELECT coalesce(sum(bytes), 0) FROM upload_days WHERE day = ?");
+  s.bind(1, now_ms / kDayMs * kDayMs);
+  return s.step() ? s.int64(0) : 0;
+}
+
+bool BackupService::over_budget(int64_t now_ms) {
+  int64_t budget = config_()->disk.upload_bytes_per_day;
+  return budget > 0 && uploaded_on_day(state(), now_ms) >= budget;
+}
+
+int64_t BackupService::uploaded_today(int64_t now_ms) {
+  auto cfg = config_();
+  if (!cfg->backup.enabled() || cfg->sandbox || !fs::exists(cfg->storage / "backup" / "state.db")) return 0;
+  // Its own connection and no lock, as times(): a nightly may be uploading.
+  sqlite::Db reader(cfg->storage / "backup" / "state.db");
+  sqlite::Stmt has(reader, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upload_days'");
+  if (!has.step()) return 0;
+  return uploaded_on_day(reader, now_ms);
 }
 
 void BackupService::tick(int64_t now_ms) {
@@ -173,18 +222,31 @@ void BackupService::tick(int64_t now_ms) {
   // A sandbox (a rehydrated devbox) never writes into anyone's bucket.
   if (!cfg->backup.enabled() || cfg->sandbox) return;
   std::string error;
+  // Attachments go up whatever the day's budget (019 § 9): no other copy of them leaves.
   try {
     run_assets(now_ms, &error);
   } catch (const std::exception& e) {
     record_error("assets", e.what(), now_ms);
   }
+  // Past limits.upload-bytes-per-day, log archives, the source mirror, and increments wait for
+  // the next UTC day; a log archive waiting a week goes anyway.
+  bool over = false;
+  {
+    std::lock_guard lock(mu_);
+    over = over_budget(now_ms);
+    if (over && meta("deferring_day") != std::to_string(now_ms / kDayMs)) {
+      set_meta("deferring_day", std::to_string(now_ms / kDayMs));
+      std::cerr << "goober-host: backups: today's uploads reached limits.upload-bytes-per-day; log archives, the source "
+                   "mirror, and increments wait for tomorrow (the nightly and attachments don't)\n";
+    }
+  }
   try {
-    if (run_logs(now_ms, &error) < 0) record_error("logs", error, now_ms);
+    if (run_logs(now_ms, &error, over ? kLogsDeferAtMostMs : 0) < 0) record_error("logs", error, now_ms);
   } catch (const std::exception& e) {
     record_error("logs", e.what(), now_ms);
   }
   try {
-    if (run_source(now_ms, &error) < 0) record_error("source", error, now_ms);
+    if (!over && run_source(now_ms, &error) < 0) record_error("source", error, now_ms);
   } catch (const std::exception& e) {
     record_error("source", e.what(), now_ms);
   }
@@ -205,7 +267,8 @@ void BackupService::tick(int64_t now_ms) {
       }
       return;
     }
-    if (now_ms - std::max(last_increment, last_nightly) >= cfg->backup.databases_every_ms) {
+    // An increment deferred loses nothing: the next one (or the next nightly) carries every change.
+    if (!over && now_ms - std::max(last_increment, last_nightly) >= cfg->backup.databases_every_ms) {
       if (!run_increment(now_ms, &error)) record_error("increment", error, now_ms);
     }
   } catch (const std::exception& e) {
@@ -215,6 +278,7 @@ void BackupService::tick(int64_t now_ms) {
 
 bool BackupService::run_nightly(int64_t now_ms, std::string* error) {
   std::lock_guard lock(mu_);
+  now_ms_ = now_ms;
   auto cfg = config_();
   if (!cfg->backup.enabled()) return *error = "backups are off: set backup.s3.bucket in the config", false;
   if (cfg->sandbox) return *error = "this host is a sandbox: it never backs up", false;
@@ -302,6 +366,15 @@ void BackupService::rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t n
     record_error("rotation", error, now_ms);
     return;
   }
+  // What the bucket holds, as these listings saw it (before this rotation's deletions).
+  auto held = [&](const std::string& prefix, const std::vector<aws::S3Object>& objects) {
+    int64_t bytes = 0;
+    for (const auto& o : objects) bytes += o.size;
+    sqlite::Stmt s(state(), "INSERT OR REPLACE INTO bucket_held VALUES (?, ?, ?, ?)");
+    s.bind(1, prefix).bind(2, bytes).bind(3, int64_t(objects.size())).bind(4, now_ms).run();
+  };
+  held("nightly", *nightly);
+  held("increments", *increments);
   std::string newest;
   for (const auto& o : *nightly) newest = std::max(newest, o.key);
   auto old = [&](const std::string& stamp) {
@@ -319,6 +392,7 @@ void BackupService::rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t n
   }
   // Archived logs are kept 400 days (032 § 2), by the day in their key: logs/$name/yyyy/mm/dd/...
   if (auto archived = s3.list("logs/", &error)) {
+    held("logs", *archived);
     int64_t log_cutoff = now_ms - 400 * kDayMs;
     for (const auto& o : *archived) {
       // The date is the three path segments before the file name.
@@ -346,8 +420,9 @@ void BackupService::rotate(aws::S3& s3, const config::HostConfig& cfg, int64_t n
   }
 }
 
-int BackupService::run_logs(int64_t now_ms, std::string* error) {
+int BackupService::run_logs(int64_t now_ms, std::string* error, int64_t older_than_ms) {
   std::lock_guard lock(mu_);
+  now_ms_ = now_ms;
   auto cfg = config_();
   if (!cfg->backup.enabled() || cfg->sandbox) return 0;
   fs::path queue = cfg->storage / "logs" / "archive";
@@ -355,8 +430,16 @@ int BackupService::run_logs(int64_t now_ms, std::string* error) {
   if (!fs::exists(queue, ec)) return 0;
   logs::finish_pending(queue);  // rotations since the last housekeeping
   std::vector<fs::path> files;
+  auto file_now = fs::file_time_type::clock::now();  // file times are on the file clock
   for (auto it = fs::directory_iterator(queue, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-    if (it->path().extension() == ".log") files.push_back(it->path());
+    if (it->path().extension() != ".log") continue;
+    if (older_than_ms > 0) {
+      // Only those queued longer than older_than_ms: the rest wait for a day with room (019 § 9).
+      std::error_code e2;
+      auto when = fs::last_write_time(it->path(), e2);
+      if (e2 || std::chrono::duration_cast<std::chrono::milliseconds>(file_now - when).count() < older_than_ms) continue;
+    }
+    files.push_back(it->path());
   }
   if (files.empty()) return 0;
   auto key = this->key(error);
@@ -390,6 +473,7 @@ int BackupService::run_logs(int64_t now_ms, std::string* error) {
     // without the key.
     if (fs::exists(manifest, ec)) {
       if (!s3->put_file(prefix + stem + ".manifest.json", manifest, error)) return -1;
+      record_upload(prefix + stem + ".manifest.json", int64_t(fs::file_size(manifest, ec)));
       fs::remove(manifest, ec);
     }
     fs::remove(f, ec);
@@ -401,6 +485,7 @@ int BackupService::run_logs(int64_t now_ms, std::string* error) {
 
 int BackupService::run_source(int64_t now_ms, std::string* error) {
   std::lock_guard lock(mu_);
+  now_ms_ = now_ms;
   auto cfg = config_();
   if (!cfg->backup.enabled() || cfg->sandbox || !source_) return 0;
   if (now_ms < std::atoll(meta("source_next_ms").c_str())) return 0;
@@ -491,6 +576,7 @@ int BackupService::run_source(int64_t now_ms, std::string* error) {
 
 bool BackupService::run_increment(int64_t now_ms, std::string* error) {
   std::lock_guard lock(mu_);
+  now_ms_ = now_ms;
   auto cfg = config_();
   if (!cfg->backup.enabled()) return *error = "backups are off: set backup.s3.bucket in the config", false;
   if (cfg->sandbox) return *error = "this host is a sandbox: it never backs up", false;
@@ -677,6 +763,7 @@ void BackupService::scan_ledgers(int64_t now_ms) {
 
 int BackupService::run_assets(int64_t now_ms, std::string* error) {
   std::lock_guard lock(mu_);
+  now_ms_ = now_ms;
   auto cfg = config_();
   if (!cfg->backup.enabled() || cfg->sandbox) return 0;
   if (nudged_ || now_ms - scanned_ms_ >= kScanEveryMs) {
@@ -800,6 +887,51 @@ bj::object BackupService::status(bool with_points, int64_t now_ms) {
     if (s.text(0) == "queued") assets["oldest_queued_at"] = base::format_utc_ms(s.int64(2));
   }
   out["assets"] = assets;
+  // Upload volume (019 § 9): today against limits.upload-bytes-per-day, each day of the last
+  // 30 by stream, and what the bucket held when rotation last listed it.
+  {
+    int64_t budget = cfg->disk.upload_bytes_per_day;
+    int64_t today = now_ms / kDayMs * kDayMs;
+    bj::object by_stream;
+    int64_t today_bytes = 0;
+    bj::array days;
+    sqlite::Stmt d(reader, "SELECT day, stream, bytes, objects FROM upload_days WHERE day >= ? ORDER BY day DESC, stream");
+    d.bind(1, today - 29 * kDayMs);
+    while (d.step()) {
+      if (d.int64(0) == today) {
+        by_stream[d.text(1)] = d.int64(2);
+        today_bytes += d.int64(2);
+      }
+      days.push_back(bj::object{{"day", base::format_utc_ms(d.int64(0)).substr(0, 10)},
+                                {"stream", d.text(1)},
+                                {"bytes", d.int64(2)},
+                                {"objects", d.int64(3)}});
+    }
+    bj::object uploads{{"budget_bytes", budget},
+                       {"key", "limits.upload-bytes-per-day"},
+                       {"today_bytes", today_bytes},
+                       {"today", std::move(by_stream)},
+                       {"days", std::move(days)}};
+    if (budget > 0) {
+      uploads["today_share"] = std::round(double(today_bytes) * 1000 / double(budget)) / 1000;
+      uploads["deferring"] = today_bytes >= budget;
+      int64_t nightly = std::atoll(meta("last_nightly_bytes").c_str());
+      if (nightly >= budget) {
+        uploads["note"] = "the last nightly alone (" + std::to_string(nightly >> 20) + " MiB) is past the budget: once it "
+                          "goes up each day, log archives wait a week and increments wait for the next day";
+      }
+    }
+    bj::array bucket;
+    sqlite::Stmt b(reader, "SELECT prefix, bytes, objects, at_ms FROM bucket_held ORDER BY prefix");
+    while (b.step()) {
+      bucket.push_back(bj::object{{"prefix", b.text(0)},
+                                  {"bytes", b.int64(1)},
+                                  {"objects", b.int64(2)},
+                                  {"at", base::format_utc_ms(b.int64(3))}});
+    }
+    uploads["bucket"] = std::move(bucket);
+    out["uploads"] = std::move(uploads);
+  }
   int64_t last = std::atoll(meta("last_nightly_ms").c_str());
   out["healthy"] = last > 0 && now_ms - last < kDayMs + 2 * 3600000 && meta("last_error").empty();
   if (with_points) {

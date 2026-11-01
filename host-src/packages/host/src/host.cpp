@@ -192,6 +192,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
           return std::nullopt;
         });
     traffic_->set_budget(config->disk.traffic_bytes);
+    // Days the logs grew before the host counted them, from the rotated files (032 § 10).
+    traffic_->seed_log_days(base::now_unix_ms());
   } catch (const std::exception& e) {
     startup_notes_.push_back(std::string("traffic rollups off: ") + e.what());
   }

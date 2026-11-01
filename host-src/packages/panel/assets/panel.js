@@ -179,8 +179,8 @@ function requestsChart(series) {
 
 // Counts per point stacked by part ({key, cls, label}), with each point's rate against `of` in
 // its tooltip: the Errors and Box failures views.
-function stackedChart(series, parts, of, ofLabel, aria) {
-  const pts = series.points, W = 900, H = 150, L = 44, B = 22, T = 8;
+function stackedChart(series, parts, of, ofLabel, aria, unit = fmt.n) {
+  const pts = series.points, W = 900, H = 150, L = 52, B = 22, T = 8;
   const total = (p) => parts.reduce((a, x) => a + (p[x.key] || 0), 0);
   const max = niceMax(Math.max(1, ...pts.map(total)));
   const bw = (W - L) / pts.length;
@@ -188,7 +188,7 @@ function stackedChart(series, parts, of, ofLabel, aria) {
   const g = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': aria });
   for (const f of [0, 0.5, 1]) {
     g.appendChild(s('line', { class: 'axis', x1: L, x2: W, y1: y(max * f), y2: y(max * f) }));
-    g.appendChild(s('text', { x: L - 6, y: y(max * f) + 4, 'text-anchor': 'end' }, fmt.n(max * f)));
+    g.appendChild(s('text', { x: L - 6, y: y(max * f) + 4, 'text-anchor': 'end' }, unit(max * f)));
   }
   pts.forEach((p, i) => {
     const x = L + i * bw, w = Math.max(1, bw - (bw > 4 ? 1 : 0));
@@ -200,8 +200,8 @@ function stackedChart(series, parts, of, ofLabel, aria) {
       base += v;
     }
     const hover = s('rect', { class: 'hover', x, width: bw, y: T, height: H - T - B });
-    const said = parts.filter((x) => p[x.key]).map((x) => `${fmt.n(p[x.key])} ${x.label}`);
-    hover.appendChild(s('title', {}, `${fmt.clock(p.t, series.step_ms)} · ${fmt.n(p[of])} ${ofLabel}` +
+    const said = parts.filter((x) => p[x.key]).map((x) => `${unit(p[x.key])} ${x.label}`);
+    hover.appendChild(s('title', {}, `${fmt.clock(p.t, series.step_ms)} · ${unit(p[of])} ${ofLabel}` +
       (said.length ? ' · ' + said.join(' · ') + ' (' + fmt.pct(total(p), p[of]) + ')' : '')));
     g.appendChild(hover);
   });
@@ -1232,6 +1232,105 @@ const views = {
         h('div', { class: 'card' }, item ? [h('h2', {}, item), extra ? h('p', { class: 'muted small' }, extra) : null,
           h('pre', { class: 'source' }, source ?? '')] : h('p', { class: 'muted' }, 'Pick one to read its source. Look-only: agents change these with template_put, partial_put, and page_put.'))),
     ];
+  },
+
+  // How fast the logs grow and what backups put in the bucket (032 § 10, 019 § 9): each log's
+  // bytes over the window, the warnings, who writes the most, and uploads per day by stream.
+  async volume(params) {
+    if (focus()) return [h('h1', {}, 'Logs and uploads'), focusNote('Logs and backups are the whole host\'s.')];
+    const log = params.get('log') || '';
+    const [v, b] = await Promise.all([
+      api('log_velocity', log ? { window: state.window, log } : { window: state.window }),
+      api('backup_status', {}).catch(() => ({ enabled: false })),
+    ]);
+    const go = (k, x) => { if (x) params.set(k, x); else params.delete(k); location.hash = '#/volume' + (params.toString() ? '?' + params : ''); };
+    const classes = ['s2', 's3', 's4', 's5', 'fp'];
+    // The four biggest logs over the window, and the rest as one.
+    const sum = (a) => a.reduce((x, y) => x + y, 0);
+    const ranked = v.series.slice().sort((a, c) => sum(c.points) - sum(a.points));
+    const shown = ranked.slice(0, 4), rest = ranked.slice(4);
+    const parts = shown.map((x, i) => ({ key: x.log, cls: classes[i], label: x.log }));
+    if (rest.length) parts.push({ key: '(others)', cls: classes[4], label: rest.length + ' more' });
+    const count = ranked.length ? ranked[0].points.length : 0;
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const p = { t: v.from_ms + i * v.step_ms, all: 0 };
+      for (const x of shown) { p[x.log] = x.points[i]; p.all += x.points[i]; }
+      if (rest.length) { p['(others)'] = sum(rest.map((x) => x.points[i])); p.all += p['(others)']; }
+      points.push(p);
+    }
+    const disk = v.disk || {};
+    const cards = [
+      h('div', { class: 'bar' }, h('h1', {}, log ? 'Log: ' + log : 'Logs and uploads'), windowPicker(render),
+        log ? h('a', { href: '#/volume' }, '← every log') : null),
+      h('p', { class: 'muted small' }, 'Every line the host writes, counted by log and by the tenant, box, and route it names; five-minute ' +
+        'counts for a week, a total per day for 90 days. A log warns when its last 24 hours are three times its usual day (the median ' +
+        'of the seven before) and at least 1 MiB.'),
+      v.warnings.length ? h('div', { class: 'notice' }, v.warnings.map((w) => h('p', {}, w.text))) : null,
+      log ? null : h('div', { class: 'stats' },
+        stat(fmt.bytes(disk.per_day_bytes), 'written in 24 hours'), stat(fmt.bytes(disk.on_disk_bytes), 'on the machine'),
+        stat(fmt.bytes(disk.archive_queued_bytes), 'waiting to upload'), stat(fmt.bytes(disk.projected_bytes), 'in 7 days at this rate'),
+        stat(fmt.pct(disk.projected_bytes, disk.budget_bytes), 'of limits.logs-bytes (' + fmt.bytes(disk.budget_bytes) + ')')),
+      h('div', { class: 'grid' },
+        card('Log volume', count ? stackedChart({ points, step_ms: v.step_ms, from_ms: v.from_ms, to_ms: v.to_ms }, parts, 'all', 'written',
+          'Log bytes over time', fmt.bytes) : h('p', { class: 'muted' }, 'Nothing counted yet.'))),
+      wideCard('By log', v.logs.length ? table([
+        { label: 'Log', get: (l) => l.log, cls: () => 'mono' },
+        { label: 'Last 24 h', num: true, get: (l) => fmt.bytes(l.last_24h_bytes) },
+        { label: 'Lines', num: true, get: (l) => fmt.n(l.last_24h_lines) },
+        { label: 'Today', num: true, get: (l) => fmt.bytes(l.today_bytes) },
+        { label: 'Usual day', num: true, get: (l) => l.median_day_bytes === null ? '–' : fmt.bytes(l.median_day_bytes) },
+        { label: 'Growth', num: true, get: (l) => l.growth === null ? '–' : l.growth + '×', cls: (l) => l.grew ? 'err' : '' },
+        { label: 'Days known', num: true, get: (l) => String(l.days_known) },
+      ], v.logs, log ? null : (l) => go('log', l.log)) : h('p', { class: 'muted' }, 'No log lines counted yet.')),
+      wideCard('Who writes the most', v.top.length ? table([
+        { label: 'Log', get: (t) => t.log, cls: () => 'mono' },
+        { label: 'Tenant', get: (t) => t.tenant || '–', cls: () => 'muted' },
+        { label: 'Box', get: (t) => t.box ? h('a', { href: '#/box/' + encodeURIComponent(t.box) }, t.box) : h('span', { class: 'muted' }, 'host') },
+        { label: 'Route', get: (t) => t.route || '–', cls: () => 'mono' },
+        { label: 'Bytes', num: true, get: (t) => fmt.bytes(t.bytes) },
+        { label: 'Lines', num: true, get: (t) => fmt.n(t.lines) },
+        { label: 'Of its log', num: true, get: (t) => fmt.pct(t.share, 1) },
+      ], v.top) : h('p', { class: 'muted' }, 'Nothing in this window.')),
+    ];
+    // Uploads (019 § 9).
+    const up = b.uploads;
+    if (!b.enabled || !up) {
+      cards.push(wideCard('Uploads', h('p', { class: 'muted' }, 'Backups are off, so nothing goes up. ' + (b.note || ''))));
+      return cards;
+    }
+    const streams = ['nightly', 'increments', 'logs', 'assets', 'source'];
+    const days = new Map();
+    for (const d of up.days) {
+      if (!days.has(d.day)) days.set(d.day, { t: Date.parse(d.day + 'T00:00:00Z'), all: 0 });
+      const p = days.get(d.day);
+      p[d.stream] = (p[d.stream] || 0) + d.bytes;
+      p.all += d.bytes;
+    }
+    const today = new Date(), dayPoints = [];
+    for (let i = 29; i >= 0; i--) {
+      const t = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - i * 86400e3;
+      dayPoints.push(days.get(new Date(t).toISOString().slice(0, 10)) || { t, all: 0 });
+    }
+    const daySeries = { points: dayPoints, step_ms: 86400e3, from_ms: dayPoints[0].t, to_ms: dayPoints[29].t + 86400e3 };
+    cards.push(h('div', { class: 'stats' },
+      stat(fmt.bytes(up.today_bytes), 'uploaded today (UTC)'),
+      stat(up.budget_bytes ? fmt.bytes(up.budget_bytes) : 'none', 'limits.upload-bytes-per-day'),
+      stat(up.budget_bytes ? fmt.pct(up.today_bytes, up.budget_bytes) : '–', 'of the budget'),
+      stat(up.deferring ? 'yes' : 'no', 'logs and increments waiting')));
+    if (up.note) cards.push(h('div', { class: 'notice' }, h('p', {}, up.note)));
+    cards.push(h('div', { class: 'grid' },
+      card('Uploads per day', stackedChart(daySeries, streams.map((x, i) => ({ key: x, cls: classes[i], label: x })), 'all', 'uploaded',
+        'Upload bytes per day', fmt.bytes),
+        h('p', { class: 'muted small' }, 'Past the budget, log archives, the source mirror, and increments wait for the next UTC day ' +
+          '(a log archive waiting a week goes anyway); the nightly and attachments never wait.')),
+      card('In the bucket', up.bucket.length ? table([
+        { label: 'Prefix', get: (x) => x.prefix + '/', cls: () => 'mono' },
+        { label: 'Objects', num: true, get: (x) => fmt.n(x.objects) },
+        { label: 'Bytes', num: true, get: (x) => fmt.bytes(x.bytes) },
+        { label: 'Listed', get: (x) => x.at, cls: () => 'muted' },
+      ], up.bucket) : h('p', { class: 'muted' }, 'Not listed yet: the first nightly\'s rotation lists it.'))));
+    return cards;
   },
 
   async logs(params) {

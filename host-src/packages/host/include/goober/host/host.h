@@ -696,6 +696,13 @@ class Host {
   void register_log_tools();
   // Hourly: rotate quiet logs, and keep 7 days of rotated files on the machine (§ 2).
   void logs_housekeeping(int64_t now_ms);
+  // Log volume (032 § 10): the traffic store's log_velocity, with the logs directory's size, the
+  // archive queue, the projection against limits.logs-bytes, and warnings. With `cached`, the
+  // whole-host answer (window 7d, every log) is computed at most once a minute, for readiness.
+  boost::json::object log_velocity_report(const std::string& window, const std::string& log, bool cached);
+  std::mutex log_velocity_mu_;
+  int64_t log_velocity_at_ms_ = 0;
+  boost::json::object log_velocity_cache_;
   std::unique_ptr<logs::Set> logs_;
   operations::LiveStats live_;
   operations::Pulse pulse_;

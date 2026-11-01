@@ -5,7 +5,10 @@
 #include <iostream>
 #include <set>
 
+#include "backups.h"
+#include "goober/base/time.h"
 #include "goober/host/host.h"
+#include "goober/json/json.h"
 #include "goober/operations/traffic.h"
 
 namespace goober::host {
@@ -152,8 +155,40 @@ bj::object Host::limits_report(bool name_tenants) {
         bj::object{{"tenant", name_tenants ? worst_tenant : std::string()}, {"files", worst_files}, {"files_limit", d.snapshot_files},
                    {"note", "per tenant: the fullest; past the limit db_snapshot refuses and a person deletes old ones"}});
   }
-  add("logs", bytes_under(cfg->storage / "logs"), d.logs_bytes, "logs-bytes",
-      bj::object{{"note", "rotated files leave after 7 days; the budget is reported, not yet enforced"}});
+  {
+    // How fast they grow (032 § 10): the projection in 7 days, and a log far past its usual day.
+    bj::object more{{"note", "rotated files leave after 7 days; the budget is reported, not yet enforced"}};
+    try {
+      auto v = log_velocity_report("7d", "", true);
+      if (const auto* disk = v.if_contains("disk"); disk && disk->is_object()) {
+        for (const char* k : {"per_day_bytes", "projected_bytes", "archive_queued_bytes"}) {
+          if (const auto* x = disk->as_object().if_contains(k)) more[k] = *x;
+        }
+      }
+      for (const auto& w : v.at("warnings").as_array()) {
+        const auto& o = w.as_object();
+        std::string log(o.at("log").as_string());
+        std::string text(o.at("text").as_string());
+        // /goober/ready is public: a box's log is named only for operators.
+        if (!name_tenants && log.starts_with("boxes/")) {
+          text = "a box's log grew " + json::dump(o.at("growth")) + " times its usual day (log_velocity names it)";
+        }
+        near.push_back(bj::value(text));
+      }
+    } catch (const std::exception&) {
+    }
+    add("logs", bytes_under(cfg->storage / "logs"), d.logs_bytes, "logs-bytes", std::move(more));
+  }
+  // What backups put in the bucket today (019 § 9): past the budget, log archives, the source
+  // mirror, and increments wait for the next day.
+  if (backups_ && cfg->backup.enabled() && !cfg->sandbox && d.upload_bytes_per_day > 0) {
+    try {
+      add("uploads", backups_->uploaded_today(base::now_unix_ms()), d.upload_bytes_per_day, "upload-bytes-per-day",
+          bj::object{{"note", "today (UTC) in the backup bucket; past it, only the nightly, attachments, and log archives "
+                              "waiting a week go up until tomorrow"}});
+    } catch (const std::exception&) {
+    }
+  }
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
   std::error_code ec;

@@ -65,6 +65,12 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   EXPECT_NE(err.find("limits.traffic-bytes"), std::string::npos) << err;
   err.clear();
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"try-bytes":"big"}})", "/", &err));
+  // The daily upload budget (019 § 9): 1 GiB unless set; 0 turns it off.
+  EXPECT_EQ(plain->disk.upload_bytes_per_day, int64_t(1) << 30);
+  auto off = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"upload-bytes-per-day":0}})", "/", &err);
+  ASSERT_TRUE(off) << err;
+  EXPECT_EQ(off->disk.upload_bytes_per_day, 0);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"upload-bytes-per-day":-1}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

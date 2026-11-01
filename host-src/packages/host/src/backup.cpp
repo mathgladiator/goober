@@ -120,6 +120,9 @@ bool backed_up(const std::string& r, const BackupOptions& options) {
   if (r.starts_with("logs/") || r.starts_with("mail/") || r.starts_with("tmp/") || r.starts_with("backup/")) return false;
   // Exports are a person's to fetch within 7 days (008 § 7.1); a restore never brings one back.
   if (r.starts_with("exports/")) return false;
+  // The panel's numbers are live statistics, five-minute rows kept a week, recounted from the
+  // logs where they can be (045): every nightly would carry up to limits.traffic-bytes for them.
+  if (r == "operations/traffic.db" || r == "operations/failures.db") return false;
   // Build caches are rebuilt from source; they'd make every nightly hundreds of MB larger.
   if (r.starts_with("source/cache/")) return false;
   if (!options.assets && r.starts_with("objects/") && r.find("/attachments/") != std::string::npos) return false;

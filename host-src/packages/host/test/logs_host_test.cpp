@@ -193,6 +193,57 @@ TEST_F(LogsHostTest, LiveStatsTheSiteTreeAndFlow) {
   EXPECT_EQ(flow.at("value").at("in").at(0).at("from"), "/");
 }
 
+// Log velocity (032 § 10): every line the host writes is counted by log and by who wrote it; a
+// log far past its usual day warns in /goober/ready, as a ratio for the public.
+TEST_F(LogsHostTest, ALogGrowingFastWarnsAndSaysWhoWritesIt) {
+  std::string err;
+  ASSERT_TRUE(host->content().put("acme", "index.md", "# Home", &err));
+  for (int i = 0; i < 3; ++i) fetch(port, "acme.example.com", bhttp::verb::get, "/");
+  int64_t now = base::now_unix_ms();
+  constexpr int64_t kDay = 24LL * 3600 * 1000;
+  // The audit log's usual day is 1 MiB; the last 24 hours wrote 5.
+  for (int d = 2; d <= 4; ++d) host->traffic().log_written(now - d * kDay, "audit", "", "", "", 1 << 20);
+  host->traffic().log_written(now - 60000, "audit", "", "", "", 5 << 20);
+  // And a box's log, which the public sees unnamed.
+  for (int d = 2; d <= 4; ++d) host->traffic().log_written(now - d * kDay, "boxes/shop", "acme", "shop", "", 1 << 20);
+  host->traffic().log_written(now - 60000, "boxes/shop", "acme", "shop", "", 4 << 20);
+  host->traffic().catch_up(now);
+
+  auto v = op("log_velocity");
+  ASSERT_FALSE(v.at("isError").as_bool()) << v.at("text");
+  const auto& o = v.at("value").as_object();
+  bool access = false, audit = false;
+  for (const auto& l : o.at("logs").as_array()) {
+    if (l.at("log") == "access") access = l.at("last_24h_bytes").as_int64() > 0;
+    if (l.at("log") == "audit") audit = l.at("grew").as_bool();
+  }
+  EXPECT_TRUE(access);
+  EXPECT_TRUE(audit);
+  bool acme = false;
+  for (const auto& t : o.at("top").as_array()) acme |= t.at("log") == "access" && t.at("tenant") == "acme";
+  EXPECT_TRUE(acme);
+  EXPECT_EQ(o.at("disk").at("budget_bytes").as_int64(), int64_t(4) << 30);
+  EXPECT_GE(o.at("disk").at("per_day_bytes").as_int64(), int64_t(5) << 20);
+  ASSERT_EQ(o.at("warnings").as_array().size(), 2u);
+  EXPECT_EQ(o.at("warnings").at(0).at("kind"), "grew");
+  EXPECT_NE(json::dump(o.at("warnings")).find("boxes/shop"), std::string::npos);  // operators see the name
+  EXPECT_TRUE(op("log_velocity", R"({"window":"30d"})").at("isError").as_bool());
+  EXPECT_TRUE(op("log_velocity", R"({"log":"../etc"})").at("isError").as_bool());
+
+  // /goober/ready: a warning in limits, the ratio in health and for Prometheus.
+  auto ready = fetch(port, "acme.example.com", bhttp::verb::get, "/goober/ready");
+  auto r = json::parse(ready.body, &err);
+  ASSERT_TRUE(r) << ready.body;
+  EXPECT_NE(json::dump(r->at("checks").at("limits").at("near")).find("audit wrote"), std::string::npos) << ready.body;
+  EXPECT_EQ(ready.body.find("shop"), std::string::npos) << ready.body;
+  EXPECT_NE(ready.body.find("a box's log grew"), std::string::npos);
+  EXPECT_NEAR(r->at("health").at("logs").at("growth").at("boxes").as_double(), 4.0, 0.05);
+  EXPECT_NEAR(r->at("health").at("logs").at("growth").at("audit").as_double(), 5.0, 0.05);  // and the tests' own lines
+  auto prom = fetch(port, "acme.example.com", bhttp::verb::get, "/goober/ready?format=prometheus");
+  EXPECT_NE(prom.body.find("goober_log_growth_ratio{log=\"audit\"} 5"), std::string::npos) << prom.body;
+  EXPECT_NE(prom.body.find("goober_logs_projected_budget_ratio"), std::string::npos);
+}
+
 TEST_F(LogsHostTest, AnAgentGoingHamIsFlagged) {
   for (int i = 0; i < 70; ++i) call(token, "content_put", R"({"tenant":"acme","path":"spam.txt","text":"x"})");
   auto a = op("agent_audit", R"({"window":"1h"})");

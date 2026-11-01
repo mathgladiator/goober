@@ -141,6 +141,10 @@ struct HostConfig {
     int64_t logs_bytes = int64_t(4) << 30;        // logs on the machine, archive queue included
     int64_t free_bytes = int64_t(1) << 30;        // what new work must leave free on the disk
     int64_t tmp_hours = 24;                       // a file in storage/tmp older than this goes
+    // What backups put in the bucket per UTC day before increments, log archives, and the
+    // source mirror wait for the next day (019 § 9); the nightly and attachments never wait.
+    // 0: no budget.
+    int64_t upload_bytes_per_day = int64_t(1) << 30;
   } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.

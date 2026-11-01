@@ -88,7 +88,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     }
     for (const char* t : {"host_health", "ids_status", "hot_boxes", "access_log", "operator_actions", "key_list", "backup_run",
                           "backup_status", "crawl_list", "crawl_pages", "crawl_records", "crawl_rerun", "crawl_start",
-                          "crawl_stop", "web_optout", "log_verify", "log_status", "agent_audit", "upgrade_dry_run",
+                          "crawl_stop", "web_optout", "log_verify", "log_status", "log_velocity", "agent_audit", "upgrade_dry_run",
                           "upgrade_start"}) {
       m[t] = Rule::kHost;
     }

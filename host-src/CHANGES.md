@@ -4,6 +4,12 @@ Served by the `whats_new` tool, built into the binary: each entry is something a
 engineers can do now, newest first, with the tools to use. A host has every entry up to its
 build (`host_health`'s `build`). Add an entry with every change agents should know about.
 
+## 2026-11-01
+
+- log_velocity {window?, log?}: how fast each log grows. Per log, the last 24 hours (bytes, lines), today, the usual day (the median of the 7 before), growth, and grew (3 times or more, and at least 1 MiB); series per step over 1h, 12h, or 7d; 90 days of daily totals; top (the tenant, box, and route that wrote the most, with their share); disk (on the machine, the archive queue, bytes per day, the projection in 7 days against limits.logs-bytes); warnings. /goober/ready's limits check warns on the same, and health.logs carries growth ratios. If a box of yours tops it, log less.
+- backup_status answers uploads: bytes put in the bucket today by stream (nightly, increments, logs, assets, source), limits.upload-bytes-per-day (1 GiB unless set), deferring (past the budget, log archives, increments, and the source mirror wait for the next UTC day; the nightly and attachments never), 30 days by stream, and what the bucket held at the last rotation.
+- The panel's traffic.db and failures.db are no longer in backups: a restore starts the panel's numbers fresh.
+
 ## 2026-10-31
 
 - /goober/ready answers health: numbers to graph over time, for the last five minutes and now (requests' 4xx and 5xx ratios and p50/p99/max latency; box, mail, and service failure ratios; the outbox's depth, oldest age, and dead letters; workers and open connections; free disk; each backup's age; the log archive queue and write errors). Ratios, latencies, ages, and gauges only, never counts: anyone can read it. /goober/ready?format=prometheus gives the same as Prometheus text (goober_*, goober_check_ok{check}), always 200 with goober_ready 0 or 1.

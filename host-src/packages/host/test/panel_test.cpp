@@ -379,6 +379,18 @@ TEST_F(PanelTest, ServicesAreReportedAndDrawnWithTheMailer) {
   EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/", {{"cookie", cookie}}).body.find("#/services"), std::string::npos);
 }
 
+// The Logs and uploads view (028 § 4.7): an observer reads log_velocity and backup_status.
+TEST_F(PanelTest, AnObserverSeesLogVolumeAndUploads) {
+  std::string cookie = sign_in("watcher@example.com");
+  auto v = parse(api(cookie, "log_velocity", R"({"window":"1h"})").body);
+  ASSERT_TRUE(v.contains("result")) << json::dump(v);
+  EXPECT_TRUE(v.at("result").as_object().contains("series"));
+  EXPECT_TRUE(v.at("result").as_object().contains("disk"));
+  auto js = fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body;
+  EXPECT_NE(js.find("async volume(params)"), std::string::npos);
+  EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/", {{"cookie", cookie}}).body.find("#/volume"), std::string::npos);
+}
+
 TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {
   uint16_t panel = host->panel_port();
   ASSERT_NE(panel, 0);

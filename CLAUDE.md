@@ -126,7 +126,9 @@ Read these before doing design work:
   - `design/machine/018.Mail.md`: Amazon SES as the host's mailer, AWS keys in the key store,
     a `mail` service boxes send through via the outbox with daily limits, and the sandbox flag.
   - `design/machine/019.Backups.md`: S3 backups: sealing, the bucket's layout, the nightly,
-    page-level increments, assets, rotation, `goober-host rehydrate`, and the tests.
+    page-level increments, assets, rotation, `goober-host rehydrate`, and the tests; the daily
+    upload budget (§ 9): uploads counted per day and stream, past `limits.upload-bytes-per-day` log
+    archives, increments, and the source mirror wait a day (never the nightly or attachments).
   - `design/machine/020.Source.md`: source projects over MCP: storage, concurrency,
     `goober.project.json`, sandboxed Rust builds with vendored crates, deploys, and the tools;
     kept jobs and deploys (box versions back to revisions), the sealed mirror in the backup
@@ -157,7 +159,8 @@ Read these before doing design work:
     failures view of how boxes fail (`box_failures`) (§ 4.1 to § 4.3); the Services view of what went out
     (`service_report`: boxes' services, mail through the mailer, push, the robot; failures, latency,
     retries, the outbox's queue) and the Overview's key graphs (§ 4.4, § 4.5); `/goober/ready`'s `health`
-    for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the change log from the
+    for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the Logs and uploads
+    view of log volume, who writes it, and uploads per day (§ 4.7); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
     and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal
@@ -173,7 +176,9 @@ Read these before doing design work:
     checks before and after, url_check, page_lint, compact output, and stable tool schemas.
   - `design/machine/032.Logs.md`: logs with an envelope and a hash chain, daily rotation, sealed
     archives kept 400 days, addresses as keyed hashes, an audit log, the log dive, live per-URI
-    p99 and flow in memory, agent auditing, the panel's new views, and a SOC2 mapping.
+    p99 and flow in memory, agent auditing, the panel's new views, and a SOC2 mapping; log velocity
+    (§ 10): every line counted by log and writer, growth against the usual day, the 7-day projection
+    against `limits.logs-bytes`, `log_velocity`, and warnings in `/goober/ready`.
   - `design/machine/033.HttpFormats.md`: research: the ways HTTP APIs are described (OpenAPI 2.0
     to 3.2, Overlays, Arazzo, Discovery, Smithy, and more), an audit of popular APIs (Amazon
     aside), and the patterns that break "just OpenAPI".
@@ -226,7 +231,8 @@ Read these before doing design work:
     has a time limit and a byte budget in one table, set under host.json's `limits`; over budget
     the derived and expiring are dropped oldest first, new tries, exports, and snapshots are
     refused naming the limit, and snapshots are never deleted by the host; what a try is; the
-    `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days.
+    `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days; the
+    log-velocity warnings and the daily upload budget in the table.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

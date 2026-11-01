@@ -392,6 +392,80 @@ TEST_F(TrafficTest, GaugesKeepEachFiveMinutesLargestAndTheLatest) {
   EXPECT_TRUE(t->gauge_series("1h", "outbox_pending", "other", kNoon + 61000).at("now").as_array().empty());
 }
 
+// Log volume (032 § 10): counted per five minutes and per day, against the week before.
+TEST_F(TrafficTest, LogVelocityComparesTheLastDayWithTheWeeksMedian) {
+  constexpr int64_t kDay = 24 * 3600 * 1000LL;
+  int64_t today = kNoon / kDay * kDay;
+  // Rotated files from three days before (seeded: bytes only), as a host would have left them.
+  for (int d = 1; d <= 3; ++d) {
+    std::string name = "access.log." + std::to_string(d);
+    std::string first = "{\"at\":\"" + at(today - d * kDay + 3600000) + "\",\"log\":\"access\"}";
+    std::string body = first + "\n" + std::string(size_t(2 << 20) - first.size() - 1, 'x');
+    ASSERT_TRUE(base::write_file_durable(root / "logs" / name, body));
+  }
+  fs::create_directories(root / "logs" / "boxes");
+  ASSERT_TRUE(base::write_file_durable(root / "logs" / "boxes" / "shop.log.1",
+                                       "{\"at\":\"" + at(today - kDay + 5000) + "\",\"log\":\"boxes/shop\"}\n"));
+  // Today's own file isn't a day gone by: never seeded.
+  ASSERT_TRUE(base::write_file_durable(root / "logs" / "audit.log.1", "{\"at\":\"" + at(today + 1000) + "\"}\n"));
+  auto t = open();
+  EXPECT_EQ(t->seed_log_days(kNoon), 4);
+  EXPECT_EQ(t->seed_log_days(kNoon), 0);  // once
+
+  // The last day: 7 MiB of access lines, most from one route; a little of the box's log.
+  for (int i = 0; i < 7; ++i) t->log_written(kNoon - i * 600000, "access", "acme", "shop", "checkout", 900 << 10);
+  for (int i = 0; i < 7; ++i) t->log_written(kNoon - i * 600000, "access", "acme", "", "page", 124 << 10);
+  t->log_written(kNoon, "boxes/shop", "acme", "shop", "", 2000);
+  t->catch_up(kNoon);
+  auto v = t->log_velocity("7d", "", kNoon);
+  const auto& logs = v.at("logs").as_array();
+  ASSERT_GE(logs.size(), 2u);
+  EXPECT_EQ(logs[0].at("log"), "access");  // biggest first
+  EXPECT_EQ(logs[0].at("last_24h_bytes").as_int64(), 7 * (1024 << 10));
+  EXPECT_EQ(logs[0].at("last_24h_lines").as_int64(), 14);
+  EXPECT_EQ(logs[0].at("median_day_bytes").as_int64(), 2 << 20);
+  EXPECT_EQ(logs[0].at("days_known").as_int64(), 3);
+  EXPECT_DOUBLE_EQ(logs[0].at("growth").as_double(), 3.5);
+  EXPECT_TRUE(logs[0].at("grew").as_bool());
+  // One known day is too few to judge; and a small log never warns.
+  for (const auto& l : logs) {
+    if (l.at("log") == "boxes/shop") {
+      EXPECT_TRUE(l.at("growth").is_null());
+      EXPECT_FALSE(l.at("grew").as_bool());
+    }
+  }
+  // The top contributor is the route that wrote the most, with its share of its log.
+  const auto& top = v.at("top").as_array();
+  ASSERT_FALSE(top.empty());
+  EXPECT_EQ(top[0].at("route"), "checkout");
+  EXPECT_EQ(top[0].at("box"), "shop");
+  EXPECT_NEAR(top[0].at("share").as_double(), 0.879, 0.001);
+  // Days: today counted with lines, the seeded ones without.
+  bool counted_today = false, seeded = false;
+  for (const auto& d : v.at("days").as_array()) {
+    std::string day(d.at("day").as_string());
+    if (day == at(today).substr(0, 10) && d.at("log") == "access") counted_today = d.at("counted").as_bool();
+    if (day == at(today - kDay).substr(0, 10) && d.at("log") == "access") seeded = d.at("lines").is_null();
+  }
+  EXPECT_TRUE(counted_today);
+  EXPECT_TRUE(seeded);
+  // The series has a point per hour over the week; the bytes add up.
+  int64_t sum = 0;
+  for (const auto& s : v.at("series").as_array()) {
+    if (s.at("log") != "access") continue;
+    EXPECT_EQ(s.at("points").as_array().size(), 168u);
+    for (const auto& p : s.at("points").as_array()) sum += p.as_int64();
+  }
+  EXPECT_EQ(sum, 7 * (1024 << 10));
+  // One log only.
+  EXPECT_EQ(t->log_velocity("1h", "boxes/shop", kNoon).at("logs").as_array().size(), 1u);
+  // Five-minute rows leave after seven days; a day's total stays 90.
+  t->catch_up(kNoon + 8 * kDay);
+  auto later = t->log_velocity("7d", "access", kNoon + 8 * kDay);
+  EXPECT_EQ(later.at("logs").at(0).at("last_24h_bytes").as_int64(), 0);
+  EXPECT_FALSE(later.at("days").as_array().empty());
+}
+
 // A measurement, not a check (045.Limits.md § 3): a week of one busy site, 50 routes each
 // answering every minute, 5 services each called every minute. Run with
 // --gtest_also_run_disabled_tests --gtest_filter='*SizeOfAWeek*'.

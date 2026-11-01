@@ -515,8 +515,10 @@ void Host::register_data_tools() {
   mcp_->add_tool({"backup_status",
                   "Backups to S3: whether they're on and healthy, the current night and last increment, the attachment "
                   "queue, the source mirror, the last error, whether a person has confirmed keeping a copy of the "
-                  "backup key (only a person can, on the server), and, with points, the restore points in the bucket. "
-                  "A read tool.",
+                  "backup key (only a person can, on the server), uploads (bytes put in the bucket today by stream "
+                  "against limits.upload-bytes-per-day, whether the non-essential streams are waiting for tomorrow, 30 "
+                  "days by stream, and what the bucket held at the last rotation), and, with points, the restore points "
+                  "in the bucket. A read tool.",
                   mcp::object_schema({{"points", mcp::boolean_property("Also list the restore points in the bucket.")}}, {}),
                   [this](const bj::object& args) {
                     bool points = args.contains("points") && args.at("points").is_bool() && args.at("points").as_bool();

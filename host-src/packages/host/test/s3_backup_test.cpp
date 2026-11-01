@@ -337,3 +337,66 @@ TEST_F(S3BackupTest, SourceHistoryIsMirroredSealedAndReadBack) {
   ASSERT_TRUE(host::pull_source_mirror(o, &report, &err)) << err;
   EXPECT_EQ(report.fetched, 0);
 }
+
+// The daily upload budget (019 § 9): every object counted by stream and day; past the budget,
+// log archives and increments wait for the next UTC day, while the nightly and attachments
+// don't, and a log archive waiting a week goes anyway.
+TEST_F(S3BackupTest, PastTheDailyBudgetLogsAndIncrementsWaitForTomorrow) {
+  int64_t t0 = utc(2026, 10, 27, 4, 0);
+  host->backup_tick(t0);
+  auto status = host->backup_status(false, t0 + 60000);
+  const auto& up = status.at("uploads").as_object();
+  EXPECT_GT(up.at("today").at("nightly").as_int64(), 0);
+  EXPECT_GT(up.at("today").at("assets").as_int64(), 0);
+  EXPECT_EQ(up.at("today_bytes").as_int64(),
+            up.at("today").at("nightly").as_int64() + up.at("today").at("assets").as_int64());
+  EXPECT_EQ(up.at("budget_bytes").as_int64(), int64_t(1) << 30);
+  EXPECT_FALSE(up.at("deferring").as_bool());
+  // Rotation listed the bucket: what it held under nightly/.
+  bool nightly_held = false;
+  for (const auto& b : up.at("bucket").as_array()) nightly_held |= b.at("prefix") == "nightly" && b.at("objects").as_int64() == 1;
+  EXPECT_TRUE(nightly_held);
+
+  // A budget smaller than today's nightly: what isn't essential waits.
+  std::string err;
+  std::string tight = *base::read_file(root / "host.json");
+  tight.insert(tight.rfind('}'), R"(, "limits": {"upload-bytes-per-day": 1000})");
+  base::write_file_durable(root / "host.json", tight);
+  auto cfg = config::load_config(root / "host.json", &err);
+  ASSERT_TRUE(cfg) << err;
+  host->config().replace(cfg);
+  host->logs().write("access", bj::object{{"path", "/old"}}, t0 - 86400000);
+  auto rotated = host->logs().write("access", bj::object{{"path", "/new"}}, t0 + 60000);
+  ASSERT_TRUE(rotated);
+  insert(5);
+  host->backup_tick(t0 + 20 * 60000);
+  EXPECT_TRUE(keys("logs/").empty());
+  EXPECT_TRUE(keys("increments/").empty());
+  EXPECT_EQ(keys("nightly/").size(), 1u);
+  status = host->backup_status(false, t0 + 20 * 60000);
+  EXPECT_TRUE(status.at("uploads").at("deferring").as_bool());
+  EXPECT_TRUE(status.at("uploads").as_object().contains("note"));  // the nightly alone is past it
+
+  // A log archive queued a week goes anyway, so the queue's 30 days never run out.
+  // (finished, it moved up from archive/pending/ into archive/)
+  fs::path queued = root / "storage/logs/archive" / rotated->queued.filename();
+  ASSERT_TRUE(fs::exists(queued));
+  fs::last_write_time(queued, fs::file_time_type::clock::now() - hours(24 * 8));
+  host->backup_tick(t0 + 22 * 60000);
+  EXPECT_FALSE(keys("logs/").empty());
+  EXPECT_TRUE(keys("increments/").empty());
+
+  // The next UTC day starts with room: the increment goes.
+  host->backup_tick(utc(2026, 10, 28, 1, 0));
+  EXPECT_FALSE(keys("increments/").empty());
+  status = host->backup_status(false, utc(2026, 10, 28, 1, 0));
+  EXPECT_GT(status.at("uploads").at("today").at("increments").as_int64(), 0);
+}
+
+// The panel's live statistics stay out of every backup (045): they are a week of five-minute rows.
+TEST(BackedUp, LiveStatisticsStayOut) {
+  host::BackupOptions o;
+  EXPECT_FALSE(host::backed_up("operations/traffic.db", o));
+  EXPECT_FALSE(host::backed_up("operations/failures.db", o));
+  EXPECT_TRUE(host::backed_up("operations/changes.db", o));
+}
