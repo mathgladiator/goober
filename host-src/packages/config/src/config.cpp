@@ -210,7 +210,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   const auto& root = parsed->get_object();
   auto cfg = std::make_shared<HostConfig>();
   if (!check_keys(root, {"listen", "storage", "platform-domain", "public-url", "domains", "operations", "identity",
-                          "threads", "limits", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants", "audit", "cache"},
+                          "threads", "limits", "controls", "web", "sandbox", "aws", "mail", "backup", "source", "pwa", "tenants", "audit", "cache"},
                   "config", &err)) {
     *error = err;
     return nullptr;
@@ -477,6 +477,21 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
         !read_limit(*limits, "memory-max-bytes", cfg->memory_max_bytes, &err)) {
       return *error = err, nullptr;
     }
+  }
+  // Per-domain controls (047 § 2): only host defaults live in host.json, checked against the
+  // limits above, which they may only lower.
+  {
+    std::string why;
+    if (const auto* controls = get_object(root, "controls", &why)) {
+      if (!check_keys(*controls, {"defaults"}, "controls", &why)) return *error = why, nullptr;
+      if (const auto* defaults = get_object(*controls, "defaults", &why)) {
+        controls::HostLimits hl{cfg->body_max_bytes, cfg->timeout_ms.max_value};
+        auto d = controls::parse_host_defaults(*defaults, hl, &why);
+        if (!d) return *error = why, nullptr;
+        cfg->controls_defaults = std::move(*d);
+      }
+    }
+    if (!why.empty()) return *error = why, nullptr;
   }
   if (const auto* web = get_object(root, "web", &err)) {
     if (!check_keys(*web, {"contact", "min-delay-ms", "max-page-bytes", "opt-out"}, "web", &err)) return *error = err, nullptr;

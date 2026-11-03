@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 #include "goober/json/json.h"
 
@@ -59,6 +60,27 @@ struct LineKey {
 using TenantOf = std::function<std::optional<std::string>(const std::string& domain)>;
 // Keys one parsed access-log line (§ 4), or nullopt for a line with no time.
 std::optional<LineKey> key_line(const bj::object& line, const TenantOf& tenant_of);
+
+// One per-domain control's five minutes (design/machine/047.Controls.md § 6), as the controls
+// gate counts them: rows sum, sketches union, so any window adds up. Clients are never named:
+// distinct ones are a 256-bit sketch (64 hex digits), and the busiest one a keyed hash.
+struct ControlRow {
+  int64_t t = 0;  // the bucket's start
+  std::string tenant, domain, control;
+  int64_t matched = 0, allowed = 0;
+  int64_t rate = 0, concurrent = 0, body = 0, closed = 0;  // refused, by reason
+  int64_t would = 0;                                       // would have refused (observe)
+  int64_t n5 = 0;                                          // of the allowed, answered 5xx
+  int64_t peak = 0;                                        // the most in flight at once
+  std::string clients, would_clients;                      // sketches of distinct clients refused, would-refuse
+  std::string top_client, would_top;                       // the busiest one's keyed hash
+  int64_t top_n = 0, would_top_n = 0;
+  Histogram hist;  // latency of the allowed
+  int64_t refused() const { return rate + concurrent + body + closed; }
+  void merge(const ControlRow& o);
+};
+// Two sketches of 64 hex digits, unioned; an empty one is nothing.
+std::string sketch_union(const std::string& a, const std::string& b);
 
 class Traffic {
  public:
@@ -143,6 +165,12 @@ class Traffic {
   static constexpr int64_t kGrowthFloorBytes = int64_t(1) << 20;
   bj::object log_velocity(std::string_view window, const std::string& log, int64_t now_ms, size_t top = 20);
 
+  // Per-domain controls (047 § 6): five-minute rows the gate hands over, written by catch_up and
+  // kept 7 days within traffic-bytes, like every other rollup. Safe from any thread.
+  void add_control_rows(std::vector<ControlRow> rows);
+  // Rows of a domain (and one control, or "" for all) with from_ms <= t < to_ms, oldest first.
+  std::vector<ControlRow> control_rows(const std::string& domain, const std::string& control, int64_t from_ms, int64_t to_ms);
+
  private:
   struct Window;
   size_t tail(const std::string& name, int64_t now_ms);
@@ -166,6 +194,9 @@ class Traffic {
   void flush_logs();
   std::mutex log_mu_;
   std::map<std::tuple<int64_t, std::string, std::string, std::string, std::string>, std::pair<int64_t, int64_t>> log_pending_;
+  void flush_controls();
+  std::mutex control_mu_;
+  std::vector<ControlRow> control_pending_;
   int64_t last_drop_ms_ = 0;
 };
 

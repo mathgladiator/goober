@@ -67,14 +67,14 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
 | 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, and a read-only database explorer; `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
 | 320 Working set | none | | Drafts for editors and agents. |
 | 325 Managing keys | none | | |
 | 330 Stability | none | | Capabilities, providers, pins, replay. |
-| 390 Quotas | none | | |
+| 390 Quotas | none | Not quotas, but beside them: per-domain controls (047) are operator-set rate, concurrency, body, timeout, and closed limits per domain, API, and endpoint, with refusals clear and counted. | Users, rows, bytes, and uploads per tenant; red lines; requests per day. |
 | 400 Cluster | none | Single machine only. | |
 | 410 API | partial | About 180 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, backups, source projects, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | mostly | `follows` steps classified by kind; expansions, emulated type changes, and indexing in place; contractions as tombstones after a person's approval; upgrade boxes with rows handlers, dry run on copies, snapshot first (041). | `writes` and `reads` handlers (no named writes yet), so a forced upgrade waits for older boxes to go; emulated reads aren't converted for older boxes; tombstoned columns aren't removed. |
@@ -961,8 +961,31 @@ per-domain controls (047), whose numbers a study suggests (048):
       `limits.studies-bytes` (64 MiB), oldest first; in the `limits` check; tests.
 - [x] The panel's **Studies** view; a test that it reads and can't start one.
 - [ ] The view checked in a browser.
-- [ ] 047 merged: the MCP `match` shape and `control_set`'s arguments agreed (048 § 4.3).
-- [ ] Four decisions (048 § 11).
+- [x] 047 merged: suggestions in `control_set`'s shape (`endpoint: {id, match}`, `set`); MCP tools
+      get none, since 047 matches paths (048 § 4.3).
+- [ ] Five decisions (048 § 11).
+
+### Phase 51: per-domain controls (2026-11-03)
+The human: "I want rate limiting, concurrent limits, and other operational controls per API per
+domain with the ability to have endpoint override. Each override becomes something that can be
+monitored as well to determine effectiveness." (`design/machine/047.Controls.md`):
+- [x] The `controls` package: properties parsed strictly (`rate` by client, user, or all;
+      `concurrent`; `body-max-bytes` and `timeout-ms`, only lower; `closed`; `"off"`), `"METHOD
+      /path"` matchers sorted by specificity, the per-property merge across host, domain, API,
+      and endpoint, `enforce` and `observe`; the gate's buckets, in-flight tickets released on
+      every path, and five-minute rows; reports with effects and verdicts; tests.
+- [x] host.json `controls.defaults`, checked at load and on reload; tests.
+- [x] `control_set`, `control_remove`, `control_list`, `control_report`: stored per domain
+      through the WAL, audited, in the change log (`control`), scoped by the domain's tenant,
+      held by approvals, live on the next request; tests.
+- [x] The request path's one hook after the host-wide shield: 429, 503, 413, and closed's
+      status through the host's error page or JSON (closed's message kept); the access log's
+      `control`; `timeout-ms` to box calls on routes and `/mcp`; tests.
+- [x] Rows in `traffic.db` within `traffic-bytes` (045's table); `health.controls` ratios and
+      their Prometheus lines; tests.
+- [x] The panel's **Controls** view; the change log's `control` kind.
+- [ ] The view checked in a browser.
+- [ ] Requests per day, alerts on verdicts, and the other decisions in 047 § 12.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

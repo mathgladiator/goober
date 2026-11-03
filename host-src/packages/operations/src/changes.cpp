@@ -76,6 +76,13 @@ PathKind classify_path(std::string_view path) {
     k.target = parts[2].substr(0, parts[2].size() - std::string_view(".json").size());
     return k;
   }
+  // Per-domain controls (047.Controls.md): controls/$tenant/$domain.json, the domain's whole set.
+  if (parts.size() == 3 && parts[0] == "controls" && parts[2].ends_with(".json")) {
+    k.kind = "control";
+    k.tenant = parts[1];
+    k.target = parts[2].substr(0, parts[2].size() - std::string_view(".json").size());
+    return k;
+  }
   if (parts.size() == 4 && parts[0] == "objects" && parts[2] == "attachments") {
     k.kind = "attachment";
     k.tenant = parts[1];
@@ -190,7 +197,7 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
         existed = fs::exists(root_ / change.path, ec);
       }
       bool texts = k.kind == "content" || k.kind == "partial" || k.kind == "template" || k.kind == "schema" ||
-                   k.kind == "flag";
+                   k.kind == "flag" || k.kind == "control";
       std::string action = del ? "delete" : existed ? "write" : "create";
       insert(now_ms, k.kind, action, k.tenant, k.target, actor, request_id, before, after, texts, detail);
     }

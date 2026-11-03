@@ -154,6 +154,23 @@ namespace {
 int64_t round_up(int64_t v, int64_t step) { return (v + step - 1) / step * step; }
 std::string clients_text(int64_t n) { return std::to_string(n) + (n == 1 ? " client" : " clients"); }
 
+// An override id from the endpoint, as 047 allows (letters, digits, _; not a leading digit; at
+// most 64): "POST /cart/{id}" is post_cart_id.
+std::string override_id(const std::string& endpoint) {
+  std::string id;
+  for (char c : endpoint) {
+    bool word = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a'), word = true;
+    if (word) id += c;
+    else if (!id.empty() && id.back() != '_') id += '_';
+  }
+  while (!id.empty() && id.back() == '_') id.pop_back();
+  if (id.empty() || (id[0] >= '0' && id[0] <= '9')) id = "e_" + id;
+  if (id.size() > 64) id.resize(64);
+  while (id.back() == '_') id.pop_back();
+  return id;
+}
+
 }  // namespace
 
 bj::object suggest_controls(const SuggestInput& in) {
@@ -164,7 +181,13 @@ bj::object suggest_controls(const SuggestInput& in) {
     return bj::object{{"none", "only " + std::to_string(in.requests) +
                                    " requests: too few to suggest from; study longer, or at a busier time"}};
   }
-  bj::object args{{"domain", in.domain}, {"api", in.api}, {"match", in.endpoint}};
+  // 047 matches "METHOD /path", and every MCP call is POST /mcp: one tool can't be singled out.
+  if (in.api == "mcp") {
+    return bj::object{{"none", "a control can't single out one MCP tool (047 matches paths, and every call is POST /mcp); "
+                               "a control on api mcp covers all of /mcp"}};
+  }
+  bj::object args{{"domain", in.domain}, {"api", in.api}, {"endpoint", bj::object{{"id", override_id(in.endpoint)}, {"match", in.endpoint}}}};
+  bj::object set;
   bj::object reasons;
   // A per-client rate protects against one client; when the endpoint carries much of the
   // domain's heat and its load is spread over many clients, the endpoint's whole rate is the
@@ -188,25 +211,26 @@ bj::object suggest_controls(const SuggestInput& in) {
                       clients_text(in.clients) + "); burst is half that";
   }
   int64_t burst = std::max<int64_t>(1, (per_minute + 1) / 2);
-  args["rate"] = bj::object{{"per-minute", per_minute}, {"burst", burst}, {"by", by}};
+  set["rate"] = bj::object{{"per-minute", per_minute}, {"burst", burst}, {"by", by}};
   int64_t cmax = std::max<int64_t>(2, 2 * in.peak_concurrent);
   int64_t cper = std::max<int64_t>(1, 2 * in.peak_client_concurrent);
-  args["concurrent"] = bj::object{{"max", cmax}, {"per-client", cper}};
+  set["concurrent"] = bj::object{{"max", cmax}, {"per-client", cper}};
   reasons["concurrent"] = "max " + std::to_string(cmax) + " = max(2, 2 x " + std::to_string(in.peak_concurrent) +
                           ", the most in flight at once); per-client " + std::to_string(cper) + " = max(1, 2 x " +
                           std::to_string(in.peak_client_concurrent) + ", the most one client had in flight)";
   if (in.max_body_bytes > 0) {
     int64_t b = std::max<int64_t>(1024, round_up(2 * in.max_body_bytes, 1024));
-    args["body-max-bytes"] = b;
+    set["body-max-bytes"] = b;
     reasons["body-max-bytes"] = std::to_string(b) + " = max(1024, 2 x " + std::to_string(in.max_body_bytes) +
                                 " bytes, the largest body seen, rounded up to a KiB)";
   }
   if (in.api.starts_with("box:")) {
     int64_t ms = std::max<int64_t>(1000, round_up((2 * in.max_us + 999) / 1000, 100));
-    args["timeout-ms"] = ms;
+    set["timeout-ms"] = ms;
     reasons["timeout-ms"] = std::to_string(ms) + " = max(1000, 2 x " + std::to_string((in.max_us + 999) / 1000) +
                             " ms, the slowest answer, rounded up to 100 ms)";
   }
+  args["set"] = std::move(set);
   args["mode"] = "observe";
   args["why"] = "heat study " + std::to_string(in.study_id) + ": observe first, then enforce";
   return bj::object{{"control_set", std::move(args)}, {"reasons", std::move(reasons)}};

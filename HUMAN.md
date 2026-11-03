@@ -405,6 +405,31 @@ shows each day by stream. If the budget is just too small for your site, raise i
 `0` turns the budget off. To upload less, keep fewer days (`backup.keep-days` only changes
 what the bucket holds), back up databases less often (`backup.databases-every-ms`), or log less.
 
+## A site is being hammered (controls)
+
+Every domain can have its own limits: a rate, how many requests at once, body size, a timeout,
+or closed. They can be set for the whole domain, one API (a box, `content`, `mcp`, `identity`),
+or one endpoint like `POST /cart/{id}` (`design/machine/047.Controls.md`). See how much they
+refuse across the host:
+
+```sh
+curl -s https://example.com/goober/ready | jq '.health.controls'
+```
+
+The panel's **Controls** view shows each one, and what it refused or would have refused. Ask
+Grok to:
+
+1. Add the limit in observe, so it refuses nothing yet: `control_set` with `"mode": "observe"`
+   and a why.
+2. Read `control_report` after a while. "Would have refused 2% from 1 client" is a flood to
+   shield against. "From 40 clients" means the limit is too tight.
+3. Then enforce it: `control_set` with `"mode": "enforce"`.
+
+To close a domain or a box at once (moving data, an incident), use `"set": {"closed":
+{"retry-after-s": 600, "message": "Back soon."}}` with `"mode": "enforce"`. Visitors get a 503
+with your message, and no box wakes. `control_remove` opens it again. Every change is in the
+change log, and in the audit log with its why.
+
 ## Where is a site's heat?
 
 A heat study counts one domain's requests by endpoint for a while, then keeps a report 30 days

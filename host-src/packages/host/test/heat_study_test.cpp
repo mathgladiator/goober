@@ -174,10 +174,10 @@ TEST_F(HeatStudyHostTest, RequestsAreKeyedByEndpointAndGetSuggestions) {
   const auto& suggest = items->at("suggest").as_object();
   ASSERT_TRUE(suggest.contains("control_set")) << json::dump(suggest);
   EXPECT_EQ(suggest.at("control_set").at("mode").as_string(), "observe");
-  EXPECT_EQ(suggest.at("control_set").at("match").as_string(), "GET /items/{id}");
+  EXPECT_EQ(suggest.at("control_set").at("endpoint").at("match").as_string(), "GET /items/{id}");
   EXPECT_EQ(suggest.at("control_set").at("domain").as_string(), "acme.example.com");
-  EXPECT_EQ(suggest.at("control_set").at("rate").at("by").as_string(), "client");
-  EXPECT_TRUE(suggest.at("control_set").as_object().contains("timeout-ms"));
+  EXPECT_EQ(suggest.at("control_set").at("set").at("rate").at("by").as_string(), "client");
+  EXPECT_TRUE(suggest.at("control_set").at("set").as_object().contains("timeout-ms"));
 
   // The host refusing before the box ran is still the route's.
   const auto* members = endpoint(rep, "GET /members");

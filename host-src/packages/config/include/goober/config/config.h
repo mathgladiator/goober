@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "goober/controls/spec.h"
+
 namespace goober::config {
 
 // A limit with a host default and a ceiling that no manifest may exceed.
@@ -126,6 +128,9 @@ struct HostConfig {
   int64_t body_max_bytes = 1 << 20;
   // Requests one client address may make per minute, in a burst of a quarter of that.
   int64_t requests_per_minute = 1200;
+  // Per-domain controls' host defaults (design/machine/047.Controls.md § 2): controls.defaults,
+  // under every domain's own. Domains' controls are set by tools, never here.
+  std::optional<controls::Control> controls_defaults;
   // Outbox calls a tenant's boxes may queue to one service in a day (a model API, a payment
   // API): what stops a looping box from spending. Mail has its own limits.
   int64_t outbox_daily_per_service = 1000;

@@ -58,6 +58,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "deletions",
     "schema_check",
     "flag_list",
+    "control_list", "control_report",
     "db_snapshots", "db_unbound",
     "route_try",
     "changeset_show", "changeset_list", "changeset_preview",
@@ -381,6 +382,7 @@ void Host::run_traffic() {
     lock.unlock();
     try {
       traffic_->set_budget(config_.get()->disk.traffic_bytes);  // limits.traffic-bytes, as reloaded
+      control_rows_to_traffic(base::now_unix_ms());
       traffic_->catch_up(base::now_unix_ms());
       if (failures_) failures_->flush(base::now_unix_ms());
       loop_beat("traffic");
@@ -939,11 +941,11 @@ void Host::register_panel_tools() {
   mcp_->add_tool(
       {"changes",
        "The change log, newest first: every deploy (activate or disable), version upload, content, partial, "
-       "template, schema, flag, and attachment write, with who made it (the operator, or host) and the request that "
+       "template, schema, flag, control, and attachment write, with who made it (the operator, or host) and the request that "
        "caused it. Each row's id is the change_id a write answered with. Texts are in change_get. Operator calls "
        "that change things outside the log (panel drops, snapshots, source commits) are in operator_actions.",
        object_schema({{"kind", enum_property("Only this kind.", {"deploy", "upload", "content", "partial", "template",
-                                                                 "schema", "flag", "attachment", "other"})},
+                                                                 "schema", "flag", "control", "attachment", "other"})},
                       {"tenant", string_property("Only this tenant (_host for host-wide content).")},
                       {"before_id", integer_property("Rows older than this id, for the next page.")},
                       {"limit", integer_property("At most this many: default 50, at most 500.")}},

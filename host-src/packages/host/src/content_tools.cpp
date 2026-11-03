@@ -166,6 +166,14 @@ the extension (.csv, .json, .xml, .atom, .rss, .webmanifest, .ics, .svg, .txt, .
 Paths with a segment that starts with "_" are never served. Text is stored byte for byte, but a
 tool-call layer can drop CR bytes on the way: give sha256 to make sure, or send base64.
 
+## Limits on a busy site [control_set, control_report, control_list]
+A page that is hammered, or a site to close for an hour, needs no deploy. control_set {domain,
+api: "content", ...} covers every page and file, and endpoint: {id, match: "GET /blog/{rest*}"}
+covers some of them. It takes rate {per-minute}, concurrent {max}, or closed {retry-after-s,
+message}; the message shows on the 503 page as {{message}}. Start with mode "observe", read
+control_report (what it would have refused, and from how many clients), then set mode
+"enforce" (design/machine/047.Controls.md).
+
 ## Error pages: your own 404, 403, and the rest [content_put]
 When the host answers an error itself (no such page, a gate, a limit, a box that failed), a
 browser gets the site's page for that status: error-message/$status.html from the site's

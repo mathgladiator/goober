@@ -502,3 +502,45 @@ TEST_F(TrafficTest, DISABLED_SizeOfAWeek) {
     std::cout << "  " << table << ": " << q.int64(0) << " rows\n";
   }
 }
+
+// Per-domain controls' rows (047 § 6): written by catch_up, halves of one bucket added up, read
+// by domain and control, and dropped with every other rollup after seven days.
+TEST_F(TrafficTest, ControlRowsAddUpAndAgeOut) {
+  auto t = open();
+  operations::ControlRow a;
+  a.t = kNoon + 1000;
+  a.tenant = "acme";
+  a.domain = "acme.example";
+  a.control = "login";
+  a.matched = 10;
+  a.allowed = 8;
+  a.rate = 2;
+  a.peak = 3;
+  a.top_client = "aa";
+  a.top_n = 2;
+  a.clients = std::string(63, '0') + "1";
+  a.hist.add(1000);
+  auto b = a;
+  b.matched = 5;
+  b.rate = 1;
+  b.peak = 1;
+  b.top_n = 1;
+  b.clients = "8" + std::string(63, '0');
+  t->add_control_rows({a});
+  t->catch_up(kNoon + 2000);
+  t->add_control_rows({b});
+  t->catch_up(kNoon + 3000);
+  auto rows = t->control_rows("acme.example", "login", kNoon - 1, kNoon + 600000);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_EQ(rows[0].t, kNoon);  // the bucket's start
+  EXPECT_EQ(rows[0].matched, 15);
+  EXPECT_EQ(rows[0].rate, 3);
+  EXPECT_EQ(rows[0].peak, 3);
+  EXPECT_EQ(rows[0].top_n, 3);
+  EXPECT_EQ(rows[0].clients, "8" + std::string(62, '0') + "1");
+  EXPECT_EQ(rows[0].hist.total(), 2);
+  EXPECT_TRUE(t->control_rows("acme.example", "other", kNoon - 1, kNoon + 600000).empty());
+  EXPECT_EQ(t->control_rows("acme.example", "", kNoon - 1, kNoon + 600000).size(), 1u);
+  t->catch_up(kNoon + 8 * 24 * 3600 * 1000LL);
+  EXPECT_TRUE(t->control_rows("acme.example", "", 0, kNoon + 600000).empty());
+}

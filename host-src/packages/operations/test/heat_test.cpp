@@ -244,14 +244,15 @@ TEST(HeatStudy, SuggestionFormulas) {
   EXPECT_EQ(a.at("mode").as_string(), "observe");
   EXPECT_EQ(a.at("domain").as_string(), "a.example.com");
   EXPECT_EQ(a.at("api").as_string(), "box:shop");
-  EXPECT_EQ(a.at("match").as_string(), "POST /cart/{id}");
-  EXPECT_EQ(a.at("rate").at("per-minute").as_int64(), 24);  // max(10, 2 x 12)
-  EXPECT_EQ(a.at("rate").at("burst").as_int64(), 12);
-  EXPECT_EQ(a.at("rate").at("by").as_string(), "client");
-  EXPECT_EQ(a.at("concurrent").at("max").as_int64(), 6);  // max(2, 2 x 3)
-  EXPECT_EQ(a.at("concurrent").at("per-client").as_int64(), 2);
-  EXPECT_EQ(a.at("body-max-bytes").as_int64(), 6144);  // 2 x 3000, rounded up to a KiB
-  EXPECT_EQ(a.at("timeout-ms").as_int64(), 1000);      // max(1000, 2 x 450 ms)
+  EXPECT_EQ(a.at("endpoint").at("match").as_string(), "POST /cart/{id}");
+  EXPECT_EQ(a.at("endpoint").at("id").as_string(), "post_cart_id");
+  EXPECT_EQ(a.at("set").at("rate").at("per-minute").as_int64(), 24);  // max(10, 2 x 12)
+  EXPECT_EQ(a.at("set").at("rate").at("burst").as_int64(), 12);
+  EXPECT_EQ(a.at("set").at("rate").at("by").as_string(), "client");
+  EXPECT_EQ(a.at("set").at("concurrent").at("max").as_int64(), 6);  // max(2, 2 x 3)
+  EXPECT_EQ(a.at("set").at("concurrent").at("per-client").as_int64(), 2);
+  EXPECT_EQ(a.at("set").at("body-max-bytes").as_int64(), 6144);  // 2 x 3000, rounded up to a KiB
+  EXPECT_EQ(a.at("set").at("timeout-ms").as_int64(), 1000);      // max(1000, 2 x 450 ms)
   EXPECT_NE(std::string(s.at("reasons").at("rate").as_string()).find("p99"), std::string::npos);
   // Floors.
   in.p99_client_minute = 2;
@@ -260,24 +261,29 @@ TEST(HeatStudy, SuggestionFormulas) {
   in.max_body_bytes = 0;
   in.max_us = 4'000'000;
   s = suggest_controls(in);
-  EXPECT_EQ(s.at("control_set").at("rate").at("per-minute").as_int64(), 10);
-  EXPECT_EQ(s.at("control_set").at("rate").at("burst").as_int64(), 5);
-  EXPECT_EQ(s.at("control_set").at("concurrent").at("max").as_int64(), 2);
-  EXPECT_EQ(s.at("control_set").at("concurrent").at("per-client").as_int64(), 1);
-  EXPECT_FALSE(s.at("control_set").as_object().contains("body-max-bytes"));
-  EXPECT_EQ(s.at("control_set").at("timeout-ms").as_int64(), 8000);
+  EXPECT_EQ(s.at("control_set").at("set").at("rate").at("per-minute").as_int64(), 10);
+  EXPECT_EQ(s.at("control_set").at("set").at("rate").at("burst").as_int64(), 5);
+  EXPECT_EQ(s.at("control_set").at("set").at("concurrent").at("max").as_int64(), 2);
+  EXPECT_EQ(s.at("control_set").at("set").at("concurrent").at("per-client").as_int64(), 1);
+  EXPECT_FALSE(s.at("control_set").at("set").as_object().contains("body-max-bytes"));
+  EXPECT_EQ(s.at("control_set").at("set").at("timeout-ms").as_int64(), 8000);
   // Heat spread over many clients: the whole endpoint's rate is the risk.
   in.heat_share = 0.4;
   in.top_client_share = 0.02;
   s = suggest_controls(in);
-  EXPECT_EQ(s.at("control_set").at("rate").at("by").as_string(), "all");
-  EXPECT_EQ(s.at("control_set").at("rate").at("per-minute").as_int64(), 180);  // 2 x 90
+  EXPECT_EQ(s.at("control_set").at("set").at("rate").at("by").as_string(), "all");
+  EXPECT_EQ(s.at("control_set").at("set").at("rate").at("per-minute").as_int64(), 180);  // 2 x 90
   // Content gets no timeout; too few requests or a grouped row gets no suggestion.
   in.api = "content";
   in.endpoint = "GET /about";
-  EXPECT_FALSE(suggest_controls(in).at("control_set").as_object().contains("timeout-ms"));
+  EXPECT_FALSE(suggest_controls(in).at("control_set").at("set").as_object().contains("timeout-ms"));
   in.requests = 19;
   EXPECT_TRUE(suggest_controls(in).contains("none"));
+  in.requests = 500;
+  in.api = "mcp";
+  in.endpoint = "search";
+  EXPECT_TRUE(suggest_controls(in).contains("none"));  // one MCP tool can't be matched
+  in.api = "content";
   in.requests = 500;
   in.endpoint = "(not found)";
   EXPECT_TRUE(suggest_controls(in).contains("none"));
