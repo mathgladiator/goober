@@ -178,8 +178,8 @@ bj::object suggest_controls(const SuggestInput& in) {
     return bj::object{{"none", "not an endpoint a control names"}};
   }
   if (in.requests < 20) {
-    return bj::object{{"none", "only " + std::to_string(in.requests) +
-                                   " requests: too few to suggest from; study longer, or at a busier time"}};
+    return bj::object{{"none", "only " + std::to_string(in.requests) + (in.requests == 1 ? " request" : " requests") +
+                                   ": too few to suggest from; study longer, or at a busier time"}};
   }
   // 047 matches "METHOD /path", and every MCP call is POST /mcp: one tool can't be singled out.
   if (in.api == "mcp") {
