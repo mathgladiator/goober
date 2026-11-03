@@ -391,6 +391,19 @@ TEST_F(PanelTest, AnObserverSeesLogVolumeAndUploads) {
   EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/", {{"cookie", cookie}}).body.find("#/volume"), std::string::npos);
 }
 
+// The Studies view (048 § 8): the panel lists and reads heat studies, and never starts one.
+TEST_F(PanelTest, TheStudiesViewReadsButNeverStarts) {
+  std::string cookie = sign_in("watcher@example.com");
+  auto list = parse(api(cookie, "heat_study_list").body);
+  ASSERT_TRUE(list.contains("result")) << json::dump(list);
+  EXPECT_TRUE(list.at("result").is_array());
+  EXPECT_EQ(api(cookie, "heat_study_start", R"({"domain":"localhost","why":"x"})").status, 403);
+  EXPECT_EQ(api(cookie, "heat_study_stop", R"({"id":1})").status, 403);
+  auto js = fetch(port, kOps, bhttp::verb::get, "/panel.js", {{"cookie", cookie}}).body;
+  EXPECT_NE(js.find("async studies(params)"), std::string::npos);
+  EXPECT_NE(fetch(port, kOps, bhttp::verb::get, "/", {{"cookie", cookie}}).body.find("#/studies"), std::string::npos);
+}
+
 TEST_F(PanelTest, ThePrivateListenerIsAllPanel) {
   uint16_t panel = host->panel_port();
   ASSERT_NE(panel, 0);

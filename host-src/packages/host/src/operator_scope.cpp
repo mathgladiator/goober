@@ -56,6 +56,10 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     m["version_upload"] = Rule::kManifest;
     for (const char* t : {"mcp_tools_preview", "route_check"}) m[t] = Rule::kDomain;
     m["route_try"] = Rule::kDomain;
+    // Heat studies (048): started on a domain, then named by id; the list keeps the scope's rows.
+    m["heat_study_start"] = Rule::kDomain;
+    for (const char* t : {"heat_study_stop", "heat_study_get"}) m[t] = Rule::kStudy;
+    m["heat_study_list"] = Rule::kFiltered;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",
@@ -376,6 +380,13 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
           return who + ", and project " + project + "'s box " + m->box + " would replace one serving " + out_of + widen;
         }
       }
+      return std::nullopt;
+    }
+    case Rule::kStudy: {
+      const auto* v = args.if_contains("id");
+      if (!v || !v->is_int64() || !heat_) return std::nullopt;  // the tool says what's wrong
+      auto t = heat_->tenant_of(v->as_int64());
+      if (t && !in(*t)) return who + ", and heat study " + std::to_string(v->as_int64()) + " is of " + *t + widen;
       return std::nullopt;
     }
     case Rule::kTicket: {

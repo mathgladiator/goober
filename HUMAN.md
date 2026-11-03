@@ -404,6 +404,28 @@ shows each day by stream. If the budget is just too small for your site, raise i
 `0` turns the budget off. To upload less, keep fewer days (`backup.keep-days` only changes
 what the bucket holds), back up databases less often (`backup.databases-every-ms`), or log less.
 
+## Where is a site's heat?
+
+A heat study counts one domain's requests by endpoint for a while, then keeps a report 30 days
+(`design/machine/048.HeatStudy.md`). It changes nothing that is served. Use one before setting
+rate or concurrency limits, or when the site feels slow:
+
+1. **Start it for an hour at a busy time.** Have Grok run
+   `heat_study_start {domain: "example.com", minutes: 60, why: "Monday's peak"}`. One runs per
+   domain, and four at most on the host.
+2. **Read it.** Open the panel's **Studies** view, or have Grok run `heat_study_get {id}`.
+   "Where the heat is" shows which endpoints take the time; the endpoints table shows how hard
+   the busiest clients push each one (client p99 per minute) and how many bots.
+3. **Send the suggestions in observe mode.** Each endpoint's suggested controls are ready
+   `control_set` arguments with `mode: "observe"` and the reason for each number. Have Grok send
+   the ones you agree with as they are.
+4. **Check `control_report`** after a day: what each control would have refused, and whom.
+5. **Enforce** the ones that would have refused only what they should: the same `control_set`
+   with `mode: "enforce"`.
+
+To end a study early, `heat_study_stop {id}`; what it gathered stays. A restart ends a running
+study too, keeping what it had saved (at most a minute old).
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone

@@ -202,6 +202,13 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   } catch (const std::exception& e) {
     startup_notes_.push_back(std::string("box failures off: ") + e.what());
   }
+  // Heat studies (048): a study the host was running when it died is kept as interrupted.
+  try {
+    heat_ = std::make_unique<operations::HeatStudies>(config->storage / "operations" / "studies");
+    for (auto& n : heat_->recovered()) startup_notes_.push_back(n);
+  } catch (const std::exception& e) {
+    startup_notes_.push_back(std::string("heat studies off: ") + e.what());
+  }
   const auto& rec = wal_->recovery();
   for (const auto& f : rec.failed) startup_notes_.push_back("host WAL: set aside " + f + " (see wal/failed/)");
   if (rec.replayed_bundles || rec.discarded_bundles || rec.torn_tail) {
@@ -335,6 +342,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_log_tools();
   register_spec_tools();
   register_approval_tools();
+  register_heat_study_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "
@@ -531,6 +539,7 @@ void Host::stop() {
   if (panel_server_) panel_server_->stop_accepting();
   if (!server_) {
     if (pool_) pool_->shutdown();
+    heat_stop_all();
     return;
   }
   // Graceful: stop taking connections, let the requests already here finish (up to ten
@@ -558,6 +567,8 @@ void Host::stop() {
   } catch (const std::exception& e) {
     std::cerr << "goober-host: box failures: " << e.what() << "\n";
   }
+  // Every request has finished: running heat studies end here and keep what they gathered.
+  heat_stop_all();
 }
 
 std::string Host::reload() {
@@ -676,7 +687,7 @@ void Host::write_dev_mail(const identity::Mail& mail) {
 }
 
 void Host::access_log(const Request& req, int status, int64_t started_us, const std::string& domain,
-                      const std::string& extra, bool host_error) {
+                      const std::string& extra, bool host_error, int64_t bytes_out) {
   bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())},
                   {"request_id", req.header("goober-request-id")},
                   {"domain", domain},
@@ -749,6 +760,8 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
                      line.at("us").as_int64(), from);
         // A monitor's own polls of /goober/ready would dilute the ratios it graphs.
         if (req.path != "/goober/ready") pulse_.request(base::now_unix_ms(), status, line.at("us").as_int64());
+        // A heat study of this domain (048 § 3): one atomic load when no study runs.
+        if (heat_ && heat_->watching(domain)) heat_observe(req, line, domain, bytes_out);
       }
     }
   }
@@ -854,7 +867,8 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
       res.headers.emplace_back("content-type", "application/json");
       res.body = json::dump(bj::object{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}});
     }
-    access_log(req, res.status, started, domain, extra, res.host_error);
+    access_log(req, res.status, started, domain, extra, res.host_error,
+               res.head_only || res.stream ? 0 : int64_t(res.body.size()));
     respond(std::move(res));
   };
 

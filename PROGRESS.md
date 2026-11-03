@@ -66,7 +66,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
 | 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log (minutes 48 h, hours 400 days), the heat map, data-flow graphs, the change log from the WAL, operator actions, and a read-only database explorer; `host:observer` read-only over MCP too. | Approvals, tuning instances and queues, counters, traces, cost, memory and queue depth, client classes, `principal_kind`. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access log (minutes 48 h, hours 400 days), the heat map, data-flow graphs, the change log from the WAL, operator actions, and a read-only database explorer; `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Approvals, tuning instances and queues, counters, traces, cost, memory and queue depth, client classes in the access log (a study classifies its own), `principal_kind`. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
@@ -909,6 +909,35 @@ Ultimately, I don't want too much uploaded." (032 § 10, 019 § 9, 028 § 4.7):
 - [x] The panel's **Logs and uploads** view; a test that it loads for an observer.
 - [ ] The view checked in a browser.
 - [ ] zstd or `gzip -9` for nightlies and log archives (a format change: the human's call).
+
+### Phase 49: heat studies by endpoint (2026-11-03)
+The human: "I want a way to do a study on a domain to discover heat by endpoint." It goes with
+per-domain controls (047), whose numbers a study suggests (048):
+- [x] `heat_study_start {domain, minutes, why}` (5 to 1440, default 60; one per domain, 4 on the
+      host), `heat_study_stop {id}`, `heat_study_get {id}`, `heat_study_list {domain?}`; start and
+      stop never wait for approval but aren't read tools; audited (`study.start`, `study.stop`);
+      scope rules `kDomain`, `kStudy` (new: the study's tenant, checked before the call), and
+      `kFiltered`; tests.
+- [x] One hook beside the access log and live statistics: one atomic load when no study runs;
+      requests keyed by endpoint (a box route's declared pattern, also when the host refused it;
+      an MCP tool; a page's path; `(not found)`, `(refused)`; host paths folded); tries, the
+      panel, the operator API, and the host's own calls left out; `bytes_out` from the one
+      `Finish`; tests.
+- [x] Per endpoint: requests per minute, each client's busiest minute (p50/p99/max, exact to 256
+      clients at once, then folded; distinct clients by HyperLogLog past that), peak concurrency
+      and per client from finished requests (exact to 64 at once), latency, heat (time serving,
+      fuel), bytes, status mix, client classes; 500 endpoints tracked, busy ones promoted, the
+      rest in `other`; memory measured (about 11 MiB for a day of 500 endpoints); tests.
+- [x] The report: ranked by heat, requests, and bytes; suggestions as `control_set` arguments in
+      observe mode with each number's reason (rate by client, by all when the heat is spread,
+      concurrent, body-max-bytes, timeout-ms); keyed hashes only; at most 256 KiB; tests.
+- [x] Saved each minute to `operations/studies/<id>.json`; time up, stopped, and the host
+      stopping end it; a crash leaves it `interrupted` at its last save; kept 30 days and within
+      `limits.studies-bytes` (64 MiB), oldest first; in the `limits` check; tests.
+- [x] The panel's **Studies** view; a test that it reads and can't start one.
+- [ ] The view checked in a browser.
+- [ ] 047 merged: the MCP `match` shape and `control_set`'s arguments agreed (048 § 4.3).
+- [ ] Four decisions (048 § 11).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

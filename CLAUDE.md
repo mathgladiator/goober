@@ -160,7 +160,8 @@ Read these before doing design work:
     (`service_report`: boxes' services, mail through the mailer, push, the robot; failures, latency,
     retries, the outbox's queue) and the Overview's key graphs (§ 4.4, § 4.5); `/goober/ready`'s `health`
     for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the Logs and uploads
-    view of log volume, who writes it, and uploads per day (§ 4.7); the change log from the
+    view of log volume, who writes it, and uploads per day (§ 4.7); the Studies view of heat studies
+    (heat by endpoint, clients, suggested controls; § 4.8, 048); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
     and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal
@@ -233,7 +234,14 @@ Read these before doing design work:
     refused naming the limit, and snapshots are never deleted by the host; what a try is; the
     `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
     box versions no longer live archived after 30 days and deleted after 400, leaving a
-    tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings and the daily upload budget in the table.
+    tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings, the daily upload budget, and heat study reports (`studies-bytes`) in the table.
+  - `design/machine/048.HeatStudy.md`: heat studies: `heat_study_start {domain, minutes, why}` counts one
+    domain's requests by endpoint (a box route's declared pattern, an MCP tool, a page's path) for 5 to
+    1440 minutes, one per domain and 4 at once, never waiting for approval; per endpoint requests per
+    minute, each client's busiest minute (p50/p99/max), peak concurrency from finished requests, latency,
+    heat, bytes, statuses, client classes; a report kept 30 days in `operations/studies/` that ranks
+    endpoints and suggests 047 controls in observe mode with each number's reason; keyed hashes, no
+    addresses or user ids; the panel's Studies view; four decisions for the human (§ 11).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

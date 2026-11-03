@@ -489,6 +489,12 @@ void Host::run_timers() {
       std::cerr << "goober-host: identity events: " << e.what() << "\n";
       loop_beat("identity", e.what());
     }
+    // Heat studies (048): the ones whose time is up end; the running ones are saved each minute.
+    try {
+      heat_tick(base::now_unix_ms());
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: heat studies: " << e.what() << "\n";
+    }
     lock.lock();
     timer_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return timers_stopping_; });
   }

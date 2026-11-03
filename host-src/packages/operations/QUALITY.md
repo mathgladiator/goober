@@ -2,7 +2,8 @@
 
 What the operator panel reads (`design/machine/028.Panel.md`): traffic rollups derived from
 the access and egress logs (traffic, edges, and errors), the record of how box calls fail
-(`failures.h`), and the change log written from the host WAL's observer.
+(`failures.h`), the change log written from the host WAL's observer, and heat studies
+(`heat.h`, design/machine/048.HeatStudy.md).
 
 ## Quality bar
 
@@ -19,3 +20,7 @@ the access and egress logs (traffic, edges, and errors), the record of how box c
   are measured, not read.
 - **One meaning, one row.** A box upload's bundle is one deploy row; partial_put's kept
   copies are not rows of their own.
+- **Heat studies are bounded and private.** A study holds at most 500 endpoints (the rest in
+  "other"), 256 clients and a ring of 64 per endpoint, and about 12 MiB in all; its report is at
+  most 256 KiB, kept 30 days. Clients are keyed hashes from the host; the report names no
+  address and no user id. When no study runs, the request path pays one atomic load.
