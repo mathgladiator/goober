@@ -18,7 +18,8 @@ to section 5. `/goober/ready` answers 503 with `"ok":false` and names the failin
 the host runs but something is wrong:
 - `disk` says how much room is left where storage lives. `"low": true` (under 10% or 2 GiB)
   is a warning; under 256 MiB fails the check, since every write (data, logs, backups) is
-  about to. `sudo du -sh /srv/goober/host/storage/*` shows what holds it.
+  about to. `sudo sh -c 'du -sh /srv/goober/host/storage/* /srv/goober/host/backups'`
+  shows what holds it (inside `sh -c`, since only `goober` can list storage to expand the `*`); `backups/` is a local copy of storage for each of the last 14 nights.
 - `boxes` lists any box with an active version that isn't served (`not_loaded`).
 - `stores` lists any shared file that wouldn't open at start (`consent`, `web`, `source`). A
   broken web or source store was moved aside (`*.unreadable-<time>`, kept) and a fresh one

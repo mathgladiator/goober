@@ -234,6 +234,11 @@ Read these before doing design work:
     `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
     box versions no longer live archived after 30 days and deleted after 400, leaving a
     tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings and the daily upload budget in the table.
+  - `design/machine/046.Operations.md`: running goober as its one operator: the stack around the
+    host (Caddy on loopback, systemd, Stalwart, SES, the bucket), what a deploy does, what to watch
+    and which tool answers which question, one table of everything kept (machine, memory, bucket),
+    backups, uploads, and log growth, a playbook for when things go wrong, what the reviews taught,
+    the open operational decisions, and where operations depart from the human docs (§ 11).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

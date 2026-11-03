@@ -1,6 +1,6 @@
 # Readiness
 
-> How ready goober is for the human's experiments, as of 2026-10-29. Short on
+> How ready goober is for the human's experiments, as of 2026-11-03. Short on
 > purpose: `PROGRESS.md` has the full account, and each line here names where the proof lives.
 > "Tested" means automated checks pass against a running host on this machine, with stand-ins
 > for AWS. example.com is live on a real server, and Grok deploys to it over OAuth; real mail
@@ -74,7 +74,8 @@
   serving on the demo host.
 - **Watch for.**
   - The operator token is host owner: give it only to an agent you trust like yourself.
-  - Every deploy goes live at once: there are no approvals yet.
+  - Every deploy goes live at once unless you turn approvals on for Grok in the panel (each
+    changing call then waits for you; `design/machine/035.Approvals.md`). They're off by default.
   - Grok's remote MCP hasn't been tried.
   - bubblewrap on Ubuntu 24.04 is untested; it works here.
 
@@ -112,11 +113,10 @@ each ranch's site weekly.
   - mail out, and mail in: a box receives on addresses it declares (024);
   - calls to Stripe or Twilio with keys bound to their hosts.
 - **Not ready:**
-  - verified senders on received mail (Q39);
   - customer file uploads to boxes (060);
   - Stripe webhooks end to end;
   - a domain per ranch without a config edit;
-  - approvals.
+  - approvals of versions before they go live (305); approvals per agent are built (035).
 
 ## 4. A good robot for a local meat index: yes, at small scale
 
@@ -150,7 +150,8 @@ each ranch's site weekly.
   - **Copy the backup key off the machine** (`goober-host backup key`), or the backups can't
     be read.
   - Archives are at most 5 GiB.
-  - The nightly needs room on disk for one more copy of storage. `/goober/ready`'s `disk`
+  - The nightly needs room on disk for one more copy of storage, and the local nightly copies
+    (`backups/`, 14 nights) have no budget (`design/machine/045.Limits.md` § 6). `/goober/ready`'s `disk`
     check says how much is free (`low` under 10% or 2 GiB; failing under 256 MiB).
   - Nothing outside watches yet: point an uptime checker or a Prometheus at `/goober/ready`
     (`?format=prometheus`); its `health` has error ratios, latency, the outbox, free disk,
@@ -174,8 +175,9 @@ each ranch's site weekly.
   host; a box declares `routes.mail` addresses (`support@`, `*@`, `reply+{ticket : token}@`)
   and its answer is the SMTP answer (`design/machine/024.MailIn.md`). `just mail-e2e` runs it
   all here, with the real Stalwart. On the server: add the MX records deploy prints, and open
-  inbound TCP 25 at your provider (many block it until asked). Senders aren't verified yet:
-  From is only a string (Q39).
+  inbound TCP 25 at your provider (many block it until asked). The host checks DKIM itself: a
+  sender whose signature aligns with the From domain and who has an account arrives as
+  `from_user_id`; any other From is only a claim (`design/machine/024.MailIn.md` § 5).
 
 ## 7. An agent people reach by email: ready to build
 
@@ -192,7 +194,8 @@ each ranch's site weekly.
   `NetworkTest.ResultRoutesHearHowADeliveryWent`, and `just mail-e2e` with the real Stalwart.
 - **Watch for.**
   - SES must have example.com verified as a domain, or mail from `hello@` dies.
-  - Senders aren't verified (Q39), so a mail's From is only a claim.
+  - Only a DKIM signature aligned with the From domain verifies a sender (024 § 5); mail
+    passing only SPF, or unsigned, is only a claim.
   - Bounces and complaints don't reach the box yet.
   - The host has no spend cap on model calls: the box must count its own.
 
@@ -216,7 +219,7 @@ each ranch's site weekly.
 
 - **What works.** The operator panel, a web page of its own:
   - key graphs on the Overview (requests, error rate, latency, box failures, calls out, the
-    outbox and its queue, mail) over 1 hour to 30 days, with p50 and p99;
+    outbox and its queue, mail) over 1 hour, 12 hours, or 7 days, with p50 and p99;
   - what went out to services, the mailer included: calls, failures by status, latency,
     retries, dead letters, and the latest failures, per service and box (the Services view);
   - errors visitors got, by status, place, and who made them, and how boxes fail, by class,
@@ -241,6 +244,9 @@ each ranch's site weekly.
   - Traffic history starts from the access logs still on disk when the panel first runs (7
     days); the rollups are five-minute buckets kept 7 days within `limits.traffic-bytes` (64
     MiB), and no longer (`design/machine/045.Limits.md`).
+  - Nothing tells you when something is wrong: point an outside monitor at `/goober/ready`
+    (HUMAN.md § 1). How to run the host day to day, what to watch, and what to do when
+    something breaks is `design/machine/046.Operations.md`.
 
 ## 9. An installable app: yes, untried on a phone
 

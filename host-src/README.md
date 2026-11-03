@@ -168,10 +168,14 @@ glibc 2.38), copies it, and runs `tools/server-bootstrap.sh` there. That script 
 curl, python3, tzdata, and bubblewrap (the build sandbox); creates a `goober` system user and `/srv/goober/host`; runs setup as
 `goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (two
 weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
-own. Running it again upgrades: it checks the config with the new binary and restarts.
+own. Behind Caddy the host listens on loopback only: with `listen.behind-proxy` set, any other
+address is refused, since the host believes the proxy's `X-Forwarded-For`. Running it again
+upgrades: it checks the config with the new binary and restarts.
 It ends by checking everything the host needs, and fails the deploy if anything is missing:
 the services and timers, a C toolchain, cargo with the wasm32 target, a real Rust build in the
-sandbox (`goober-host toolchain`), Stalwart on port 25, and the mail hook.
+sandbox (`goober-host toolchain`), Stalwart on port 25, and the mail hook. [`HUMAN.md`](../HUMAN.md) is the one-page check while it runs, and
+[`046.Operations.md`](../design/machine/046.Operations.md) is how to run it: what to watch,
+what is kept, and what to do when something breaks.
 
 `you` in `you@server` (or `--user you`) is your ssh login, which needs sudo; ssh connects once,
 so a password is asked for once. `--run-as NAME` is a different account: the system user the

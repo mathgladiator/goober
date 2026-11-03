@@ -13,8 +13,9 @@ the access and egress logs (traffic, edges, and errors), the record of how box c
   address. The one path kept is an error's place (028 § 4.2), and only the path of a page the
   site has; every path nothing answers is "(not found)". Change rows name operators, never
   site visitors. Box failures keep the host's own messages and boxes' error text, at most 300
-  bytes each, the newest 200 per box for 30 days, as box logs keep them.
-- **Bounded.** Minute rows are kept 48 hours, hour rows 400 days; change texts are kept only
+  bytes each, the newest 200 per box for 7 days (045).
+- **Bounded.** One resolution, five-minute buckets kept 7 days, and `traffic.db` within
+  `limits.traffic-bytes`, its oldest hours dropped first (045); change texts are kept only
   for content and schemas of at most 64 KiB, and dropped after 90 days. Old files past 1 MiB
   are measured, not read.
 - **One meaning, one row.** A box upload's bundle is one deploy row; partial_put's kept
