@@ -482,6 +482,23 @@ each flip, and the access log records what each call read.
 Use flags for freezes, kill switches, and modes the whole box follows. Not for per-person or
 per-row state: that belongs in the box's database. A box can't set its own flags.
 
+## Controls: limits operators set per domain, API, and endpoint
+
+Operators limit traffic without touching the box (design/machine/047.Controls.md). They can
+set rate {per-minute, burst, by: client|user|all} (429), concurrent {max, per-client} (503),
+body-max-bytes (413), timeout-ms, or closed {status, retry-after-s, message}. Each can be set
+for a domain, an API (box:<your box>, content, mcp, identity), or one endpoint ("POST
+/cart/{id}"; the most specific wins). A refused request never reaches the box, and a box can't
+see or change its controls. To add one:
+1. control_set {domain, endpoint: {id, match}, set, mode: "observe", why}. Observe refuses
+   nothing and counts what it would have refused.
+2. control_report {domain, id}: matched, refused by reason, would, distinct clients, p99, the
+   effect of the last change, and verdicts ("refusals come mostly from one client: shielding",
+   "may be too tight", "never matched").
+3. control_set {domain, endpoint: {id}, mode: "enforce", why} once the report agrees.
+control_list shows each control's effective values and where they come from. To pause a box
+while data moves, set closed on api "box:<name>" (or use a flag the box reads).
+
 ## Calling other services
 
 A box has no sockets. It calls services the manifest declares, through the host:

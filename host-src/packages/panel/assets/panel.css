@@ -81,6 +81,7 @@ td.null { color: var(--muted); font-style: italic; }
 .pill.partial, .pill.template { border-color: var(--ok); color: var(--ok); }
 .pill.delete { border-color: var(--server); color: var(--server); }
 .pill.failed { border-color: var(--server); color: var(--server); }
+.pill.ok { border-color: var(--ok); color: var(--ok); }
 
 svg { display: block; max-width: 100%; }
 svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }

@@ -681,6 +681,85 @@ const views = {
     ];
   },
 
+  // Per-domain controls (047 § 9): each domain's controls with their effective values and mode,
+  // and for the one picked, what each control did and the verdicts. Look-only: changes go through
+  // control_set and control_remove.
+  async controls(params) {
+    const all = await api('control_list', {});
+    const domains = all.map((d) => d.domain);
+    const withControls = all.filter((d) => d.controls.length || d.host_defaults);
+    const domain = params.get('domain') || (withControls[0] || all[0] || {}).domain || '';
+    const go = (k, v) => { if (v) params.set(k, v); else params.delete(k); location.hash = '#/controls' + (params.toString() ? '?' + params : ''); };
+    const bar = h('div', { class: 'bar' }, h('h1', {}, 'Controls'), windowPicker(render),
+      domains.length ? h('span', {}, h('label', {}, 'Domain '), h('select', { onchange: (ev) => go('domain', ev.target.value) },
+        domains.map((d) => h('option', { value: d, selected: d === domain }, d)))) : null);
+    const about = h('p', { class: 'muted small' }, 'Rate limits, concurrency, body size, timeouts, and closing, per domain, per API ' +
+      '(a box, content, mcp, identity), and per endpoint, inside the host-wide per-client limit. An observed control refuses nothing ' +
+      'and counts what it would have refused. Set them with control_set (start in observe), read control_report, then enforce.');
+    if (!domain) return [bar, about, h('p', { class: 'muted' }, 'No domains.')];
+    const row = all.find((d) => d.domain === domain) || { controls: [] };
+    const report = await api('control_report', { domain, window: state.window });
+    const byId = new Map(report.controls.map((c) => [c.id, c]));
+    const valueText = (v) => v === null || v === undefined ? '–' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    const props = ['rate', 'concurrent', 'body-max-bytes', 'timeout-ms', 'closed'];
+    const effectiveTable = (c) => {
+      const rows = props.filter((p) => c.effective.enforced[p] || c.effective.observed[p]).map((p) => ({ p, e: c.effective.enforced[p], o: c.effective.observed[p] }));
+      return rows.length ? table([
+        { label: 'Property', get: (r) => r.p, cls: () => 'mono' },
+        { label: 'Enforced', get: (r) => r.e ? valueText(r.e.value) : '–', cls: () => 'mono' },
+        { label: 'From', get: (r) => r.e ? r.e.from : '', cls: () => 'muted' },
+        { label: 'Observed', get: (r) => r.o ? valueText(r.o.value) : '', cls: () => 'mono' },
+        { label: 'From', get: (r) => r.o ? r.o.from : '', cls: () => 'muted' },
+      ], rows) : h('p', { class: 'muted small' }, 'Names no property: it only watches what it matches.');
+    };
+    const brief = (b) => b ? fmt.n(b.requests) + ' requests, ' + fmt.n(b.refused) + ' refused, p99 ' + fmt.us(b.p99_us) +
+      ', 5xx ' + fmt.pct(b.ratio_5xx, 1) : '–';
+    const reportCard = (id, listed) => {
+      const r = byId.get(id);
+      const title = (listed && listed.match ? id + ' · ' + listed.match : id) + (listed && listed.api ? ' · ' + listed.api : '');
+      const mode = listed ? listed.mode : 'removed';
+      const kids = [h('p', {}, h('span', { class: 'pill' + (mode === 'enforce' ? ' ok' : '') }, mode), ' ',
+        h('span', { class: 'muted small' }, listed ? listed.level + (listed.last_change ? ' · changed ' + fmt.ago(listed.last_change.at_ms) +
+          ' by ' + listed.last_change.by + ': ' + listed.last_change.why : '') : 'removed'),
+        listed && listed.in_flight ? h('span', { class: 'muted small' }, ' · ' + listed.in_flight + ' in flight') : null)];
+      if (listed) kids.push(effectiveTable(listed));
+      if (r) {
+        const t = r.totals;
+        kids.push(h('div', { class: 'stats' }, stat(fmt.n(t.matched), 'matched'), stat(fmt.n(t.refused), 'refused'),
+          stat(fmt.pct(t.refused, t.matched), 'of matched'), stat(fmt.n(t.would), 'would refuse'),
+          stat(t.clients_refused >= 1000 ? '1000+' : fmt.n(t.clients_refused), 'clients refused'),
+          stat(fmt.pct(t.top_client_share, 1), 'from the busiest'), stat(fmt.n(t.peak), 'peak in flight'),
+          stat(fmt.us(t.p99_us), 'p99 allowed')));
+        if (r.verdicts.length) kids.push(h('div', { class: 'notice' }, r.verdicts.map((v) => h('p', {}, v))));
+        const series = { ...r, points: r.points.map((p) => ({ ...p, n: p.allowed })) };
+        kids.push(stackedChart(series, [
+          { key: 'allowed', cls: 's2', label: 'allowed' }, { key: 'rate', cls: 's4', label: 'rate' },
+          { key: 'concurrent', cls: 's5', label: 'concurrent' }, { key: 'body', cls: 's3', label: 'body' },
+          { key: 'closed', cls: 'fp', label: 'closed' }], 'matched', 'matched', 'What ' + id + ' matched over time'));
+        if (t.would || mode === 'observe') {
+          kids.push(stackedChart(series, [{ key: 'would', cls: 's4', label: 'would refuse' }], 'matched', 'matched',
+            'What ' + id + ' would have refused over time'));
+        }
+        kids.push(latencyChart(series));
+        if (r.effect) {
+          kids.push(h('p', { class: 'small' }, 'Since its last change (' + fmt.dur(r.effect.span_ms) + ' each side): before ',
+            brief(r.effect.before), '; after ', brief(r.effect.after), '.', r.effect.note ? h('span', { class: 'muted' }, ' ' + r.effect.note) : null));
+        }
+      }
+      return wideCard(title, kids);
+    };
+    const cards = [bar, about];
+    if (row.host_defaults) {
+      cards.push(h('p', { class: 'small' }, 'host.json controls.defaults (' + row.host_defaults.mode + '): ',
+        h('span', { class: 'mono' }, JSON.stringify(row.host_defaults.set))));
+    }
+    if (!row.controls.length && !report.controls.length) cards.push(h('p', { class: 'muted' }, 'No controls on ' + domain + '.'));
+    const seen = new Set();
+    for (const c of row.controls) { seen.add(c.id); cards.push(reportCard(c.id, c)); }
+    for (const r of report.controls) if (!seen.has(r.id)) cards.push(reportCard(r.id, null));
+    return cards;
+  },
+
   // What went out to services (028 § 4.4): the mailer, push, the robot, and every service boxes
   // call; one service's methods, statuses, and latest failures when one is picked.
   async services(params) {
@@ -970,7 +1049,7 @@ const views = {
       ];
     }
     const c = await api('changes', { kind, tenant, before_id: before, limit: 100 });
-    const kinds = ['deploy', 'upload', 'content', 'partial', 'template', 'schema', 'attachment', 'other'];
+    const kinds = ['deploy', 'upload', 'content', 'partial', 'template', 'schema', 'flag', 'control', 'attachment', 'other'];
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Change log'), tabs,
         h('label', {}, 'Kind '), h('select', { onchange: (e) => go('kind', e.target.value) }, h('option', { value: '' }, 'all'),
@@ -1929,7 +2008,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'controls', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

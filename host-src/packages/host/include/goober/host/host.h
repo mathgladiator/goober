@@ -15,6 +15,8 @@
 #include "goober/boxes/registry.h"
 #include "goober/config/config.h"
 #include "goober/content/content.h"
+#include "goober/controls/gate.h"
+#include "goober/router/path.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
 #include "goober/ids/ids.h"
@@ -290,6 +292,9 @@ class Host {
     // An upgrade box's call (design/machine/041.SchemaEvolution.md § 7): no clock (now_ms 0) and a
     // fixed seed, so the same row always gives the same answer.
     bool pure = false;
+    // A per-domain control's timeout-ms for this request (047 § 3), or 0: the call's timeout is
+    // the lower of it and the box's own.
+    int64_t control_timeout_ms = 0;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -356,7 +361,9 @@ class Host {
                        const std::string& tenant);
   // 303 to sign in for a browser GET, else the 401 page.
   server::http::Response sign_in_or_401(const server::http::Request& req, const std::string& tenant) const;
-  server::http::Response error_page(const std::string& tenant, int status, const std::string& detail) const;
+  // message: an operator's words (a closed control's, 047), shown on the page and kept as JSON.
+  server::http::Response error_page(const std::string& tenant, int status, const std::string& detail,
+                                    const std::string& message = "") const;
   void register_tools();
   void register_content_tools();
   void register_data_tools();
@@ -929,6 +936,28 @@ class Host {
   // Box flags (design/machine/039.Flags.md; flags.cpp): set by operators, read through goober_flag.
   std::unique_ptr<class FlagStore> flags_;
   void register_flag_tools();
+  // Per-domain controls (design/machine/047.Controls.md; controls.cpp): limits an operator sets
+  // per domain, API, and endpoint, kept in storage/controls/$tenant/$domain.json, applied by the
+  // gate on the request path (after the host-wide per-client limit), and reported per control.
+  std::unique_ptr<controls::Gate> gate_;
+  std::mutex controls_mu_;  // a change's read, check, and write
+  void setup_controls();    // compiles every domain's controls into the gate: at start and on reload
+  void register_control_tools();
+  // The request path's one hook: true when a control refused the request (it is answered);
+  // otherwise `finish` may be wrapped to count the request and release what it holds.
+  bool control_gate(server::http::Request& req, Finish& finish, const std::string& domain, const std::string& tenant,
+                    const router::NormalizedPath& path, int64_t started_us);
+  // The API a request belongs to (box:<name>, content, mcp, identity).
+  std::string control_api(const server::http::Request& req, const router::NormalizedPath& path, const std::string& domain);
+  // A signed-in caller's account for `by: user` rates, looked up off the network thread and kept
+  // a minute; "" until it is known, or for nobody.
+  std::string control_user_key(const server::http::Request& req, const std::string& tenant);
+  std::mutex control_users_mu_;
+  std::map<std::string, std::pair<int64_t, std::string>> control_users_;  // credential hash -> (at_ms, key)
+  // The rows of control buckets that have closed, handed to the traffic rollups.
+  void control_rows_to_traffic(int64_t now_ms);
+  // A control's timeout-ms the gate put on the request, or 0.
+  static int64_t control_timeout(const server::http::Request& req);
   // Change sets (design/machine/042.ChangeSets.md; changesets.cpp): schema adds, box versions,
   // content, and flags previewed, applied, and rolled back together; one JSON file each in
   // storage/operations/changesets.

@@ -47,6 +47,9 @@ struct Response {
   // A host-generated error page, which the host may re-render (as JSON, for an API
   // caller) before it is sent. The server ignores it.
   bool host_error = false;
+  // An operator's words for a host error (a closed control's message), kept when it is
+  // re-rendered. The server ignores it.
+  std::string host_message;
   // Set: the status and headers go out with no length and "connection: close", the body is
   // ignored, and this is called with the open stream (on a network thread; it must not block).
   std::function<void(std::shared_ptr<Stream>)> stream;

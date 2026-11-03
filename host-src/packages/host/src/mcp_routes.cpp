@@ -114,7 +114,9 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
                          {"params", bj::object{}},   {"query", bj::object{}}, {"headers", bj::object{}},
                          {"body", json::dump(input)}, {"domain", domain},     {"tenant", tenant},
                          {"user", user_json(who)}};
-          auto call = call_box(ref, doc, tenant, request_id, who);
+          CallOptions options;
+          options.control_timeout_ms = control_timeout(req);  // a control on /mcp (047 § 3)
+          auto call = call_box(ref, doc, tenant, request_id, who, options);
           const auto& r = call.result;
           audit_status = r.outcome == runtime::wasm::CallResult::Outcome::kOk ? r.status : 500;
           audit_result = r.body;

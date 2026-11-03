@@ -323,6 +323,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_try_tools();
   register_cache_tools();
   register_flag_tools();
+  register_control_tools();
   register_changeset_tools();
   register_perf_tools();
   register_db_admin_tools();
@@ -558,6 +559,15 @@ void Host::stop() {
   } catch (const std::exception& e) {
     std::cerr << "goober-host: box failures: " << e.what() << "\n";
   }
+  // What every control counted, open buckets too (047 § 6).
+  try {
+    if (gate_ && traffic_) {
+      traffic_->add_control_rows(gate_->take_all());
+      traffic_->catch_up(base::now_unix_ms());
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "goober-host: control rollups: " << e.what() << "\n";
+  }
 }
 
 std::string Host::reload() {
@@ -569,6 +579,7 @@ std::string Host::reload() {
   std::string notes = config_.replace(next);
   set_outbound_sandbox(next->sandbox);
   setup_version_keeping();  // limits.version-* (045 § 3.1)
+  setup_controls();         // controls.defaults (047 § 2), under every domain's own
   audit("config.reload", "signal", "host.json", "ok", bj::object{{"notes", notes}});
   return "config reloaded. " + notes;
 }
@@ -755,10 +766,12 @@ void Host::access_log(const Request& req, int status, int64_t started_us, const 
   log_line("access", std::move(line));
 }
 
-Response Host::error_page(const std::string& tenant, int status, const std::string& request_id) const {
+Response Host::error_page(const std::string& tenant, int status, const std::string& request_id,
+                          const std::string& message) const {
   Response res;
   res.status = status;
   res.host_error = true;
+  res.host_message = message;
   std::string file = "error-message/" + std::to_string(status) + ".html";
   std::optional<content::File> page;
   if (!tenant.empty()) page = content_->get(tenant, file);
@@ -777,6 +790,7 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
                     {"reason", reason(status)},
                     {"title", std::to_string(status) + " " + reason(status)},
                     {"request_id", request_id}};
+    if (!message.empty()) data["message"] = message;
     auto html = site_->render_named(tenant.empty() ? std::string(content::kHostTree) : tenant, "goober-error-page",
                                     std::move(data), &inline_templates, &err);
     if (!html) {
@@ -800,8 +814,9 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
     res.body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Uh Oh!</title>"
                "<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem}"
                "code{color:#666}</style></head><body><h1>Uh Oh!</h1><p>" +
-               std::to_string(status) + " " + reason(status) + "</p><p><code>request " + request_id +
-               "</code></p></body></html>\n";
+               std::to_string(status) + " " + reason(status) + "</p>" +
+               (message.empty() ? std::string() : "<p>" + base::html_escape(message) + "</p>") + "<p><code>request " +
+               request_id + "</code></p></body></html>\n";
   }
   return res;
 }
@@ -813,7 +828,7 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
   int64_t started = base::monotonic_us();
   std::string request_id = new_request_id();
   req.headers.erase(std::remove_if(req.headers.begin(), req.headers.end(),
-                                   [](const auto& h) { return h.first == "goober-request-id"; }),
+                                   [](const auto& h) { return h.first == "goober-request-id" || h.first.starts_with("goober-control-"); }),
                     req.headers.end());
   req.headers.emplace_back("goober-request-id", request_id);
   auto cfg = config_.get();
@@ -852,7 +867,9 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     if (res.host_error && (bearer || (accept.find("application/json") != std::string::npos && !prefers_html(accept)))) {
       std::erase_if(res.headers, [](const auto& h) { return h.first == "content-type"; });
       res.headers.emplace_back("content-type", "application/json");
-      res.body = json::dump(bj::object{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}});
+      bj::object body{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}};
+      if (!res.host_message.empty()) body["message"] = res.host_message;
+      res.body = json::dump(body);
     }
     access_log(req, res.status, started, domain, extra, res.host_error);
     respond(std::move(res));
@@ -980,6 +997,9 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
   if (!resolved) return finish(error_page("", 404, request_id), R"({"why":"unknown domain"})");
   auto tenant = std::optional<std::string>(resolved->second.tenant);
   if (!path) return finish(error_page(*tenant, 400, request_id), R"({"why":"bad path"})");
+  // Per-domain controls (design/machine/047.Controls.md § 5): the operator's limits for this
+  // domain, its APIs, and its endpoints, inside the host-wide shield above (controls.cpp).
+  if (control_gate(req, finish, domain, *tenant, *path, started)) return;
   if (path->path == "/mcp") {
     pool_->post([this, req, finish, domain, tenant = *tenant] {
       try {
@@ -1475,6 +1495,8 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   runtime::wasm::CallLimits limits{cfg->timeout_ms.resolve(options.timeout_ms ? options.timeout_ms : m.behavior.timeout_ms),
                                    cfg->fuel.resolve(m.behavior.fuel),
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
+  // A control's timeout-ms (047 § 3) only ever shortens the call.
+  if (options.control_timeout_ms > 0) limits.timeout_ms = std::min<int64_t>(limits.timeout_ms, options.control_timeout_ms);
   net.deadline_us = base::monotonic_us() + limits.timeout_ms * 1000;
   lib_deadline_us = net.deadline_us;
   int64_t engine_started_us = base::monotonic_us();
@@ -1850,6 +1872,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   CallOptions options;
   options.read_only = req.method == "get" || req.method == "head";
   options.perf_by_caller = true;
+  options.control_timeout_ms = control_timeout(req);
   // A try's write runs on copies of the tenant's databases, as a job's dry run does: internal
   // calls refused, deliveries kept in the copies, nothing published (route_try.cpp).
   if (trying && !options.read_only) {

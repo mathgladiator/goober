@@ -174,6 +174,25 @@ TEST_F(ScopeTest, TenantToolsStayInside) {
   EXPECT_NE(list.body.find("\"content_put\""), std::string::npos);
 }
 
+// Per-domain controls (047 § 4): a domain is its tenant's, so a focused operator sets and reads
+// only their own domains' controls, and lists only theirs.
+TEST_F(ScopeTest, ControlsStayInsideTheirDomains) {
+  focus_grok(R"(["acme"])");
+  const std::string set = R"(,"set":{"rate":{"per-minute":60}},"mode":"observe","why":"watch it"})";
+  auto in = call("control_set", R"({"domain":"acme.example.com")" + set);
+  EXPECT_FALSE(in.at("isError").as_bool()) << in.at("text");
+  auto out = call("control_set", R"({"domain":"other.example.com")" + set);
+  EXPECT_TRUE(out.at("isError").as_bool());
+  EXPECT_NE(std::string(out.at("text").as_string()).find("isn't one of theirs"), std::string::npos) << out.at("text");
+  EXPECT_TRUE(call("control_report", R"({"domain":"other.example.com"})").at("isError").as_bool());
+  EXPECT_TRUE(call("control_remove", R"({"domain":"other.example.com","id":"defaults"})").at("isError").as_bool());
+  auto list = call("control_list");
+  ASSERT_FALSE(list.at("isError").as_bool()) << list.at("text");
+  std::string text(list.at("text").as_string());
+  EXPECT_NE(text.find("acme.example.com"), std::string::npos);
+  EXPECT_EQ(text.find("other.example.com"), std::string::npos) << text;
+}
+
 TEST_F(ScopeTest, BoxesManifestsAndLists) {
   focus_grok(R"(["acme"])");
   EXPECT_FALSE(call("version_list", R"({"box":"kcbox"})").at("isError").as_bool());

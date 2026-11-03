@@ -426,6 +426,14 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
   db_->exec(
       "CREATE TABLE IF NOT EXISTS log_day (day INTEGER NOT NULL, log TEXT NOT NULL, bytes INTEGER NOT NULL,"
       " lines INTEGER NOT NULL, counted INTEGER NOT NULL, PRIMARY KEY (day, log))");
+  // Per-domain controls (047 § 6): one row per control per five minutes.
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS control_5m (t INTEGER NOT NULL, tenant TEXT NOT NULL, domain TEXT NOT NULL,"
+      " control TEXT NOT NULL, matched INTEGER NOT NULL, allowed INTEGER NOT NULL, rate INTEGER NOT NULL,"
+      " concurrent INTEGER NOT NULL, body INTEGER NOT NULL, closed INTEGER NOT NULL, would INTEGER NOT NULL,"
+      " n5 INTEGER NOT NULL, peak INTEGER NOT NULL, clients TEXT NOT NULL, would_clients TEXT NOT NULL,"
+      " top_client TEXT NOT NULL, top_n INTEGER NOT NULL, would_top TEXT NOT NULL, would_top_n INTEGER NOT NULL,"
+      " hist TEXT NOT NULL, PRIMARY KEY (domain, control, t))");
   if (old) {
     {
       sqlite::Stmt q(*db_, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'gauge_minutes'");
@@ -455,6 +463,7 @@ size_t Traffic::catch_up(int64_t now_ms) {
   size_t lines = tail("access", now_ms) + tail("egress", now_ms) + tail("mail", now_ms);
   flush_gauges();
   flush_logs();
+  flush_controls();
   if (now_ms - last_drop_ms_ > 10 * kMinuteMs) {
     drop_old(now_ms);
   } else if (service_failures_added_) {
@@ -628,7 +637,8 @@ size_t Traffic::tail(const std::string& name, int64_t) {
 }
 
 namespace {
-constexpr const char* kRollups[] = {"route_5m", "edge_5m", "error_5m", "service_5m", "service_status_5m", "gauge_5m", "log_5m"};
+constexpr const char* kRollups[] = {"route_5m", "edge_5m", "error_5m", "service_5m", "service_status_5m", "gauge_5m", "log_5m",
+                                    "control_5m"};
 constexpr int64_t kDayMs = 24 * kHourMs;
 constexpr int64_t kLogDaysKeptMs = 90 * kDayMs;
 std::string base_day(int64_t ms) { return base::format_utc_ms(ms).substr(0, 10); }
@@ -652,7 +662,7 @@ void Traffic::drop_old(int64_t now_ms) {
     int64_t oldest = 0;
     {
       sqlite::Stmt q(*db_, "SELECT min(t) FROM (SELECT min(t) AS t FROM route_5m UNION ALL SELECT min(t) FROM service_5m"
-                           " UNION ALL SELECT min(t) FROM gauge_5m)");
+                           " UNION ALL SELECT min(t) FROM gauge_5m UNION ALL SELECT min(t) FROM control_5m)");
       if (!q.step() || q.is_null(0)) break;
       oldest = q.int64(0);
     }
@@ -1319,5 +1329,123 @@ bj::object Traffic::log_velocity(std::string_view window, const std::string& log
                     {"days", std::move(days)},
                     {"top", std::move(tops)}};
 }
+
+std::string sketch_union(const std::string& a, const std::string& b) {
+  if (a.size() != 64) return b.size() == 64 ? b : std::string();
+  if (b.size() != 64) return a;
+  auto nibble = [](char c) { return c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0'; };
+  std::string out(64, '0');
+  for (size_t i = 0; i < 64; ++i) out[i] = "0123456789abcdef"[(nibble(a[i]) | nibble(b[i])) & 15];
+  return out;
+}
+
+void ControlRow::merge(const ControlRow& o) {
+  matched += o.matched;
+  allowed += o.allowed;
+  rate += o.rate;
+  concurrent += o.concurrent;
+  body += o.body;
+  closed += o.closed;
+  would += o.would;
+  n5 += o.n5;
+  peak = std::max(peak, o.peak);
+  clients = sketch_union(clients, o.clients);
+  would_clients = sketch_union(would_clients, o.would_clients);
+  // The busiest client of two halves of a bucket: the same one adds up, else the larger stands
+  // (approximate, as 047 § 6 allows).
+  if (o.top_client == top_client) top_n += o.top_n;
+  else if (o.top_n > top_n) top_client = o.top_client, top_n = o.top_n;
+  if (o.would_top == would_top) would_top_n += o.would_top_n;
+  else if (o.would_top_n > would_top_n) would_top = o.would_top, would_top_n = o.would_top_n;
+  hist.merge(o.hist);
+}
+
+void Traffic::add_control_rows(std::vector<ControlRow> rows) {
+  if (rows.empty()) return;
+  std::lock_guard lock(control_mu_);
+  for (auto& r : rows) control_pending_.push_back(std::move(r));
+}
+
+namespace {
+
+constexpr const char* kControlColumns =
+    "t, tenant, domain, control, matched, allowed, rate, concurrent, body, closed, would, n5, peak, clients, would_clients, "
+    "top_client, top_n, would_top, would_top_n, hist";
+
+ControlRow control_row_of(const sqlite::Stmt& s) {
+  ControlRow r;
+  r.t = s.int64(0);
+  r.tenant = s.text(1);
+  r.domain = s.text(2);
+  r.control = s.text(3);
+  r.matched = s.int64(4);
+  r.allowed = s.int64(5);
+  r.rate = s.int64(6);
+  r.concurrent = s.int64(7);
+  r.body = s.int64(8);
+  r.closed = s.int64(9);
+  r.would = s.int64(10);
+  r.n5 = s.int64(11);
+  r.peak = s.int64(12);
+  r.clients = s.text(13);
+  r.would_clients = s.text(14);
+  r.top_client = s.text(15);
+  r.top_n = s.int64(16);
+  r.would_top = s.text(17);
+  r.would_top_n = s.int64(18);
+  r.hist = Histogram::decode(s.text(19));
+  return r;
+}
+
+}  // namespace
+
+void Traffic::flush_controls() {
+  std::vector<ControlRow> pending;
+  {
+    std::lock_guard lock(control_mu_);
+    pending.swap(control_pending_);
+  }
+  if (pending.empty()) return;
+  db_->exec("BEGIN IMMEDIATE");
+  try {
+    for (auto& r : pending) {
+      r.t = r.t / kBucketMs * kBucketMs;
+      // A bucket the host flushed half of before a restart adds to what is there.
+      {
+        sqlite::Stmt q(*db_, std::string("SELECT ") + kControlColumns + " FROM control_5m WHERE domain = ? AND control = ? AND t = ?");
+        q.bind(1, r.domain).bind(2, r.control).bind(3, r.t);
+        if (q.step()) {
+          auto old = control_row_of(q);
+          old.merge(r);
+          old.tenant = r.tenant;
+          r = std::move(old);
+        }
+      }
+      sqlite::Stmt w(*db_, std::string("INSERT OR REPLACE INTO control_5m (") + kControlColumns +
+                               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      w.bind(1, r.t).bind(2, r.tenant).bind(3, r.domain).bind(4, r.control).bind(5, r.matched).bind(6, r.allowed);
+      w.bind(7, r.rate).bind(8, r.concurrent).bind(9, r.body).bind(10, r.closed).bind(11, r.would).bind(12, r.n5);
+      w.bind(13, r.peak).bind(14, r.clients).bind(15, r.would_clients).bind(16, r.top_client).bind(17, r.top_n);
+      w.bind(18, r.would_top).bind(19, r.would_top_n).bind(20, r.hist.encode());
+      w.run();
+    }
+    db_->exec("COMMIT");
+  } catch (...) {
+    db_->exec("ROLLBACK");
+    throw;
+  }
+}
+
+std::vector<ControlRow> Traffic::control_rows(const std::string& domain, const std::string& control, int64_t from_ms,
+                                              int64_t to_ms) {
+  std::lock_guard lock(mu_);
+  std::vector<ControlRow> out;
+  sqlite::Stmt s(*db_, std::string("SELECT ") + kControlColumns +
+                           " FROM control_5m WHERE domain = ? AND (? = '' OR control = ?) AND t >= ? AND t < ? ORDER BY t");
+  s.bind(1, domain).bind(2, control).bind(3, control).bind(4, from_ms).bind(5, to_ms);
+  while (s.step()) out.push_back(control_row_of(s));
+  return out;
+}
+
 
 }  // namespace goober::operations

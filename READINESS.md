@@ -226,9 +226,13 @@ each ranch's site weekly.
     mailer;
   - the change log, with line diffs for pages and partials, and manifest diffs for deploys;
   - every operator call (Grok's included), linked to what it changed;
-  - a database explorer with a read-only SQL box.
+  - a database explorer with a read-only SQL box;
+  - each domain's controls (rate, concurrency, body size, timeouts, closing; per domain, per
+    API, per endpoint) with what each refused or would have refused, and verdicts like "may be
+    too tight" (the Controls view; `design/machine/047.Controls.md`).
 
-  It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`).
+  It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`). Controls
+  are set with `control_set`, started in observe, and are untried against real traffic.
 - **To turn it on at example.com.** Deploy: the operations audit offers to set it up once
   `ops.example.com` resolves to the server (it does today). By hand:
   - Add an `A` record for `ops.example.com`.

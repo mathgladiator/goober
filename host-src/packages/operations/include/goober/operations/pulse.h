@@ -26,6 +26,9 @@ class Pulse {
     kMailFailed,
     kServiceCalls,
     kServiceFailed,
+    kControlled,      // requests a per-domain control met (047)
+    kControlRefused,  // ... and refused
+    kControlWould,    // ... and an observing control would have refused
     kCounters
   };
 

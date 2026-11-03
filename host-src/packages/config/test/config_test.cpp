@@ -333,3 +333,23 @@ TEST(Config, BehindAProxyListensOnLoopbackOnly) {
   EXPECT_TRUE(is_loopback_address("127.0.0.1"));
   EXPECT_FALSE(is_loopback_address("128.0.0.1"));
 }
+
+// Per-domain controls (047 § 2): host.json holds only their host defaults, checked strictly and
+// only lower than the host's own limits.
+TEST(Config, ControlDefaultsAreCheckedAgainstTheHostsLimits) {
+  std::string err;
+  auto ok = parse_config(R"({"operations":{"token":"0123456789abcdef"},
+      "controls":{"defaults":{"rate":{"per-minute":600},"mode":"observe"}}})", "/", &err);
+  ASSERT_TRUE(ok) << err;
+  ASSERT_TRUE(ok->controls_defaults);
+  EXPECT_EQ(ok->controls_defaults->mode, goober::controls::Mode::kObserve);
+  EXPECT_EQ(ok->controls_defaults->props.rate.value.per_minute, 600);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"controls":{"domains":{}}})", "/", &err));
+  EXPECT_NE(err.find("controls"), std::string::npos) << err;
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"body-max-bytes":1000},
+      "controls":{"defaults":{"body-max-bytes":2000}}})", "/", &err));
+  EXPECT_NE(err.find("may only lower it"), std::string::npos) << err;
+  EXPECT_FALSE(parse_config(
+      R"({"operations":{"token":"0123456789abcdef"},"controls":{"defaults":{"rate":{"per-minute":1,"bursty":2}}}})", "/", &err));
+  EXPECT_NE(err.find("unknown key bursty"), std::string::npos) << err;
+}

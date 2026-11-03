@@ -391,6 +391,12 @@ bj::object Host::health(int64_t now_ms) {
       {"boxes", bj::object{{"failure_ratio", ratio(s.n[P::kBoxFailed], s.n[P::kBoxCalls])}}},
       {"mail", bj::object{{"failure_ratio", ratio(s.n[P::kMailFailed], s.n[P::kMailSent] + s.n[P::kMailFailed])}}},
       {"services", bj::object{{"failure_ratio", ratio(s.n[P::kServiceFailed], s.n[P::kServiceCalls])}}},
+      // Per-domain controls (047 § 8), host-wide and as ratios only: this is public, so no tenant
+      // or domain is named. Of every request, the share a control refused, would have refused
+      // (observe), and met at all.
+      {"controls", bj::object{{"refused_ratio", ratio(s.n[P::kControlRefused], requests)},
+                              {"would_refuse_ratio", ratio(s.n[P::kControlWould], requests)},
+                              {"matched_ratio", ratio(s.n[P::kControlled], requests)}}},
       {"outbox",
        bj::object{{"depth", outbox_depth_.load()}, {"oldest_age_s", age_s(outbox_oldest_ms_.load())}, {"dead", outbox_dead_.load()}}},
       {"workers", bj::object{{"queued", int64_t(pool_ ? pool_->queued() : 0)},
@@ -518,6 +524,10 @@ std::string Host::prometheus_text(const bj::object& ready) {
         {"goober_box_failure_ratio", {"boxes", "failure_ratio"}, "gauge", "Share of box calls that failed, last 5 minutes."},
         {"goober_mail_failure_ratio", {"mail", "failure_ratio"}, "gauge", "Share of mail sends that failed, last 5 minutes."},
         {"goober_service_failure_ratio", {"services", "failure_ratio"}, "gauge", "Share of calls to outside services that failed, last 5 minutes."},
+        {"goober_control_refused_ratio", {"controls", "refused_ratio"}, "gauge",
+         "Share of requests a per-domain control refused, last 5 minutes."},
+        {"goober_control_would_refuse_ratio", {"controls", "would_refuse_ratio"}, "gauge",
+         "Share of requests an observing per-domain control would have refused, last 5 minutes."},
         {"goober_outbox_depth", {"outbox", "depth"}, "gauge", "Outbox elements waiting for delivery."},
         {"goober_outbox_oldest_age_seconds", {"outbox", "oldest_age_s"}, "gauge", "Age of the oldest waiting outbox element."},
         {"goober_outbox_dead", {"outbox", "dead"}, "gauge", "Outbox dead letters kept."},
