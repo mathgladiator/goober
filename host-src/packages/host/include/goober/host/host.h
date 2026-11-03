@@ -28,6 +28,7 @@
 #include "goober/mcp/mcp.h"
 #include "goober/operations/changes.h"
 #include "goober/operations/failures.h"
+#include "goober/operations/heat.h"
 #include "goober/operations/live.h"
 #include "goober/operations/pulse.h"
 #include "goober/operations/traffic.h"
@@ -151,6 +152,10 @@ class Host {
   operations::ChangeLog& changes() { return *changes_; }
   logs::Set& logs() { return *logs_; }
   operations::LiveStats& live() { return live_; }
+  // Heat studies (design/machine/048.HeatStudy.md): each second the timer thread ends the ones
+  // whose time is up and saves the running ones once a minute (heat_study.cpp).
+  operations::HeatStudies* heat_studies() { return heat_.get(); }
+  void heat_tick(int64_t now_ms);
   // Whether the host is ready (GET /goober/ready):
   // storage writable (when probed), identity answering, boxes loaded, the queue not full.
   std::pair<int, boost::json::object> readiness(bool probe_storage);
@@ -175,8 +180,9 @@ class Host {
   // with "set" (it blocks an address); and version_upload {dry_run: true}, which stores nothing.
   static bool is_read_call(std::string_view tool, const boost::json::object& args);
   // Operator scope (design/machine/030.OperatorScope.md): which tenants an operator acts on.
+  // kStudy: a heat study's id, checked against the tenant of the domain it studies (048).
   enum class ScopeRule { kTenant, kBox, kManifest, kDomain, kSchema, kProject, kProjectCreate, kTicket, kResult,
-                         kFiltered, kOpen, kHost };
+                         kFiltered, kOpen, kHost, kStudy };
   struct OperatorScope {
     bool all = true;
     std::set<std::string> tenants;  // when not all
@@ -407,8 +413,15 @@ class Host {
     std::string saved_op_, saved_req_;
   };
   // host_error: the host made the answer (an error page or its JSON), not a box.
+  // bytes_out: the body sent, for a heat study's weight (0 when unknown).
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
-                  const std::string& extra, bool host_error = false);
+                  const std::string& extra, bool host_error = false, int64_t bytes_out = 0);
+  // One finished request on a domain a heat study watches (048 § 3): keyed by endpoint and fed in.
+  void heat_observe(const server::http::Request& req, const boost::json::object& line, const std::string& domain,
+                    int64_t bytes_out);
+  void heat_stop_all();
+  void register_heat_study_tools();
+  std::unique_ptr<operations::HeatStudies> heat_;
 
   std::filesystem::path config_file_;
   config::ConfigHolder config_;

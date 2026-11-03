@@ -188,3 +188,13 @@ form.logform input, form.logform select { font: inherit; padding: 5px 8px; borde
 .loglines { font-size: .8rem; }
 .logline { padding: 4px 2px; border-bottom: 1px solid var(--line); cursor: pointer; word-break: break-all; }
 .logline:hover { background: var(--bg); }
+/* Heat studies (048 § 8): bars of each endpoint's share, colored by how hot. */
+svg.hb text.label { fill: var(--fg); font-size: 12px; font-family: var(--mono); }
+svg.hb rect.track { fill: var(--line); opacity: .5; }
+svg.hb rect.fill { fill: var(--cold); }
+svg.hb rect.fill.h1 { fill: color-mix(in srgb, var(--hot) 30%, var(--cold)); }
+svg.hb rect.fill.h2 { fill: color-mix(in srgb, var(--hot) 50%, var(--cold)); }
+svg.hb rect.fill.h3 { fill: color-mix(in srgb, var(--hot) 75%, var(--cold)); }
+svg.hb rect.fill.h4 { fill: var(--hot); }
+.suggest { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.suggest h3 { font-size: .95rem; margin: 0 0 6px; }

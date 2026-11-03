@@ -189,6 +189,10 @@ bj::object Host::limits_report(bool name_tenants) {
     } catch (const std::exception&) {
     }
   }
+  if (heat_) {
+    add("studies", heat_->bytes(), d.studies_bytes, "studies-bytes",
+        bj::object{{"note", "heat study reports, kept 30 days; past the budget the oldest finished one goes"}});
+  }
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
   std::error_code ec;

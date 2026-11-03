@@ -1238,6 +1238,98 @@ const views = {
     ];
   },
 
+  // Heat studies (048 § 8): the list, a running study's progress, and a finished one's heat by
+  // endpoint, its clients, and the controls it suggests. Look-only: studies start and stop
+  // through the operator tools.
+  async studies(params) {
+    const id = params.get('id');
+    if (!id) {
+      const rows = await api('heat_study_list', {});
+      return [
+        h('h1', {}, 'Heat studies'),
+        h('p', { class: 'muted small' }, 'A study counts one domain\'s requests by endpoint for 5 minutes to a day, then keeps a report ' +
+          '30 days: where the heat is, and the controls it suggests, in observe mode. An agent or operator starts one with ' +
+          'heat_study_start {domain, minutes, why}; this panel only reads them.'),
+        wideCard('', rows.length ? table([
+          { label: 'Study', get: (r) => '#' + r.id, cls: () => 'mono' },
+          { label: 'Domain', get: (r) => r.domain },
+          { label: 'State', get: (r) => h('span', { class: 'pill' + (r.state === 'running' ? ' deploy' : r.state === 'interrupted' ? ' failed' : '') },
+            r.state + (r.state === 'running' ? ' · ' + fmt.dur(r.remaining_ms || 0) + ' left' : '')) },
+          { label: 'Started', get: (r) => fmt.time(r.started_ms), cls: () => 'muted' },
+          { label: 'Minutes', num: true, get: (r) => String(r.minutes) },
+          { label: 'Requests', num: true, get: (r) => fmt.n(r.requests) },
+          { label: 'Hottest', get: (r) => r.hottest ? r.hottest.endpoint + ' · ' + fmt.pct(r.hottest.heat_share, 1) : '–', cls: () => 'mono' },
+          { label: 'By', get: (r) => r.by, cls: () => 'muted' },
+          { label: 'Why', get: (r) => clip(r.why, 60), cls: () => 'muted' },
+        ], rows, (r) => { location.hash = '#/studies?id=' + r.id; }) : h('p', { class: 'muted' }, 'No studies yet, or none in the last 30 days.')),
+      ];
+    }
+    const r = await api('heat_study_get', { id: Number(id) });
+    const by = params.get('by') || 'heat';
+    const go = (k, x) => { params.set(k, x); location.hash = '#/studies?' + params; };
+    const t = r.totals, eps = r.endpoints;
+    const running = r.state === 'running';
+    const points = r.per_minute.series.map((n, i) => ({ t: r.started_ms + i * 60e3, n }));
+    const series = { points, step_ms: 60e3, from_ms: r.started_ms, to_ms: r.started_ms + points.length * 60e3 };
+    const shareOf = { heat: (e) => e.heat_share, requests: (e) => e.requests_share, bytes: (e) => e.bytes_share };
+    const ranked = eps.slice().sort((a, b) => shareOf[by](b) - shareOf[by](a)).slice(0, 20);
+    const detailed = eps.filter((e) => e.clients);
+    const suggested = detailed.filter((e) => e.suggest && e.suggest.control_set);
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Heat study #' + r.id + ' · ' + r.domain),
+        h('span', { class: 'pill' + (running ? ' deploy' : '') }, r.state), h('a', { href: '#/studies' }, '← every study')),
+      h('p', { class: 'muted small' }, (r.why ? 'Why: ' + r.why + '. ' : '') + 'Started ' + fmt.time(r.started_ms) + ' by ' + r.by + ' for ' +
+        r.minutes + ' minutes' + (running ? '; ' + fmt.dur(r.remaining_ms || 0) + ' left, numbers so far.' :
+          '; ended ' + fmt.time(r.ended_ms) + ' (' + String(r.ended_by).replace('_', ' ') + ').')),
+      h('div', { class: 'stats' },
+        stat(fmt.n(t.requests), 'requests'), stat(fmt.us(t.heat_us), 'heat (time serving)'),
+        stat(fmt.bytes(t.bytes_in + t.bytes_out), 'bytes in and out'), stat(fmt.n(r.per_minute.peak), 'busiest minute'),
+        stat((r.clients.exact ? '' : '≈') + fmt.n(r.clients.distinct), 'clients'), stat(String(r.concurrent.peak), 'most at once'),
+        stat(fmt.us(t.latency_us.p99), 'p99 latency')),
+      h('div', { class: 'grid' },
+        card('Requests per minute', points.length ? stackedChart(series, [{ key: 'n', cls: 's2', label: 'requests' }], 'n', 'requests',
+          'Requests per minute') : h('p', { class: 'muted' }, 'Nothing yet.')),
+        card('Each client\'s busiest minute',
+          h('div', { class: 'stats' }, stat(String(r.clients.busiest_minute.p50), 'p50'), stat(String(r.clients.busiest_minute.p99), 'p99'),
+            stat(String(r.clients.busiest_minute.max), 'max'), stat(String(r.concurrent.per_client_peak), 'most at once, one client')),
+          r.top_clients.length ? table([
+            { label: 'Client (keyed hash)', get: (c) => c.client_h, cls: () => 'mono' },
+            { label: 'Class', get: (c) => c.class, cls: () => 'muted' },
+            { label: 'Requests', num: true, get: (c) => fmt.n(c.requests) },
+            { label: 'Busiest minute', num: true, get: (c) => String(c.busiest_minute) },
+          ], r.top_clients) : null,
+          h('p', { class: 'muted small' }, 'A client is a keyed hash of its address (an IPv6 /64 is one); log_search finds its lines. ' +
+            'No address or user id is kept.'))),
+      wideCard('Where the heat is', h('div', { class: 'bar' }, h('label', {}, 'By '), segmented(['heat', 'requests', 'bytes'], by, (x) => go('by', x))),
+        ranked.length ? shareBars(ranked, shareOf[by]) : h('p', { class: 'muted' }, 'No requests yet.'),
+        r.tracked.other_requests ? h('p', { class: 'muted small' }, fmt.n(r.tracked.other_requests) + ' requests past the ' + r.tracked.cap +
+          ' endpoints tracked are in "other".') : null),
+      wideCard('Endpoints', detailed.length ? table([
+        { label: 'Endpoint', get: (e) => e.endpoint, cls: () => 'mono' },
+        { label: 'API', get: (e) => e.api, cls: () => 'muted' },
+        { label: 'Requests', num: true, get: (e) => fmt.n(e.requests) },
+        { label: 'Heat', num: true, get: (e) => fmt.pct(e.heat_share, 1) },
+        { label: 'p99', num: true, get: (e) => fmt.us(e.latency_us.p99) },
+        { label: 'Peak/min', num: true, get: (e) => String(e.per_minute.peak) },
+        { label: 'Clients', num: true, get: (e) => (e.clients.exact ? '' : '≈') + fmt.n(e.clients.distinct) },
+        { label: 'Client p99/min', num: true, get: (e) => String(e.clients.busiest_minute.p99) },
+        { label: 'At once', num: true, get: (e) => String(e.concurrent.peak) },
+        { label: 'Out', num: true, get: (e) => fmt.bytes(e.bytes.out) },
+        { label: '4xx', num: true, get: (e) => e.status['4xx'] ? fmt.n(e.status['4xx']) : '', cls: (e) => e.status['4xx'] ? 'warn' : '' },
+        { label: '5xx', num: true, get: (e) => e.status['5xx'] ? fmt.n(e.status['5xx']) : '', cls: (e) => e.status['5xx'] ? 'err' : '' },
+        { label: '429', num: true, get: (e) => e.status['429'] ? fmt.n(e.status['429']) : '' },
+        { label: 'Bots', num: true, get: (e) => e.classes.bot ? fmt.pct(e.classes.bot, e.requests) : '' },
+      ], detailed) : h('p', { class: 'muted' }, 'No requests yet.')),
+      wideCard('Suggested controls', h('p', { class: 'muted small' }, 'Each is ready-to-send control_set arguments in observe mode: ' +
+        'send it, read control_report while it observes, and enforce once it would have refused only what it should. This panel only looks.'),
+        suggested.length ? suggested.map((e) => h('div', { class: 'suggest' },
+          h('h3', { class: 'mono' }, e.endpoint, ' ', h('span', { class: 'muted small' }, e.api)),
+          h('pre', { class: 'source' }, JSON.stringify(e.suggest.control_set, null, 2)),
+          h('ul', { class: 'small' }, Object.entries(e.suggest.reasons).map(([k, v]) => h('li', {}, h('b', {}, k), ': ', v)))))
+          : h('p', { class: 'muted' }, 'No endpoint has enough requests to suggest from yet (20 at least).')),
+    ];
+  },
+
   // How fast the logs grow and what backups put in the bucket (032 § 10, 019 § 9): each log's
   // bytes over the window, the warnings, who writes the most, and uploads per day by stream.
   async volume(params) {
@@ -1505,6 +1597,23 @@ function dropsCard(tenant, unbound, snapshots) {
       { label: '', get: (s) => button('Delete', ask({ kind: 'snapshot', snapshot: s.snapshot }, s.snapshot, 'Delete snapshot')) || '' },
     ], snapshots)) : null,
     out);
+}
+
+// Horizontal bars of each row's share (0 to 1), labeled: a heat study's endpoints (048 § 8).
+function shareBars(rows, share) {
+  const W = 900, row = 22, L = 330, R = 60, H = rows.length * row + 4;
+  const max = Math.max(0.0001, ...rows.map(share));
+  const g = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Share by endpoint', class: 'hb' });
+  rows.forEach((e, i) => {
+    const y = 2 + i * row, w = Math.max(1, (W - L - R) * share(e) / max);
+    g.appendChild(s('text', { x: L - 8, y: y + 15, 'text-anchor': 'end', class: 'label' }, clip(e.endpoint, 44)));
+    g.appendChild(s('rect', { class: 'track', x: L, y: y + 3, width: W - L - R, height: row - 8 }));
+    const bar = s('rect', { class: 'fill h' + heatClass(share(e)), x: L, y: y + 3, width: w, height: row - 8 });
+    bar.appendChild(s('title', {}, `${e.endpoint} (${e.api}): ${fmt.pct(share(e), 1)}`));
+    g.appendChild(bar);
+    g.appendChild(s('text', { x: L + w + 6, y: y + 15, class: 'label' }, fmt.pct(share(e), 1)));
+  });
+  return g;
 }
 
 function stat(v, label) { return h('div', { class: 'stat' }, h('b', {}, String(v ?? '–')), h('span', {}, label)); }
@@ -1929,7 +2038,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job', 'studies'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

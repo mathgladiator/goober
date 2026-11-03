@@ -86,6 +86,12 @@ void Host::identity_tick(int64_t now_ms) {
     });
     // What a crash or a hang left in storage/tmp, past limits.tmp-hours (045).
     step("tmp", [&] { sweep_tmp(now_ms); });
+    // Heat study reports past 30 days, then past limits.studies-bytes, oldest first (048 § 6).
+    step("studies", [&] {
+      if (!heat_) return;
+      int gone = heat_->prune(now_ms, config_.get()->disk.studies_bytes);
+      if (gone > 0) std::cerr << "goober-host: deleted " << gone << " heat study report(s) past their keeping\n";
+    });
     // Box versions no longer live: archived, then deleted with a tombstone (045 § 3.1).
     step("versions", [&] {
       auto r = prune_versions(now_ms);

@@ -82,6 +82,12 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   ASSERT_TRUE(off) << err;
   EXPECT_EQ(off->disk.upload_bytes_per_day, 0);
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"upload-bytes-per-day":-1}})", "/", &err));
+  // Heat study reports (048): 64 MiB unless set, at least 1 MiB.
+  EXPECT_EQ(plain->disk.studies_bytes, int64_t(64) << 20);
+  auto studies = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"studies-bytes":2097152}})", "/", &err);
+  ASSERT_TRUE(studies) << err;
+  EXPECT_EQ(studies->disk.studies_bytes, 2097152);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"studies-bytes":1000}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

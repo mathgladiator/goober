@@ -929,6 +929,19 @@ stores the row (a unique column and ON CONFLICT DO NOTHING make repeats harmless
 confirmation mail through a mail service (above), and answers 303 with Location: /thanks. Don't pin
 {!email} in require for anonymous visitors: nobody is signed in, so the call would fail.
 
+## Where a domain's heat is (heat studies)
+
+Before setting rate or concurrency limits, or when a site feels slow, study it (048):
+1. heat_study_start {domain, minutes: 60, why} at a busy time (5 to 1440 minutes; one per
+   domain, 4 on the host; it changes nothing served and never waits for approval).
+2. heat_study_get {id}: endpoints ranked by heat (time serving), with requests per minute, each
+   client's busiest minute (p50/p99/max), peak concurrency, latency, bytes, statuses, and bots.
+   A box route is keyed by its declared pattern, like "GET /posts/{id}".
+3. Each endpoint's suggest.control_set is ready control_set arguments in mode "observe", with
+   the reason for each number. Send the ones the person agrees with as they are.
+4. Read control_report while they observe; enforce (mode "enforce") only once a control would
+   have refused only what it should. Never enforce straight from a study.
+
 ## When a call answers pending_approval
 
 A person can turn approvals on for you in the panel. Then a changing tool answers

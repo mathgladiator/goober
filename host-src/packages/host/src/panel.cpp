@@ -60,7 +60,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "flag_list",
     "db_snapshots", "db_unbound",
     "route_try",
-    "changeset_show", "changeset_list", "changeset_preview"};
+    "changeset_show", "changeset_list", "changeset_preview",
+    "heat_study_get", "heat_study_list"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -123,6 +124,10 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   // An export hands the agent no rows: they're sealed for a person to fetch (008 § 7.1). Not a
   // read tool, though, so observers and the look-only panel can't make one.
   if (tool == "db_export") return true;
+  // A heat study only counts what is served (048 § 2): it never changes how anything is
+  // served, so it never waits for approval. Not a read tool: observers and the panel can't
+  // start or stop one.
+  if (tool == "heat_study_start" || tool == "heat_study_stop") return true;
   // A change set's draft is the same: nothing is live until changeset_apply (which waits).
   if (tool == "changeset_create" || tool == "changeset_add" || tool == "changeset_discard") return true;
   // A try only looks when it is an HTTP GET or HEAD (read-only on live data); a write's, a
