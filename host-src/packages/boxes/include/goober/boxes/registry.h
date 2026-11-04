@@ -39,6 +39,21 @@ class ActiveSet {
  public:
   std::map<std::string, std::shared_ptr<const ActiveBox>> boxes;
 
+  // A/B splits (design/human/310.Deployments.md § Splitting traffic; design/machine/052.Splits.md):
+  // a candidate version of a live box serving `share_bp` (basis points, 0 to 10000) of the
+  // requests whose bucket falls under it. The route tables hold the live version; the host
+  // swaps a request's RouteRef for the candidate's route of the same verb and name.
+  struct Split {
+    std::shared_ptr<const ActiveBox> candidate;
+    int64_t share_bp = 0;
+    std::string salt;  // the split's own, so each experiment assigns people afresh
+    std::map<std::string, const manifest::HttpRoute*> routes;  // "verb name" -> the candidate's route
+  };
+  std::map<std::string, Split> splits;  // by box
+  // The candidate's route for `ref` when its box is split and `bucket` (0 to 9999) falls under
+  // the share, else nullopt (the live version answers).
+  std::optional<RouteRef> candidate_for(const RouteRef& ref, int64_t bucket) const;
+
   // The route table for a domain: its own table when some manifest names it,
   // or else the table of routes on "*".
   const router::RouteTable<RouteRef>& table_for(const std::string& domain) const;
@@ -84,6 +99,11 @@ struct PruneReport {
   std::vector<std::pair<std::string, std::string>> archived;  // box, version
   std::vector<boost::json::object> deleted;                   // each tombstone
 };
+
+// Why two versions of a box can't split traffic (052 § 3), or nothing: both must answer the same
+// routes (kind, verb, pattern, and name) and bind the same data (strategy, schema, database,
+// tenant, pattern), so a person lands on either and both read and write the same rows.
+std::vector<std::string> split_refusals(const manifest::Manifest& live, const manifest::Manifest& candidate);
 
 // Box versions on disk (storage/boxes/$box/...), and which one is active.
 // All writes go through the host WAL.
@@ -139,6 +159,17 @@ class BoxRegistry {
   // "dropped": true), and boxes/$box/dropped holding `record`. The name stays usable: uploading
   // the box again starts it afresh. Answers the versions deleted.
   std::optional<std::vector<std::string>> drop(const std::string& box, const boost::json::object& record, std::string* error);
+  // Splits (052): starts or changes the split of a live box to `version` at `share_bp`, keeping
+  // `record` (the controller's state) in boxes/$box/split. Refused when the box isn't live, the
+  // version is the live one or can't be loaded, or the two aren't compatible
+  // (split_refusals). A new live version, a disable, or a drop ends the box's split.
+  bool split_set(const std::string& box, const std::string& version, int64_t share_bp, const boost::json::object& record,
+                 std::string* error);
+  // Ends a box's split: the live version answers everything again.
+  bool split_end(const std::string& box, std::string* error);
+  // A box's split record, or nullopt.
+  std::optional<boost::json::object> split_record(const std::string& box) const;
+
   // A dropped box's record, or nullopt (also once it is uploaded again).
   std::optional<boost::json::object> dropped(const std::string& box) const;
 

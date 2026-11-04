@@ -949,6 +949,7 @@ const views = {
       api('changes', { kind: 'deploy', limit: 200, tenant: focus() ? focus()[0] : '' }).catch(() => ({ changes: [] })),
       api('source_box_history', { box: name, limit: 20 }).catch(() => ({ deploys: [] })),
       api('grant_usage', { box: name }).catch(() => [])]);
+    const split = await api('split_report', { box: name }).catch(() => null);
     const active = versions.find((v) => v.active) || versions[0] || {};
     const manifest = active.version ? await api('version_get', { box: name, version: active.version }) : null;
     const jobs = manifest && manifest.manifest.routes && manifest.manifest.routes.job ? await jobsOf(name) : [];
@@ -960,6 +961,7 @@ const views = {
       h('div', { class: 'bar' }, h('h1', {}, name), h('code', { class: 'muted' }, (active.version || '').slice(0, 12)), windowPicker(render),
         h('a', { href: '#/traffic?box=' + encodeURIComponent(name) }, 'Traffic →')),
       manifest && manifest.manifest.mission ? h('p', { class: 'muted' }, manifest.manifest.mission) : null,
+      splitCard(split),
       wideCard('Its graph', flowGraph(graph, (n) => { if (n.label !== name) openNode(n); })),
       grantsCard(grants[0]),
       jobsCard(jobs),
@@ -1794,6 +1796,41 @@ const views = {
     ];
   },
 };
+
+// An A/B split (052 § 6): both versions side by side, the share, the ladder, and the history.
+// Look-only: split_start, split_set, and split_stop change it.
+function splitCard(r) {
+  if (!r || (r.state !== 'splitting' && !r.last)) return null;
+  const arms = (x) => table([
+    { label: '', get: (a) => a.label },
+    { label: 'Version', get: (a) => (a.version || '').slice(0, 12), cls: () => 'mono muted' },
+    { label: 'Requests', num: true, get: (a) => fmt.n(a.arm.requests) },
+    { label: '5xx', num: true, get: (a) => fmt.pct(a.arm.errors, a.arm.requests), cls: (a) => a.arm.errors ? 'err' : '' },
+    { label: 'p50', num: true, get: (a) => fmt.us(a.arm.p50_us) },
+    { label: 'p99', num: true, get: (a) => fmt.us(a.arm.p99_us) },
+  ], [{ label: 'live', version: x.live_version, arm: x.live }, { label: 'candidate', version: x.candidate_version, arm: x.candidate }]);
+  if (r.state !== 'splitting') {
+    const l = r.last;
+    return wideCard('Last split', h('p', { class: 'muted small' }, `${l.outcome === 'promote' ? 'Promoted' : 'Rolled back'} ` +
+      `${(l.version || '').slice(0, 12)} ${fmt.ago(l.ended_ms)} by ${l.ended_by}` + (l.end_why ? `: ${l.end_why}` : '') + '.'),
+    l.live ? arms({ live_version: r.live_version, candidate_version: l.version, live: l.live, candidate: l.candidate }) : null);
+  }
+  const s = r.split;
+  const g = s.guardrails || {};
+  return wideCard(`Split: ${r.share_percent}% to the candidate`,
+    h('p', { class: 'muted small' }, (r.mode === 'ladder' ? `Ladder ${(s.ladder || []).map((x) => x / 100 + '%').join(' → ')}, next step ` +
+      `no sooner than ${fmt.time(r.next_step_at_ms)}, once the candidate served ${s.min_requests} requests in the step. ` : 'Held by hand. ') +
+      `Rolls back on its own if the candidate's 5xx rate passes the live one's by ${(g.error_rate_delta || 0) * 100} points or its p99 ` +
+      `passes ${g.p99_ratio}× the live one's. Started ${fmt.time(s.started_ms)} by ${s.by}: ${s.why}.`),
+    h('h3', {}, 'This step'), arms({ live_version: r.live_version, candidate_version: r.candidate_version, ...r.step }),
+    h('h3', {}, 'Since the start'), arms({ live_version: r.live_version, candidate_version: r.candidate_version, ...r.since_start }),
+    h('details', {}, h('summary', {}, `History (${(s.history || []).length})`), table([
+      { label: 'When', get: (x) => fmt.time(x.at_ms), cls: () => 'muted' },
+      { label: 'Share', num: true, get: (x) => x.share_bp / 100 + '%' },
+      { label: 'By', get: (x) => x.by, cls: () => 'muted small' },
+      { label: 'Why', get: (x) => x.why || '' },
+    ], s.history || [])));
+}
 
 function isDrop(r) { return (r.tool === 'box_drop' || r.tool === 'db_drop') && !(r.args && r.args.dry_run); }
 

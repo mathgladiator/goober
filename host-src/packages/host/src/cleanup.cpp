@@ -54,6 +54,13 @@ bool Host::always_held(std::string_view tool, const bj::object& args) {
   return (tool == "box_drop" || tool == "db_drop") && !flag_of(args, "dry_run");
 }
 
+std::string Host::drop_approval() {
+  if (!approved_by_now().empty()) return approved_by_now();
+  // Development mode (--local, `just run`): drops don't wait (the human, 2026-11-04).
+  if (config_.get()->local) return "development mode (--local)";
+  return "";
+}
+
 std::string& Host::approved_by_now() {
   thread_local std::string who;
   return who;
@@ -267,8 +274,9 @@ void Host::register_cleanup_tools() {
        [this](const bj::object& args) {
          std::string box = text_of(args, "box");
          if (flag_of(args, "dry_run")) return ToolResult::ok(box_drop_check(box));
-         if (approved_by_now().empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
-         auto [status, body] = drop_box(box, current_operator(), text_of(args, "why"), approved_by_now(), current_request_id());
+         std::string approved = drop_approval();
+         if (approved.empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
+         auto [status, body] = drop_box(box, current_operator(), text_of(args, "why"), approved, current_request_id());
          if (status != 200) return ToolResult::fail(text_of(body, "error"));
          return ToolResult::ok(std::move(body));
        }});
@@ -288,9 +296,10 @@ void Host::register_cleanup_tools() {
        [this](const bj::object& args) {
          std::string tenant = text_of(args, "tenant"), database = text_of(args, "database"), table = text_of(args, "table");
          if (flag_of(args, "dry_run")) return ToolResult::ok(db_drop_check(tenant, database, table));
-         if (approved_by_now().empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
+         std::string approved = drop_approval();
+         if (approved.empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
          auto [status, body] = drop_database(tenant, database, table, current_operator(), text_of(args, "why"),
-                                             approved_by_now(), current_request_id());
+                                             approved, current_request_id());
          if (status != 200) return ToolResult::fail(text_of(body, "error"));
          return ToolResult::ok(std::move(body));
        }});

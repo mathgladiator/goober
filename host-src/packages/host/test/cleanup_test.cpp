@@ -91,7 +91,10 @@ class CleanupTest : public ::testing::Test {
         "threads": {"network": 1, "boxes": 2}})",
                                     root, &err);
     ASSERT_TRUE(cfg) << err;
-    host = std::make_unique<host::Host>(config::local_mode(cfg));
+    // Not development mode: there, drops don't wait (051 § 4). Mail stays the dev mailer.
+    auto prod = std::make_shared<config::HostConfig>(*config::local_mode(cfg));
+    prod->local = false;
+    host = std::make_unique<host::Host>(prod);
     port = host->start();
     token = *host::create_operator_token(root / "storage", "grok", 0, &err);
     ASSERT_TRUE(host->schemas().put(kSchema, &err)) << err;
@@ -244,4 +247,25 @@ TEST_F(CleanupTest, ADropNeverRunsWithoutAPersonAndIsScoped) {
   auto boss = sign_in("boss@example.com");
   EXPECT_EQ(api(boss, "write/decide", {{"id", id}, {"decision", "deny"}, {"confirm", true}}).status, 200);
   EXPECT_TRUE(host->boxes().active()->boxes.count("shop"));
+}
+
+TEST(CleanupLocalTest, InDevelopmentModeADropDoesntWait) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "cleanup_local";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"localhost": {"tenant": "acme"}}, "threads": {"network": 1, "boxes": 2}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto host = std::make_unique<host::Host>(config::local_mode(cfg));
+  uint16_t port = host->start();
+  auto token = *host::create_operator_token(root / "storage", "grok", 0, &err);
+  ASSERT_TRUE(host->boxes().upload(R"({"box":"old","domains":["*"],"routes":{"http":{"/old":{"get":{"name":"old","public":true}}}}})",
+                                   module_of({"old"}), &err)) << err;
+  auto r = fetch(port, "localhost", bhttp::verb::post, "/goober-operations-mcp",
+                 {{"authorization", "Bearer " + token}, {"content-type", "application/json"}},
+                 R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"box_drop","arguments":{"box":"old","why":"dev"}}})");
+  EXPECT_EQ(r.body.find("pending_approval"), std::string::npos) << r.body;
+  EXPECT_TRUE(host->boxes().dropped("old"));
+  auto rec = host->boxes().dropped("old");
+  EXPECT_EQ(rec->at("approved_by"), "development mode (--local)");
 }

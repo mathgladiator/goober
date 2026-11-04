@@ -157,7 +157,8 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
   // Looking never waits; nor does asking about one's own requests.
   // A route_try changes nothing real (its writes run on copies), so it never waits either.
   if (is_read_call(tool, args) || tool == "approval_status" || tool == "route_try") return std::nullopt;
-  bool drop = always_held(tool, args);  // a drop waits for a person whatever the switch says (051 § 4)
+  // A drop waits for a person whatever the switch says, except in development mode (051 § 4).
+  bool drop = always_held(tool, args) && !config_.get()->local;
   if (!drop && !approvals_on(agent)) return std::nullopt;
   bj::object held = args;
   // A deploy or build held without a revision is pinned to the head now, so the person approves

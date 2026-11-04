@@ -489,6 +489,12 @@ void Host::run_timers() {
       std::cerr << "goober-host: identity events: " << e.what() << "\n";
       loop_beat("identity", e.what());
     }
+    // A/B splits (052): guardrails, and the ladder's next step.
+    try {
+      split_tick(base::now_unix_ms());
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: splits: " << e.what() << "\n";
+    }
     // Heat studies (048): the ones whose time is up end; the running ones are saved each minute.
     try {
       heat_tick(base::now_unix_ms());

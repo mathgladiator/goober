@@ -479,6 +479,21 @@ curl -s https://example.com/goober/ready | jq '.health.mcp'
 fine. The Controls view shows each queue, and `mcp_queue_report` explains it
 (`design/machine/047.Controls.md` § 13).
 
+## Try a new version on part of the traffic (splits)
+
+A split sends a share of a box's real traffic to a new version beside the live one
+(`design/machine/052.Splits.md`). Each person stays on one version.
+
+1. **Store the new version dark.** Grok runs `version_upload` with `activate: false`.
+2. **Start the split.** `split_start {box, version, why}` climbs 1%, 5%, 25%, 50%, 100%, a step
+   every 30 minutes once the new version has served 200 requests in it. At 100% the new version
+   becomes the live one. `share: 5` holds 5% instead, until you say otherwise.
+3. **Watch it.** The panel's page for the box shows both versions side by side: requests, 5xx,
+   p50, p99. If the new version's errors or p99 get worse than the live one's past the
+   guardrails, the host rolls back on its own.
+4. **Decide.** `split_stop {box, outcome: "promote"}` ships it now; `"rollback"` sends everyone
+   back to the live version at once.
+
 ## Where is a site's heat?
 
 A heat study counts one domain's requests by endpoint for a while, then keeps a report 30 days

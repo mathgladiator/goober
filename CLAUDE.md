@@ -285,7 +285,19 @@ Read these before doing design work:
     answers what it would take and what blocks it; a box drop takes it out of service, deletes every
     version leaving tombstones and its flags, keeps its databases (unbound for their own drop), and is
     refused while another box calls it; the name can be uploaded again; `cleanup_report`; the panel's
-    Cleanup view of requests, boxes, databases, and what was dropped; five decisions for the human.
+    Cleanup view of requests, boxes, databases, and what was dropped; drops run at once in development
+    mode (`--local`); the human's five decisions (2026-11-04).
+  - `design/machine/052.Splits.md`: A/B splits and the traffic controller (310): a candidate version of
+    a live box serves a share by a stable hash (user id within a domain, else the address); HTTP routes
+    and box MCP tools split, the rest stays live; only versions with the same routes and data split; a
+    ladder (1, 5, 25, 50, 100%) stepping every `step_minutes` after `min_requests`, guardrails on 5xx and
+    p99 that roll back on their own, promotion at 100%; `split_start`, `split_set`, `split_stop`,
+    `split_report`, `split_list`; the box page's Split card; five decisions for the human.
+  - `design/machine/053.Beta.md`: a proposal, not built: a beta site on the production host
+    (`beta.example.com` as a `<tenant>-beta` tenant, `beta-ops.example.com` for its panel and MCP),
+    staging deployments as a beta slot per box shipped by promote or split, beta mail captured with a
+    mail viewer and injector in beta-ops, effects that fail in beta, the deploy audit's two offers; flags
+    the conflict with 310's "staging is another host"; seven decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

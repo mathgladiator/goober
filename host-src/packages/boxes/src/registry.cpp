@@ -32,6 +32,84 @@ const std::map<std::string, RouteRef>& ActiveSet::tools_for(const std::string& d
   return it == tools_.end() ? kEmpty : it->second;
 }
 
+std::optional<RouteRef> ActiveSet::candidate_for(const RouteRef& ref, int64_t bucket) const {
+  if (splits.empty() || !ref.box || !ref.route) return std::nullopt;
+  auto it = splits.find(ref.box->manifest.box);
+  if (it == splits.end() || bucket >= it->second.share_bp) return std::nullopt;
+  auto r = it->second.routes.find(ref.route->verb + " " + ref.route->name);
+  if (r == it->second.routes.end()) return std::nullopt;
+  return RouteRef{it->second.candidate, r->second};
+}
+
+std::vector<std::string> split_refusals(const manifest::Manifest& a, const manifest::Manifest& b) {
+  std::vector<std::string> out;
+  auto routes = [](const manifest::Manifest& m) {
+    std::set<std::string> s;
+    auto add = [&](const char* kind, const std::vector<manifest::HttpRoute>& list) {
+      for (const auto& r : list) s.insert(std::string(kind) + " " + r.verb + " " + r.pattern.source + " " + r.name + (r.mail_address.empty() ? "" : " " + r.mail_address));
+    };
+    add("http", m.routes);
+    add("mcp", m.tools);
+    add("timer", m.timers);
+    add("internal", m.internal);
+    add("identity", m.identity);
+    add("mail", m.mail);
+    add("result", m.results);
+    add("job", m.jobs);
+    add("upgrade", m.upgrades);
+    return s;
+  };
+  auto data = [](const manifest::Manifest& m) {
+    std::set<std::string> s;
+    for (const auto& d : m.data) s.insert(d.name + " " + d.pattern + " " + d.schema + " " + d.database + " " + d.tenant);
+    return s;
+  };
+  auto diff = [&](const std::set<std::string>& x, const std::set<std::string>& y, const char* what) {
+    for (const auto& k : x) {
+      if (!y.count(k)) out.push_back(std::string("the live version has ") + what + " \"" + k + "\" and the candidate doesn't");
+    }
+    for (const auto& k : y) {
+      if (!x.count(k)) out.push_back(std::string("the candidate has ") + what + " \"" + k + "\" and the live version doesn't");
+    }
+  };
+  diff(routes(a), routes(b), "route");
+  diff(data(a), data(b), "data strategy");
+  if (a.domains != b.domains) out.push_back("the two versions serve different domains");
+  return out;
+}
+
+namespace {
+
+int64_t num(const boost::json::object& o, const char* k) {
+  const auto* v = o.if_contains(k);
+  return v && v->is_int64() ? v->as_int64() : 0;
+}
+
+bool valid_version(const std::string& v) {
+  return !v.empty() && v.size() <= 64 && v.find('/') == std::string::npos && v.find("..") == std::string::npos;
+}
+
+// A split as the active set holds it, its routes by "verb name".
+std::optional<ActiveSet::Split> split_of(std::shared_ptr<const ActiveBox> candidate, int64_t share_bp, std::string salt) {
+  ActiveSet::Split sp;
+  sp.share_bp = std::clamp<int64_t>(share_bp, 0, 10000);
+  sp.salt = std::move(salt);
+  for (const auto* list : {&candidate->manifest.routes, &candidate->manifest.tools}) {
+    for (const auto& r : *list) sp.routes[r.verb + " " + r.name] = &r;
+  }
+  sp.candidate = std::move(candidate);
+  return sp;
+}
+
+// Every split but `except`'s, from one active set to the next.
+void carry_splits(const ActiveSet& from, ActiveSet& to, const std::string& except) {
+  for (const auto& [box, sp] : from.splits) {
+    if (box != except && to.boxes.count(box)) to.splits[box] = sp;
+  }
+}
+
+}  // namespace
+
 bool ActiveSet::build(std::string* error) {
   tables_.clear();
   tools_.clear();
@@ -165,9 +243,92 @@ std::vector<std::string> BoxRegistry::load_all() {
     }
     next->build(&err);
   }
+  // Splits (052): each box's candidate, loaded again; one that can't be is left out, said.
+  for (const auto& [box, live] : next->boxes) {
+    auto text = base::read_file(wal_.root() / "boxes" / box / "split");
+    if (!text) continue;
+    auto v = json::parse(*text, &err);
+    if (!v || !v->is_object()) continue;
+    const auto& o = v->as_object();
+    std::string version = o.contains("version") && o.at("version").is_string() ? std::string(o.at("version").as_string()) : "";
+    auto loaded = version.empty() ? std::nullopt : load_version(box, version, &err);
+    if (!loaded || !split_refusals(live->manifest, loaded->manifest).empty()) {
+      warnings.push_back("box " + box + ": its split to " + version + " not resumed" + (loaded ? "" : ": " + err));
+      continue;
+    }
+    if (auto sp = split_of(std::make_shared<const ActiveBox>(std::move(*loaded)), num(o, "share_bp"),
+                           o.contains("salt") && o.at("salt").is_string() ? std::string(o.at("salt").as_string()) : version)) {
+      next->splits[box] = std::move(*sp);
+    }
+  }
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
   return warnings;
+}
+
+bool BoxRegistry::split_set(const std::string& box, const std::string& version, int64_t share_bp,
+                            const boost::json::object& record, std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box) || !valid_version(version)) return *error = "bad box or version", false;
+  auto current = active();
+  auto live = current->boxes.find(box);
+  if (live == current->boxes.end()) return *error = "box " + box + " isn't live: only a live box splits", false;
+  if (live->second->version == version) return *error = "version " + version + " is the live one", false;
+  std::shared_ptr<const ActiveBox> candidate;
+  std::string salt;
+  if (auto it = current->splits.find(box); it != current->splits.end() && it->second.candidate->version == version) {
+    candidate = it->second.candidate;
+    salt = it->second.salt;
+  } else {
+    if (archived(box, version, error)) return false;
+    auto loaded = load_version(box, version, error);
+    if (!loaded) return false;
+    if (check_ && !check_(loaded->manifest, error)) return false;
+    auto why = split_refusals(live->second->manifest, loaded->manifest);
+    if (!why.empty()) {
+      std::string all;
+      for (const auto& w : why) all += (all.empty() ? "" : "; ") + w;
+      return *error = "these versions can't split traffic: " + all, false;
+    }
+    candidate = std::make_shared<const ActiveBox>(std::move(*loaded));
+    salt = base::sha256_hex(box + "|" + version + "|" + std::to_string(base::now_unix_ms())).substr(0, 16);
+  }
+  auto sp = split_of(candidate, share_bp, salt);
+  auto next = std::make_shared<ActiveSet>(*current);
+  next->splits[box] = *sp;
+  boost::json::object rec = record;
+  rec["version"] = version;
+  rec["share_bp"] = sp->share_bp;
+  rec["salt"] = salt;
+  if (!wal_.commit({{wal::FileChange::Kind::kWrite, "boxes/" + box + "/split", json::dump(rec)}}, error)) return false;
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+  return true;
+}
+
+bool BoxRegistry::split_end(const std::string& box, std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box)) return *error = "bad box name", false;
+  auto current = active();
+  std::error_code ec;
+  if (!current->splits.count(box) && !fs::exists(wal_.root() / "boxes" / box / "split", ec)) {
+    return *error = "box " + box + " isn't split", false;
+  }
+  auto next = std::make_shared<ActiveSet>(*current);
+  next->splits.erase(box);
+  if (!wal_.commit({{wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""}}, error)) return false;
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+  return true;
+}
+
+std::optional<boost::json::object> BoxRegistry::split_record(const std::string& box) const {
+  if (!base::is_valid_name(box)) return std::nullopt;
+  auto text = base::read_file(wal_.root() / "boxes" / box / "split");
+  if (!text) return std::nullopt;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  return v && v->is_object() ? std::optional<boost::json::object>(v->as_object()) : std::nullopt;
 }
 
 std::vector<std::string> BoxRegistry::unloaded() const {
@@ -248,7 +409,12 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   next->boxes[name] = candidate;
   if (!next->build(error)) return false;
   if (dry_run) return true;
-  if (!wal_.commit(bundle, error)) return false;
+  // A new live version ends the box's split (052 § 4).
+  carry_splits(*current, *next, name);
+  wal::Bundle all = bundle;
+  std::error_code sec;
+  if (fs::exists(wal_.root() / "boxes" / name / "split", sec)) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/split", ""});
+  if (!wal_.commit(all, error)) return false;
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
   return true;
@@ -368,9 +534,12 @@ std::optional<std::string> BoxRegistry::disable(const std::string& box, const st
     if (name != box) next->boxes[name] = b;
   }
   if (!next->build(error)) return std::nullopt;
+  carry_splits(*current, *next, box);
   std::string record = json::dump(boost::json::object{{"version", version}, {"why", why.substr(0, 500)}});
   wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
                         {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
+  std::error_code sec;
+  if (fs::exists(wal_.root() / "boxes" / box / "split", sec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""});
   live_moves(bundle, box, "", nullptr, base::now_unix_ms());
   if (!wal_.commit(bundle, error)) return std::nullopt;
   std::lock_guard snap(snapshot_mu_);
@@ -431,10 +600,6 @@ std::vector<std::string> BoxRegistry::box_names() const {
 
 namespace {
 
-int64_t num(const boost::json::object& o, const char* k) {
-  const auto* v = o.if_contains(k);
-  return v && v->is_int64() ? v->as_int64() : 0;
-}
 
 int64_t mtime_ms(const fs::path& p) {
   std::error_code ec;
@@ -445,9 +610,6 @@ int64_t mtime_ms(const fs::path& p) {
       .count();
 }
 
-bool valid_version(const std::string& v) {
-  return !v.empty() && v.size() <= 64 && v.find('/') == std::string::npos && v.find("..") == std::string::npos;
-}
 
 // The stored versions of a box: directories holding a manifest (a deleted one's is empty).
 std::vector<std::string> stored_versions(const fs::path& root, const std::string& box) {
@@ -481,7 +643,9 @@ std::optional<std::vector<std::string>> BoxRegistry::drop(const std::string& box
       if (name != box) next->boxes[name] = b;
     }
     if (!next->build(error)) return std::nullopt;
+    carry_splits(*current, *next, box);
   }
+  if (fs::exists(root / "split", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""});
   if (fs::exists(root / "active", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""});
   if (fs::exists(root / "disabled", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
   std::vector<std::string> gone;
@@ -665,6 +829,9 @@ std::map<std::string, std::string> BoxRegistry::kept(const std::string& box,
   if (auto it = protected_.find(box); it != protected_.end()) out = it->second;
   if (auto d = disabled(box); d && !d->version.empty()) {
     out[d->version] = "the version of the disabled box: box_enable serves it again";
+  }
+  if (auto sp = split_record(box); sp && sp->contains("version") && sp->at("version").is_string()) {
+    out[std::string(sp->at("version").as_string())] = "the candidate of a split: it serves a share of the traffic";
   }
   // The newest versions that were live before, by when they stopped: rollback targets.
   auto active = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");

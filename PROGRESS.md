@@ -1134,8 +1134,33 @@ that I can clean the machine up. I want to be able to approval database drops, b
 - [x] The panel's Cleanup view: requests with their checks, approve by typing the name, deny;
       every box and database with Drop…; dropped boxes. Operators sends drops there.
 - [ ] Not opened in a browser yet: the Cleanup view.
-- [ ] Decisions (051 § 8): owners alone approve, drops always wait, a live box drops in one step,
-      a box drop keeps its databases, no undrop.
+- [x] Decisions (051 § 8), the human on 2026-11-04: owners alone approve; drops always wait,
+      except in development mode (`--local`), built; a live box drops in one step; a box drop keeps
+      its databases; no undrop, backups are the way back.
+
+### Phase 58: A/B splits and the traffic controller (2026-11-04)
+The human: "I'd like the ability to train so let's get a/b traffic flow started."
+(`design/human/310.Deployments.md` § Splitting traffic; `design/machine/052.Splits.md`):
+- [x] The registry holds a split (`boxes/<box>/split`): a compatible candidate version (same
+      routes, data, and domains), its share and salt; resumed at start; ended by a new live
+      version, a disable, or a drop; the candidate kept from archiving; tests.
+- [x] Requests assigned by a stable hash (user id within a domain, else the address) on HTTP
+      routes and box MCP tools; both arms counted per step and since the start; the access log
+      says which arm; tests.
+- [x] The controller on the timer thread: guardrails (5xx delta, p99 ratio) roll back on their
+      own; the ladder steps and promotes at 100%; tests.
+- [x] `split_start`, `split_set`, `split_stop`, `split_report`, `split_list`; audited, change log
+      actions, scope rules; tests.
+- [x] The box page's Split and Last split cards.
+- [ ] Not opened in a browser yet: the Split card.
+- [ ] Later (052 § 8): subscriptions, timers, and internal calls in splits; shadowing and the
+      comparison report; cost as a guardrail; splits between two boxes.
+- [ ] Decisions (052 § 9).
+
+### Phase 59: a beta site on the production host (proposed, 2026-11-04)
+`design/machine/053.Beta.md`: waits for the human's seven decisions, the first being the conflict
+with 310's "a staging environment is just another goober host".
+- [ ] Decisions (053 § 9).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

@@ -94,14 +94,25 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   std::string audit_tool;
   int audit_status = 0;
   std::string audit_input, audit_result;
-  for (const auto& [name, ref] : active->tools_for(domain)) {
+  for (const auto& [name, listed_ref] : active->tools_for(domain)) {
     // An agent only discovers what the person behind it may call (050).
-    if (manifest::check_access(*ref.route, &*caller, {}, tenant) != manifest::Access::kAllowed) continue;
+    if (manifest::check_access(*listed_ref.route, &*caller, {}, tenant) != manifest::Access::kAllowed) continue;
+    // An A/B split (052): the person's tools come from one version, by domain and user id.
+    auto ref = listed_ref;
+    std::string split_version;
+    bool candidate = false;
+    if (auto it = active->splits.find(ref.box->manifest.box); it != active->splits.end()) {
+      split_version = it->second.candidate->version;
+      if (auto arm = split_arm(*active, ref, "u:" + domain + ":" + std::to_string(who->user.user_id))) {
+        ref = *arm;
+        candidate = true;
+      }
+    }
     bj::object schema{{"type", "object"}, {"properties", bj::object{}}, {"additionalProperties", false}};
     std::string input_type = types::json_type_name(ref.route->input);
     if (!input_type.empty() && ref.box->types) schema = ref.box->types->json_schema(input_type).as_object();
     mcp::Tool listed{
-        name, ref.route->description, schema, [&, ref, input_type, name](const bj::object& args) -> mcp::ToolResult {
+        name, ref.route->description, schema, [&, ref, input_type, name, split_version, candidate](const bj::object& args) -> mcp::ToolResult {
           audit_tool = name;
           audit_input = json::dump(args);
           bj::value input = args;
@@ -134,6 +145,10 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
           options.control_fuel = gate.fuel;
           int64_t called_us = base::monotonic_us();
           auto call = call_box(ref, doc, tenant, request_id, who, options);
+          if (!split_version.empty()) {
+            bool ok = call.result.outcome == runtime::wasm::CallResult::Outcome::kOk;
+            split_count(ref.box->manifest.box, split_version, candidate, ok ? call.result.status : 500, base::monotonic_us() - called_us);
+          }
           if (gate.ticket) {
             bool ok = call.result.outcome == runtime::wasm::CallResult::Outcome::kOk;
             gate.ticket->done(ok ? call.result.status : 500, base::monotonic_us() - called_us, base::now_unix_ms());

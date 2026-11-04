@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <thread>
+#include <array>
 #include <mutex>
 #include <condition_variable>
 #include <filesystem>
@@ -808,6 +809,35 @@ class Host {
   void register_cleanup_tools();
   // Who approved the call running on this thread now (panel_decide sets it), or "".
   static std::string& approved_by_now();
+  // A/B splits and the traffic controller (design/machine/052.Splits.md; splits.cpp).
+  struct SplitArm {
+    int64_t requests = 0, errors = 0;
+    std::array<int64_t, 40> latency{};  // power-of-two microsecond buckets
+    void add(int status, int64_t us);
+    int64_t quantile_us(double q) const;
+    boost::json::object json() const;
+  };
+  struct SplitStats {
+    std::string version;  // the candidate these count for
+    SplitArm step_live, step_candidate, total_live, total_candidate;
+  };
+  static int64_t split_bucket(const std::string& salt, const std::string& box, const std::string& key);
+  // The candidate's route when the request's key falls in the split's share, else nullopt.
+  static std::optional<boxes::RouteRef> split_arm(const boxes::ActiveSet& active, const boxes::RouteRef& ref,
+                                                  const std::string& key);
+  void split_count(const std::string& box, const std::string& split_version, bool candidate, int status, int64_t us);
+  void split_tick(int64_t now_ms);
+  std::string split_breach(const boost::json::object& record, const SplitStats& stats);
+  // Ends a box's split ("rollback" or "promote"), keeping its totals as boxes/$box/split-last.
+  std::optional<std::string> split_end(const std::string& box, const std::string& outcome, const std::string& by,
+                                       const std::string& why);
+  boost::json::object split_report_of(const std::string& box);
+  void register_split_tools();
+  std::mutex splits_mu_;
+  std::map<std::string, SplitStats> split_stats_;
+  // Who lets a drop run now: the approving person, "development mode (--local)" in local mode
+  // (where drops don't wait), or "" (the drop must wait).
+  std::string drop_approval();
 
  private:
   std::mutex upload_tickets_mu_;

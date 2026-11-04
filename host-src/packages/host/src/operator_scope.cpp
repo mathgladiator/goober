@@ -72,6 +72,9 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     m["box_drop"] = Rule::kBox;
     m["db_drop"] = Rule::kTenant;
     m["cleanup_report"] = Rule::kHost;
+    // Splits (052): by the box; the list keeps the scope's boxes.
+    for (const char* t : {"split_start", "split_set", "split_stop", "split_report"}) m[t] = Rule::kBox;
+    m["split_list"] = Rule::kFiltered;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",
@@ -477,8 +480,9 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
   // A drop always waits for a person (051 § 4); everything else only when approvals are on.
   if (hold) {
     bool on = approvals_on(operator_name);
-    policy.hold = [this, operator_name, on](const std::string& tool, const bj::object& args) -> std::optional<mcp::ToolResult> {
-      if (!on && !always_held(tool, args)) return std::nullopt;
+    bool local = config_.get()->local;  // development mode: drops don't wait (051 § 4)
+    policy.hold = [this, operator_name, on, local](const std::string& tool, const bj::object& args) -> std::optional<mcp::ToolResult> {
+      if (!on && (local || !always_held(tool, args))) return std::nullopt;
       return hold_for_approval(operator_name, tool, args);
     };
   }

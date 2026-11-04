@@ -276,3 +276,56 @@ TEST_F(RegistryTest, ADisabledBoxDrops) {
   EXPECT_FALSE(reg->disabled("off"));
   EXPECT_TRUE(reg->dropped("off"));
 }
+
+TEST_F(RegistryTest, ASplitServesTheCandidateUnderItsShare) {
+  std::string err;
+  auto v1 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get"}), &err);
+  ASSERT_TRUE(v1) << err;
+  // The same routes, another module: a candidate stored dark.
+  auto v2 = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "ab_get_extra_export_unused"}), "", &err);
+  ASSERT_TRUE(v2) << err;
+  ASSERT_TRUE(reg->split_set("ab", v2->version, 2500, {{"by", "test"}}, &err)) << err;
+  auto set = reg->active();
+  auto ref = *set->table_for("x").match({"ab"}, "get").value;
+  EXPECT_EQ(ref.box->version, v1->version);  // the tables hold the live version
+  auto under = set->candidate_for(ref, 2499);
+  ASSERT_TRUE(under);
+  EXPECT_EQ(under->box->version, v2->version);
+  EXPECT_EQ(under->route->name, "ab_get");
+  EXPECT_FALSE(set->candidate_for(ref, 2500));
+  EXPECT_EQ(reg->split_record("ab")->at("share_bp"), 2500);
+  // A restart resumes it, with the same salt.
+  std::string salt = set->splits.at("ab").salt;
+  boxes::BoxRegistry again(*w, engine());
+  again.load_all();
+  ASSERT_TRUE(again.active()->splits.count("ab"));
+  EXPECT_EQ(again.active()->splits.at("ab").salt, salt);
+  // The candidate is kept from archiving while it serves.
+  bool kept = false;
+  for (const auto& v : reg->versions("ab")) kept |= v.version == v2->version && !v.kept.empty();
+  EXPECT_TRUE(kept);
+  // Promoting a version ends the split.
+  ASSERT_TRUE(reg->promote("ab", v2->version, &err)) << err;
+  EXPECT_FALSE(reg->active()->splits.count("ab"));
+  EXPECT_FALSE(reg->split_record("ab"));
+}
+
+TEST_F(RegistryTest, OnlyCompatibleVersionsOfALiveBoxSplit) {
+  std::string err;
+  auto v1 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get"}), &err);
+  auto moved = reg->store(manifest_for("ab", "*", "/moved", "ab_get"), module_for({"ab_get"}), "", &err);
+  ASSERT_TRUE(v1 && moved) << err;
+  EXPECT_FALSE(reg->split_set("ab", moved->version, 100, {}, &err));
+  EXPECT_NE(err.find("can't split"), std::string::npos) << err;
+  EXPECT_FALSE(reg->split_set("ab", v1->version, 100, {}, &err));
+  EXPECT_NE(err.find("live one"), std::string::npos) << err;
+  EXPECT_FALSE(reg->split_set("nope", v1->version, 100, {}, &err));
+  auto same = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "x"}), "", &err);
+  ASSERT_TRUE(same) << err;
+  ASSERT_TRUE(reg->split_set("ab", same->version, 100, {}, &err)) << err;
+  // Disabling the box ends it.
+  ASSERT_TRUE(reg->disable("ab", "pause", &err)) << err;
+  EXPECT_FALSE(reg->active()->splits.count("ab"));
+  EXPECT_FALSE(reg->split_record("ab"));
+  EXPECT_FALSE(reg->split_end("ab", &err));
+}

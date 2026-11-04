@@ -355,6 +355,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_mcp_queue_tools();
   register_skill_tools();
   register_cleanup_tools();
+  register_split_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "
@@ -1791,12 +1792,11 @@ void Host::record_box_call(const BoxCall& call, const std::string& tenant, const
 }
 
 void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<std::string, std::string> params,
-                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet>, int64_t posted_us,
+                     std::string domain, std::string tenant, std::shared_ptr<const boxes::ActiveSet> active, int64_t posted_us,
                      TryRun* trying) {
   int64_t served_us = base::monotonic_us();
   auto cfg = config_.get();
   std::string request_id = req.header("goober-request-id");
-  const auto& m = ref.box->manifest;
 
   // Identity: who is calling, and may they use this route.
   std::optional<SignedIn> who;
@@ -1807,6 +1807,26 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     std::cerr << "goober-host: identity: " << e.what() << "\n";
     return finish(error_page(tenant, 500, request_id), R"({"why":"identity failed"})");
   }
+  // An A/B split (052): a signed-in person by domain and user id, anyone else by address, so a
+  // person stays on one version. A try runs the version it named.
+  if (!trying && active && !active->splits.empty()) {
+    if (auto it = active->splits.find(ref.box->manifest.box); it != active->splits.end()) {
+      std::string key = who ? "u:" + domain + ":" + std::to_string(who->user.user_id) : "a:" + rate_key(client_address(req));
+      auto arm = split_arm(*active, ref, key);
+      bool candidate = arm.has_value();
+      if (arm) ref = *arm;
+      finish = [this, inner = std::move(finish), box = it->first, version = it->second.candidate->version, candidate,
+                served_us](Response res, std::string extra) {
+        split_count(box, version, candidate, res.status, base::monotonic_us() - served_us);
+        std::string err;
+        bj::object fields;
+        if (auto v = json::parse(extra, &err); v && v->is_object()) fields = v->as_object();
+        fields["split"] = candidate ? "candidate" : "live";
+        inner(std::move(res), json::dump(fields));
+      };
+    }
+  }
+  const auto& m = ref.box->manifest;
   std::optional<manifest::Caller> caller;
   if (who) caller = manifest::Caller{std::to_string(who->user.user_id), who->host, who->roles};
   switch (manifest::check_access(*ref.route, caller ? &*caller : nullptr, params, tenant)) {
