@@ -264,6 +264,12 @@ Read these before doing design work:
     reason; keyed hashes, no addresses or user ids; the request path's cost measured (§ 3.8: about 100 ns
     recorded, 290 ns the whole hook); what the cleanup cut (§ 12); the panel's Studies view; MCP tools suggested
     as `TOOL /<name>`; the five decisions made (§ 11).
+  - `design/machine/049.ReviewNovember.md`: the code, performance, and security review of 2026-11-01 to
+    2026-11-03's work: measurements (`/goober/ready`'s 645 ms stall and its fix), the fixes with their
+    tests (a heat study id of another shape, escaped MCP methods charged a fifth, counts in the public
+    ready, revoked tokens, caches cleared whole, backup pruning, logs counted twice, SSE concurrency,
+    idle buckets), a second scope bypass through `rev`, what wasn't fixed (refusals naming another
+    tenant, with a proposal), and six decisions for the human (box limits only tighten, local copies).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

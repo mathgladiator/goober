@@ -1060,6 +1060,44 @@ make it crisp and clean." On the local copies: "For (1), I like that policy and 
       setup's `goober-backup.service` no longer runs `find` (an old unit's is harmless); tests.
 - [x] `local-copies` in the `limits` check of `/goober/ready` and `host_health`: how many, their
       bytes, and how many are kept; no budget, as the host doesn't own them (045, 046 A12); tests.
+      (Since phase 55, `host_health` only: the public `/goober/ready` gives shares, no counts.)
+
+### Phase 55: the November review (2026-11-03)
+The human: "Do a code review, performance review, and security review please." Three reviews of
+2026-11-01 to 2026-11-03's work, the fixes, and the decisions left
+(`design/machine/049.ReviewNovember.md`):
+- [x] Security M1 and L4: one integer parser for scope rules and tools; `kStudy` refuses an id of
+      another shape and names no tenant; the operator MCP normalizes integer and boolean
+      arguments before the policy and the tool; tests.
+- [x] The sweep's second bypass: `kProject` checks `source_deploy` and `source_build` at the `rev`
+      they build, whatever its shape; test.
+- [x] Security M2 (code C1): the strict rate charges a fifth only for an exact, escape-free cheap
+      method; test.
+- [x] Security M3: the public `/goober/ready`'s `limits` check gives shares and ratios only;
+      `host_health` keeps the detail; tests.
+- [x] Security L1: a token refused with a 401 is forgotten at once; test.
+- [x] Security L2 (perf P3): both 10,000-entry caches drop the stale, then the oldest sixteenth;
+      `by: user` keyed by the token or session cookie, lookups bounded; tests.
+- [x] Security L3 and code C8: backups prune only dated siblings holding `BACKUP.json`, and a
+      trailing slash no longer skips pruning; test.
+- [x] Security L5 and L6: visitor paths in heat reports folded and capped at 200 bytes; the client
+      hash's IPv6 /64 documented; tests.
+- [x] Code C2: logs counted once per inode, the projection without hard-linked twins; test.
+- [x] Code C3, C4, C5, C6, C7: control fuel defaults, SSE streams holding their concurrent ticket,
+      a study's final report never overwritten, box limits recompiled on reload, idle buckets kept
+      until refilled; tests.
+- [x] Perf P1 and P2: `/goober/ready` never waits on the traffic lock (max 38.1 ms before, 2.9 ms
+      after) and reuses its limits report for 30 s; test.
+- [x] Perf P4 and P5: version keeping in one pass per prune; indexes on `t` for the control and
+      MCP queue rows; tests.
+- [ ] Not fixed, proposed (049 § 5, N4): scope refusals that name another tenant, and box-name
+      probing.
+- [ ] Decision: box route limits only tighten (recommended), or loosen as built.
+- [ ] Decision: an agent stays an OAuth client plus a person (recommended).
+- [ ] Decision: heat studies never wait for approval.
+- [ ] Decision: attachments count toward the daily upload budget and can delay increments.
+- [ ] Decision: 14 local copies until a nightly reached S3 in the last two days (recommended).
+- [ ] Decision: which fuel an operator's `fuel: "off"` gives back (the route's own, recommended).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
