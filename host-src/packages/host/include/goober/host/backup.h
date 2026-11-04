@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "goober/aws/aws.h"
@@ -58,6 +59,28 @@ bool backup_storage(const std::filesystem::path& storage, const std::filesystem:
 // Copies a backup into `storage`, which must be missing or empty. Run it with the host stopped.
 bool restore_storage(const std::filesystem::path& backup, const std::filesystem::path& storage, BackupReport* report,
                      std::string* error);
+
+// ---- Local nightly copies (design/machine/046.Operations.md § 9 A12, 045.Limits.md) ----
+
+// A directory name like 2026-11-03: how setup's goober-backup timer names each night's copy.
+bool is_dated_copy_name(std::string_view name);
+// How many nights stay on the machine: 3 when S3 backups are on (the bucket holds the rest),
+// 14 when they're off.
+int local_copies_to_keep(bool s3_backups);
+// The directory beside storage that setup's timer backs up into: <storage's parent>/backups.
+std::filesystem::path local_copies_dir(const std::filesystem::path& storage);
+// After a backup into `dest`: when `dest` is named YYYY-MM-DD, the dated directories beside it
+// are removed but for the newest by name, `keep` in all with `dest`, which always stays.
+// Nothing else beside it (files, links, other names) is touched. Answers the names removed,
+// oldest first.
+std::vector<std::string> prune_local_copies(const std::filesystem::path& dest, int keep, std::string* error);
+// The dated copies in `dir`: how many, and their bytes (BACKUP.json's count for a whole copy,
+// measured for one a failed run left).
+struct LocalCopies {
+  int copies = 0;
+  int64_t bytes = 0;
+};
+LocalCopies local_copies(const std::filesystem::path& dir);
 
 // ---- Rehydrating from S3 ----
 

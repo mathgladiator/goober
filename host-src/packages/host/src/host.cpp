@@ -204,7 +204,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   }
   // Heat studies (048): a study the host was running when it died is kept as interrupted.
   try {
-    heat_ = std::make_unique<operations::HeatStudies>(config->storage / "operations" / "studies");
+    heat_ = std::make_unique<operations::HeatStudies>(config->storage / "operations" / "studies",
+                                                      operations::HeatStudies::Caps{}, heat_client_hash());
     for (auto& n : heat_->recovered()) startup_notes_.push_back(n);
   } catch (const std::exception& e) {
     startup_notes_.push_back(std::string("heat studies off: ") + e.what());

@@ -2,21 +2,21 @@
 
 // Heat studies (design/machine/048.HeatStudy.md): a time-boxed look at one domain's traffic,
 // keyed by endpoint, kept in memory while it runs and written as a small report when it ends.
-// Each endpoint's heat (time spent serving, and fuel), weight (bytes), rate (per minute, per
-// client), and concurrency, with suggested controls in 047's vocabulary, always in observe mode.
-// Nothing private: clients are keyed hashes, and only counts and distributions leave memory.
+// Each endpoint's heat (time spent serving), weight (bytes), rate (per minute, per client), and
+// concurrency, with suggested controls in 047's vocabulary, always in observe mode. Nothing
+// private: clients leave memory only as the host's keyed log hash, with counts.
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <boost/json.hpp>
@@ -24,12 +24,6 @@
 #include "goober/operations/traffic.h"
 
 namespace goober::operations {
-
-enum class ClientClass : uint8_t { kBrowser = 0, kBot = 1, kAgent = 2, kOther = 3 };
-// A cheap reading of who asked: an agent (a bearer token or /mcp), a bot (a user agent that
-// says so, or a tool like curl), a browser (a Mozilla/ user agent), or other.
-ClientClass classify_client(std::string_view user_agent, bool agent);
-const char* client_class_name(ClientClass c);
 
 // A box route's declared pattern as 047's match: "GET /posts/{id}" from get and
 // "/posts/{id : int64}". The method is uppercased; types are left out.
@@ -65,24 +59,32 @@ class DistinctCounter {
   std::array<uint8_t, 256> reg_{};
 };
 
-// One finished request on a studied domain.
+// Which of 047's APIs a request was on. The host's own paths (/goober/*, CORS preflights) are
+// never studied.
+enum class HeatApi : uint8_t { kBox, kContent, kMcp, kIdentity };
+
+// One finished request on a studied domain. Views, valid for the call: the study builds an
+// endpoint's strings once, when it first sees the endpoint, and a client's keyed hash once per
+// endpoint it asks.
 struct HeatSample {
   int64_t at_ms = 0;   // wall clock at the finish
   int64_t end_us = 0;  // monotonic µs at the finish
   int64_t us = 0;      // how long it took
-  std::string api;       // box:<name>, content, mcp, identity, or host
-  std::string endpoint;  // "GET /posts/{id}", a tool's name, "(not found)", ...
-  std::string method;    // "GET", "POST", ... ("" for MCP)
-  uint64_t client = 0;   // the client's keyed hash (the log's client_h, as 64 bits)
-  ClientClass cls = ClientClass::kOther;
+  HeatApi api = HeatApi::kContent;
+  std::string_view box;     // the box's name, for kBox
+  std::string_view method;  // lowercase ("get" for a HEAD); empty for an MCP call and a group
+  // The route's declared pattern (kBox), the path (kContent, kIdentity), the tool's name or
+  // "(rpc)" (kMcp), or a group: "(not found)", "(refused)".
+  std::string_view what;
+  std::string_view client;  // the client as the rate limiter counts it (an IPv6 /64 is one)
   int status = 0;
-  int64_t bytes_in = 0, bytes_out = 0, fuel = 0;
+  int64_t bytes_in = 0, bytes_out = 0;
 };
 
 // What one endpoint's suggestion is computed from.
 struct SuggestInput {
   int64_t study_id = 0;
-  std::string domain, api, endpoint, method;
+  std::string domain, api, endpoint;
   int64_t requests = 0;
   int64_t clients = 0;
   uint32_t p99_client_minute = 0;  // the p99 of each client's busiest minute
@@ -109,23 +111,25 @@ class HeatStudies {
     size_t endpoints = 500;         // tracked; the rest are folded into "other"
     size_t candidates = 5000;       // untracked endpoints counted, to promote the busy ones
     size_t endpoint_clients = 256;  // clients kept per endpoint before idle ones are folded
-    size_t domain_clients = 4096;   // the same for the whole domain
     size_t endpoint_ring = 64;      // concurrency is exact up to this many at once per endpoint
-    size_t domain_ring = 512;       // and for the whole domain
     size_t detailed = 100;          // endpoints with every number and a suggestion in the report
-    size_t series = 10;             // endpoints with a per-minute series in the report
   };
+  // The client's keyed hash as the report shows it (the host's log hash, client_h, as 64 bits).
+  using ClientHash = std::function<uint64_t(std::string_view client)>;
 
   // `dir` holds one <id>.json per study. A study found "running" was cut short by a crash or a
-  // kill: it becomes "interrupted", ending at its last save.
+  // kill: it becomes "interrupted", ending at its last save. Without `hash`, a client's hash is
+  // a plain one (for tests).
   explicit HeatStudies(std::filesystem::path dir);
-  HeatStudies(std::filesystem::path dir, Caps caps);
+  HeatStudies(std::filesystem::path dir, Caps caps, ClientHash hash = {});
   ~HeatStudies();
   HeatStudies(const HeatStudies&) = delete;
   HeatStudies& operator=(const HeatStudies&) = delete;
 
-  // The request path's check: one atomic load when nothing runs anywhere.
+  // The request path's check: one relaxed atomic load when nothing runs anywhere; otherwise a
+  // compare with each running study's domain, without a lock.
   bool watching(std::string_view domain) const;
+  // Takes only the domain's study's lock.
   void record(std::string_view domain, const HeatSample& s);
 
   // Starts one; refused when one already runs on the domain, or kMaxRunning run on the host.
@@ -156,17 +160,24 @@ class HeatStudies {
     boost::json::object summary;
     int64_t bytes = 0;
   };
+  Study* find(std::string_view domain) const;
   std::optional<boost::json::object> finish(const std::shared_ptr<Study>& st, const std::string& state,
                                             const std::string& ended_by, int64_t ended_ms);
   bool write(int64_t id, const boost::json::object& report, int64_t* bytes);
 
   std::filesystem::path dir_;
   Caps caps_;
+  ClientHash hash_;
+  // The running studies, for the request path: read without a lock. A study's memory outlives
+  // its slot (`ended_` keeps the small shell of each, its counts freed), so a request that read
+  // a slot just before the study ended finds it ended under the study's lock.
+  std::array<std::atomic<Study*>, kMaxRunning> slots_{};
+  std::atomic<int> running_{0};
   mutable std::mutex mu_;
   std::map<int64_t, std::shared_ptr<Study>> live_;  // running
+  std::vector<std::shared_ptr<Study>> ended_;       // shells of the ones that ran since the start
   std::map<int64_t, Row> done_;                     // finished, from their files
   int64_t next_id_ = 1;
-  std::atomic<int> running_{0};
   std::vector<std::string> recovered_;
 };
 

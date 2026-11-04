@@ -236,12 +236,14 @@ Read these before doing design work:
     refused naming the limit, and snapshots are never deleted by the host; what a try is; the
     `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
     box versions no longer live archived after 30 days and deleted after 400, leaving a
-    tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings, the daily upload budget, and heat study reports (`studies-bytes`) in the table.
+    tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings, the daily upload budget, heat study reports (`studies-bytes`), and the local
+    nightly copies (the newest 3 with S3 on, 14 off, kept by `goober-host backup`, named as `local-copies`) in the table.
   - `design/machine/046.Operations.md`: running goober as its one operator: the stack around the
     host (Caddy on loopback, systemd, Stalwart, SES, the bucket), what a deploy does, what to watch
     and which tool answers which question, one table of everything kept (machine, memory, bucket),
     backups, uploads, and log growth, a playbook for when things go wrong, what the reviews taught,
-    the open operational decisions, and where operations depart from the human docs (§ 11).
+    the open operational decisions (A12, local nightly copies, decided), and where operations depart from the
+    human docs (§ 11).
   - `design/machine/047.Controls.md`: per-domain controls: host defaults, a domain's defaults, an API
     (`box:<name>`, `content`, `mcp`, `identity`), and endpoint overrides (`"METHOD /path"`, most specific
     wins), per property; `rate` (by client, user, or all), `concurrent`, `body-max-bytes`, `timeout-ms`
@@ -254,12 +256,14 @@ Read these before doing design work:
     waiting, round-robin, 30 or 120 s; `mcp_queue_report`, `health.mcp`; § 14); departures, the
     human's 2026-11-03 decisions, and the open ones.
   - `design/machine/048.HeatStudy.md`: heat studies: `heat_study_start {domain, minutes, why}` counts one
-    domain's requests by endpoint (a box route's declared pattern, an MCP tool, a page's path) for 5 to
-    1440 minutes, one per domain and 4 at once, never waiting for approval; per endpoint requests per
-    minute, each client's busiest minute (p50/p99/max), peak concurrency from finished requests, latency,
-    heat, bytes, statuses, client classes; a report kept 30 days in `operations/studies/` that ranks
-    endpoints and suggests 047 controls in observe mode with each number's reason; keyed hashes, no
-    addresses or user ids; the panel's Studies view; five decisions for the human (§ 11).
+    domain's requests by endpoint (a box route's declared pattern, an MCP tool, a page's path; never the
+    host's own `/goober/*` or preflights) for 5 to 1440 minutes, one per domain and 4 at once, never waiting
+    for approval; per endpoint heat, bytes, the busiest minute, each client's busiest minute (p50/p99/max),
+    peak concurrency from finished requests, latency, and statuses; a report kept 30 days in
+    `operations/studies/` that ranks endpoints and suggests 047 controls in observe mode with each number's
+    reason; keyed hashes, no addresses or user ids; the request path's cost measured (§ 3.8: about 100 ns
+    recorded, 290 ns the whole hook); what the cleanup cut (§ 12); the panel's Studies view; MCP tools suggested
+    as `TOOL /<name>`; the five decisions made (§ 11).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

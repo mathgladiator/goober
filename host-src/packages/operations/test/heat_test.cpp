@@ -3,8 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <regex>
+#include <thread>
 
 #include "goober/base/files.h"
 #include "goober/json/json.h"
@@ -19,20 +22,40 @@ namespace {
 constexpr int64_t kT0 = 1793232000000;
 constexpr int64_t kMin = 60000;
 
-HeatSample sample(int64_t at_ms, const std::string& endpoint, uint64_t client, int64_t us = 1000,
-                  const std::string& api = "box:shop", int status = 200) {
-  HeatSample s;
-  s.at_ms = at_ms;
-  s.end_us = at_ms * 1000;  // a monotonic clock that agrees with the wall clock, for tests
-  s.us = us;
-  s.api = api;
-  s.endpoint = endpoint;
-  s.method = endpoint.substr(0, endpoint.find(' '));
-  s.client = client;
-  s.cls = ClientClass::kBrowser;
-  s.status = status;
-  s.bytes_out = 100;
-  return s;
+// A request owning the strings a HeatSample views; it converts to one for record().
+struct Req {
+  HeatSample base;
+  std::string box, method, what, client;
+  operator HeatSample() const {
+    HeatSample s = base;
+    s.box = box;
+    s.method = method;
+    s.what = what;
+    s.client = client;
+    return s;
+  }
+};
+
+// "GET /p" on box shop by default; "content" and "mcp" for those APIs; "(not found)" a group.
+Req sample(int64_t at_ms, const std::string& endpoint, uint64_t client, int64_t us = 1000,
+           const std::string& api = "box:shop", int status = 200) {
+  Req r;
+  r.base.at_ms = at_ms;
+  r.base.end_us = at_ms * 1000;  // a monotonic clock that agrees with the wall clock, for tests
+  r.base.us = us;
+  r.base.status = status;
+  r.base.bytes_out = 100;
+  r.base.api = api.starts_with("box:") ? HeatApi::kBox : api == "mcp" ? HeatApi::kMcp : HeatApi::kContent;
+  if (api.starts_with("box:")) r.box = api.substr(4);
+  auto space = endpoint.find(' ');
+  if (space == std::string::npos || endpoint.starts_with("(")) {
+    r.what = endpoint;
+  } else {
+    for (char c : endpoint.substr(0, space)) r.method.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+    r.what = endpoint.substr(space + 1);
+  }
+  r.client = "198.51.100." + std::to_string(client);
+  return r;
 }
 
 fs::path fresh(const std::string& name) {
@@ -58,13 +81,23 @@ TEST(HeatStudy, EndpointMatchFromDeclaredPatterns) {
   EXPECT_EQ(endpoint_match("get", "/files/{rest*}"), "GET /files/{rest*}");
 }
 
-TEST(HeatStudy, ClientClasses) {
-  EXPECT_EQ(classify_client("Mozilla/5.0 (X11; Linux x86_64) Firefox/130.0", false), ClientClass::kBrowser);
-  EXPECT_EQ(classify_client("Mozilla/5.0 (compatible; Googlebot/2.1)", false), ClientClass::kBot);
-  EXPECT_EQ(classify_client("curl/8.5.0", false), ClientClass::kBot);
-  EXPECT_EQ(classify_client("Mozilla/5.0", true), ClientClass::kAgent);
-  EXPECT_EQ(classify_client("", false), ClientClass::kOther);
-  EXPECT_STREQ(client_class_name(ClientClass::kBot), "bot");
+// An endpoint's name is built from its parts once; each API names its own way, and a HEAD the
+// host folded to get is its GET.
+TEST(HeatStudy, EndpointsAreNamedByTheirAPI) {
+  HeatStudies hs(fresh("names"));
+  std::string err;
+  ASSERT_TRUE(hs.start("a.example.com", "a", 60, "", "op", kT0, &err));
+  hs.record("a.example.com", sample(kT0 + 1, "GET /posts/{id : int64}", 1));
+  hs.record("a.example.com", sample(kT0 + 2, "GET /about", 1, 1000, "content"));
+  hs.record("a.example.com", sample(kT0 + 3, "search", 1, 1000, "mcp"));
+  hs.record("a.example.com", sample(kT0 + 4, "(not found)", 1, 1000, "content", 404));
+  auto rep = *hs.get(1, kT0 + 10, &err);
+  ASSERT_TRUE(find_endpoint(rep, "GET /posts/{id}")) << goober::json::dump(rep);
+  EXPECT_EQ(find_endpoint(rep, "GET /posts/{id}")->at("api").as_string(), "box:shop");
+  EXPECT_EQ(find_endpoint(rep, "GET /about")->at("api").as_string(), "content");
+  EXPECT_EQ(find_endpoint(rep, "search")->at("api").as_string(), "mcp");
+  EXPECT_EQ(find_endpoint(rep, "(not found)")->at("status").at("4xx").as_int64(), 1);
+  EXPECT_EQ(rep.at("endpoints").as_array().size(), 4u);
 }
 
 TEST(HeatStudy, CountHistogramIsExactBelow64AndCloseAbove) {
@@ -175,10 +208,12 @@ TEST(HeatStudy, EachClientsBusiestMinute) {
   EXPECT_EQ(c.at("busiest_minute").at("max").as_int64(), 40);
   EXPECT_EQ(p->at("per_minute").at("peak").as_int64(), 198);
   // The domain's busiest clients by keyed hash only.
-  const auto& top = rep.at("top_clients").as_array();
+  const auto& top = rep.at("clients").at("top").as_array();
   ASSERT_FALSE(top.empty());
   EXPECT_EQ(top[0].at("requests").as_int64(), 40);
   EXPECT_TRUE(std::regex_match(std::string(top[0].at("client_h").as_string()), std::regex("[0-9a-f]{16}")));
+  EXPECT_EQ(top[0].at("endpoint").as_string(), "GET /p");
+  EXPECT_NEAR(double(rep.at("clients").at("distinct").as_int64()), 100.0, 7.0);
 }
 
 TEST(HeatStudy, ClientsPastTheCapAreFoldedAndCountedApproximately) {
@@ -205,7 +240,7 @@ TEST(HeatStudy, PeakConcurrencyFromFinishedRequests) {
   ASSERT_TRUE(hs.start("a.example.com", "a", 60, "", "op", kT0, &err));
   auto at = [&](int64_t start_ms, int64_t end_ms, uint64_t client) {
     auto s = sample(kT0 + end_ms, "POST /slow", client, (end_ms - start_ms) * 1000);
-    s.end_us = (kT0 + end_ms) * 1000;
+    s.base.end_us = (kT0 + end_ms) * 1000;
     hs.record("a.example.com", s);
   };
   // A long request [0, 1000) finishing last, three short ones inside it (two by client 7, at
@@ -219,7 +254,6 @@ TEST(HeatStudy, PeakConcurrencyFromFinishedRequests) {
   const auto& c = find_endpoint(rep, "POST /slow")->at("concurrent").as_object();
   EXPECT_EQ(c.at("peak").as_int64(), 4);
   EXPECT_EQ(c.at("per_client_peak").as_int64(), 2);
-  EXPECT_EQ(rep.at("concurrent").at("peak").as_int64(), 4);
 }
 
 TEST(HeatStudy, SuggestionFormulas) {
@@ -228,7 +262,6 @@ TEST(HeatStudy, SuggestionFormulas) {
   in.domain = "a.example.com";
   in.api = "box:shop";
   in.endpoint = "POST /cart/{id}";
-  in.method = "POST";
   in.requests = 500;
   in.clients = 40;
   in.p99_client_minute = 12;
@@ -282,7 +315,18 @@ TEST(HeatStudy, SuggestionFormulas) {
   in.requests = 500;
   in.api = "mcp";
   in.endpoint = "search";
-  EXPECT_TRUE(suggest_controls(in).contains("none"));  // one MCP tool can't be matched
+  {
+    // One MCP tool, matched as "TOOL /<name>" (047): rate and concurrent, no timeout.
+    auto tool = suggest_controls(in);
+    ASSERT_TRUE(tool.contains("control_set")) << goober::json::dump(tool);
+    EXPECT_EQ(tool.at("control_set").at("api").as_string(), "mcp");
+    EXPECT_EQ(tool.at("control_set").at("endpoint").at("match").as_string(), "TOOL /search");
+    EXPECT_EQ(tool.at("control_set").at("endpoint").at("id").as_string(), "tool_search");
+    EXPECT_TRUE(tool.at("control_set").at("set").as_object().contains("rate"));
+    EXPECT_FALSE(tool.at("control_set").at("set").as_object().contains("timeout-ms"));
+    in.endpoint = "(rpc)";
+    EXPECT_TRUE(suggest_controls(in).contains("none"));
+  }
   in.api = "content";
   in.requests = 500;
   in.endpoint = "(not found)";
@@ -408,8 +452,11 @@ TEST(HeatStudy, ADayOfManyEndpointsStaysSmall) {
   EXPECT_LT(memory, int64_t(16) << 20);
   ASSERT_TRUE(hs.stop(1, "op", kT0 + 1439 * kMin, &err)) << err;
   EXPECT_LE(fs::file_size(dir / "1.json"), HeatStudies::kReportMaxBytes);
+  std::printf("heat study: a day of 600 endpoints held %.1f MiB; its report is %.0f KiB\n", double(memory) / (1 << 20),
+              double(fs::file_size(dir / "1.json")) / 1024);
   auto rep = *hs.get(1, kT0 + 1440 * kMin, &err);
   EXPECT_EQ(rep.at("tracked").at("endpoints").as_int64(), 500);
+  EXPECT_EQ(rep.at("endpoints").at(0).as_object().contains("suggest"), true);  // every detail fit
   EXPECT_GT(rep.at("tracked").at("other_requests").as_int64(), 0);
 }
 
@@ -424,4 +471,61 @@ TEST(HeatStudy, ListFiltersByDomainAndNamesTheTenant) {
   EXPECT_EQ(only[0].at("tenant").as_string(), "acme");
   EXPECT_EQ(*hs.tenant_of(2), "other");
   EXPECT_FALSE(hs.tenant_of(9));
+}
+
+// The cost of the request path's hook (048 § 3.1): a realistic mix of endpoints and clients fed
+// to a running study, and the check on a domain nothing studies. Printed; bounded loosely so a
+// slow build doesn't fail it.
+TEST(HeatStudy, RecordCost) {
+  HeatStudies hs(fresh("cost"));
+  std::string err;
+  ASSERT_TRUE(hs.start("a.example.com", "a", 1440, "", "op", kT0, &err));
+  std::vector<Req> mix;
+  for (int i = 0; i < 4096; ++i) {
+    mix.push_back(sample(kT0, "GET /e/" + std::to_string(i % 40) + "/{id}", uint64_t(i) * 2654435761u % 3000,
+                         200 + (i % 7) * 100));
+  }
+  constexpr int kN = 400000;
+  auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < kN; ++i) {
+    HeatSample s = mix[size_t(i) % mix.size()];
+    s.at_ms = kT0 + int64_t(i) * 10;  // most of a day at 100 requests a second
+    s.end_us = s.at_ms * 1000;
+    if (hs.watching("a.example.com")) hs.record("a.example.com", s);
+  }
+  double ns = double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()) / kN;
+  auto t1 = std::chrono::steady_clock::now();
+  int watched = 0;
+  for (int i = 0; i < kN; ++i) watched += hs.watching("b.example.com");
+  double other_ns =
+      double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t1).count()) / kN;
+  // Four request threads at once, as the host's network and box pools are.
+  auto t2 = std::chrono::steady_clock::now();
+  {
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t) {
+      threads.emplace_back([&, t] {
+        for (int i = t; i < kN; i += 4) {
+          HeatSample s = mix[size_t(i) % mix.size()];
+          s.at_ms = kT0 + int64_t(i) * 10;
+          s.end_us = s.at_ms * 1000;
+          if (hs.watching("a.example.com")) hs.record("a.example.com", s);
+        }
+      });
+    }
+    for (auto& th : threads) th.join();
+  }
+  double four_ns =
+      double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t2).count()) / kN;
+  // Nothing running: one relaxed load.
+  ASSERT_TRUE(hs.stop(1, "op", kT0 + kMin, &err)) << err;
+  auto t3 = std::chrono::steady_clock::now();
+  for (int i = 0; i < kN; ++i) watched += hs.watching("a.example.com");
+  double idle_ns =
+      double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t3).count()) / kN;
+  std::printf("heat study: %.0f ns a request recorded; %.0f ns a request from four threads at once; %.1f ns to check an "
+              "unstudied domain; %.1f ns when nothing runs\n",
+              ns, four_ns, other_ns, idle_ns);
+  EXPECT_EQ(watched, 0);
+  EXPECT_LT(ns, 100000);
 }

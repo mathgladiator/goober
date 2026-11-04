@@ -18,93 +18,81 @@ using server::http::Request;
 
 namespace {
 
-std::string upper(std::string s) {
-  for (auto& c : s) c = char(std::toupper(static_cast<unsigned char>(c)));
-  return s;
-}
-
 std::string text_of(const bj::object& o, const char* k) {
   const auto* v = o.if_contains(k);
   return v && v->is_string() ? std::string(v->as_string()) : std::string();
 }
 
-// A host path's endpoint: its first two segments, and the rest as {rest*}, so capability links
-// (unsubscribe, list confirmations, invites) and per-item paths are one endpoint, never a token.
-std::string fold_host_path(const std::string& path, size_t keep) {
-  size_t at = 0;
-  for (size_t i = 0; i < keep; ++i) {
-    at = path.find('/', at + 1);
-    if (at == std::string::npos) return path;
-  }
-  return path.substr(0, at) + "/{rest*}";
+std::string_view view_of(const bj::object& o, const char* k) {
+  const auto* v = o.if_contains(k);
+  return v && v->is_string() ? std::string_view(v->as_string()) : std::string_view();
 }
 
 }  // namespace
 
+operations::HeatStudies::ClientHash Host::heat_client_hash() {
+  return [this](std::string_view client) {
+    return std::strtoull(address_hash_for_logs(std::string(client)).c_str(), nullptr, 16);
+  };
+}
+
 void Host::heat_observe(const Request& req, const bj::object& line, const std::string& domain, int64_t bytes_out) {
   // Not a visitor: a try, the panel, or the host's own calls (timers, outbox results, identity
-  // events, internal calls), whose paths don't start with "/".
-  if (line.contains("try") || line.contains("panel") || !req.path.starts_with("/")) return;
-  std::string raw = req.path.substr(0, req.path.find('?'));
-  auto path = router::normalize_path(raw);
-  std::string p = path ? path->path : "";
-  if (p == kOperationsMcpPath || p == kMailHookPath) return;
-  int status = 0;
-  if (const auto* st = line.if_contains("status"); st && st->is_int64()) status = int(st->as_int64());
+  // events, internal calls), whose paths don't start with "/". Nor the host's own paths: CORS
+  // preflights (every OPTIONS: no box route takes one) and /goober/*.
+  if (line.contains("try") || line.contains("panel") || !req.path.starts_with("/") || req.method == "options") return;
+  auto path = router::normalize_path(req.path);
+  std::string_view p = path ? std::string_view(path->path) : std::string_view(req.path);
+  if (p == "/goober" || p.starts_with("/goober/") || p == kOperationsMcpPath || p == kMailHookPath) return;
   operations::HeatSample s;
   s.at_ms = base::now_unix_ms();
   s.end_us = base::monotonic_us();
   if (const auto* us = line.if_contains("us"); us && us->is_int64()) s.us = us->as_int64();
-  if (const auto* f = line.if_contains("fuel"); f && f->is_int64()) s.fuel = f->as_int64();
-  s.status = status;
+  if (const auto* st = line.if_contains("status"); st && st->is_int64()) s.status = int(st->as_int64());
   s.bytes_in = int64_t(req.body.size());
   s.bytes_out = std::max<int64_t>(0, bytes_out);
-  std::string method = upper(req.method == "head" ? "get" : req.method);
-  s.method = method;
-  bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
+  s.method = req.method == "head" ? std::string_view("get") : std::string_view(req.method);
+  // Held for the call: the box route's names are views into it.
+  std::shared_ptr<const boxes::ActiveSet> active;
   if (!path) {
-    s.api = "content";
-    s.endpoint = "(refused)";
+    s.what = "(refused)";
+    s.method = {};
   } else if (p == "/mcp") {
-    s.api = "mcp";
-    std::string tool = text_of(line, "tool");
-    s.endpoint = tool.empty() ? "(rpc)" : tool;
-    s.method.clear();
+    s.api = operations::HeatApi::kMcp;
+    s.what = view_of(line, "tool");
+    if (s.what.empty()) s.what = "(rpc)";
+    s.method = {};
   } else if (p.starts_with("/identity/") || p == "/oauth" || p.starts_with("/oauth/") || p.starts_with("/.well-known/")) {
-    s.api = "identity";
-    s.endpoint = method + " " + (p.starts_with("/identity/invite/") ? std::string("/identity/invite/{rest*}") : p);
-  } else if (p == "/goober" || p.starts_with("/goober/")) {
-    s.api = "host";
-    s.endpoint = method + " " + fold_host_path(p, 2);
-  } else if (req.method == "options") {
-    s.api = "host";
-    s.endpoint = "(preflight)";
+    s.api = operations::HeatApi::kIdentity;
+    // Invite links are capabilities: one endpoint, never a token.
+    s.what = p.starts_with("/identity/invite/") ? std::string_view("/identity/invite/{rest*}") : p;
   } else if (p == "/attachment" || p.starts_with("/attachment/")) {
-    s.api = "content";
-    s.endpoint = method + " /attachment/{file}";
+    s.what = "/attachment/{file}";
   } else {
     // A box route, by the same match the dispatcher made: its declared pattern, whoever answered
     // (the box, or the host refusing before it ran).
-    auto active = boxes_->active();
+    active = boxes_->active();
     const auto& table = active->table_for(domain);
-    std::string verb = req.method == "head" ? "get" : req.method;
+    std::string verb(s.method);
     const boxes::RouteRef* ref = table.match(path->segments, verb).value;
     if (!ref && verb == "get") ref = table.match(path->segments, "subscribe").value;
     if (ref && ref->route && ref->box) {
-      s.api = "box:" + ref->box->manifest.box;
-      s.endpoint = operations::endpoint_match(method, ref->route->pattern.source);
+      s.api = operations::HeatApi::kBox;
+      s.box = ref->box->manifest.box;
+      s.what = ref->route->pattern.source;
+    } else if (s.status >= 400) {
+      // What nothing answers, and what the host refused, each together, so a scan can't push
+      // the site's pages out (as the live statistics do).
+      s.what = s.status == 404 ? "(not found)" : "(refused)";
+      s.method = {};
     } else {
-      // Content, by its path; what nothing answers, and what the host refused, each together, so
-      // a scan can't push the site's pages out (as the live statistics do).
-      s.api = "content";
-      s.endpoint = status == 404 ? "(not found)" : status >= 400 ? "(refused)" : method + " " + p.substr(0, 200);
+      s.what = p.substr(0, 200);
     }
   }
-  // The client as the rate limiter counts it (an IPv6 /64 is one), as a keyed hash: the same
-  // hash the audit log gives an IPv4 address (client_h).
-  std::string h = address_hash_for_logs(rate_key(client_address(req)));
-  s.client = std::strtoull(h.c_str(), nullptr, 16);
-  s.cls = operations::classify_client(req.header("user-agent"), bearer || p == "/mcp");
+  // The client as the rate limiter counts it (an IPv6 /64 is one); the study hashes it with the
+  // log key only the first time it sees it on an endpoint.
+  std::string client = rate_key(client_address(req));
+  s.client = client;
   heat_->record(domain, s);
 }
 
@@ -142,9 +130,9 @@ void Host::register_heat_study_tools() {
       {"heat_study_start",
        "Starts a heat study of one domain: for `minutes` (5 to 1440, default 60), every request on it is counted by "
        "endpoint (a box route's declared pattern like \"GET /posts/{id}\", an MCP tool's name, a page's path): "
-       "requests per minute, each client's busiest minute, peak concurrency, latency, heat (time serving, and "
-       "fuel), bytes in and out, statuses, and client classes. The report ranks endpoints by heat, requests, and "
-       "bytes, and suggests controls in observe mode, ready to send with control_set. It changes nothing that is "
+       "requests per minute, each client's busiest minute, peak concurrency, latency, heat (time serving), bytes "
+       "in and out, and statuses. The host's own paths (/goober/*, CORS preflights) aren't counted. The report "
+       "ranks endpoints by heat and suggests controls in observe mode, ready to send with control_set. It changes nothing that is "
        "served, so it never waits for approval; one per domain and 4 on the host at once. Clients are keyed "
        "hashes; no address or user id is kept. Audited. Answers {id, domain, ends_ms, ...}; read it with "
        "heat_study_get.",
@@ -195,9 +183,9 @@ void Host::register_heat_study_tools() {
   mcp_->add_tool(
       {"heat_study_get",
        "Read tool. One heat study: while it runs, its progress so far (remaining_ms); once it ends, its report. "
-       "Totals, requests per minute, clients (distinct, each one's busiest minute as p50/p99/max), peak "
-       "concurrency, the busiest clients by keyed hash, and endpoints ranked by heat (time serving), each with "
-       "requests, latency, bytes, statuses, client classes, and `suggest`: control_set arguments in mode "
+       "Totals, requests per minute, clients (distinct, and the ten busiest by keyed hash), and endpoints ranked "
+       "by heat (time serving), each with its share of heat, requests, and bytes, its busiest minute, each "
+       "client's busiest minute as p50/p99/max, peak concurrency, latency, statuses, and `suggest`: control_set arguments in mode "
        "\"observe\" with the reason for each number (or `none` with why). Send a suggestion as it is, watch "
        "control_report, and enforce once it holds.",
        object_schema({{"id", id_prop}}, {"id"}),

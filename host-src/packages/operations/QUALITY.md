@@ -24,4 +24,6 @@ the access and egress logs (traffic, edges, and errors), the record of how box c
 - **Heat studies are bounded and private.** A study holds at most 500 endpoints (the rest in
   "other"), 256 clients and a ring of 64 per endpoint, and about 12 MiB in all; its report is at
   most 256 KiB, kept 30 days. Clients are keyed hashes from the host; the report names no
-  address and no user id. When no study runs, the request path pays one atomic load.
+  address and no user id. When no study runs, the request path pays one atomic load; when one
+  does, it finds the study without a lock, takes that study's lock once, and builds no string
+  (048 § 3.8, measured by `HeatStudy.RecordCost`).

@@ -194,4 +194,88 @@ bool restore_storage(const fs::path& backup, const fs::path& storage, BackupRepo
   return copy_tree(backup, storage, false, BackupOptions{}, report, error);
 }
 
+bool is_dated_copy_name(std::string_view n) {
+  if (n.size() != 10 || n[4] != '-' || n[7] != '-') return false;
+  for (size_t i : {0, 1, 2, 3, 5, 6, 8, 9}) {
+    if (n[i] < '0' || n[i] > '9') return false;
+  }
+  int month = (n[5] - '0') * 10 + (n[6] - '0'), day = (n[8] - '0') * 10 + (n[9] - '0');
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+int local_copies_to_keep(bool s3_backups) { return s3_backups ? 3 : 14; }
+
+fs::path local_copies_dir(const fs::path& storage) {
+  fs::path s = fs::absolute(storage).lexically_normal();
+  if (s.filename().empty()) s = s.parent_path();
+  return s.parent_path() / "backups";
+}
+
+namespace {
+
+// The real directories (not links) named YYYY-MM-DD in `dir`, by name.
+std::vector<std::string> dated_copies(const fs::path& dir) {
+  std::vector<std::string> names;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code e2;
+    if (it->is_symlink(e2) || !it->is_directory(e2)) continue;
+    std::string name = it->path().filename().string();
+    if (is_dated_copy_name(name)) names.push_back(name);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+}  // namespace
+
+std::vector<std::string> prune_local_copies(const fs::path& dest, int keep, std::string* error) {
+  std::vector<std::string> removed;
+  fs::path d = dest.lexically_normal();
+  if (d.filename().empty()) d = d.parent_path();
+  std::string own = d.filename().string();
+  if (!is_dated_copy_name(own)) return removed;
+  auto names = dated_copies(d.parent_path());
+  // This night's copy stays, whatever its name says, and with it the newest others by name, to
+  // `keep` in all.
+  std::erase(names, own);
+  size_t others = size_t(std::max(keep, 1) - 1);
+  size_t keep_from = names.size() > others ? names.size() - others : 0;
+  for (size_t i = 0; i < keep_from; ++i) {
+    std::error_code ec;
+    fs::remove_all(d.parent_path() / names[i], ec);
+    if (ec) {
+      if (error) *error = "cannot remove " + describe_path(d.parent_path() / names[i]) + ": " + ec.message();
+      continue;
+    }
+    removed.push_back(names[i]);
+  }
+  return removed;
+}
+
+LocalCopies local_copies(const fs::path& dir) {
+  LocalCopies out;
+  for (const auto& name : dated_copies(dir)) {
+    ++out.copies;
+    fs::path copy = dir / name;
+    if (auto text = base::read_file(copy / "BACKUP.json")) {
+      std::string err;
+      if (auto v = json::parse(*text, &err); v && v->is_object()) {
+        if (const auto* b = v->as_object().if_contains("bytes"); b && b->is_int64()) {
+          out.bytes += b->as_int64();
+          continue;
+        }
+      }
+    }
+    // A copy a failed run left: measured.
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(copy, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      std::error_code e2;
+      if (it->is_regular_file(e2) && !it->is_symlink(e2)) out.bytes += int64_t(it->file_size(e2));
+    }
+  }
+  return out;
+}
+
 }  // namespace goober::host

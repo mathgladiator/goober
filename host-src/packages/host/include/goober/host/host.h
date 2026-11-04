@@ -160,6 +160,10 @@ class Host {
   // whose time is up and saves the running ones once a minute (heat_study.cpp).
   operations::HeatStudies* heat_studies() { return heat_.get(); }
   void heat_tick(int64_t now_ms);
+  // One finished request on a domain a heat study watches (048 § 3): keyed by endpoint and fed
+  // in. Called beside the access log; public for its cost test.
+  void heat_observe(const server::http::Request& req, const boost::json::object& line, const std::string& domain,
+                    int64_t bytes_out);
   // Whether the host is ready (GET /goober/ready):
   // storage writable (when probed), identity answering, boxes loaded, the queue not full.
   std::pair<int, boost::json::object> readiness(bool probe_storage);
@@ -429,10 +433,9 @@ class Host {
   // bytes_out: the body sent, for a heat study's weight (0 when unknown).
   void access_log(const server::http::Request& req, int status, int64_t started_us, const std::string& domain,
                   const std::string& extra, bool host_error = false, int64_t bytes_out = 0);
-  // One finished request on a domain a heat study watches (048 § 3): keyed by endpoint and fed in.
-  void heat_observe(const server::http::Request& req, const boost::json::object& line, const std::string& domain,
-                    int64_t bytes_out);
   void heat_stop_all();
+  // A client's keyed hash in a study's report: the log's client_h, as 64 bits.
+  operations::HeatStudies::ClientHash heat_client_hash();
   void register_heat_study_tools();
   std::unique_ptr<operations::HeatStudies> heat_;
 

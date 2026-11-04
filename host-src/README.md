@@ -166,8 +166,8 @@ just deploy you@server --add-tenant bobs.example --tenant-name bobs --tenant-own
 It builds the `server` preset here (a release binary with libstdc++ linked in, needing only
 glibc 2.38), copies it, and runs `tools/server-bootstrap.sh` there. That script installs Caddy,
 curl, python3, tzdata, and bubblewrap (the build sandbox); creates a `goober` system user and `/srv/goober/host`; runs setup as
-`goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (two
-weeks kept, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
+`goober` (answer **Production**); and installs the systemd unit, a nightly backup timer (the
+newest 3 kept with S3 backups on, 14 with them off, in `/srv/goober/host/backups/`), and the Caddyfile, which gets certificates on its
 own. Behind Caddy the host listens on loopback only: with `listen.behind-proxy` set, any other
 address is refused, since the host believes the proxy's `X-Forwarded-For`. Running it again
 upgrades: it checks the config with the new binary and restarts.

@@ -7,6 +7,7 @@
 
 #include "backups.h"
 #include "goober/base/time.h"
+#include "goober/host/backup.h"
 #include "goober/host/host.h"
 #include "goober/json/json.h"
 #include "goober/operations/traffic.h"
@@ -195,6 +196,21 @@ bj::object Host::limits_report(bool name_tenants) {
   }
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
+  // The nightly copies setup's timer makes beside storage (046 A12): told, not budgeted. The
+  // host doesn't own them; `goober-host backup` keeps the newest 3 (S3 on) or 14 (off).
+  {
+    fs::path dir = local_copies_dir(cfg->storage);
+    auto copies = local_copies(dir);
+    int keep = local_copies_to_keep(cfg->backup.enabled());
+    bj::object row{{"used_bytes", copies.bytes},
+                   {"copies", copies.copies},
+                   {"keep", keep},
+                   {"note", "nightly copies of storage beside it (backups/YYYY-MM-DD/); goober-host backup keeps the newest " +
+                                std::to_string(keep) + (cfg->backup.enabled() ? " (S3 backups on)" : " (S3 backups off)") +
+                                "; no budget: the host doesn't own them, but they share the disk the disk check reads"}};
+    if (name_tenants) row["dir"] = dir.string();
+    out["local-copies"] = std::move(row);
+  }
   std::error_code ec;
   auto space = fs::space(cfg->storage, ec);
   if (!ec) {
