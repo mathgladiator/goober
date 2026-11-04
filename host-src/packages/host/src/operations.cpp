@@ -111,6 +111,7 @@ std::string Host::bearer_operator(const Request& req) const {
 void Host::handle_operations(const Request& req, const Finish& finish) {
   std::string operator_name = bearer_operator(req);
   if (operator_name.empty()) {
+    mcp_forget(req, "operator");  // a revoked token stops counting as its operator's (047 § 14)
     // Wrong tokens are slowed per address; right ones aren't counted at all.
     if (int64_t wait = limiter_.take("operator-auth", rate_key(client_address(req)), RateRule{10, 5}, base::now_unix_ms())) {
       auto res = json_response(429, R"({"error":"rate limit reached"})");

@@ -358,4 +358,12 @@ TEST(Config, ControlDefaultsAreCheckedAgainstTheHostsLimits) {
   EXPECT_FALSE(parse_config(
       R"({"operations":{"token":"0123456789abcdef"},"controls":{"defaults":{"rate":{"per-minute":1,"bursty":2}}}})", "/", &err));
   EXPECT_NE(err.find("unknown key bursty"), std::string::npos) << err;
+  // A default fuel is taken up to limits.fuel's max, and refused past it.
+  auto fuel = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"fuel":{"default":1000000,"max":5000000}},
+      "controls":{"defaults":{"fuel":2000000}}})", "/", &err);
+  ASSERT_TRUE(fuel) << err;
+  EXPECT_EQ(fuel->controls_defaults->props.fuel.value, 2000000);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"fuel":{"default":1000000,"max":5000000}},
+      "controls":{"defaults":{"fuel":6000000}}})", "/", &err));
+  EXPECT_NE(err.find("limits.fuel max"), std::string::npos) << err;
 }

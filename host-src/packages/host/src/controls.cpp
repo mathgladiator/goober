@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <iostream>
 
+#include "goober/base/bounded.h"
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
 #include "goober/base/hash.h"
@@ -234,14 +235,16 @@ bj::array Host::route_limits_json(const manifest::Manifest& m) {
 }
 
 std::shared_ptr<const Host::BoxLimits> Host::box_limits(const std::shared_ptr<const boxes::ActiveSet>& active) {
+  auto cfg = config_.get();
   {
     std::lock_guard lock(box_limits_mu_);
-    if (box_limits_ && box_limits_->set == active) return box_limits_;
+    if (box_limits_ && box_limits_->set == active && box_limits_->config == cfg) return box_limits_;
   }
-  // Compiled once per active set (an upload, a promotion, a disable), never per request.
+  // Compiled once per active set (an upload, a promotion, a disable) and per config (a reload
+  // that lowers the host's limits), never per request.
   auto out = std::make_shared<BoxLimits>();
   out->set = active;
-  auto cfg = config_.get();
+  out->config = cfg;
   for (const auto& [name, box] : active->boxes) {
     const auto& m = box->manifest;
     bool any = false;
@@ -335,12 +338,18 @@ std::string Host::control_api(const Request& req, const router::NormalizedPath& 
 }
 
 std::string Host::control_user_key(const Request& req, const std::string& tenant) {
+  // Keyed by the credential itself (the bearer token, or the session cookie's value), never the
+  // whole header: other cookies that change from request to request don't make a new entry, and
+  // a request without a session's shape is nobody, with no lookup at all.
   std::string auth = req.header("authorization");
   std::string credential;
+  Request probe;
   if (auth.size() > 7 && base::to_lower(auth.substr(0, 7)) == "bearer ") {
     credential = "b:" + auth.substr(7);
-  } else if (std::string cookie = req.header("cookie"); !cookie.empty()) {
-    credential = "c:" + cookie;
+    probe.headers.emplace_back("authorization", auth);
+  } else if (std::string session = session_cookie(req); !session.empty()) {
+    credential = "s:" + session;
+    probe.headers.emplace_back("cookie", session_cookie_name() + "=" + session);
   }
   if (credential.empty()) return "";
   std::string key = base::sha256_hex(tenant + "\n" + credential);
@@ -349,27 +358,37 @@ std::string Host::control_user_key(const Request& req, const std::string& tenant
     std::lock_guard lock(control_users_mu_);
     auto it = control_users_.find(key);
     if (it != control_users_.end() && now - it->second.first < kUserKeyMs) return it->second.second;
-    if (control_users_.size() >= kUserKeysMax) control_users_.clear();
-    // Until the lookup lands, the request counts as its client's; one lookup at a time per credential.
-    control_users_[key] = {now, it == control_users_.end() ? std::string() : it->second.second};
-  }
-  // Sessions and tokens are in SQLite: looked up on a worker, never on the network thread.
-  Request probe;
-  for (const char* h : {"authorization", "cookie"}) {
-    if (auto v = req.header(h); !v.empty()) probe.headers.emplace_back(h, v);
-  }
-  pool_->post([this, probe = std::move(probe), tenant, key] {
-    std::string who;
-    try {
-      if (auto s = signed_in(probe, tenant)) who = (s->host ? "h:" : "u:") + std::to_string(s->user.user_id);
-    } catch (const std::exception& e) {
-      std::cerr << "goober-host: controls: who is signed in: " << e.what() << "\n";
+    std::string known = it == control_users_.end() ? std::string() : it->second.second;
+    // Full: the stale, then the oldest few go, never every person at once.
+    if (it == control_users_.end()) {
+      base::make_room(control_users_, kUserKeysMax, now, kUserKeyMs, [](const auto& v) { return v.first; });
     }
-    std::lock_guard lock(control_users_mu_);
-    control_users_[key] = {base::now_unix_ms(), who};
-  });
+    // Until the lookup lands, the request counts as its client's; one lookup at a time per credential.
+    control_users_[key] = {now, known};
+  }
+  // Sessions and tokens are in SQLite: looked up on a worker, never on the network thread. The
+  // lookup waits behind at most half the pool's queue; past that it isn't made, and the
+  // request counts as its client's (the next one tries again).
+  bool posted = pool_->post(
+      [this, probe = std::move(probe), tenant, key] {
+        std::string who;
+        try {
+          if (auto s = signed_in(probe, tenant)) who = (s->host ? "h:" : "u:") + std::to_string(s->user.user_id);
+        } catch (const std::exception& e) {
+          std::cerr << "goober-host: controls: who is signed in: " << e.what() << "\n";
+        }
+        std::lock_guard lock(control_users_mu_);
+        control_users_[key] = {base::now_unix_ms(), who};
+      },
+      max_queued_ / 2);
   std::lock_guard lock(control_users_mu_);
-  return control_users_[key].second;
+  auto it = control_users_.find(key);
+  if (!posted && it != control_users_.end() && it->second.second.empty()) {
+    // Not looked up: forgotten, so the next request after the queue drains tries again.
+    control_users_.erase(it);
+    return "";
+  }
+  return it == control_users_.end() ? std::string() : it->second.second;
 }
 
 bool Host::control_gate(Request& req, Finish& finish, const std::string& domain, const std::string& tenant,
@@ -427,9 +446,20 @@ bool Host::control_gate(Request& req, Finish& finish, const std::string& domain,
   if (!api.empty()) note["api"] = api;
   // The ticket goes with the finish: done when it is called, released by its destructor when a
   // path never calls it.
+  // A stream (an SSE subscription) holds it until the stream closes, so `concurrent` caps the
+  // streams open at once, not only their opening; its latency is the time to open.
   finish = [inner = std::move(finish), ticket = std::move(v.ticket), started_us, text = json::dump(note)](
                Response res, std::string extra) {
-    if (ticket) ticket->done(res.status, base::monotonic_us() - started_us, base::now_unix_ms());
+    if (ticket && res.stream) {
+      int64_t open_us = base::monotonic_us() - started_us;
+      int status = res.status;
+      res.stream = [open = std::move(res.stream), ticket, open_us, status](std::shared_ptr<server::http::Stream> s) {
+        s->on_close([ticket, open_us, status] { ticket->done(status, open_us, base::now_unix_ms()); });
+        open(std::move(s));
+      };
+    } else if (ticket) {
+      ticket->done(res.status, base::monotonic_us() - started_us, base::now_unix_ms());
+    }
     inner(std::move(res), with_control(extra, text));
   };
   return false;

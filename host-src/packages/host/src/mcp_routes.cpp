@@ -29,6 +29,9 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   auto who = signed_in(req, tenant);
   bool bearer = base::to_lower(req.header("authorization")).starts_with("bearer ");
   if (!who || !bearer) {
+    // A token once good (now revoked or expired) no longer counts as its agent's: its calls go
+    // back to the address's bucket, never draining the agent's (047 § 14).
+    mcp_forget(req, tenant);
     // MCP authorization: point the client at this realm's protected-resource metadata,
     // which names the authorization server it signs in with (RFC 9728).
     Response res;

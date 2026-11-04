@@ -101,3 +101,56 @@ TEST(Mcp, AHoldAnswersInTheToolsPlaceUnfiltered) {
   EXPECT_NE(reply.body.find("pending_approval"), std::string::npos) << reply.body;
   EXPECT_EQ(reply.body.find("filtered"), std::string::npos);
 }
+
+// With checked types, a policy's check and the tool read an integer or boolean argument the same
+// way: normalized before either sees it, or refused (030 § 3).
+TEST(Mcp, CheckedTypesNormalizeBeforeThePolicyAndTheTool) {
+  mcp::McpServer s("goober-test", "0.1", "testing");
+  s.set_checked_types(true);
+  s.add_tool({"get", "Gets a thing.",
+              mcp::object_schema({{"id", mcp::integer_property("id")}, {"dry_run", mcp::boolean_property("dry")},
+                                  {"name", mcp::string_property("name")}},
+                                 {"id"}),
+              [](const bj::object& args) { return mcp::ToolResult::ok(bj::object{{"args", args}}); }});
+  std::vector<std::string> checked;
+  mcp::McpServer::Policy policy;
+  policy.check = [&](const std::string&, const bj::object& args) -> std::optional<std::string> {
+    checked.push_back(json::dump(args));
+    if (auto id = mcp::integer_arg(args, "id"); id.ok && id.value == 7) return "id 7 is someone else's";
+    return std::nullopt;
+  };
+  auto run = [&](const std::string& args) {
+    auto r = s.handle(R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get","arguments":)" + args + "}}",
+                      policy);
+    std::string err;
+    return json::parse(r.body, &err)->at("result");
+  };
+  // 7 in every whole-number shape meets the check as the integer 7.
+  for (const char* id : {"7", "7.0", "\"7\""}) {
+    auto r = run(std::string(R"({"id":)") + id + "}");
+    EXPECT_TRUE(r.at("isError").as_bool()) << id;
+    EXPECT_EQ(checked.back(), R"({"id":7})") << id;
+  }
+  // Not a whole number: refused before the check or the tool sees it.
+  size_t seen = checked.size();
+  for (const char* id : {"7.5", "true", "\"7x\"", "[7]", "{}", "18446744073709551615"}) {
+    auto r = run(std::string(R"({"id":)") + id + "}");
+    EXPECT_TRUE(r.at("isError").as_bool()) << id;
+    EXPECT_NE(std::string(r.at("content").at(0).at("text").as_string()).find("id must be a whole number"), std::string::npos) << id;
+  }
+  EXPECT_EQ(checked.size(), seen);
+  // Booleans: true/false, or their strings; strings and null left alone.
+  auto ok = run(R"({"id":"8","dry_run":"true","name":5})");
+  ASSERT_FALSE(ok.at("isError").as_bool()) << json::dump(ok);
+  EXPECT_EQ(json::dump(ok.at("structuredContent").at("args")), R"({"id":8,"dry_run":true,"name":5})");
+  EXPECT_TRUE(run(R"({"id":8,"dry_run":"yes"})").at("isError").as_bool());
+  EXPECT_FALSE(run(R"({"id":8,"dry_run":null})").at("isError").as_bool());
+  // A direct call is checked the same.
+  EXPECT_TRUE(s.call("get", bj::object{{"id", 1.5}})->is_error);
+  EXPECT_EQ(s.call("get", bj::object{{"id", 2.0}})->value.at("args").at("id").as_int64(), 2);
+  // The shared reader.
+  EXPECT_FALSE(mcp::integer_arg(bj::object{}, "id").present);
+  EXPECT_FALSE(mcp::integer_arg(bj::object{{"id", nullptr}}, "id").present);
+  EXPECT_EQ(mcp::integer_arg(bj::object{{"id", "-12"}}, "id").value, -12);
+  EXPECT_FALSE(mcp::integer_arg(bj::object{{"id", 1e300}}, "id").ok);
+}

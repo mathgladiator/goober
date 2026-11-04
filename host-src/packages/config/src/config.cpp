@@ -485,7 +485,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (const auto* controls = get_object(root, "controls", &why)) {
       if (!check_keys(*controls, {"defaults"}, "controls", &why)) return *error = why, nullptr;
       if (const auto* defaults = get_object(*controls, "defaults", &why)) {
-        controls::HostLimits hl{cfg->body_max_bytes, cfg->timeout_ms.max_value};
+        controls::HostLimits hl{cfg->body_max_bytes, cfg->timeout_ms.max_value, cfg->fuel.max_value};
         auto d = controls::parse_host_defaults(*defaults, hl, &why);
         if (!d) return *error = why, nullptr;
         cfg->controls_defaults = std::move(*d);

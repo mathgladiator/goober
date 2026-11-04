@@ -101,6 +101,34 @@ TEST(RpcCallsTest, CountsEachCallAndTellsFullFromCheap) {
   EXPECT_DOUBLE_EQ(batch.cost(0.2), 2 + 5 * 0.2);
 }
 
+// 047 § 14: only an exact, escape-free cheap method is cheap. Every spelling a JSON parser reads
+// as tools/call (an escaped slash, unicode escapes, an escaped key, a method named twice) and any
+// method not on the cheap list counts full.
+TEST(RpcCallsTest, EscapedMethodsAndKeysCountFull) {
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"tools\/call","params":{"name":"x"}})").full, 1);
+  // Unicode escapes, built from a lone backslash so nothing on the way decodes them.
+  const std::string u = std::string("\\") + "u";
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"tools)" + u + R"(002fcall"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":")" + u + R"(0074ools/call"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"meth)" + u + R"(006fd":"tools/call"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"p)" + u + R"(0069ng"})").full, 1);  // even a cheap one, escaped
+  // Sanity: those really are a backslash and a u.
+  EXPECT_EQ((R"("p)" + u + R"(0069ng")").substr(2, 2), std::string("\\") + "u");
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"tools/call","method":"ping"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"ping","method":"tools/call"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"something/else"})").full, 1);
+  EXPECT_EQ(count_rpc_calls(R"({"id":1,"method":"Tools/List"})").full, 1);
+  auto batch = count_rpc_calls(R"([{"id":1,"method":"tools\/call"},{"id":2,"method":"ping"},{"method":"notifications/initialized"}])");
+  EXPECT_EQ(batch.full, 1);
+  EXPECT_EQ(batch.cheap, 2);
+  // The cheap ones, exactly spelled, stay cheap; an escape inside params doesn't matter.
+  for (const char* m : {"initialize", "ping", "tools/list", "notifications/cancelled", "resources/list", "prompts/list"}) {
+    auto c = count_rpc_calls(std::string(R"({"id":1,"params":{"s":"a\/b"},"method":")") + m + "\"}");
+    EXPECT_EQ(c.full, 0) << m;
+    EXPECT_EQ(c.cheap, 1) << m;
+  }
+}
+
 TEST(McpQueueTest, SizesItsCapsFromThePool) {
   EXPECT_EQ(queue_running_for(1), 1);
   EXPECT_EQ(queue_running_for(4), 2);

@@ -21,7 +21,13 @@ int64_t system_now_ms() {
 
 bool space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
-bool full_method(std::string_view m) { return m == "tools/call" || m == "resources/read" || m == "prompts/get"; }
+// A call is cheap only when its one method is exactly one of these, written without escapes
+// (047 § 14): anything else, a method or key with a backslash, or a method named twice, counts
+// full, so no spelling the JSON parser reads as tools/call is charged as a ping.
+bool cheap_method(std::string_view m) {
+  return m == "initialize" || m == "ping" || m == "tools/list" || m == "resources/list" ||
+         m == "resources/templates/list" || m == "prompts/list" || m.starts_with("notifications/");
+}
 
 double ratio(int64_t part, int64_t whole) { return whole > 0 ? double(part) / double(whole) : 0.0; }
 
@@ -57,6 +63,8 @@ RpcCalls count_rpc_calls(std::string_view b) {
   int depth = 0, counted = 0;
   bool in_element = false;
   std::string_view key, method;
+  int methods = 0;       // how often the element names a method
+  bool escaped = false;  // a key or the method written with a backslash
   auto counts = [&] { return (out.batch && depth == 1); };  // a bare value in a batch: no request
   while (i < n) {
     char c = b[i];
@@ -79,8 +87,11 @@ RpcCalls count_rpc_calls(std::string_view b) {
       } else if (depth == element && in_element) {
         if (is_key) {
           key = s;
+          if (s.find('\\') != std::string_view::npos) escaped = true;
         } else if (key == "method") {
           method = s;
+          ++methods;
+          if (s.find('\\') != std::string_view::npos) escaped = true;
         } else if (key == "id" && !out.batch && s.size() <= 128 &&
                    std::none_of(s.begin(), s.end(), [](char x) { return static_cast<unsigned char>(x) < 0x20; })) {
           out.id = "\"" + std::string(s) + "\"";
@@ -98,14 +109,17 @@ RpcCalls count_rpc_calls(std::string_view b) {
         in_element = true;
         method = {};
         key = {};
+        methods = 0;
+        escaped = false;
       }
       ++i;
       continue;
     }
     if (c == '}' || c == ']') {
       if (c == '}' && depth == element && in_element) {
-        if (full_method(method)) ++out.full;
-        else ++out.cheap;
+        bool cheap = !escaped && (methods == 0 || (methods == 1 && cheap_method(method)));
+        if (cheap) ++out.cheap;
+        else ++out.full;
         ++counted;
         in_element = false;
       }

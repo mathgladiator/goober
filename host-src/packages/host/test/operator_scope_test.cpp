@@ -452,6 +452,32 @@ TEST_F(ScopeTest, ACommitCantWriteAnotherTenantsBoxIntoAProject) {
   EXPECT_FALSE(fine.at("isError").as_bool()) << json::dump(fine);
 }
 
+// The revision a deploy or build is checked at is the one it builds, in whatever shape rev comes
+// (a number, a whole double, a string of digits); a rev that isn't a whole number is refused.
+TEST_F(ScopeTest, ADeployIsCheckedAtTheRevisionItBuildsWhateverShapeRevHas) {
+  ASSERT_FALSE(call("source_create", R"({"project":"mixed","tenant":"acme"})").at("isError").as_bool());
+  // Revision 1 serves the other tenant; revision 2, the head, only acme.
+  ASSERT_FALSE(call("source_commit", R"J({"project":"mixed","base_rev":0,"message":"theirs","changes":[
+      {"path":"goober.project.json","text":"{\"boxes\":[\".\"]}"},
+      {"path":"manifest.json","text":"{\"box\":\"theirs\",\"domains\":[\"other.example.com\"]}"}]})J")
+                   .at("isError")
+                   .as_bool());
+  ASSERT_FALSE(call("source_commit", R"J({"project":"mixed","base_rev":1,"message":"ours","changes":[
+      {"path":"manifest.json","text":"{\"box\":\"ours\",\"domains\":[\"acme.example.com\"]}"}]})J")
+                   .at("isError")
+                   .as_bool());
+  focus_grok(R"(["acme"])");
+  for (const char* rev : {"1", "1.0", "\"1\"", "\"x\"", "true", "1.5"}) {
+    for (const char* tool : {"source_deploy", "source_build"}) {
+      auto r = call(tool, std::string(R"({"project":"mixed","rev":)") + rev + "}");
+      EXPECT_TRUE(r.at("isError").as_bool()) << tool << " rev " << rev << ": " << json::dump(r);
+      std::string text(r.at("text").as_string());
+      EXPECT_TRUE(text.find("focused on acme") != std::string::npos || text.find("must be a whole number") != std::string::npos)
+          << tool << " rev " << rev << ": " << text;
+    }
+  }
+}
+
 // The human, 2026-11-03: "operators can override at any time since a control may be bum." In the
 // panel's Controls view a person with host:owner or host:operator sets, changes, observes, and
 // removes any control, in their scope, audited and in the change log, never held for approval;

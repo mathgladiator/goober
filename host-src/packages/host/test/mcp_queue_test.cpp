@@ -92,18 +92,25 @@ class McpQueueTest : public ::testing::Test {
     auto& id = host->identity();
     int64_t now = base::now_unix_ms();
     ASSERT_TRUE(id.grant("example", "exec@example.com", "owner", "test", now, &err)) << err;
-    int64_t user = std::stoll(std::string(id.describe("example", now).at("users").at(0).at("user_id").as_string()));
+    user = std::stoll(std::string(id.describe("example", now).at("users").at(0).at("user_id").as_string()));
     for (const char* name : {"Grok", "Polite"}) {
       auto client = id.register_client("example", name, {}, now, &err);
       ASSERT_TRUE(client) << err;
-      identity::OAuthError e;
-      auto d = id.start_device("example", client->client_id, base::now_unix_ms(), &e);
-      ASSERT_TRUE(d);
-      ASSERT_TRUE(id.decide_device("example", d->user_code, user, true, base::now_unix_ms(), &err));
-      auto t = id.poll_device("example", client->client_id, d->device_code, base::now_unix_ms(), 86400000, &e);
-      ASSERT_TRUE(t) << e.description;
-      tokens.push_back(t->access_token);
+      clients.push_back(client->client_id);
+      tokens.push_back(device_token(client->client_id));
+      ASSERT_FALSE(tokens.back().empty());
     }
+  }
+  // A fresh access token for the client and the person, by the device flow.
+  std::string device_token(const std::string& client_id) {
+    auto& id = host->identity();
+    std::string err;
+    identity::OAuthError e;
+    auto d = id.start_device("example", client_id, base::now_unix_ms(), &e);
+    if (!d) return "";
+    if (!id.decide_device("example", d->user_code, user, true, base::now_unix_ms(), &err)) return "";
+    auto t = id.poll_device("example", client_id, d->device_code, base::now_unix_ms(), 86400000, &e);
+    return t ? t->access_token : "";
   }
   void TearDown() override { host.reset(); }
 
@@ -144,7 +151,8 @@ class McpQueueTest : public ::testing::Test {
   std::shared_ptr<const config::HostConfig> config;
   std::unique_ptr<host::Host> host;
   uint16_t port = 0;
-  std::vector<std::string> tokens;
+  int64_t user = 0;
+  std::vector<std::string> tokens, clients;
 };
 
 size_t count(const std::string& s, const std::string& what) {
@@ -312,4 +320,18 @@ TEST_F(McpQueueTest, ACallWhoseClientLeftWhileWaitingNeverRuns) {
   auto agents = log("agents.log");
   EXPECT_EQ(count(agents, R"("tool":"fast")"), 1u) << agents;
   EXPECT_EQ(count(agents, R"("tool":"slow")"), 2u);
+}
+
+// A token revoked after it was known good stops counting as its agent's at its first refusal:
+// its calls go back to the address's bucket, so they never drain the agent's (the person's next
+// token still has the agent's whole burst).
+TEST_F(McpQueueTest, ARevokedTokenStopsDrainingItsAgentsBucket) {
+  ASSERT_EQ(call(tokens[0], "fast").status, 200);  // known good from here
+  host->identity().revoke_token("example", clients[0], tokens[0], base::now_unix_ms());
+  for (int i = 0; i < 12; ++i) EXPECT_EQ(call(tokens[0], "fast").status, 401) << i;
+  std::string fresh = device_token(clients[0]);
+  ASSERT_FALSE(fresh.empty());
+  ASSERT_EQ(call(fresh, "fast").status, 200);  // the address's, while the new token is proved
+  // The same agent (the client and the person): its burst of 30 is whole but for the first call.
+  for (int i = 0; i < 26; ++i) EXPECT_EQ(call(fresh, "fast").status, 200) << i;
 }

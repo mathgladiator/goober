@@ -266,6 +266,8 @@ class Host {
   // This request's origin, like https://example.com or http://localhost:8080.
   std::string origin_of(const server::http::Request& req) const;
   std::string session_cookie_name() const;
+  // The session cookie's value when it has a session's shape ("h.<token>" or "t.<token>"), else "".
+  std::string session_cookie(const server::http::Request& req) const;
   void send_mail(const identity::Mail& mail);
   void write_dev_mail(const identity::Mail& mail);
   struct BoxCall {
@@ -988,10 +990,12 @@ class Host {
   static int64_t control_timeout(const server::http::Request& req);
   // A control's fuel the gate put on the request (047 § 13): nullopt for none, 0 for lifted.
   static std::optional<int64_t> control_fuel(const server::http::Request& req);
-  // Box routes' own limits (047 § 13), compiled from the active set when it changes, never per
-  // request: keyed by the route, which the set they came from keeps alive.
+  // Box routes' own limits (047 § 13), compiled when the active set or the config changes (a
+  // reload may lower limits.fuel or body-max-bytes), never per request: keyed by the route,
+  // which the set they came from keeps alive.
   struct BoxLimits {
     std::shared_ptr<const boxes::ActiveSet> set;
+    std::shared_ptr<const config::HostConfig> config;  // the config they were checked against
     std::unordered_map<const manifest::HttpRoute*, controls::Control> routes;
     bool every_domain = false;  // a box with limits serves "*"
     std::set<std::string, std::less<>> domains;
@@ -1052,6 +1056,8 @@ class Host {
   void mcp_remember(const server::http::Request& req, const std::string& realm, const std::string& agent,
                     const std::string& cls);
   std::pair<std::string, std::string> mcp_agent(const server::http::Request& req, const std::string& realm);
+  // A token refused (revoked, expired) stops counting as its agent's at once (047 § 14).
+  void mcp_forget(const server::http::Request& req, const std::string& realm);
   std::mutex mcp_agents_mu_;
   std::map<std::string, std::pair<int64_t, std::pair<std::string, std::string>>> mcp_agents_;  // hash -> (at, (agent, cls))
   void mcp_queue_start();

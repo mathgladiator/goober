@@ -125,13 +125,12 @@ void Host::register_heat_study_tools() {
   using mcp::object_schema;
   using mcp::string_property;
   auto id_prop = integer_property("The study's id, from heat_study_start or heat_study_list.");
-  auto int_of = [](const bj::object& args, const char* k) -> std::optional<int64_t> {
-    const auto* v = args.if_contains(k);
-    if (!v) return std::nullopt;
-    if (v->is_int64()) return v->as_int64();
-    if (v->is_uint64()) return int64_t(v->as_uint64());
-    if (v->is_double()) return int64_t(v->as_double());
-    return std::nullopt;
+  // The one reading of an integer argument, the same as the scope rule's (030 § 3): absent,
+  // a whole number, or present and not one, which is refused.
+  auto int_of = [](const bj::object& args, const char* k, std::string* error) -> std::optional<int64_t> {
+    auto a = mcp::integer_arg(args, k);
+    if (a.present && !a.ok) *error = std::string(k) + " must be a whole number";
+    return a.ok ? std::optional<int64_t>(a.value) : std::nullopt;
   };
 
   mcp_->add_tool(
@@ -159,8 +158,9 @@ void Host::register_heat_study_tools() {
            return ToolResult::fail(domain.empty() ? std::string("domain is required")
                                                   : domain + " isn't a domain this host serves (domain_list names them)");
          }
-         int64_t minutes = int_of(args, "minutes").value_or(operations::HeatStudies::kDefaultMinutes);
          std::string err;
+         int64_t minutes = int_of(args, "minutes", &err).value_or(operations::HeatStudies::kDefaultMinutes);
+         if (!err.empty()) return ToolResult::fail(err);
          auto row = heat_->start(domain, it->second.tenant, int(std::clamp<int64_t>(minutes, -1, 100000)), why,
                                  current_operator(), base::now_unix_ms(), &err);
          audit("study.start", current_operator(), domain, row ? "ok" : "refused",
@@ -178,9 +178,10 @@ void Host::register_heat_study_tools() {
        object_schema({{"id", id_prop}}, {"id"}),
        [this, int_of](const bj::object& args) {
          if (!heat_) return ToolResult::fail("heat studies are off: see host_health's startup notes");
-         auto id = int_of(args, "id");
-         if (!id) return ToolResult::fail("id is required");
          std::string err;
+         auto id = int_of(args, "id", &err);
+         if (!err.empty()) return ToolResult::fail(err);
+         if (!id) return ToolResult::fail("id is required");
          auto row = heat_->stop(*id, current_operator(), base::now_unix_ms(), &err);
          audit("study.stop", current_operator(), row ? text_of(*row, "domain") : std::string(), row ? "ok" : "refused",
                bj::object{{"id", *id}, {"ended_by", "operator"}, {"error", row ? "" : err}});
@@ -199,9 +200,10 @@ void Host::register_heat_study_tools() {
        object_schema({{"id", id_prop}}, {"id"}),
        [this, int_of](const bj::object& args) {
          if (!heat_) return ToolResult::fail("heat studies are off: see host_health's startup notes");
-         auto id = int_of(args, "id");
-         if (!id) return ToolResult::fail("id is required");
          std::string err;
+         auto id = int_of(args, "id", &err);
+         if (!err.empty()) return ToolResult::fail(err);
+         if (!id) return ToolResult::fail("id is required");
          auto rep = heat_->get(*id, base::now_unix_ms(), &err);
          if (!rep) return ToolResult::fail(err);
          return ToolResult::ok(std::move(*rep));

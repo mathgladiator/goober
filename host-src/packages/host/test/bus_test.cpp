@@ -348,3 +348,27 @@ TEST(Manifest, SubscriptionsRefuseWhatTheyWouldIgnore) {
     EXPECT_FALSE(manifest::parse_manifest(m, &err)) << m;
   }
 }
+
+// A subscribe route's `concurrent` (047 § 13) caps the streams open at once: the slot is held
+// until the stream closes, not given back when it opens.
+TEST_F(BusTest, ConcurrentOnASubscribeRouteCapsOpenStreams) {
+  std::string m = kManifest;
+  std::string live = R"("coalesce-ms":50,"refresh-ms":60000})";
+  m.replace(m.find(live), live.size(), R"("coalesce-ms":50,"refresh-ms":60000,"limits":{"concurrent":{"max":1}}})");
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(m, kWat, &err)) << err;
+  {
+    Subscriber a(port, "/items/live");
+    ASSERT_TRUE(a.wait_for("event: update", 1, 3000)) << a.text();
+    Subscriber b(port, "/items/live");
+    ASSERT_TRUE(b.wait_for("HTTP/1.1 503", 1, 3000)) << b.text();
+    EXPECT_NE(b.text().find("rate limit reached"), std::string::npos) << b.text();
+  }
+  // Both closed: the slot comes back once the host sees the stream go.
+  bool opened = false;
+  for (int i = 0; i < 50 && !opened; ++i) {
+    Subscriber c(port, "/items/live");
+    opened = c.wait_for("event: update", 1, 200);
+  }
+  EXPECT_TRUE(opened);
+}
