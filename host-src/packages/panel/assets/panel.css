@@ -199,3 +199,7 @@ svg.hb rect.fill.h3 { fill: color-mix(in srgb, var(--hot) 75%, var(--cold)); }
 svg.hb rect.fill.h4 { fill: var(--hot); }
 .suggest { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
 .suggest h3 { font-size: .95rem; margin: 0 0 6px; }
+.prose { line-height: 1.55; max-width: 52rem; }
+.prose h2, .prose h3, .prose h4, .prose h5, .prose h6 { margin: 1.1em 0 .4em; }
+.prose blockquote { margin: .6em 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.prose li { margin: .2em 0; }

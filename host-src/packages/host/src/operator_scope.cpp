@@ -64,6 +64,10 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     m["heat_study_start"] = Rule::kDomain;
     for (const char* t : {"heat_study_stop", "heat_study_get"}) m[t] = Rule::kStudy;
     m["heat_study_list"] = Rule::kFiltered;
+    // Skills (050 § 5): host-wide knowledge every operator reads; only an operator not focused on
+    // some tenants writes it, as it is read by agents of every tenant.
+    for (const char* t : {"skill_list", "skill_search", "skill_get"}) m[t] = Rule::kOpen;
+    for (const char* t : {"skill_put", "skill_delete"}) m[t] = Rule::kHost;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",

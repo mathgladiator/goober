@@ -237,7 +237,9 @@ each ranch's site weekly.
   - every operator call (Grok's included), linked to what it changed;
   - a database explorer with a read-only SQL box;
   - heat studies (the Studies view): one domain's heat, rates, and concurrency by endpoint over
-    an hour or a day, with suggested controls in observe mode (`design/machine/048.HeatStudy.md`).
+    an hour or a day, with suggested controls in observe mode (`design/machine/048.HeatStudy.md`);
+  - skills and playbooks (the Skills view): what Grok's engineers wrote down for each role,
+    searched and read; agents write them with `skill_put` (`design/machine/050.Skills.md`).
   - each domain's controls (rate, concurrency, body size, timeouts, fuel, closing; per domain,
     per API, per box route from its manifest's `limits`, per endpoint) with what each refused or
     would have refused, and verdicts like "may be too tight" (the Controls view;

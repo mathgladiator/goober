@@ -1099,6 +1099,26 @@ The human: "Do a code review, performance review, and security review please." T
 - [ ] Decision: 14 local copies until a nightly reached S3 in the last two days (recommended).
 - [ ] Decision: which fuel an operator's `fuel: "off"` gives back (the route's own, recommended).
 
+### Phase 56: skills and playbooks (2026-11-04)
+The human: "a new feature that is viewable in the ops but is entirely focused on SKILLS/Playbooks
+... I want to be able to search and read skills for different roles. The operator agent can
+create/delete/modify each skill/playbook." (`design/machine/050.Skills.md`):
+- [x] The `skills` package: one Agent Skills SKILL.md per skill (name, description, title, kind,
+      roles, body, revision, who and when), checks, reading back to the same bytes, and the
+      in-memory library with search by every word; tests.
+- [x] `skill_list`, `skill_search`, `skill_get`, `skill_put` (if_etag, revisions),
+      `skill_delete`; through the host WAL, audited, change log kind `skill` with texts before and
+      after; read back at start, a broken file skipped and named; tests.
+- [x] Scope: reads `kOpen`, writes `kHost`; reads are read tools, writes are held by approvals;
+      tests.
+- [x] `limits.skills-bytes` (16 MiB) in host_health's limits check; config test.
+- [x] The panel's Skills view: search, kind, role chips, one skill with its history, markdown
+      drawn as text.
+- [x] The MCP server's instructions point new agents at `skill_list {role}` and `skill_put`.
+- [ ] Not opened in a browser yet: the Skills view.
+- [ ] Decisions (050 § 9): free role names, focused operators can't write, writes wait for
+      approval, the panel only reads, no export command yet.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

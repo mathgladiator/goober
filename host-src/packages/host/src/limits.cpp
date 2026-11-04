@@ -234,6 +234,8 @@ bj::object Host::limits_report(bool name_tenants) {
     add("studies", heat_->bytes(), d.studies_bytes, "studies-bytes",
         bj::object{{"note", "heat study reports, kept 30 days; past the budget the oldest finished one goes"}});
   }
+  add("skills", skills_.bytes(), d.skills_bytes, "skills-bytes",
+      bj::object{{"note", "skills and playbooks, kept until an operator deletes one; past the budget skill_put refuses to grow them"}});
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
   // /goober/ready is public: each budget as its share and whether it warns, and the warnings as

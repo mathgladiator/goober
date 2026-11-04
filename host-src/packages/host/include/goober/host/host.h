@@ -36,6 +36,7 @@
 #include "goober/operations/live.h"
 #include "goober/operations/pulse.h"
 #include "goober/operations/traffic.h"
+#include "goober/skills/skills.h"
 #include "goober/runtime_wasm/engine.h"
 #include "goober/server_http/server.h"
 #include "goober/site/site.h"
@@ -440,6 +441,12 @@ class Host {
   operations::HeatStudies::ClientHash heat_client_hash();
   void register_heat_study_tools();
   std::unique_ptr<operations::HeatStudies> heat_;
+  // Skills and playbooks (050): every skills/$name.md, read at start and kept current by the
+  // tools, whose writes hold skills_mu_ from the etag check to the library's update.
+  void load_skills();
+  void register_skill_tools();
+  skills::Library skills_;
+  std::mutex skills_mu_;
 
   std::filesystem::path config_file_;
   config::ConfigHolder config_;

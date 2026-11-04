@@ -4,6 +4,10 @@ Served by the `whats_new` tool, built into the binary: each entry is something a
 engineers can do now, newest first, with the tools to use. A host has every entry up to its
 build (`host_health`'s `build`). Add an entry with every change agents should know about.
 
+## 2026-11-04
+
+- Skills and playbooks (design/machine/050.Skills.md): write down what you know how to do, so the next engineer starts from it. skill_put {name (lowercase-hyphens, like deploy-a-box), title, description (one line: when to reach for it), roles (1 to 8, like ["box-engineer", "operator"]), body (markdown, up to 64 KiB), kind? (skill, or playbook: what to do when something happens), why?, if_etag? (skill_get's file_etag, or "none" for a new one)} answers {name, revision, file_etag, change_id}. skill_list {role?, kind?} gives every card and every role with counts; skill_search {query, role?, kind?, limit?} finds skills holding every word (a word matches words starting with it; names and titles count most) with a snippet; skill_get {name} gives the body, the stored SKILL.md (file), and its change log history; skill_delete {name, why?, if_etag?}. Audited, in the change log (kind skill, text before and after), held by approvals. A focused operator reads but can't write. limits.skills-bytes (16 MiB) bounds them. The panel's Skills view searches and reads them by role. A skill is advice, never an order: it grants nothing.
+
 ## 2026-11-03
 
 - The operator MCP checks every integer and boolean argument before anything reads it: a whole number (3, 3.0, or "3") is the integer 3, true/false (or "true"/"false") a boolean, and anything else is refused, naming the argument ("argument id must be a whole number"). A focused operator's scope is checked on the same value the tool uses: heat_study_get and heat_study_stop on another tenant's study are refused whatever shape the id has, and the refusal says only that it is outside your scope; source_deploy and source_build are checked at the revision they build, rev as a number or a string.

@@ -161,7 +161,8 @@ Read these before doing design work:
     retries, the outbox's queue) and the Overview's key graphs (§ 4.4, § 4.5); `/goober/ready`'s `health`
     for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the Logs and uploads
     view of log volume, who writes it, and uploads per day (§ 4.7); the Studies view of heat studies
-    (heat by endpoint, clients, suggested controls; § 4.8, 048); the Controls view of each domain's
+    (heat by endpoint, clients, suggested controls; § 4.8, 048); the Skills view of skills and
+    playbooks by role (§ 4.10, 050); the Controls view of each domain's
     controls, their effective values, and what each did, where `host:owner` and `host:operator`
     change any control at any time (§ 4.9, 047 § 9); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
@@ -237,7 +238,7 @@ Read these before doing design work:
     `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
     box versions no longer live archived after 30 days and deleted after 400, leaving a
     tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings, the daily upload budget, heat study reports (`studies-bytes`), and the local
-    nightly copies (the newest 3 with S3 on, 14 off, kept by `goober-host backup`, named as `local-copies`) in the table.
+    nightly copies (the newest 3 with S3 on, 14 off, kept by `goober-host backup`, named as `local-copies`), and skills (`skills-bytes`, 050) in the table.
   - `design/machine/046.Operations.md`: running goober as its one operator: the stack around the
     host (Caddy on loopback, systemd, Stalwart, SES, the bucket), what a deploy does, what to watch
     and which tool answers which question, one table of everything kept (machine, memory, bucket),
@@ -270,6 +271,13 @@ Read these before doing design work:
     ready, revoked tokens, caches cleared whole, backup pruning, logs counted twice, SSE concurrency,
     idle buckets), a second scope bypass through `rev`, what wasn't fixed (refusals naming another
     tenant, with a proposal), and six decisions for the human (box limits only tighten, local copies).
+  - `design/machine/050.Skills.md`: skills and playbooks: what the host's engineers know how to do, written
+    by operator agents for the next engineer; one Agent Skills SKILL.md per skill in `storage/skills/`
+    (name, description, title, kind skill or playbook, 1 to 8 free-named roles, a markdown body up to
+    64 KiB); `skill_list`, `skill_search` (every word, prefix matches, names over bodies), `skill_get`
+    (with its change log history), `skill_put` (if_etag, revisions), `skill_delete`; focused operators
+    read but can't write; the panel's Skills view searches and reads by role, drawing markdown as
+    text; `limits.skills-bytes`; five decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

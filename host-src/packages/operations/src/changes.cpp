@@ -83,6 +83,12 @@ PathKind classify_path(std::string_view path) {
     k.target = parts[2].substr(0, parts[2].size() - std::string_view(".json").size());
     return k;
   }
+  // Skills and playbooks (050.Skills.md): skills/$name.md, host-wide.
+  if (parts.size() == 2 && parts[0] == "skills" && parts[1].ends_with(".md")) {
+    k.kind = "skill";
+    k.target = parts[1].substr(0, parts[1].size() - std::string_view(".md").size());
+    return k;
+  }
   if (parts.size() == 4 && parts[0] == "objects" && parts[2] == "attachments") {
     k.kind = "attachment";
     k.tenant = parts[1];
@@ -103,6 +109,7 @@ ChangeLog::ChangeLog(fs::path db_file, fs::path storage_root) : root_(std::move(
       " request_id TEXT NOT NULL, bytes_before INTEGER, bytes_after INTEGER, hash_before TEXT, hash_after TEXT,"
       " before BLOB, after BLOB, detail TEXT NOT NULL);"
       "CREATE INDEX IF NOT EXISTS changes_request ON changes (request_id);"
+      "CREATE INDEX IF NOT EXISTS changes_target ON changes (kind, target, id);"
       "CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL,"
       " operator TEXT NOT NULL, tool TEXT NOT NULL, request_id TEXT NOT NULL, args TEXT NOT NULL,"
       " failed INTEGER NOT NULL);");
@@ -197,7 +204,7 @@ void ChangeLog::record(const wal::Bundle& bundle, const std::string& actor, cons
         existed = fs::exists(root_ / change.path, ec);
       }
       bool texts = k.kind == "content" || k.kind == "partial" || k.kind == "template" || k.kind == "schema" ||
-                   k.kind == "flag" || k.kind == "control";
+                   k.kind == "flag" || k.kind == "control" || k.kind == "skill";
       std::string action = del ? "delete" : existed ? "write" : "create";
       insert(now_ms, k.kind, action, k.tenant, k.target, actor, request_id, before, after, texts, detail);
     }
@@ -288,6 +295,15 @@ bj::array ChangeLog::list(const std::string& kind, const std::string& tenant, in
                            " FROM changes WHERE (? = '' OR kind = ?) AND (? = '' OR tenant = ?) AND (? <= 0 OR id < ?)"
                            " ORDER BY id DESC LIMIT ?");
   s.bind(1, kind).bind(2, kind).bind(3, tenant).bind(4, tenant).bind(5, before_id).bind(6, before_id).bind(7, limit);
+  bj::array out;
+  while (s.step()) out.push_back(row_of(s, false));
+  return out;
+}
+
+bj::array ChangeLog::history(const std::string& kind, const std::string& target, int64_t limit) {
+  std::lock_guard lock(mu_);
+  sqlite::Stmt s(*db_, std::string("SELECT ") + kColumns + " FROM changes WHERE kind = ? AND target = ? ORDER BY id DESC LIMIT ?");
+  s.bind(1, kind).bind(2, target).bind(3, limit);
   bj::array out;
   while (s.step()) out.push_back(row_of(s, false));
   return out;

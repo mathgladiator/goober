@@ -62,7 +62,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "db_snapshots", "db_unbound",
     "route_try",
     "changeset_show", "changeset_list", "changeset_preview",
-    "heat_study_get", "heat_study_list"};
+    "heat_study_get", "heat_study_list",
+    "skill_list", "skill_search", "skill_get"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -958,7 +959,7 @@ void Host::register_panel_tools() {
        "caused it. Each row's id is the change_id a write answered with. Texts are in change_get. Operator calls "
        "that change things outside the log (panel drops, snapshots, source commits) are in operator_actions.",
        object_schema({{"kind", enum_property("Only this kind.", {"deploy", "upload", "content", "partial", "template",
-                                                                 "schema", "flag", "control", "attachment", "other"})},
+                                                                 "schema", "flag", "control", "skill", "attachment", "other"})},
                       {"tenant", string_property("Only this tenant (_host for host-wide content).")},
                       {"before_id", integer_property("Rows older than this id, for the next page.")},
                       {"limit", integer_property("At most this many: default 50, at most 500.")}},

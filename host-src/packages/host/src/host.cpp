@@ -218,6 +218,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                              (rec.torn_tail ? ", torn tail dropped" : ""));
   }
   content_ = std::make_unique<content::ContentStore>(*wal_);
+  load_skills();
   site_ = std::make_unique<site::Site>(*content_);
   // The id service (038 § 2). Its first start reads the highest id already stored and starts
   // past it, so every id kept from before stays one of a kind. It never falls back: without
@@ -301,7 +302,8 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "from there (source_create, source_checkout, source_commit, source_deploy), or deploy WASM boxes directly "
       "(version_upload). Query tenant databases (db_list, db_query), read logs, and check backups (backup_status). "
       "See traffic, heat, and data flow (traffic, hot_boxes, box_graph), and what changed and who changed it "
-      "(changes, change_get, operator_actions). "
+      "(changes, change_get, operator_actions). New here? skill_list {role} and skill_search show what the team "
+      "wrote down; when you learn how to do something, write it for the next engineer with skill_put. "
       "Terms every tool uses: a read tool changes nothing and never waits; a changing tool acts at once, unless "
       "approvals are on for you (a person turns them on in the panel), when it answers pending_approval and waits "
       "for a person (approval_status follows it). A changing tool that writes the change log answers change_id (or "
@@ -351,6 +353,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_approval_tools();
   register_heat_study_tools();
   register_mcp_queue_tools();
+  register_skill_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "

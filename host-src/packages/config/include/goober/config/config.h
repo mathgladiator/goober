@@ -159,6 +159,9 @@ struct HostConfig {
     // Heat study reports (design/machine/048.HeatStudy.md), kept 30 days; past this, the oldest
     // finished report goes first.
     int64_t studies_bytes = int64_t(64) << 20;
+    // Skills and playbooks (design/machine/050.Skills.md), kept until an operator deletes one;
+    // past this, skill_put refuses what would grow them.
+    int64_t skills_bytes = int64_t(16) << 20;
   } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.

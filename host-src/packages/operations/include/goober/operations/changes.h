@@ -59,6 +59,8 @@ class ChangeLog {
   // Newest first, without texts: [{id, at_ms, kind, action, tenant, target, actor, request_id,
   // bytes_before, bytes_after, hash_before, hash_after, has_text, detail}].
   bj::array list(const std::string& kind, const std::string& tenant, int64_t before_id, int64_t limit);
+  // One thing's rows (a kind and its target, like a skill's name), newest first, as list has them.
+  bj::array history(const std::string& kind, const std::string& target, int64_t limit);
   // One row, with "before" and "after" when kept.
   std::optional<bj::object> get(int64_t id);
   // The newest change's id, or 0: a tool call's changes are those after it, with its request id.

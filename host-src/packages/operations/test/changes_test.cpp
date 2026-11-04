@@ -49,7 +49,26 @@ TEST(ClassifyPath, EachWriterIsNamed) {
   auto a = operations::classify_path("objects/acme/attachments/77");
   EXPECT_EQ(a.kind, "attachment");
   EXPECT_EQ(a.target, "77");
+  auto skill = operations::classify_path("skills/deploy-a-box.md");
+  EXPECT_EQ(skill.kind, "skill");
+  EXPECT_EQ(skill.target, "deploy-a-box");
+  EXPECT_EQ(skill.tenant, "");
   EXPECT_EQ(operations::classify_path("keys/x").kind, "other");
+}
+
+TEST_F(ChangesTest, OneThingsHistoryIsItsOwnRows) {
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "skills/deploy.md", "one\n"}}));
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "skills/other.md", "x\n"}}));
+  ASSERT_TRUE(commit({{FileChange::Kind::kWrite, "skills/deploy.md", "two\n"}}));
+  auto rows = log->history("skill", "deploy", 10);
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_EQ(rows[0].at("action"), "write");
+  EXPECT_EQ(rows[1].at("action"), "create");
+  EXPECT_EQ(log->history("skill", "deploy", 1).size(), 1u);
+  auto one = log->get(rows[0].at("id").as_int64());
+  ASSERT_TRUE(one);
+  EXPECT_EQ(one->at("before"), "one\n");
+  EXPECT_EQ(one->at("after"), "two\n");
 }
 
 TEST_F(ChangesTest, ContentKeepsBeforeAndAfterWithWhoDidIt) {

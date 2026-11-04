@@ -1090,7 +1090,7 @@ const views = {
       ];
     }
     const c = await api('changes', { kind, tenant, before_id: before, limit: 100 });
-    const kinds = ['deploy', 'upload', 'content', 'partial', 'template', 'schema', 'flag', 'control', 'attachment', 'other'];
+    const kinds = ['deploy', 'upload', 'content', 'partial', 'template', 'schema', 'flag', 'control', 'skill', 'attachment', 'other'];
     return [
       h('div', { class: 'bar' }, h('h1', {}, 'Change log'), tabs,
         h('label', {}, 'Kind '), h('select', { onchange: (e) => go('kind', e.target.value) }, h('option', { value: '' }, 'all'),
@@ -1654,7 +1654,142 @@ const views = {
     }
     return [h('h1', {}, 'Database'), h('div', { class: 'cols' }, side, h('div', {}, right.length ? right : h('p', { class: 'muted' }, 'Pick a table.')))];
   },
+
+  // Skills and playbooks (050 § 6): search and read what the host's engineers wrote down, by role.
+  // Look-only: operators write them with skill_put and skill_delete.
+  async skills(params) {
+    const q = params.get('q') || '', role = params.get('role') || '', kind = params.get('kind') || '';
+    const go = (k, x) => { if (x) params.set(k, x); else params.delete(k); location.hash = '#/skills?' + params; };
+    const filter = {};
+    if (role) filter.role = role;
+    if (kind) filter.kind = kind;
+    const [all, found] = await Promise.all([api('skill_list', {}),
+      q.trim() ? api('skill_search', { query: q, limit: 50, ...filter }) : api('skill_list', filter)]);
+    const input = h('input', { type: 'search', value: q, size: 40, placeholder: 'Find a skill, like "restore a database"' });
+    const form = h('form', { class: 'bar', onsubmit: (e) => { e.preventDefault(); go('q', input.value.trim()); } },
+      input, h('button', {}, 'Search'), q ? h('a', { href: '#/skills?' + new URLSearchParams(filter) }, 'clear') : null);
+    const chip = (r) => h('a', { href: '#', class: 'pill' + (r === role ? ' deploy' : ''),
+      onclick: (e) => { e.preventDefault(); go('role', r === role ? '' : r); } }, r);
+    const rows = found.skills;
+    return [
+      h('h1', {}, 'Skills and playbooks'),
+      h('p', { class: 'muted small' }, 'What the host\'s engineers know how to do, written down so the next one starts from it. ' +
+        'A skill is how to do one thing; a playbook is what to do when something happens. Agents write them with ' +
+        'skill_put; a new engineer reads theirs with skill_list {role}.'),
+      form,
+      h('div', { class: 'bar' }, h('label', {}, 'Kind '), segmented(['all', 'skill', 'playbook'], kind || 'all', (x) => go('kind', x === 'all' ? '' : x))),
+      all.roles.length ? h('div', { class: 'bar' }, h('label', {}, 'Roles '),
+        all.roles.map((r) => h('span', { title: r.skills + ' skills' }, chip(r.role), ' '))) : null,
+      wideCard(q ? `${rows.length} found for “${clip(q, 60)}”` : `${rows.length} of ${all.count}`, rows.length ? table([
+        { label: 'Skill', get: (r) => h('div', {}, h('b', {}, r.title), ' ', h('span', { class: 'mono muted' }, r.name),
+          r.snippet ? h('div', { class: 'muted small' }, r.snippet) : h('div', { class: 'muted small' }, r.description)) },
+        { label: 'Kind', get: (r) => h('span', { class: 'pill' + (r.kind === 'playbook' ? ' schema' : '') }, r.kind) },
+        { label: 'Roles', get: (r) => r.roles.join(', '), cls: () => 'muted' },
+        { label: 'Rev', num: true, get: (r) => String(r.revision) },
+        { label: 'Updated', get: (r) => fmt.ago(r.updated_ms) + ' · ' + r.updated_by, cls: () => 'muted small' },
+      ], rows, (r) => { location.hash = '#/skill/' + encodeURIComponent(r.name); })
+        : h('p', { class: 'muted' }, all.count ? 'Nothing matches.' : 'No skills yet: an operator agent writes them with skill_put.')),
+    ];
+  },
+
+  async skill(params, name) {
+    const r = await api('skill_get', { name });
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, r.title), h('span', { class: 'pill' + (r.kind === 'playbook' ? ' schema' : '') }, r.kind),
+        h('a', { href: '#/skills' }, '← every skill')),
+      h('p', {}, r.description),
+      h('p', { class: 'muted small' }, h('span', { class: 'mono' }, r.name), ' · for ',
+        r.roles.map((x, i) => [i ? ', ' : '', h('a', { href: '#/skills?role=' + encodeURIComponent(x) }, x)]),
+        ' · revision ' + r.revision + ', ' + fmt.time(r.updated_ms) + ' by ' + r.updated_by +
+        (r.revision > 1 ? '; first written ' + fmt.time(r.created_ms) + ' by ' + r.created_by : '')),
+      wideCard('', h('div', { class: 'prose' }, markdownView(r.body))),
+      wideCard('History', (r.history || []).length ? table([
+        { label: 'Change', get: (c) => '#' + c.id, cls: () => 'mono' },
+        { label: 'What', get: (c) => c.action },
+        { label: 'When', get: (c) => fmt.time(c.at_ms), cls: () => 'muted' },
+        { label: 'By', get: (c) => c.actor, cls: () => 'muted' },
+      ], r.history, (c) => { location.hash = '#/change/' + c.id; }) : h('p', { class: 'muted' }, 'No changes kept.')),
+    ];
+  },
 };
+
+// A skill's markdown as elements, every piece of it placed as text: headings, paragraphs, lists,
+// quotes, fenced code, tables, rules, and inline code, bold, emphasis, and http(s) links.
+function markdownView(text) {
+  const out = [];
+  const lines = String(text || '').split('\n');
+  let para = [], list = null;
+  const flush = () => {
+    if (para.length) out.push(h('p', {}, inlineView(para.join(' '))));
+    para = [];
+    if (list) out.push(list);
+    list = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m;
+    if (/^\s*```/.test(line)) {
+      flush();
+      const code = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
+      out.push(h('pre', { class: 'json' }, code.join('\n')));
+    } else if ((m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
+      flush();
+      out.push(h('h' + Math.min(6, m[1].length + 1), {}, inlineView(m[2])));
+    } else if (/^\s*([-*_])\s*\1\s*\1[\s\-*_]*$/.test(line)) {
+      flush();
+      out.push(h('hr', {}));
+    } else if ((m = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(line))) {
+      if (para.length) { out.push(h('p', {}, inlineView(para.join(' ')))); para = []; }
+      const tag = /\d/.test(m[1]) ? 'ol' : 'ul';
+      if (!list || list.tagName.toLowerCase() !== tag) { if (list) out.push(list); list = h(tag, {}); }
+      const task = /^\[([ xX])\]\s+(.*)$/.exec(m[2]);
+      list.appendChild(h('li', {}, task ? [h('input', { type: 'checkbox', checked: task[1] !== ' ', disabled: true }), ' ', inlineView(task[2])]
+        : inlineView(m[2])));
+    } else if (/^\s*>/.test(line)) {
+      flush();
+      const quote = [line.replace(/^\s*>\s?/, '')];
+      while (i + 1 < lines.length && /^\s*>/.test(lines[i + 1])) quote.push(lines[++i].replace(/^\s*>\s?/, ''));
+      out.push(h('blockquote', {}, markdownView(quote.join('\n'))));
+    } else if (/^\s*\|.*\|\s*$/.test(line)) {
+      flush();
+      const rows = [line];
+      while (i + 1 < lines.length && /^\s*\|.*\|\s*$/.test(lines[i + 1])) rows.push(lines[++i]);
+      const cells = (l) => l.trim().slice(1, -1).split('|').map((c) => c.trim());
+      const body = rows.filter((l, k) => !(k === 1 && /^[\s|:-]+$/.test(l)));
+      const [head, ...rest] = body.map(cells);
+      out.push(h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, head.map((c) => h('th', {}, inlineView(c))))),
+        h('tbody', {}, rest.map((r) => h('tr', {}, r.map((c) => h('td', {}, inlineView(c)))))))));
+    } else if (!line.trim()) {
+      flush();
+    } else if (list && /^\s+\S/.test(line)) {
+      const last = list.lastChild;
+      if (last) append(last, [' ', inlineView(line.trim())]);
+    } else {
+      if (list) { out.push(list); list = null; }
+      para.push(line.trim());
+    }
+  }
+  flush();
+  return out;
+}
+
+function inlineView(text) {
+  const out = [];
+  const re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)\s]+)\)|(?:^|(?<=[\s(]))[*_]([^*_\s][^*_]*)[*_]/g;
+  let at = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > at) out.push(text.slice(at, m.index));
+    if (m[1] !== undefined) out.push(h('code', {}, m[1]));
+    else if (m[2] !== undefined) out.push(h('strong', {}, m[2]));
+    else if (m[3] !== undefined) {
+      out.push(/^https?:/i.test(m[4]) ? h('a', { href: m[4], rel: 'noopener noreferrer', target: '_blank' }, m[3]) : m[3]);
+    } else out.push(h('em', {}, m[5]));
+    at = re.lastIndex;
+  }
+  if (at < text.length) out.push(text.slice(at));
+  return out;
+}
 
 // Whether the signed-in person may change things the panel lets a person change (028 § 2).
 function mayChange() {
@@ -2204,11 +2339,11 @@ async function render(quiet) {
   const params = new URLSearchParams(query || '');
   const [view, arg] = route.split('/').map(decodeURIComponent);
   const name = view || 'overview';
-  const needsArg = ['box', 'change', 'project', 'job'].includes(name);
+  const needsArg = ['box', 'change', 'project', 'job', 'skill'].includes(name);
   const fn = Object.hasOwn(views, name) && (!needsArg || arg) ? views[name] : null;
   for (const a of document.querySelectorAll('#nav a')) {
     const v = a.getAttribute('data-view');
-    a.classList.toggle('active', v === name || (v === 'boxes' && name === 'box') || (v === 'changes' && name === 'change') ||
+    a.classList.toggle('active', v === name || (v === 'boxes' && name === 'box') || (v === 'changes' && name === 'change') || (v === 'skills' && name === 'skill') ||
       (v === 'source' && (name === 'project' || name === 'job')));
   }
   const seq = ++renderSeq;

@@ -88,6 +88,12 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   ASSERT_TRUE(studies) << err;
   EXPECT_EQ(studies->disk.studies_bytes, 2097152);
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"studies-bytes":1000}})", "/", &err));
+  // Skills (050): 16 MiB unless set, at least 1 MiB.
+  EXPECT_EQ(plain->disk.skills_bytes, int64_t(16) << 20);
+  auto skills = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"skills-bytes":4194304}})", "/", &err);
+  ASSERT_TRUE(skills) << err;
+  EXPECT_EQ(skills->disk.skills_bytes, 4194304);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"skills-bytes":1000}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

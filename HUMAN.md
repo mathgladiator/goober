@@ -490,6 +490,18 @@ rate or concurrency limits, or when the site feels slow:
 To end a study early, `heat_study_stop {id}`; what it gathered stays. A restart ends a running
 study too, keeping what it had saved (at most a minute old).
 
+## What does the team know? (skills)
+
+Grok's engineers write down what they learn as skills (how to do one thing) and playbooks (what
+to do when something happens), each for one or more roles (`design/machine/050.Skills.md`).
+
+- **Read them.** Open the panel's **Skills** view: search, or click a role. Each skill shows who
+  wrote it, its revision, and every change.
+- **Ask for one.** Tell Grok "write a skill for box engineers on how you deploy", and it saves it
+  with `skill_put`. A new agent starts with `skill_list {role: "box-engineer"}`.
+- **A bad one.** Have Grok fix it with `skill_put`, or remove it with `skill_delete`; the change
+  log keeps the old text either way (the panel's **Changes** view, kind `skill`).
+
 ## Someone asks to be deleted
 
 People can delete their own account on the site's account page (/identity/account). If someone
