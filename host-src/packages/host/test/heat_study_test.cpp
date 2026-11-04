@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 
+#include "goober/operations/heat.h"
 #include "goober/base/encoding.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
@@ -186,6 +187,32 @@ TEST_F(HeatStudyHostTest, RequestsAreKeyedByEndpointAndGetSuggestions) {
   EXPECT_EQ(suggest.at("control_set").at("domain").as_string(), "acme.example.com");
   EXPECT_EQ(suggest.at("control_set").at("set").at("rate").at("by").as_string(), "client");
   EXPECT_TRUE(suggest.at("control_set").at("set").as_object().contains("timeout-ms"));
+  // A suggestion is control_set's own arguments: sent as it is, it's taken, for a route and for
+  // one MCP tool alike.
+  {
+    auto set = op("control_set", suggest.at("control_set").as_object());
+    EXPECT_FALSE(set.at("isError").as_bool()) << set.at("text");
+    operations::SuggestInput in;
+    in.domain = "acme.example.com";
+    in.api = "mcp";
+    in.endpoint = "search";
+    in.study_id = 1;
+    in.requests = 100;
+    in.clients = 3;
+    in.p99_client_minute = 30;
+    in.peak_minute = 40;
+    in.peak_concurrent = 2;
+    in.peak_client_concurrent = 1;
+    in.max_body_bytes = 500;
+    auto tool = operations::suggest_controls(in);
+    ASSERT_TRUE(tool.contains("control_set")) << json::dump(tool);
+    auto set_tool = op("control_set", tool.at("control_set").as_object());
+    EXPECT_FALSE(set_tool.at("isError").as_bool()) << set_tool.at("text");
+    for (const char* id : {"get_items_id", "tool_search"}) {
+      auto rm = op("control_remove", {{"domain", "acme.example.com"}, {"id", id}, {"why", "test"}});
+      EXPECT_FALSE(rm.at("isError").as_bool()) << id << ": " << rm.at("text");
+    }
+  }
 
   // The host refusing before the box ran is still the route's.
   const auto* members = endpoint(rep, "GET /members");

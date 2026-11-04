@@ -154,9 +154,12 @@ bj::object suggest_controls(const SuggestInput& in) {
     return bj::object{{"none", "only " + count_of(in.requests, "request", "requests") +
                                    ": too few to suggest from; study longer, or at a busier time"}};
   }
-  // One MCP tool is matched as "TOOL /<name>" on api mcp (047).
-  std::string match = in.api == "mcp" ? "TOOL /" + in.endpoint : in.endpoint;
-  bj::object args{{"domain", in.domain}, {"api", in.api}, {"endpoint", bj::object{{"id", override_id(match)}, {"match", match}}}};
+  // One MCP tool is matched as "TOOL /<name>", which names no api: it meets only /mcp's tool calls (047 § 13).
+  bool tool = in.api == "mcp";
+  std::string match = tool ? "TOOL /" + in.endpoint : in.endpoint;
+  bj::object args{{"domain", in.domain}};
+  if (!tool) args["api"] = in.api;
+  args["endpoint"] = bj::object{{"id", override_id(match)}, {"match", match}};
   bj::object set;
   bj::object reasons;
   // A per-client rate protects against one client; when the endpoint carries much of the

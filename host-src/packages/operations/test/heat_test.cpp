@@ -319,7 +319,7 @@ TEST(HeatStudy, SuggestionFormulas) {
     // One MCP tool, matched as "TOOL /<name>" (047): rate and concurrent, no timeout.
     auto tool = suggest_controls(in);
     ASSERT_TRUE(tool.contains("control_set")) << goober::json::dump(tool);
-    EXPECT_EQ(tool.at("control_set").at("api").as_string(), "mcp");
+    EXPECT_FALSE(tool.at("control_set").as_object().contains("api"));  // TOOL takes none (047 § 13)
     EXPECT_EQ(tool.at("control_set").at("endpoint").at("match").as_string(), "TOOL /search");
     EXPECT_EQ(tool.at("control_set").at("endpoint").at("id").as_string(), "tool_search");
     EXPECT_TRUE(tool.at("control_set").at("set").as_object().contains("rate"));
