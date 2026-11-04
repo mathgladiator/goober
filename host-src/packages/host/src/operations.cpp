@@ -113,7 +113,7 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
   if (operator_name.empty()) {
     // Wrong tokens are slowed per address; right ones aren't counted at all.
     if (int64_t wait = limiter_.take("operator-auth", rate_key(client_address(req)), RateRule{10, 5}, base::now_unix_ms())) {
-      auto res = json_response(429, R"({"error":"too many requests without a valid token"})");
+      auto res = json_response(429, R"({"error":"rate limit reached"})");
       res.headers.emplace_back("retry-after", std::to_string(wait));
       return finish(std::move(res), R"({"why":"rate limited","bucket":"operator-auth"})");
     }
@@ -994,8 +994,8 @@ void Host::register_tools() {
 
   mcp_->add_tool({"version_get",
                   "Read tool. One stored version's manifest (live, dark, or old): {box, version, manifest, "
-                  "module_sha256, module_bytes}. The whole manifest, with the tools, timers, mail routes, jobs, data "
-                  "grants, and flags that box_list doesn't show. module_sha256 is the hex SHA-256 of the stored "
+                  "module_sha256, module_bytes, limits?}. The whole manifest, with the tools, timers, mail routes, jobs, data "
+                  "grants, and flags that box_list doesn't show; limits gathers each route's own limits ({route, what, id, limits}), which the host enforces per tenant and an operator's endpoint override beats. module_sha256 is the hex SHA-256 of the stored "
                   "binary module (a wat upload is stored compiled to binary): compare it with the sha256 of the "
                   ".wasm you reviewed to know these are the same bytes.",
                   object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
@@ -1019,11 +1019,16 @@ void Host::register_tools() {
                     }
                     std::string err;
                     auto v = json::parse(files->manifest_text, &err);
-                    return ToolResult::ok(bj::object{{"box", *box},
-                                                     {"version", *version},
-                                                     {"manifest", v ? *v : bj::value(files->manifest_text)},
-                                                     {"module_sha256", base::sha256_hex(files->wasm)},
-                                                     {"module_bytes", files->wasm.size()}});
+                    bj::object out{{"box", *box},
+                                   {"version", *version},
+                                   {"manifest", v ? *v : bj::value(files->manifest_text)},
+                                   {"module_sha256", base::sha256_hex(files->wasm)},
+                                   {"module_bytes", files->wasm.size()}};
+                    // Each route's own limits, gathered (047 § 13): what the host enforces on it.
+                    if (auto m = manifest::parse_manifest(files->manifest_text, &err)) {
+                      if (auto limits = route_limits_json(*m); !limits.empty()) out["limits"] = std::move(limits);
+                    }
+                    return ToolResult::ok(std::move(out));
                   }});
 
   mcp_->add_tool(

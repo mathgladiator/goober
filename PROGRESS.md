@@ -66,15 +66,15 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 099 The system | partial | Plain HTTP behind Caddy, on loopback only (043); systemd units from setup; Stalwart for mail in (024), Amazon SES for mail out (018); backups to S3 in place of Litestream (019). The whole stack is 046 § 1. | NATS, Caddy's on-demand TLS ask (certificates come from the Caddyfile's site lines), Stalwart for mail out. |
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
-| 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
+| 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. A route's `limits` (fuel, rate, concurrent, body-max-bytes), which 150 lacks (047 § 13). | Most fields; deploy-time defaults and hash-named versions. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports, which a person may change from the panel at any time (047; past 300's "tune within those bounds": 046 § 11); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
 | 320 Working set | none | | Drafts for editors and agents. |
 | 325 Managing keys | none | | |
 | 330 Stability | none | | Capabilities, providers, pins, replay. |
-| 390 Quotas | none | Not quotas, but beside them: per-domain controls (047) are operator-set rate, concurrency, body, timeout, and closed limits per domain, API, and endpoint, with refusals clear and counted. | Users, rows, bytes, and uploads per tenant; red lines; requests per day. |
+| 390 Quotas | none | Not quotas, but beside them: per-domain controls (047) are operator-set rate, concurrency, body, timeout, fuel, and closed limits per domain, API, box route (its manifest's `limits`), and endpoint, with refusals clear and counted. | Users, rows, bytes, and uploads per tenant; red lines; requests per day. |
 | 400 Cluster | none | Single machine only. | |
 | 410 API | partial | About 180 MCP tools: versions, content, pages, templates, attachments, schemas, databases, identity and clients (and minted agent tokens), timers, keys, the outbox, the web and crawls, backups, source projects, the Rust binding, and the site and box guides. | HTTP twins under `/goober-operations/`, host roles below owner, most catalog entries. |
 | 420 Migration | mostly | `follows` steps classified by kind; expansions, emulated type changes, and indexing in place; contractions as tombstones after a person's approval; upgrade boxes with rows handlers, dry run on copies, snapshot first (041). | `writes` and `reads` handlers (no named writes yet), so a forced upgrade waits for older boxes to go; emulated reads aren't converted for older boxes; tombstoned columns aren't removed. |
@@ -985,7 +985,33 @@ monitored as well to determine effectiveness." (`design/machine/047.Controls.md`
       their Prometheus lines; tests.
 - [x] The panel's **Controls** view; the change log's `control` kind.
 - [ ] The view checked in a browser.
-- [ ] Requests per day, alerts on verdicts, and the other decisions in 047 § 12.
+- [ ] Requests per day, and the other open decisions in 047 § 12 (alerts on verdicts: the
+      human, 2026-11-03, "don't need it yet").
+
+### Phase 52: box limits per route, and operators override at any time (2026-11-03)
+The human: "(4) I just want rate limit reached." "(5) don't need it yet." "(7) operators can
+override at any time since a control may be bum." "Also, manifests can set an override per
+operation as well so each box has fuel/limits that are enforced by the host."
+(`design/machine/047.Controls.md` § 3, § 9, § 13):
+- [x] Every rate and concurrency refusal says only "rate limit reached" (page and JSON, no control
+      id, level, or bucket), the host-wide limiter, anonymous writes, subscriptions, and the
+      operator endpoint's bad-token budget too; 413 and closed as they were; tests.
+- [x] A route's `limits` in the manifest (`fuel` on every route; `rate`, `concurrent`,
+      `body-max-bytes` where a client calls), checked at upload by the manifest package and by
+      the host against its own limits; tests.
+- [x] A fifth level, `box`, between an API and an override: compiled per live set, enforced per
+      tenant per route, monitored as `box:<box>/<route>`; `fuel` as a control property through
+      the call's fuel (the trap path); tool calls checked in `/mcp` with `TOOL` overrides; tests.
+- [x] `version_get`'s `limits`, `version_diff`'s per-property changes, `control_list` and
+      `control_report` showing the box's limits from its manifest, box_guide's "Limits per
+      route"; tests.
+- [x] The panel's Controls view edits for `host:owner` and `host:operator`: mode toggle, edit,
+      remove, add override, override a box's limits; `panel.control_set` and
+      `panel.control_remove` audited, in the change log, never held; observers refused; tests.
+- [x] `just products-e2e` and `just terminal-e2e` on a host of its own.
+- [ ] The editing checked in a browser.
+- [ ] Two new decisions (047 § 12, 5 and 6): box limits looser than an API's control, and two
+      body limits.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

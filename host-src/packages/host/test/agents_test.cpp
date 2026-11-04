@@ -247,6 +247,45 @@ TEST_F(AgentsTest, AgentsCallBoxToolsOverMcp) {
   EXPECT_NE(audit->find(R"("agent":true)"), std::string::npos);
 }
 
+// A tool's own limits (047 § 13): enforced per call on /mcp, refused as "rate limit reached"
+// without naming the control, monitored as box:<box>/<tool>, and beaten by a TOOL override.
+TEST_F(AgentsTest, ToolLimitsAreEnforcedAndAnOperatorOverrideBeatsThem) {
+  std::string limited = kManifest;
+  limited.replace(limited.find(R"("requirements":[["owner"]]}},)"), 29,
+                  R"("requirements":[["owner"]],"limits":{"rate":{"per-minute":1,"burst":1}}}},)");
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(limited, kWat, kTypes, &err)) << err;
+  auto add = [&] { return rpc("tools/call", {{"name", "add_order"}, {"arguments", bj::object{{"n", 2}}}}); };
+  EXPECT_FALSE(add().at("result").at("isError").as_bool());
+  auto refused = add();
+  EXPECT_TRUE(refused.at("result").at("isError").as_bool());
+  std::string text = json::dump(refused);
+  EXPECT_NE(text.find("rate limit reached"), std::string::npos) << text;
+  EXPECT_EQ(text.find("box:orders"), std::string::npos) << text;  // never which control
+  EXPECT_EQ(text.find("add_order\\/"), std::string::npos) << text;
+
+  auto list = host->operator_tools().call("control_list", {{"domain", "localhost"}});
+  ASSERT_TRUE(list && !list->is_error) << json::dump(list->value);
+  std::string listed = json::dump(list->value);
+  EXPECT_NE(listed.find(R"("id":"box:orders/add_order")"), std::string::npos) << listed;
+  EXPECT_NE(listed.find(R"("from":"manifest")"), std::string::npos) << listed;
+  auto report = host->operator_tools().call("control_report", {{"domain", "localhost"}, {"id", "box:orders/add_order"}, {"window", "1h"}});
+  ASSERT_TRUE(report && !report->is_error) << json::dump(report->value);
+  EXPECT_EQ(report->value.at("controls").at(0).at("totals").at("rate"), 1);
+  EXPECT_EQ(report->value.at("controls").at(0).at("level"), "box");
+
+  // The operator beats the box's bum limit with a TOOL override.
+  auto over = host->operator_tools().call(
+      "control_set", {{"domain", "localhost"},
+                      {"endpoint", bj::object{{"id", "orders_ok"}, {"match", "TOOL /add_order"}}},
+                      {"set", bj::object{{"rate", bj::object{{"per-minute", 600}}}}},
+                      {"mode", "enforce"},
+                      {"why", "the box's limit is too tight"}});
+  ASSERT_TRUE(over && !over->is_error) << json::dump(over->value);
+  EXPECT_FALSE(add().at("result").at("isError").as_bool());
+  EXPECT_FALSE(add().at("result").at("isError").as_bool());
+}
+
 TEST_F(AgentsTest, UploadsCheckTheTypesDocument) {
   std::string err;
   EXPECT_FALSE(host->boxes().upload(kManifest, kWat, &err));

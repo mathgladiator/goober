@@ -109,3 +109,28 @@ TEST(Review, TheSameVersionChangesNothing) {
   EXPECT_TRUE(r->at("changes").as_array().empty()) << json::dump(r->at("changes"));
   EXPECT_FALSE(boxes::review(&a, version("x", "{not json"), &err));
 }
+
+// A route's own limits (047 § 13) in a diff: one change per property, raised or removed widens,
+// lowered or added narrows.
+TEST(Review, LimitsChangesAreListedAndClassified) {
+  std::string err;
+  auto a = version("v1", R"({"box":"shop","domains":["*"],"routes":{"http":{"/cart":{"post":{"name":"add","public":true,
+    "limits":{"rate":{"per-minute":30},"fuel":5000000,"concurrent":{"max":4}}}}}}})");
+  auto b = version("v2", R"({"box":"shop","domains":["*"],"routes":{"http":{"/cart":{"post":{"name":"add","public":true,
+    "limits":{"rate":{"per-minute":120},"fuel":1000000,"body-max-bytes":4096}}}}}})");
+  auto r = boxes::review(&a, b, &err);
+  ASSERT_TRUE(r) << err;
+  std::map<std::string, std::string> cls;
+  for (const auto& c : r->at("changes").as_array()) {
+    const auto& o = c.as_object();
+    if (o.contains("field")) cls[std::string(o.at("field").as_string())] = std::string(o.at("class").as_string());
+  }
+  EXPECT_EQ(cls["limits.rate"], "widens");
+  EXPECT_EQ(cls["limits.fuel"], "narrows");
+  EXPECT_EQ(cls["limits.concurrent"], "widens");
+  EXPECT_EQ(cls["limits.body-max-bytes"], "narrows");
+  EXPECT_TRUE(has(r->at("widens").as_array(), "route POST /cart no longer limits its concurrent")) << json::dump(r->at("widens"));
+  EXPECT_TRUE(has(r->at("widens").as_array(),
+                  "route POST /cart's rate limit is now {\"per-minute\":120} (was {\"per-minute\":30})"))
+      << json::dump(r->at("widens"));
+}

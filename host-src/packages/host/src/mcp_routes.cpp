@@ -114,9 +114,22 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
                          {"params", bj::object{}},   {"query", bj::object{}}, {"headers", bj::object{}},
                          {"body", json::dump(input)}, {"domain", domain},     {"tenant", tenant},
                          {"user", user_json(who)}};
+          // The tool's own limits and TOOL overrides (047 § 13): refused calls say only "rate limit reached".
+          auto gate = control_tool(ref, domain, tenant, *who, req, int64_t(audit_input.size()));
+          if (gate.refused) {
+            audit_status = gate.status;
+            audit_result = gate.message;
+            return mcp::ToolResult::fail(gate.message);
+          }
           CallOptions options;
           options.control_timeout_ms = control_timeout(req);  // a control on /mcp (047 § 3)
+          options.control_fuel = gate.fuel;
+          int64_t called_us = base::monotonic_us();
           auto call = call_box(ref, doc, tenant, request_id, who, options);
+          if (gate.ticket) {
+            bool ok = call.result.outcome == runtime::wasm::CallResult::Outcome::kOk;
+            gate.ticket->done(ok ? call.result.status : 500, base::monotonic_us() - called_us, base::now_unix_ms());
+          }
           const auto& r = call.result;
           audit_status = r.outcome == runtime::wasm::CallResult::Outcome::kOk ? r.status : 500;
           audit_result = r.body;

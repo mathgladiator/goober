@@ -62,6 +62,56 @@ bool is_header_name(std::string_view h) {
   return true;
 }
 
+// A route's "limits" (047 § 13): the keys its protocol takes, each a value (never "off": a box
+// declares limits, it doesn't lift the operator's). Ranges are the host's check at upload.
+enum class LimitKeys { kFuel, kStream, kAll };
+bool parse_limits(const bj::object& def, LimitKeys kinds, const std::string& verb, const std::string& where, HttpRoute* route,
+                  std::string* error) {
+  const auto* v = def.if_contains("limits");
+  if (!v) return true;
+  std::string at = where + ".limits";
+  if (!v->is_object() || v->as_object().empty()) {
+    return *error = at + " is an object of fuel" +
+                    std::string(kinds == LimitKeys::kFuel ? "" : kinds == LimitKeys::kStream ? ", rate, and concurrent" : ", rate, concurrent, and body-max-bytes") +
+                    ", like {\"fuel\": 5000000}",
+           false;
+  }
+  for (const auto& kv : v->as_object()) {
+    std::string k(kv.key());
+    bool known = k == "fuel" || k == "rate" || k == "concurrent" || k == "body-max-bytes";
+    if (!known) {
+      if (k == "timeout-ms") return *error = at + ".timeout-ms: a route's timeout is its own timeout-ms, not a limit", false;
+      return *error = at + ": unknown key " + k + " (limits take fuel, rate, concurrent, and body-max-bytes)", false;
+    }
+    if (k != "fuel" && kinds == LimitKeys::kFuel) {
+      return *error = at + "." + k + ": only fuel applies here; rate, concurrent, and body-max-bytes are for http routes "
+                      "and mcp tools, which a client calls",
+             false;
+    }
+    if (k == "body-max-bytes" && (kinds == LimitKeys::kStream || verb == "get" || verb == "delete")) {
+      return *error = at + ".body-max-bytes: a " + (kinds == LimitKeys::kStream ? std::string("subscription") : verb) +
+                      " carries no body",
+             false;
+    }
+    if (kv.value().is_string() && kv.value().as_string() == "off") {
+      return *error = at + "." + k + " can't be \"off\": a box declares limits; lifting one is an operator's override", false;
+    }
+    if (k == "fuel") {
+      const auto& f = kv.value();
+      bool whole = f.is_int64() || (f.is_uint64() && f.as_uint64() <= uint64_t(INT64_MAX));
+      int64_t n = f.is_int64() ? f.as_int64() : whole ? int64_t(f.as_uint64()) : 0;
+      if (!whole || n < 1) return *error = at + ".fuel must be a whole number of at least 1 (only lower than the host's limits.fuel)", false;
+      route->limits.fuel = n;
+    } else if (!kv.value().is_object() && k != "body-max-bytes") {
+      return *error = at + "." + k + " is an object, like " +
+                      (k == "rate" ? "{\"per-minute\": 30}" : "{\"max\": 4, \"per-client\": 1}"),
+             false;
+    }
+  }
+  route->limits.set = v->as_object();
+  return true;
+}
+
 // The request parts of 037: body, max-body-bytes, query, request-headers, and response.
 bool parse_request_parts(const bj::object& def, const std::string& verb, const std::string& where, HttpRoute* route,
                          std::string* error) {
@@ -151,7 +201,7 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
       const auto& def = verb.value().as_object();
       for (const auto& f : def) {
         std::string k(f.key());
-        if (k == "name" || k == "description" || k == "input" || k == "response" || k == "requirements") continue;
+        if (k == "name" || k == "description" || k == "input" || k == "response" || k == "requirements" || k == "limits") continue;
         if (k == "public") return *error = at + ": MCP routes can't be public; an agent always acts for somebody", false;
         if (k == "grantable" || k == "revocable" || k == "queue") {
           m->warnings.push_back(at + "." + k + " is accepted but not implemented in v1");
@@ -194,6 +244,7 @@ bool parse_tools(const bj::value& mcp, std::set<std::string>* names, Manifest* m
       if (!parse_requirements_value(*req, router::RoutePattern{}, &tool.requirements, &why)) {
         return *error = at + ": " + why, false;
       }
+      if (!parse_limits(def, LimitKeys::kAll, "tool", at, &tool, error)) return false;
       m->tools.push_back(std::move(tool));
     }
   }
@@ -304,7 +355,7 @@ bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m
     const auto& def = kv.value().as_object();
     for (const auto& f : def) {
       std::string k(f.key());
-      if (k == "name" || k == "timeout-ms") continue;
+      if (k == "name" || k == "timeout-ms" || k == "limits") continue;
       if (k == "requirements" || k == "public") return *error = where + ": jobs are started by an operator and called only by the host, so they carry no " + k, false;
       return *error = where + ": unknown field \"" + k + "\"", false;
     }
@@ -317,6 +368,7 @@ bool parse_jobs(const bj::value& jobs, std::set<std::string>* names, Manifest* m
     r.timeout_ms = get_int(def, "timeout-ms", &err);
     if (!err.empty()) return *error = where + ": " + err, false;
     if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 30000)) return *error = where + ".timeout-ms must be 1 to 30000", false;
+    if (!parse_limits(def, LimitKeys::kFuel, "job", where, &r, error)) return false;
     m->jobs.push_back(std::move(r));
   }
   return true;
@@ -338,7 +390,7 @@ bool parse_upgrades(const bj::value& upgrades, std::set<std::string>* names, Man
     const auto& def = kv.value().as_object();
     for (const auto& f : def) {
       std::string k(f.key());
-      if (k == "from" || k == "to" || k == "rows" || k == "timeout-ms") continue;
+      if (k == "from" || k == "to" || k == "rows" || k == "timeout-ms" || k == "limits") continue;
       if (k == "writes" || k == "reads") {
         return *error = where + "." + k + ": boxes write and read with SQL, so there are no named writes or reads to "
                         "translate yet; an upgrade runs once no box pinned to from (or older) uses the table "
@@ -363,6 +415,7 @@ bool parse_upgrades(const bj::value& upgrades, std::set<std::string>* names, Man
     r.timeout_ms = get_int(def, "timeout-ms", &err);
     if (!err.empty()) return *error = where + ": " + err, false;
     if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 1000)) return *error = where + ".timeout-ms must be 1 to 1000", false;
+    if (!parse_limits(def, LimitKeys::kFuel, "upgrade", where, &r, error)) return false;
     m->upgrades.push_back(std::move(r));
   }
   return true;
@@ -380,7 +433,7 @@ bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifes
     for (const auto& f : def) {
       std::string k(f.key());
       if (k == "name" || k == "every-ms" || k == "cron" || k == "source" || k == "at-field" || k == "timeout-ms" ||
-          k == "missed") {
+          k == "missed" || k == "limits") {
         continue;
       }
       if (k == "requirements" || k == "public") return *error = where + ": timers are called only by the host, so they carry no " + k, false;
@@ -419,6 +472,7 @@ bool parse_timers(const bj::value& timers, std::set<std::string>* names, Manifes
     if (t.missed.empty()) t.missed = t.every_ms ? "skip" : "once";
     if (t.missed != "once" && t.missed != "skip") return *error = where + ".missed must be once or skip", false;
     if (t.timeout_ms && (*t.timeout_ms < 1 || *t.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    if (!parse_limits(def, LimitKeys::kFuel, "timer", where, &t, error)) return false;
     m->timers.push_back(std::move(t));
   }
   return true;
@@ -438,7 +492,7 @@ bool parse_results(const bj::value& routes, std::set<std::string>* names, Manife
       if (f.key() == "requirements" || f.key() == "public") {
         return *error = where + ": result routes are called only by the host, so they carry no " + std::string(f.key()), false;
       }
-      if (f.key() != "timeout-ms") return *error = where + ": unknown field \"" + std::string(f.key()) + "\"", false;
+      if (f.key() != "timeout-ms" && f.key() != "limits") return *error = where + ": unknown field \"" + std::string(f.key()) + "\"", false;
     }
     if (!names->insert(name).second) return *error = "route name \"" + name + "\" is used twice", false;
     HttpRoute r;
@@ -447,6 +501,7 @@ bool parse_results(const bj::value& routes, std::set<std::string>* names, Manife
     r.timeout_ms = get_int(kv.value().as_object(), "timeout-ms", &err);
     if (!err.empty()) return *error = where + ": " + err, false;
     if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    if (!parse_limits(kv.value().as_object(), LimitKeys::kFuel, "result", where, &r, error)) return false;
     m->results.push_back(std::move(r));
   }
   return true;
@@ -469,7 +524,7 @@ bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manif
     const auto& def = kv.value().as_object();
     for (const auto& f : def) {
       std::string k(f.key());
-      if (k == "name" || k == "timeout-ms") continue;
+      if (k == "name" || k == "timeout-ms" || k == "limits") continue;
       if (k == "requirements" || k == "public") return *error = where + ": identity routes are called only by the host, so they carry no " + k, false;
       return *error = where + ": unknown field \"" + k + "\"", false;
     }
@@ -483,6 +538,7 @@ bool parse_identity(const bj::value& routes, std::set<std::string>* names, Manif
     r.timeout_ms = get_int(def, "timeout-ms", &err);
     if (!err.empty()) return *error = where + ": " + err, false;
     if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    if (!parse_limits(def, LimitKeys::kFuel, "identity", where, &r, error)) return false;
     m->identity.push_back(std::move(r));
   }
   return true;
@@ -515,7 +571,7 @@ bool parse_mail(const bj::value& routes, std::set<std::string>* names, Manifest*
     where += ".receive";
     for (const auto& f : def) {
       std::string k(f.key());
-      if (k == "name" || k == "public" || k == "max-bytes" || k == "attachments" || k == "automatic" || k == "timeout-ms") continue;
+      if (k == "name" || k == "public" || k == "max-bytes" || k == "attachments" || k == "automatic" || k == "timeout-ms" || k == "limits") continue;
       if (k == "requirements") return *error = where + ": senders aren't signed in, so a mail route is public", false;
       return *error = where + ": unknown field \"" + k + "\"", false;
     }
@@ -538,6 +594,7 @@ bool parse_mail(const bj::value& routes, std::set<std::string>* names, Manifest*
     if (*r.max_body_bytes < 1024 || *r.max_body_bytes > kMailMaxBytes) return *error = where + ".max-bytes must be 1024 to 26214400 (25 MiB)", false;
     if (r.mail_attachments < 0 || r.mail_attachments > 100) return *error = where + ".attachments must be 0 to 100", false;
     if (r.timeout_ms && (*r.timeout_ms < 1 || *r.timeout_ms > 10000)) return *error = where + ".timeout-ms must be 1 to 10000", false;
+    if (!parse_limits(def, LimitKeys::kFuel, "receive", where, &r, error)) return false;
     m->mail.push_back(std::move(r));
   }
   return true;
@@ -1239,7 +1296,7 @@ bool parse_internal(const bj::value& routes, std::set<std::string>* names, Manif
       for (const auto& f : def) {
         std::string k(f.key());
         if (k == "name" || k == "callers" || k == "requirements" || k == "body" || k == "query" || k == "response" ||
-            k == "max-body-bytes") {
+            k == "max-body-bytes" || k == "limits") {
           continue;
         }
         if (k == "public") return *error = where + ": nothing outside can reach an internal route, so it isn't public", false;
@@ -1272,6 +1329,7 @@ bool parse_internal(const bj::value& routes, std::set<std::string>* names, Manif
         r.is_public = true;  // callers alone gate it; there is no outside to be public to
       }
       if (!parse_request_parts(def, v, where, &r, error)) return false;
+      if (!parse_limits(def, LimitKeys::kFuel, v, where, &r, error)) return false;
       m->internal.push_back(std::move(r));
     }
   }
@@ -1797,7 +1855,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             if (key == "name" || key == "public" || key == "requirements" || key == "template" || key == "agents" ||
                 key == "body" || key == "max-body-bytes" || key == "query" || key == "request-headers" ||
                 key == "response" || key == "cors" || key == "includes" || key == "cache" || key == "client-ip" ||
-                key == "grantable" || key == "revocable") {
+                key == "grantable" || key == "revocable" || key == "limits") {
               // A subscription answers its own page's EventSource: no body, no template or
               // partials (the events are the box's bytes), and no cross-origin readers.
               if (sse && (key == "body" || key == "max-body-bytes" || key == "template" || key == "includes" ||
@@ -1896,6 +1954,7 @@ std::optional<Manifest> parse_manifest(std::string_view text, std::string* error
             RoleChange& rc = std::string_view(k) == "grantable" ? route.grantable : route.revocable;
             if (!parse_role_change(*g, k, route, where, &rc, &m.warnings, error)) return std::nullopt;
           }
+          if (!parse_limits(def, sse ? LimitKeys::kStream : LimitKeys::kAll, v, where, &route, error)) return std::nullopt;
           m.routes.push_back(std::move(route));
         }
       }

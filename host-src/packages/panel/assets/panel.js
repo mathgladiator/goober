@@ -682,8 +682,10 @@ const views = {
   },
 
   // Per-domain controls (047 § 9): each domain's controls with their effective values and mode,
-  // and for the one picked, what each control did and the verdicts. Look-only: changes go through
-  // control_set and control_remove.
+  // and for the one picked, what each control did and the verdicts. A person with host:owner or
+  // host:operator changes any control here at any time (the human, 2026-11-03: "a control may be
+  // bum"): a mode toggle, edit, remove, and add override, each with a why. Box routes' own limits
+  // come from their manifests: they are beaten by an override, never edited here.
   async controls(params) {
     const all = await api('control_list', {});
     const domains = all.map((d) => d.domain);
@@ -693,15 +695,17 @@ const views = {
     const bar = h('div', { class: 'bar' }, h('h1', {}, 'Controls'), windowPicker(render),
       domains.length ? h('span', {}, h('label', {}, 'Domain '), h('select', { onchange: (ev) => go('domain', ev.target.value) },
         domains.map((d) => h('option', { value: d, selected: d === domain }, d)))) : null);
-    const about = h('p', { class: 'muted small' }, 'Rate limits, concurrency, body size, timeouts, and closing, per domain, per API ' +
-      '(a box, content, mcp, identity), and per endpoint, inside the host-wide per-client limit. An observed control refuses nothing ' +
-      'and counts what it would have refused. Set them with control_set (start in observe), read control_report, then enforce.');
+    const about = h('p', { class: 'muted small' }, 'Rate limits, concurrency, body size, timeouts, fuel, and closing, per domain, per API ' +
+      '(a box, content, mcp, identity), per box route (its manifest\'s limits), and per endpoint, inside the host-wide per-client limit. ' +
+      'An observed control refuses nothing and counts what it would have refused. Refused clients read only "rate limit reached". ' +
+      (mayChange() ? 'Change any control here at any time; each change needs a why and goes in the audit and change logs.'
+        : 'Agents set them with control_set (start in observe); host:owner and host:operator change them here.'));
     if (!domain) return [bar, about, h('p', { class: 'muted' }, 'No domains.')];
     const row = all.find((d) => d.domain === domain) || { controls: [] };
     const report = await api('control_report', { domain, window: state.window });
     const byId = new Map(report.controls.map((c) => [c.id, c]));
     const valueText = (v) => v === null || v === undefined ? '–' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-    const props = ['rate', 'concurrent', 'body-max-bytes', 'timeout-ms', 'closed'];
+    const props = ['rate', 'concurrent', 'body-max-bytes', 'timeout-ms', 'fuel', 'closed'];
     const effectiveTable = (c) => {
       const rows = props.filter((p) => c.effective.enforced[p] || c.effective.observed[p]).map((p) => ({ p, e: c.effective.enforced[p], o: c.effective.observed[p] }));
       return rows.length ? table([
@@ -722,7 +726,12 @@ const views = {
         h('span', { class: 'muted small' }, listed ? listed.level + (listed.last_change ? ' · changed ' + fmt.ago(listed.last_change.at_ms) +
           ' by ' + listed.last_change.by + ': ' + listed.last_change.why : '') : 'removed'),
         listed && listed.in_flight ? h('span', { class: 'muted small' }, ' · ' + listed.in_flight + ' in flight') : null)];
+      if (listed && listed.from === 'manifest') {
+        kids.push(h('p', { class: 'muted small' }, 'From ' + listed.box + '\'s manifest (version ' + String(listed.version || '').slice(0, 12) +
+          '), on ' + listed.what + ': ', h('span', { class: 'mono' }, JSON.stringify(listed.limits)), listed.note ? ' · ' + listed.note : ''));
+      }
       if (listed) kids.push(effectiveTable(listed));
+      if (listed && mayChange()) kids.push(controlActions(domain, listed));
       if (r) {
         const t = r.totals;
         kids.push(h('div', { class: 'stats' }, stat(fmt.n(t.matched), 'matched'), stat(fmt.n(t.refused), 'refused'),
@@ -753,6 +762,7 @@ const views = {
       cards.push(h('p', { class: 'small' }, 'host.json controls.defaults (' + row.host_defaults.mode + '): ',
         h('span', { class: 'mono' }, JSON.stringify(row.host_defaults.set))));
     }
+    if (mayChange()) cards.push(controlEditor(domain, null));
     if (!row.controls.length && !report.controls.length) cards.push(h('p', { class: 'muted' }, 'No controls on ' + domain + '.'));
     const seen = new Set();
     for (const c of row.controls) { seen.add(c.id); cards.push(reportCard(c.id, c)); }
@@ -1617,6 +1627,98 @@ const views = {
     return [h('h1', {}, 'Database'), h('div', { class: 'cols' }, side, h('div', {}, right.length ? right : h('p', { class: 'muted' }, 'Pick a table.')))];
   },
 };
+
+// Whether the signed-in person may change things the panel lets a person change (028 § 2).
+function mayChange() {
+  const roles = (state.me && state.me.roles) || [];
+  return roles.includes('host:owner') || roles.includes('host:operator');
+}
+
+// A route's address as an override's match: "{id : string}" becomes "{id}".
+function matchOf(what) {
+  if (!what) return '';
+  const m = what.replace(/^subscription /, '');
+  if (!/^(TOOL|GET|POST|PUT|PATCH|DELETE) \//.test(m)) return '';
+  return m.replace(/\{\s*(\w+)\s*:[^}]*\}/g, '{$1}');
+}
+
+// One control's actions (047 § 9): switch its mode, edit it, or remove it, each with a why. A box
+// route's own limits can only be beaten, by an override that matches the route.
+function controlActions(domain, c) {
+  const out = h('span', { class: 'muted small' });
+  const holder = h('div', {});
+  const why = h('input', { type: 'text', placeholder: 'Why (required: kept in the audit and change logs)', size: 48 });
+  const send = async (tool, args) => {
+    if (!why.value.trim()) { out.textContent = 'Say why first.'; why.focus(); return; }
+    try {
+      await api(tool, Object.assign({ domain, why: why.value.trim() }, args));
+      render(true);
+    } catch (e) { out.textContent = e.message; }
+  };
+  const target = c.level === 'endpoint' ? { endpoint: { id: c.id } } : c.level === 'api' ? { api: c.id } : {};
+  const open = (editing, prefill) => () => { clear(holder); holder.appendChild(controlEditor(domain, editing, prefill, () => clear(holder))); };
+  if (c.level === 'box') {
+    const match = matchOf(c.what);
+    return h('div', {}, h('div', { class: 'bar' },
+      match ? h('button', { type: 'button', class: 'small', onclick: open(null, { match, set: c.limits }) }, 'Override…') : null,
+      h('span', { class: 'muted small' }, match ? 'An override that matches the route beats the box\'s limits at once.'
+        : 'Enforced at each call; no request gate sees this route, so no override reaches it.')), holder);
+  }
+  if (c.level === 'host') {
+    return h('p', { class: 'muted small' }, 'host.json controls.defaults: change them in host.json, or give the domain its own defaults.');
+  }
+  const other = c.mode === 'enforce' ? 'observe' : 'enforce';
+  return h('div', {}, h('div', { class: 'bar' }, why,
+    h('button', { type: 'button', class: 'small', onclick: () => send('write/control_set', Object.assign({ mode: other }, target)) },
+      other === 'observe' ? 'Switch to observe' : 'Enforce'),
+    h('button', { type: 'button', class: 'small', onclick: open(c, null) }, 'Edit…'),
+    h('button', { type: 'button', class: 'small', onclick: () => send('write/control_remove', { id: c.id }) }, 'Remove'), out), holder);
+}
+
+// The form that adds a control (an override by default) or edits one: match, api, mode, the
+// properties as JSON, and a why. Saving is a person's act, at once.
+function controlEditor(domain, editing, prefill, done) {
+  prefill = prefill || {};
+  const out = h('span', { class: 'muted small' });
+  const kind = h('select', { disabled: !!editing },
+    [['endpoint', 'Endpoint override'], ['api', 'An API'], ['domain', 'The domain\'s defaults']].map(([v, l]) =>
+      h('option', { value: v, selected: v === (editing ? editing.level : 'endpoint') }, l)));
+  const id = h('input', { type: 'text', size: 18, placeholder: 'id, like cart_flood', value: editing && editing.level === 'endpoint' ? editing.id : '', disabled: !!editing });
+  const match = h('input', { type: 'text', size: 28, placeholder: 'POST /cart/{id}, or TOOL /search', value: editing ? editing.match || '' : prefill.match || '' });
+  const apiBox = h('input', { type: 'text', size: 16, placeholder: 'box:shop (optional)', value: editing && editing.level !== 'domain' ? editing.api || '' : '' });
+  const mode = h('select', {}, ['observe', 'enforce'].map((m) => h('option', { value: m, selected: m === (editing ? editing.mode : 'observe') }, m)));
+  const before = editing ? editing.set || {} : {};
+  const set = h('textarea', { rows: 3, spellcheck: 'false' });
+  set.value = JSON.stringify(editing ? before : prefill.set || { rate: { 'per-minute': 60 } });
+  const why = h('input', { type: 'text', size: 48, placeholder: 'Why (required)' });
+  const save = async () => {
+    let props;
+    try { props = JSON.parse(set.value || '{}'); } catch { out.textContent = 'The properties must be JSON, like {"rate": {"per-minute": 60}}.'; return; }
+    if (!why.value.trim()) { out.textContent = 'Say why first.'; why.focus(); return; }
+    // An edit names every property it keeps; one it drops is removed (null).
+    for (const k of Object.keys(before)) if (!(k in props)) props[k] = null;
+    const args = { domain, set: props, mode: mode.value, why: why.value.trim() };
+    const k = kind.value;
+    if (k === 'endpoint') {
+      args.endpoint = { id: editing ? editing.id : id.value.trim() };
+      if (match.value.trim()) args.endpoint.match = match.value.trim();
+      if (apiBox.value.trim()) args.api = apiBox.value.trim();
+    } else if (k === 'api') {
+      args.api = editing ? editing.id : apiBox.value.trim();
+    }
+    try {
+      await api('write/control_set', args);
+      if (done) done();
+      render(true);
+    } catch (e) { out.textContent = e.message; }
+  };
+  return card(editing ? 'Edit ' + editing.id : 'Add a control',
+    h('div', { class: 'bar' }, kind, id, match, apiBox, mode),
+    h('p', { class: 'muted small' }, 'Properties, each replacing that property whole: rate {per-minute, burst, by}, concurrent {max, per-client}, ' +
+      'body-max-bytes, timeout-ms, fuel, closed {status, retry-after-s, message}; "off" lifts one here. Start in observe.'),
+    set, h('div', { class: 'bar' }, why, h('button', { type: 'button', class: 'run', onclick: save }, 'Save'),
+      done ? h('button', { type: 'button', class: 'small', onclick: done }, 'Cancel') : null, out));
+}
 
 // What no box binds, the snapshots, and the drops only a person makes (008 § 11). Each drop
 // asks for the name typed out; the host refuses while a box binds it and snapshots first.

@@ -162,7 +162,8 @@ Read these before doing design work:
     for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the Logs and uploads
     view of log volume, who writes it, and uploads per day (§ 4.7); the Studies view of heat studies
     (heat by endpoint, clients, suggested controls; § 4.8, 048); the Controls view of each domain's
-    controls, their effective values, and what each did (§ 4.9, 047 § 9); the change log from the
+    controls, their effective values, and what each did, where `host:owner` and `host:operator`
+    change any control at any time (§ 4.9, 047 § 9); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
     the operations audit every deploy runs (`goober-host audit`, `audit.quiet`), which offers the panel
     and `www.` redirects (yes, not now, never; Caddy too) and asks for missing settings (postal
@@ -244,9 +245,12 @@ Read these before doing design work:
   - `design/machine/047.Controls.md`: per-domain controls: host defaults, a domain's defaults, an API
     (`box:<name>`, `content`, `mcp`, `identity`), and endpoint overrides (`"METHOD /path"`, most specific
     wins), per property; `rate` (by client, user, or all), `concurrent`, `body-max-bytes`, `timeout-ms`
-    (only lower), and `closed`, each `enforce` or `observe`; `control_set`, `control_remove`,
+    and `fuel` (only lower), and `closed`, each `enforce` or `observe`; `control_set`, `control_remove`,
     `control_list`, `control_report` (series, effect of the last change, verdicts); five-minute rows
-    7 days in traffic-bytes; `health.controls` ratios; departures and four decisions for the human.
+    7 days in traffic-bytes; `health.controls` ratios; refused clients read only "rate limit reached"
+    (§ 3); a person edits any control in the panel at any time (§ 9); a box route's own `limits` in
+    its manifest, between an API and an override, monitored as `box:<box>/<route>`, `TOOL /name`
+    overrides for tools (§ 13); departures, the human's 2026-11-03 decisions, and the open ones.
   - `design/machine/048.HeatStudy.md`: heat studies: `heat_study_start {domain, minutes, why}` counts one
     domain's requests by endpoint (a box route's declared pattern, an MCP tool, a page's path) for 5 to
     1440 minutes, one per domain and 4 at once, never waiting for approval; per endpoint requests per

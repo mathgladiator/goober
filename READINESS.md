@@ -232,12 +232,16 @@ each ranch's site weekly.
   - a database explorer with a read-only SQL box;
   - heat studies (the Studies view): one domain's heat, rates, and concurrency by endpoint over
     an hour or a day, with suggested controls in observe mode (`design/machine/048.HeatStudy.md`).
-  - each domain's controls (rate, concurrency, body size, timeouts, closing; per domain, per
-    API, per endpoint) with what each refused or would have refused, and verdicts like "may be
-    too tight" (the Controls view; `design/machine/047.Controls.md`).
+  - each domain's controls (rate, concurrency, body size, timeouts, fuel, closing; per domain,
+    per API, per box route from its manifest's `limits`, per endpoint) with what each refused or
+    would have refused, and verdicts like "may be too tight" (the Controls view;
+    `design/machine/047.Controls.md`).
 
-  It only looks; changes still go through Grok's tools (`design/machine/028.Panel.md`). Controls
-  are set with `control_set`, started in observe, and are untried against real traffic.
+  It mostly looks; changes go through Grok's tools (`design/machine/028.Panel.md`), except the
+  few only a person makes: scopes, mail blocks, drops, and controls. In the Controls view you
+  (as `host:owner` or `host:operator`) can switch any control to observe, edit, remove, or
+  override it at once, with a why, never waiting for approval. Controls and box limits are
+  untried against real traffic.
 - **To turn it on at example.com.** Deploy: the operations audit offers to set it up once
   `ops.example.com` resolves to the server (it does today). By hand:
   - Add an `A` record for `ops.example.com`.

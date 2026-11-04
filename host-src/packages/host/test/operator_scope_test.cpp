@@ -447,3 +447,59 @@ TEST_F(ScopeTest, ACommitCantWriteAnotherTenantsBoxIntoAProject) {
       {"path":"manifest.json","text":"{\"box\":\"ours\",\"domains\":[\"acme.example.com\"]}"}]})J");
   EXPECT_FALSE(fine.at("isError").as_bool()) << json::dump(fine);
 }
+
+// The human, 2026-11-03: "operators can override at any time since a control may be bum." In the
+// panel's Controls view a person with host:owner or host:operator sets, changes, observes, and
+// removes any control, in their scope, audited and in the change log, never held for approval;
+// an observer gets 403.
+TEST_F(ScopeTest, APersonChangesAControlInThePanelAtAnyTime) {
+  auto boss = sign_in("boss@example.com");
+  auto helper = sign_in("helper@example.com");
+  auto watcher = sign_in("watcher@example.com");
+  // Approvals on for the agent: its control_set waits, the panel's never does.
+  ASSERT_EQ(api(boss, "write/approvals", R"({"agent":"token:grok","on":true,"confirm":true})").status, 200);
+  auto held = call("control_set", R"({"domain":"acme.example.com","set":{"rate":{"per-minute":1}},"mode":"enforce","why":"agent"})");
+  EXPECT_NE(std::string(held.at("text").as_string()).find("pending_approval"), std::string::npos) << json::dump(held);
+
+  const char* bum = R"({"domain":"acme.example.com","endpoint":{"id":"hi_tight","match":"GET /hi"},
+      "set":{"rate":{"per-minute":1,"burst":1}},"mode":"enforce","why":"someone set this too tight"})";
+  EXPECT_EQ(api(watcher, "write/control_set", bum).status, 403);
+  auto set = api(helper, "write/control_set", bum);
+  ASSERT_EQ(set.status, 200) << set.body;
+  EXPECT_EQ(parse(set.body).at("result").at("level"), "endpoint");
+  EXPECT_NE(fetch(port, "acme.example.com", bhttp::verb::get, "/hi").status, 429);  // the box answers (it says nothing: 500)
+  auto refused = fetch(port, "acme.example.com", bhttp::verb::get, "/hi", {{"accept", "application/json"}});
+  EXPECT_EQ(refused.status, 429);
+  // To observe, then edit: each needs a why.
+  EXPECT_EQ(api(boss, "write/control_set", R"({"domain":"acme.example.com","endpoint":{"id":"hi_tight"},"mode":"observe"})").status,
+            400);
+  ASSERT_EQ(api(boss, "write/control_set",
+                R"({"domain":"acme.example.com","endpoint":{"id":"hi_tight"},"mode":"observe","why":"it is bum: watch it"})")
+                .status,
+            200);
+  EXPECT_NE(fetch(port, "acme.example.com", bhttp::verb::get, "/hi").status, 429);  // the box answers (it says nothing: 500)
+  ASSERT_EQ(api(boss, "write/control_set",
+                R"({"domain":"acme.example.com","endpoint":{"id":"hi_tight"},"set":{"rate":{"per-minute":600}},"why":"looser"})")
+                .status,
+            200);
+  // A focused person changes only their tenants.
+  ASSERT_EQ(api(helper, "write/scope", R"({"operator":"person:helper@example.com","tenants":["other"],"confirm":true})").status, 200);
+  EXPECT_EQ(api(helper, "write/control_remove", R"({"domain":"acme.example.com","id":"hi_tight","why":"done"})").status, 403);
+  EXPECT_EQ(api(watcher, "write/control_remove", R"({"domain":"acme.example.com","id":"hi_tight","why":"done"})").status, 403);
+  EXPECT_EQ(api(boss, "write/control_remove", R"({"domain":"acme.example.com","id":"hi_tight"})").status, 400);  // no why
+  auto removed = api(boss, "write/control_remove", R"({"domain":"acme.example.com","id":"hi_tight","why":"not needed"})");
+  ASSERT_EQ(removed.status, 200) << removed.body;
+  // The audit says a person did each, as panel.control_set and panel.control_remove; the change
+  // log has every change, by the person.
+  auto audit = base::read_file(root / "storage" / "logs" / "audit.log").value_or("");
+  EXPECT_NE(audit.find(R"("panel.control_set")"), std::string::npos);
+  EXPECT_NE(audit.find(R"("panel.control_remove")"), std::string::npos);
+  EXPECT_NE(audit.find("someone set this too tight"), std::string::npos);
+  EXPECT_NE(audit.find("panel:helper@example.com"), std::string::npos);
+  auto changes = call("changes", R"({"kind":"control"})");
+  std::string text = std::string(changes.at("text").as_string());
+  EXPECT_NE(text.find("panel:boss@example.com"), std::string::npos) << text;
+  EXPECT_NE(text.find("panel:helper@example.com"), std::string::npos) << text;
+  auto history = call("control_report", R"({"domain":"acme.example.com","id":"hi_tight","window":"1h"})");
+  EXPECT_NE(std::string(history.at("text").as_string()).find("not needed"), std::string::npos);
+}

@@ -34,6 +34,7 @@ const char* property_name(Property p) {
     case Property::kBodyMaxBytes: return "body-max-bytes";
     case Property::kTimeoutMs: return "timeout-ms";
     case Property::kClosed: return "closed";
+    case Property::kFuel: return "fuel";
   }
   return "rate";
 }
@@ -43,6 +44,7 @@ const char* level_name(Level l) {
     case Level::kHost: return "host";
     case Level::kDomain: return "domain";
     case Level::kApi: return "api";
+    case Level::kBox: return "box";
     case Level::kEndpoint: return "endpoint";
   }
   return "domain";
@@ -55,6 +57,7 @@ bool Props::named(Property p) const {
     case Property::kBodyMaxBytes: return body_max_bytes.named;
     case Property::kTimeoutMs: return timeout_ms.named;
     case Property::kClosed: return closed.named;
+    case Property::kFuel: return fuel.named;
   }
   return false;
 }
@@ -66,6 +69,7 @@ bool Props::off(Property p) const {
     case Property::kBodyMaxBytes: return body_max_bytes.off;
     case Property::kTimeoutMs: return timeout_ms.off;
     case Property::kClosed: return closed.off;
+    case Property::kFuel: return fuel.off;
   }
   return false;
 }
@@ -225,7 +229,7 @@ bool parse_bytes_or_ms(const bj::value& v, const std::string& where, int64_t hos
 
 std::optional<Props> parse_props(const bj::object& set, const HostLimits& limits, const std::string& where,
                                  std::string* error) {
-  if (!only_keys(set, {"rate", "concurrent", "body-max-bytes", "timeout-ms", "closed"}, where, error)) return std::nullopt;
+  if (!only_keys(set, {"rate", "concurrent", "body-max-bytes", "timeout-ms", "closed", "fuel"}, where, error)) return std::nullopt;
   Props p;
   for (const auto& kv : set) {
     std::string key(kv.key());
@@ -247,6 +251,8 @@ std::optional<Props> parse_props(const bj::object& set, const HostLimits& limits
       if (!mark(p.timeout_ms)) ok = parse_bytes_or_ms(v, at, limits.timeout_ms_max, "limits.timeout-ms.max", &p.timeout_ms, error);
     } else if (key == "closed") {
       if (!mark(p.closed)) ok = parse_closed(v, at, &p.closed, error);
+    } else if (key == "fuel") {
+      if (!mark(p.fuel)) ok = parse_bytes_or_ms(v, at, limits.fuel_max, "limits.fuel max", &p.fuel, error);
     }
     if (!ok) return std::nullopt;
   }
@@ -271,6 +277,7 @@ bj::value property_json(const Props& p, Property which) {
     }
     case Property::kBodyMaxBytes: return p.body_max_bytes.value;
     case Property::kTimeoutMs: return p.timeout_ms.value;
+    case Property::kFuel: return p.fuel.value;
     case Property::kClosed: {
       bj::object o{{"status", p.closed.value.status}};
       if (p.closed.value.retry_after_s >= 0) o["retry-after-s"] = p.closed.value.retry_after_s;
@@ -399,15 +406,22 @@ std::optional<Control> parse_host_defaults(const bj::object& defaults, const Hos
 }
 
 DomainControls::Chain DomainControls::chain(std::string_view method, const std::vector<std::string>& path,
-                                            std::string_view api) const {
-  Chain c{host ? &*host : nullptr, defaults ? &*defaults : nullptr, nullptr, nullptr};
-  if (!api.empty()) {
-    if (auto it = apis.find(api); it != apis.end()) c[2] = &it->second;
+                                            std::string_view api, const Control* box) const {
+  bool tool = method == "tool";
+  Chain c{nullptr, nullptr, nullptr, box, nullptr};
+  if (!tool) {
+    c[kAtHost] = host ? &*host : nullptr;
+    c[kAtDomain] = defaults ? &*defaults : nullptr;
+    if (!api.empty()) {
+      if (auto it = apis.find(api); it != apis.end()) c[kAtApi] = &it->second;
+    }
   }
   for (const auto& e : endpoints) {
-    if (!e.api.empty() && e.api != api) continue;
+    // A TOOL override meets only a tool call, and a tool call only TOOL overrides.
+    if ((e.match->method == "tool") != tool) continue;
+    if (!tool && !e.api.empty() && e.api != api) continue;
     if (e.match->matches(method, path)) {
-      c[3] = &e;
+      c[kAtEndpoint] = &e;
       break;
     }
   }
@@ -518,6 +532,16 @@ std::optional<DomainControls> compile(const bj::object& file, const std::string&
     });
   }
   return d;
+}
+
+Control box_route_control(const std::string& box, const std::string& route, Props props) {
+  Control c;
+  c.level = Level::kBox;
+  c.id = box_route_id(box, route);
+  c.api = "box:" + box;
+  c.mode = Mode::kEnforce;
+  c.props = std::move(props);
+  return c;
 }
 
 Effective effective(const DomainControls::Chain& chain, Property p) {

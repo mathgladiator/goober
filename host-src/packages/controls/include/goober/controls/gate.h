@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -30,6 +31,9 @@ struct Ask {
   std::function<std::string()> user;
   int64_t body_bytes = 0;
   int64_t now_ms = 0;
+  // The box route's own limits (Level::kBox) when the request reaches a route that declares
+  // them, compiled when its version loaded; null otherwise.
+  const Control* box = nullptr;
 };
 
 struct State;
@@ -66,6 +70,9 @@ struct Verdict {
   int64_t retry_after_s = -1;  // -1: none
   std::string message;        // closed's message
   int64_t timeout_ms = 0;     // an enforced timeout-ms for the box call, or 0
+  // An enforced fuel for the box call: nullopt when no level names it, 0 when the most specific
+  // lifts it ("off": the box's own behavior.fuel or the host's default), else the fuel.
+  std::optional<int64_t> fuel;
   std::string id;             // the most specific control the request met
   std::vector<std::pair<std::string, Reason>> would;  // (observing id, reason)
   std::shared_ptr<Ticket> ticket;  // when allowed

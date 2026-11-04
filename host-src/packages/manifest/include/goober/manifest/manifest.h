@@ -23,6 +23,18 @@ struct RoleChange {
   bool allow_self_revoke = false;    // revocable only: the caller may revoke their own roles
 };
 
+// A route's own limits (design/machine/047.Controls.md § 13; the human, 2026-11-03): what the host
+// enforces per tenant on this route, in 047's vocabulary. Every route may take fuel; http routes
+// and mcp tools also rate, concurrent, and body-max-bytes (not a get or delete), subscriptions
+// rate and concurrent. Checked here for shape (the keys a protocol takes, no "off"), and by the
+// host at upload for ranges and against its own limits (controls::parse_props). An operator's
+// endpoint override beats any of it.
+struct RouteLimits {
+  boost::json::object set;      // as written: {"fuel": 5000000, "rate": {"per-minute": 30}, ...}
+  std::optional<int64_t> fuel;  // the call's wasm fuel, for routes no request gate sees
+  bool any() const { return !set.empty(); }
+};
+
 struct HttpRoute {
   std::string verb;  // get, post, put, patch, delete
   std::string name;  // the route name; the box exports goober_route_$name
@@ -101,6 +113,7 @@ struct HttpRoute {
     int64_t browser_ms = 0;         // what browsers and proxies may keep: 0 is no-cache with the ETag
     int64_t check_percent = 1;      // the share of hits that also run the box and compare the bytes
   } cache;
+  RouteLimits limits;
   std::string export_name() const { return "goober_route_" + name; }
 };
 

@@ -497,7 +497,25 @@ see or change its controls. To add one:
    "may be too tight", "never matched").
 3. control_set {domain, endpoint: {id}, mode: "enforce", why} once the report agrees.
 control_list shows each control's effective values and where they come from. To pause a box
-while data moves, set closed on api "box:<name>" (or use a flag the box reads).
+while data moves, set closed on api "box:<name>" (or use a flag the box reads). A person can
+also set, observe, or remove any control in the panel's Controls view, at any time.
+
+## Limits per route
+
+A route may declare its own limits, which the host enforces per tenant per route:
+  "/cart": {"post": {"name": "add", "public": true,
+    "limits": {"fuel": 5000000, "rate": {"per-minute": 30, "by": "user"},
+               "concurrent": {"max": 4, "per-client": 1}, "body-max-bytes": 4096}}}
+Every route kind takes fuel (timers, internal, mail, jobs too): the call's wasm fuel, only
+lower than the host's limits.fuel; running out is out_of_fuel, a 500. HTTP routes and MCP
+tools also take rate, concurrent, and body-max-bytes (not on a get or delete); subscriptions
+take rate and concurrent. A route's timeout stays its own timeout-ms. The values are 047's
+(rate per-minute 0.1 to 1000000, concurrent 1 to 100000), checked at upload; "off" isn't
+allowed. A refused caller reads only "rate limit reached" (429, or 503 when busy).
+They sit above the operator's domain and API controls and below an operator's endpoint
+override, so an operator can always beat a limit that turns out wrong ("TOOL /name" matches a
+tool). control_list and control_report show each as box:<box>/<route name>; version_get and
+version_diff show them, a raised limit as widening.
 
 ## Calling other services
 

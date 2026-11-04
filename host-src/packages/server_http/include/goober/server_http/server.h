@@ -50,6 +50,9 @@ struct Response {
   // An operator's words for a host error (a closed control's message), kept when it is
   // re-rendered. The server ignores it.
   std::string host_message;
+  // The error's words in place of the status's reason when it is re-rendered as JSON
+  // ({"error": "rate limit reached"}); "" keeps the reason. The server ignores it.
+  std::string host_reason;
   // Set: the status and headers go out with no length and "connection: close", the body is
   // ignored, and this is called with the open stream (on a network thread; it must not block).
   std::function<void(std::shared_ptr<Stream>)> stream;

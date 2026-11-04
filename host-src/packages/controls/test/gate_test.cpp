@@ -13,7 +13,7 @@ using namespace goober::controls;
 
 namespace {
 
-const HostLimits kLimits{8 << 20, 30000};
+const HostLimits kLimits{8 << 20, 30000, 2'000'000'000};
 constexpr int64_t kT0 = 1'800'000'000'000;  // a bucket's start
 
 std::shared_ptr<const DomainControls> compiled(std::string_view file) {
@@ -223,4 +223,78 @@ TEST(ControlsGate, SketchesCountDistinctClients) {
   EXPECT_EQ(sketch_count(""), 0);
   EXPECT_EQ(sketch_count(sketch_add("", "x")), 1);
   EXPECT_EQ(operations::sketch_union(sketch_add("", "x"), sketch_add("", "x")), sketch_add("", "x"));
+}
+
+namespace {
+
+Props props_of(std::string_view text) {
+  std::string err;
+  auto v = json::parse(text, &err);
+  EXPECT_TRUE(v) << err;
+  auto p = parse_props(v->as_object(), kLimits, "limits", &err);
+  EXPECT_TRUE(p) << err;
+  return p ? *p : Props{};
+}
+
+}  // namespace
+
+// A box route's own limits (2026-11-03) are enforced and monitored under box:<box>/<route>; a
+// tighter box rate refuses before the API's looser one, and an operator's override beats it.
+TEST(ControlsGate, BoxRouteLimitsAreEnforcedAndMonitored) {
+  Gate g;
+  auto d = compiled(R"({"apis":{"box:shop":{"mode":"enforce","set":{"rate":{"per-minute":600}}}},
+      "endpoints":[{"id":"loosen","match":"POST /cart","mode":"enforce","set":{"rate":{"per-minute":600},"fuel":9000}}]})");
+  auto box = box_route_control("shop", "cart", props_of(R"({"rate":{"per-minute":1,"burst":1},"fuel":5000})"));
+  std::vector<std::string> path{"cart"};
+  auto req = [&](const char* method) {
+    Ask a;
+    a.method = method;
+    a.path = &path;
+    a.api = "box:shop";
+    a.client = "192.0.2.1";
+    a.now_ms = kT0;
+    a.box = &box;
+    return g.check(*d, a);
+  };
+  auto first = req("get");
+  EXPECT_FALSE(first.refused);
+  EXPECT_EQ(first.id, "box:shop/cart");
+  EXPECT_EQ(first.fuel, 5000);
+  auto second = req("get");
+  EXPECT_TRUE(second.refused);  // the box's 1 a minute, not the API's 600
+  EXPECT_EQ(second.control, "box:shop/cart");
+  EXPECT_EQ(second.status, 429);
+  // The operator's override on POST /cart beats the box.
+  auto post = req("post");
+  EXPECT_FALSE(post.refused);
+  EXPECT_EQ(post.fuel, 9000);
+  EXPECT_FALSE(req("post").refused);
+  first.ticket.reset();
+  post.ticket.reset();
+  auto row = row_of(g, "box:shop/cart");
+  EXPECT_EQ(row.matched, 4);  // each level a request meets counts it, the POSTs' too
+  EXPECT_EQ(row.rate, 1);
+}
+
+// A box tool call meets the box's limits and TOOL overrides only; fuel "off" lifts to the box's own.
+TEST(ControlsGate, ToolCallsMeetTheBoxsLimits) {
+  Gate g;
+  auto d = compiled(R"({"defaults":{"mode":"enforce","set":{"concurrent":{"max":5}}},
+      "endpoints":[{"id":"lift","match":"TOOL /search","mode":"enforce","set":{"fuel":"off"}}]})");
+  auto box = box_route_control("shop", "search", props_of(R"({"concurrent":{"max":1},"fuel":100})"));
+  std::vector<std::string> path{"search"};
+  Ask a;
+  a.method = "tool";
+  a.path = &path;
+  a.client = "192.0.2.1";
+  a.now_ms = kT0;
+  a.box = &box;
+  auto one = g.check(*d, a);
+  ASSERT_TRUE(one.ticket);
+  ASSERT_TRUE(one.fuel);
+  EXPECT_EQ(*one.fuel, 0);  // lifted by the operator: the box's own behavior.fuel
+  auto two = g.check(*d, a);
+  EXPECT_TRUE(two.refused);
+  EXPECT_EQ(two.control, "box:shop/search");
+  EXPECT_EQ(two.status, 503);
 }

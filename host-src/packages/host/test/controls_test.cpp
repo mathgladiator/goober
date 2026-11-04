@@ -397,3 +397,175 @@ TEST_F(ControlsTest, HostDefaultsApplyEverywhereAndReadySaysTheRatio) {
   ASSERT_FALSE(lift.as_object().contains("error")) << json::dump(lift);
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 200);
 }
+
+namespace {
+
+// The human, 2026-11-03: a refused client reads "rate limit reached" and nothing that names the
+// control, its level, or its bucket.
+void expect_says_only_rate_limit_reached(const Reply& r, const std::vector<std::string>& never) {
+  EXPECT_NE(r.body.find("rate limit reached"), std::string::npos) << r.body;
+  for (const auto& word : never) EXPECT_EQ(r.body.find(word), std::string::npos) << word << " in " << r.body;
+  for (const auto& [k, v] : r.headers) {
+    for (const auto& word : never) EXPECT_EQ(v.find(word), std::string::npos) << word << " in header " << k;
+  }
+}
+
+}  // namespace
+
+TEST_F(ControlsTest, RefusalsSayOnlyRateLimitReached) {
+  ASSERT_FALSE(tool("control_set", {{"domain", "example.com"},
+                                    {"endpoint", bj::object{{"id", "secret_rule_name"}, {"match", "GET /api/items"}}},
+                                    {"set", bj::object{{"rate", bj::object{{"per-minute", 1}, {"burst", 1}}}}},
+                                    {"mode", "enforce"},
+                                    {"why", "x"}})
+                   .as_object()
+                   .contains("error"));
+  ASSERT_FALSE(tool("control_set", {{"domain", "example.com"},
+                                    {"api", "box:shop"},
+                                    {"set", bj::object{{"concurrent", bj::object{{"max", 1}}}}},
+                                    {"mode", "enforce"},
+                                    {"why", "x"}})
+                   .as_object()
+                   .contains("error"));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 200);
+  std::vector<std::string> never = {"secret_rule_name", "box:shop", "endpoint", "\"rate\"", "bucket", "control"};
+  auto html = fetch(port, bhttp::verb::get, "/api/items", {{"accept", "text/html"}});
+  EXPECT_EQ(html.status, 429);
+  EXPECT_FALSE(html.headers["retry-after"].empty());
+  expect_says_only_rate_limit_reached(html, never);
+  auto api = fetch(port, bhttp::verb::get, "/api/items", {{"accept", "application/json"}});
+  EXPECT_EQ(api.status, 429);
+  EXPECT_NE(api.body.find(R"("error":"rate limit reached")"), std::string::npos) << api.body;
+  expect_says_only_rate_limit_reached(api, never);
+
+  // Concurrency: 503 with Retry-After: 1, and the same words. A slow call holds the box's one slot.
+  std::thread slow([&] { fetch(port, bhttp::verb::get, "/api/spin"); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  auto busy = fetch(port, bhttp::verb::get, "/api/boom", {{"accept", "application/json"}});
+  slow.join();
+  EXPECT_EQ(busy.status, 503);
+  EXPECT_EQ(busy.headers["retry-after"], "1");
+  EXPECT_NE(busy.body.find(R"("error":"rate limit reached")"), std::string::npos) << busy.body;
+  expect_says_only_rate_limit_reached(busy, never);
+  // The access log keeps which control and why.
+  auto log = access_log();
+  EXPECT_NE(log.find(R"("control":{"id":"secret_rule_name","outcome":"refused","reason":"rate")"), std::string::npos);
+  EXPECT_NE(log.find(R"("id":"box:shop","outcome":"refused","reason":"concurrent")"), std::string::npos);
+}
+
+// The older host-wide limiter (limits.requests-per-minute) says the same, and only that.
+TEST_F(ControlsTest, TheHostWideLimiterSaysOnlyRateLimitReached) {
+  host.reset();
+  start(R"(, "limits": {"requests-per-minute": 10})");
+  Reply last;
+  for (int i = 0; i < 12 && last.status != 429; ++i) last = fetch(port, bhttp::verb::get, "/api/items", {{"accept", "application/json"}});
+  ASSERT_EQ(last.status, 429) << last.body;
+  EXPECT_NE(last.body.find(R"("error":"rate limit reached")"), std::string::npos) << last.body;
+  expect_says_only_rate_limit_reached(last, {"bucket", "\"all\"", "192.0.2", "127.0.0.1"});
+  auto html = fetch(port, bhttp::verb::get, "/api/items", {{"accept", "text/html"}});
+  EXPECT_EQ(html.status, 429);
+  expect_says_only_rate_limit_reached(html, {"bucket", "127.0.0.1"});
+}
+
+// A box route's own limits (047 § 13): checked at upload, enforced per tenant per route,
+// monitored as box:<box>/<route>; a box limit tighter than its API's control refuses first, and
+// an operator's endpoint override beats the box.
+TEST_F(ControlsTest, BoxRouteLimitsSitBetweenTheApiAndTheOperatorsOverride) {
+  std::string err;
+  std::string manifest = kManifest;
+  manifest.replace(manifest.find(R"({"name":"items","public":true})"), 30,
+                   R"({"name":"items","public":true,"limits":{"rate":{"per-minute":1,"burst":1}}})");
+  // Out of range, and past the host's own limits, are refused at upload.
+  auto refused = [&](const std::string& limits, const char* why) {
+    std::string m = kManifest;
+    m.replace(m.find(R"({"name":"items","public":true})"), 30, R"({"name":"items","public":true,"limits":)" + limits + "}");
+    std::string e;
+    EXPECT_FALSE(host->boxes().upload(m, kWat, &e)) << limits;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refused(R"({"rate":{"per-minute":0}})", "route items limits.rate.per-minute must be 0.1 to 1000000");
+  refused(R"({"fuel":9000000000})", "route items limits.fuel must be a whole number, 1 to the host's limits.fuel max");
+  refused(R"({"concurrent":{"max":0}})", "limits.concurrent.max must be a whole number, 1 to 100000");
+  refused(R"({"rate":{"per-minute":5,"by":"tenant"}})", "limits.rate.by must be client, user, or all");
+  // The checker (version_upload's dry run) says the same.
+  std::string bad = kManifest;
+  bad.replace(bad.find(R"({"name":"items","public":true})"), 30,
+              R"({"name":"items","public":true,"limits":{"body-max-bytes":5}})");
+  EXPECT_NE(error_of("version_upload", {{"manifest", bad}, {"wat", kWat}, {"dry_run", true}}).find("a get carries no body"),
+            std::string::npos);
+  auto dry = tool("version_upload", {{"manifest", manifest}, {"wat", kWat}, {"dry_run", true}});
+  EXPECT_EQ(dry.at("ok"), true) << json::dump(dry);
+  ASSERT_TRUE(host->boxes().upload(manifest, kWat, &err)) << err;
+
+  // The API's looser rate doesn't save the route from its own.
+  ASSERT_FALSE(tool("control_set", {{"domain", "example.com"},
+                                    {"api", "box:shop"},
+                                    {"set", bj::object{{"rate", bj::object{{"per-minute", 600}}}}},
+                                    {"mode", "enforce"},
+                                    {"why", "the shop's budget"}})
+                   .as_object()
+                   .contains("error"));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 429);
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/api/cart/1", kSameSite).status, 200);  // other routes: the API's
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/api/cart/1", kSameSite).status, 200);
+
+  auto list = tool("control_list", {{"domain", "example.com"}});
+  const bj::object* box = nullptr;
+  for (const auto& c : list.at(0).at("controls").as_array()) {
+    if (c.at("id") == "box:shop/items") box = &c.as_object();
+  }
+  ASSERT_TRUE(box) << json::dump(list);
+  EXPECT_EQ(box->at("level"), "box");
+  EXPECT_EQ(box->at("from"), "manifest");
+  EXPECT_EQ(box->at("what"), "GET /api/items");
+  EXPECT_EQ(box->at("limits").at("rate").at("per-minute"), 1);
+  EXPECT_EQ(box->at("effective").at("enforced").at("rate").at("from"), "box:shop/items (the box's manifest)");
+  auto report = tool("control_report", {{"domain", "example.com"}, {"id", "box:shop/items"}, {"window", "1h"}});
+  ASSERT_FALSE(report.as_object().contains("error")) << json::dump(report);
+  EXPECT_EQ(report.at("controls").at(0).at("totals").at("rate"), 1);
+  EXPECT_NE(error_of("control_remove", {{"domain", "example.com"}, {"id", "box:shop/items"}}).find("from its manifest"),
+            std::string::npos);
+
+  // The operator's override that matches the route beats the box's bum limit, at once.
+  ASSERT_FALSE(tool("control_set", {{"domain", "example.com"},
+                                    {"endpoint", bj::object{{"id", "items_ok"}, {"match", "GET /api/items"}}},
+                                    {"set", bj::object{{"rate", bj::object{{"per-minute", 600}}}}},
+                                    {"mode", "enforce"},
+                                    {"why", "the box's limit is bum"}})
+                   .as_object()
+                   .contains("error"));
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 200);
+
+  // version_get gathers the limits.
+  auto live = host->boxes().active()->boxes.at("shop")->version;
+  auto got = tool("version_get", {{"box", "shop"}, {"version", live}});
+  EXPECT_EQ(got.at("limits").at(0).at("id"), "box:shop/items") << json::dump(got);
+}
+
+// A route's limits.fuel is the call's fuel: a box that spins traps out of fuel at once, rather
+// than waiting out its timeout; an operator's fuel "off" gives the box its own fuel back.
+TEST_F(ControlsTest, FuelLimitsTrapTheCall) {
+  std::string err;
+  std::string manifest = kManifest;
+  manifest.replace(manifest.find(R"({"name":"spin","public":true})"), 29,
+                   R"({"name":"spin","public":true,"limits":{"fuel":100000}})");
+  ASSERT_TRUE(host->boxes().upload(manifest, kWat, &err)) << err;
+  auto t0 = std::chrono::steady_clock::now();
+  auto r = fetch(port, bhttp::verb::get, "/api/spin");
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_EQ(r.status, 500);
+  EXPECT_LT(ms, 1500);
+  EXPECT_NE(access_log().find(R"("outcome":"out_of_fuel")"), std::string::npos);
+  // Lifted for the endpoint, with a short timeout so the test doesn't wait the box's 5 s: now a timeout.
+  ASSERT_FALSE(tool("control_set", {{"domain", "example.com"},
+                                    {"endpoint", bj::object{{"id", "spin_fuel"}, {"match", "GET /api/spin"}}},
+                                    {"set", bj::object{{"fuel", "off"}, {"timeout-ms", 200}}},
+                                    {"mode", "enforce"},
+                                    {"why", "the box's fuel is too low"}})
+                   .as_object()
+                   .contains("error"));
+  fetch(port, bhttp::verb::get, "/api/spin");
+  EXPECT_NE(access_log().find(R"("outcome":"timeout")"), std::string::npos);
+}

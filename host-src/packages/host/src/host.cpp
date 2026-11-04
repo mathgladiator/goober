@@ -261,7 +261,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   engine_ = std::make_unique<runtime::wasm::Engine>();
   boxes_ = std::make_unique<boxes::BoxRegistry>(*wal_, *engine_);
   boxes_->set_manifest_check(
-      [this](const manifest::Manifest& m, std::string* error) { return check_data(m, error) && check_calls(m, error); });
+      [this](const manifest::Manifest& m, std::string* error) { return check_data(m, error) && check_calls(m, error) && check_limits(m, error); });
   boxes_->set_manifest_advice([this](const manifest::Manifest& m) { return grant_advice(m, *schemas_); });
   timers_ = std::make_unique<TimerState>();
   keys_ = std::make_unique<KeyStore>(config->storage);
@@ -834,6 +834,15 @@ Response Host::error_page(const std::string& tenant, int status, const std::stri
   return res;
 }
 
+// The human, 2026-11-03: "I just want rate limit reached." The page and the JSON say only that:
+// never which limit, control, level, or bucket (the access log keeps those).
+Response Host::rate_limited(const std::string& tenant, int status, const std::string& request_id) const {
+  static const std::string kWords = "rate limit reached";
+  auto res = error_page(tenant, status, request_id, kWords);
+  res.host_reason = kWords;
+  return res;
+}
+
 uint16_t Host::panel_port() const { return panel_server_ ? panel_server_->port() : 0; }
 
 void Host::handle(Request req, Responder respond, bool panel_listener) {
@@ -880,8 +889,10 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     if (res.host_error && (bearer || (accept.find("application/json") != std::string::npos && !prefers_html(accept)))) {
       std::erase_if(res.headers, [](const auto& h) { return h.first == "content-type"; });
       res.headers.emplace_back("content-type", "application/json");
-      bj::object body{{"error", reason(res.status)}, {"status", res.status}, {"request_id", request_id}};
-      if (!res.host_message.empty()) body["message"] = res.host_message;
+      bj::object body{{"error", res.host_reason.empty() ? std::string(reason(res.status)) : res.host_reason},
+                      {"status", res.status},
+                      {"request_id", request_id}};
+      if (!res.host_message.empty() && res.host_message != res.host_reason) body["message"] = res.host_message;
       res.body = json::dump(body);
     }
     access_log(req, res.status, started, domain, extra, res.host_error,
@@ -923,7 +934,7 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
       }
     }
     if (wait) {
-      auto res = error_page(resolved ? resolved->second.tenant : "", 429, request_id);
+      auto res = rate_limited(resolved ? resolved->second.tenant : "", 429, request_id);
       res.headers.emplace_back("retry-after", std::to_string(wait));
       return finish(std::move(res), json::dump(bj::object{{"why", "rate limited"}, {"bucket", bucket}, {"client", client}}));
     }
@@ -1511,6 +1522,14 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
                                    cfg->memory_max_bytes.resolve(m.behavior.memory_max_bytes)};
   // A control's timeout-ms (047 § 3) only ever shortens the call.
   if (options.control_timeout_ms > 0) limits.timeout_ms = std::min<int64_t>(limits.timeout_ms, options.control_timeout_ms);
+  // Fuel (047 § 13): an operator's control when one names it (0 lifts it back to the box's own),
+  // else the route's own limits.fuel, else the box's; never past the host's limits.fuel max.
+  if (options.control_fuel) {
+    if (*options.control_fuel > 0) limits.fuel = *options.control_fuel;
+  } else if (ref.route->limits.fuel) {
+    limits.fuel = *ref.route->limits.fuel;
+  }
+  limits.fuel = std::min<int64_t>(limits.fuel, cfg->fuel.max_value);
   net.deadline_us = base::monotonic_us() + limits.timeout_ms * 1000;
   lib_deadline_us = net.deadline_us;
   int64_t engine_started_us = base::monotonic_us();
@@ -1794,7 +1813,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   std::string client_key = rate_key(client_address(req));
   if (!trying && !who && req.method != "get" && req.method != "head") {
     if (int64_t wait = limiter_.take("anonymous-write", client_key, RateRule{20, 10}, base::now_unix_ms())) {
-      auto res = error_page(tenant, 429, request_id);
+      auto res = rate_limited(tenant, 429, request_id);
       res.headers.emplace_back("retry-after", std::to_string(wait));
       return finish(std::move(res), R"({"why":"rate limited","bucket":"anonymous-write"})");
     }
@@ -1887,6 +1906,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   options.read_only = req.method == "get" || req.method == "head";
   options.perf_by_caller = true;
   options.control_timeout_ms = control_timeout(req);
+  options.control_fuel = control_fuel(req);
   // A try's write runs on copies of the tenant's databases, as a job's dry run does: internal
   // calls refused, deliveries kept in the copies, nothing published (route_try.cpp).
   if (trying && !options.read_only) {

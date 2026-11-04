@@ -210,7 +210,7 @@ bool Gate::any() const {
 Verdict Gate::check(const DomainControls& d, const Ask& ask) {
   static const std::vector<std::string> kRoot;
   Verdict v;
-  auto chain = d.chain(ask.method, ask.path ? *ask.path : kRoot, ask.api);
+  auto chain = d.chain(ask.method, ask.path ? *ask.path : kRoot, ask.api, ask.box);
   std::vector<std::string> ids;
   for (const Control* c : chain) {
     if (!c) continue;
@@ -228,6 +228,7 @@ Verdict Gate::check(const DomainControls& d, const Ask& ask) {
   const auto& body = eff[size_t(Property::kBodyMaxBytes)];
   const auto& timeout = eff[size_t(Property::kTimeoutMs)];
   const auto& closed = eff[size_t(Property::kClosed)];
+  const auto& fuel = eff[size_t(Property::kFuel)];
 
   std::string user_key;
   bool user_asked = false;
@@ -330,6 +331,7 @@ Verdict Gate::check(const DomainControls& d, const Ask& ask) {
     }
   }
   if (const Control* c = timeout.enforced; c && c->props.timeout_ms.on()) v.timeout_ms = c->props.timeout_ms.value;
+  if (const Control* c = fuel.enforced) v.fuel = c->props.fuel.off ? 0 : c->props.fuel.value;
 
   // Allowed: every control it met holds it in flight until it finishes.
   for (const auto& id : ids) {

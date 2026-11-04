@@ -25,9 +25,12 @@ enum class By { kClient, kUser, kAll };
 // Why a request was refused, or would have been. kTimeout is only ever a would-refuse: an
 // observed timeout-ms counts the calls that took longer than it.
 enum class Reason { kRate, kConcurrent, kBody, kClosed, kTimeout };
-enum class Property { kRate, kConcurrent, kBodyMaxBytes, kTimeoutMs, kClosed };
-inline constexpr std::array<Property, 5> kProperties = {Property::kRate, Property::kConcurrent, Property::kBodyMaxBytes,
-                                                        Property::kTimeoutMs, Property::kClosed};
+// kFuel (2026-11-03) is the wasm fuel a box call may burn, only lower than the host's limits.fuel:
+// it is enforced through the call's limits, never refused at the door, and an observed one
+// counts nothing (the fuel a call burns isn't known until it ends).
+enum class Property { kRate, kConcurrent, kBodyMaxBytes, kTimeoutMs, kClosed, kFuel };
+inline constexpr std::array<Property, 6> kProperties = {Property::kRate,      Property::kConcurrent, Property::kBodyMaxBytes,
+                                                        Property::kTimeoutMs, Property::kClosed,     Property::kFuel};
 
 const char* mode_name(Mode m);
 const char* by_name(By b);
@@ -65,6 +68,7 @@ struct Props {
   Prop<int64_t> body_max_bytes;
   Prop<int64_t> timeout_ms;
   Prop<Closed> closed;
+  Prop<int64_t> fuel;
   bool named(Property p) const;
   bool off(Property p) const;
   bool any() const;
@@ -74,6 +78,7 @@ struct Props {
 struct HostLimits {
   int64_t body_max_bytes = 0;
   int64_t timeout_ms_max = 0;
+  int64_t fuel_max = 0;  // limits.fuel's max; 0 refuses any fuel
 };
 
 // Ranges, so the tool, the doc, and the tests say the same.
@@ -88,8 +93,8 @@ inline constexpr size_t kApisMax = 50;
 inline constexpr size_t kHistoryKept = 20;
 inline constexpr size_t kRemovedKept = 50;
 
-// Parses a control's properties: only rate, concurrent, body-max-bytes, timeout-ms, and closed,
-// each in range or "off". Strict: an unknown key, a wrong type, or a value out of range is an
+// Parses a control's properties: only rate, concurrent, body-max-bytes, timeout-ms, closed, and
+// fuel, each in range or "off". Strict: an unknown key, a wrong type, or a value out of range is an
 // error naming `where` and the key.
 std::optional<Props> parse_props(const bj::object& set, const HostLimits& limits, const std::string& where,
                                  std::string* error);
@@ -120,12 +125,16 @@ bool valid_override_id(std::string_view id, std::string* why);
 // An API: box:<box name>, content, mcp, or identity.
 bool valid_api(std::string_view api, std::string* why);
 
-enum class Level { kHost, kDomain, kApi, kEndpoint };
+// kBox is a box route's own `limits` in its manifest (2026-11-03): above an API's control, below an
+// operator's endpoint override, so an operator can always beat a box's limit.
+enum class Level { kHost, kDomain, kApi, kBox, kEndpoint };
 const char* level_name(Level l);
 
 struct Control {
   Level level = Level::kDomain;
-  std::string id;   // "defaults" for the host's and the domain's, the API's name, or the override's id
+  // "defaults" for the host's and the domain's, the API's name, the override's id, or a box
+  // route's box:<box>/<route name>
+  std::string id;
   std::string api;  // an API control's API; an override's optional API ("" is any)
   std::optional<Pattern> match;  // overrides only
   Mode mode = Mode::kEnforce;
@@ -148,9 +157,15 @@ struct DomainControls {
   bool api_scoped = false;
 
   bool empty() const { return !host && !defaults && apis.empty() && endpoints.empty(); }
-  // The levels a request meets, least specific first: host, domain, API, endpoint (each may be null).
-  using Chain = std::array<const Control*, 4>;
-  Chain chain(std::string_view method, const std::vector<std::string>& path, std::string_view api) const;
+  // The levels a request meets, least specific first: host, domain, API, a box route's own limits,
+  // endpoint (each may be null). The box route's comes from the manifest, never from this file:
+  // the caller passes it. Method "tool" is a box tool call on /mcp (path: the tool's name): it
+  // meets only the box's limits and "TOOL /name" overrides, since the /mcp request that carries
+  // it has already met the domain's levels. "TOOL" overrides never match an HTTP request.
+  using Chain = std::array<const Control*, 5>;
+  enum : size_t { kAtHost = 0, kAtDomain = 1, kAtApi = 2, kAtBox = 3, kAtEndpoint = 4 };
+  Chain chain(std::string_view method, const std::vector<std::string>& path, std::string_view api,
+              const Control* box = nullptr) const;
   const Control* find(std::string_view id) const;  // the domain's defaults, an API's, or an override, by id
 };
 
@@ -167,6 +182,13 @@ struct Effective {
   const Control* observed = nullptr;
 };
 Effective effective(const DomainControls::Chain& chain, Property p);
+
+// A box route's own limits (its manifest's `limits`) as a control at Level::kBox, always
+// enforced, monitored as box:<box>/<route>.
+Control box_route_control(const std::string& box, const std::string& route, Props props);
+inline std::string box_route_id(std::string_view box, std::string_view route) {
+  return "box:" + std::string(box) + "/" + std::string(route);
+}
 
 // The id a level is monitored and refused under: the host's defaults count as the domain's.
 inline const std::string& monitored_id(const Control& c) {

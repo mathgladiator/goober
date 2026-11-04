@@ -919,3 +919,22 @@ TEST_F(PanelTest, SchemaApplyRefusesAForcedStepOnRows) {
   EXPECT_EQ(json::dump(call("db_describe", R"({"tenant":"playground","database":"kits"})").at("schemas")).find("kits2"),
             std::string::npos);
 }
+
+// The Controls view edits (047 § 9): the script carries the editor, the owner saves a control,
+// an observer is refused, and neither goes through the read-tool path.
+TEST_F(PanelTest, TheControlsViewEditsForAPerson) {
+  auto js = fetch(port, kOps, bhttp::verb::get, "/panel.js").body;
+  EXPECT_NE(js.find("function controlEditor"), std::string::npos);
+  EXPECT_NE(js.find("'write/control_set'"), std::string::npos);
+  EXPECT_NE(js.find("'write/control_remove'"), std::string::npos);
+  std::string watcher = sign_in("watcher@example.com");
+  const char* args = R"({"domain":"localhost","set":{"rate":{"per-minute":600}},"mode":"observe","why":"watch first"})";
+  EXPECT_EQ(api(watcher, "write/control_set", args).status, 403);
+  EXPECT_EQ(api(watcher, "control_set", args).status, 403);  // the tool itself is never the panel's
+  std::string boss = sign_in("boss@example.com");
+  auto saved = api(boss, "write/control_set", args);
+  ASSERT_EQ(saved.status, 200) << saved.body;
+  EXPECT_EQ(parse(saved.body).at("result").at("id"), "defaults");
+  auto list = parse(api(watcher, "control_list", R"({"domain":"localhost"})").body);
+  EXPECT_EQ(list.at("result").at(0).at("controls").at(0).at("last_change").at("by"), "panel:boss@example.com");
+}

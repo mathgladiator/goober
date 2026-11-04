@@ -196,7 +196,7 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
         sse_per_client_[client] >= kMaxStreamsPerClient) {
       if (sse_per_tenant_[tenant] == 0) sse_per_tenant_.erase(tenant);
       if (sse_per_client_[client] == 0) sse_per_client_.erase(client);
-      auto res = error_page(tenant, 429, request_id);
+      auto res = rate_limited(tenant, 429, request_id);
       res.headers.emplace_back("retry-after", "30");
       return finish(std::move(res), R"({"why":"too many open subscriptions"})");
     }

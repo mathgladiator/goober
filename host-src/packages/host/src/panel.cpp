@@ -324,6 +324,18 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
             status == 200 ? "ok" : "refused", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
       return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
+    // Setting, changing, observing, or removing a per-domain control (047 § 9): a person's act at
+    // any time, since a control may be bum (the human, 2026-11-03). Audited as
+    // panel.control_set or panel.control_remove, in the change log, never held for approval.
+    if (tool == "write/control_set" || tool == "write/control_remove") {
+      auto [status, body] = panel_control(*who, tool == "write/control_set" ? "set" : "remove", args, request_id);
+      if (status != 200) {
+        audit(tool == "write/control_set" ? "panel.control_set" : "panel.control_remove", me,
+              "control:" + arg_text(args, "domain"), "refused",
+              bj::object{{"ip", client_address(req)}, {"request_id", request_id}, {"error", body.contains("error") ? body.at("error") : bj::value(nullptr)}});
+      }
+      return finish(own(status, body), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
     if (!is_read_tool(tool) || !is_read_call(tool, args)) {
       return finish(json_reply(403, bj::object{{"error", "the panel only looks: " + tool + " isn't a read tool"}}),
                     json::dump(bj::object{{"panel", tool}, {"why", "not a read tool"}}));

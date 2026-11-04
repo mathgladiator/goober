@@ -668,3 +668,50 @@ TEST(Manifest, GrantingARoleThatGatesThisBoxIsNeverQuiet) {
   ASSERT_TRUE(delegated) << err;
   EXPECT_TRUE(delegated->warnings.empty()) << delegated->warnings.at(0);
 }
+
+// A route's own limits (design/machine/047.Controls.md § 13): every protocol takes fuel; http
+// routes and tools also rate, concurrent, and body-max-bytes; subscriptions rate and concurrent.
+TEST(Manifest, RouteLimits) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"shop","domains":["*"],"routes":{
+    "http":{"/cart":{"post":{"name":"add","public":true,
+      "limits":{"fuel":5000000,"rate":{"per-minute":30,"by":"user"},"concurrent":{"max":4},"body-max-bytes":4096}}}},
+    "sse":{"/live":{"subscribe":{"name":"live","public":true,"wake":["orders"],"limits":{"concurrent":{"per-client":1}}}}},
+    "mcp":{"search":{"tool":{"description":"Search.","requirements":[],"limits":{"rate":{"per-minute":10}}}}},
+    "timer":{"t":{"name":"tick","every-ms":60000,"limits":{"fuel":1000}}},
+    "internal":{"/i":{"post":{"name":"inner","callers":["other"],"limits":{"fuel":2000}}}},
+    "job":{"j":{"name":"move","limits":{"fuel":3000}}}}})", &err);
+  ASSERT_TRUE(m) << err;
+  const auto& add = m->routes[0].name == "add" ? m->routes[0] : m->routes[1];
+  EXPECT_TRUE(add.limits.any());
+  EXPECT_EQ(*add.limits.fuel, 5000000);
+  EXPECT_EQ(add.limits.set.at("rate").as_object().at("by"), "user");
+  EXPECT_EQ(m->tools[0].limits.set.size(), 1u);
+  EXPECT_FALSE(m->tools[0].limits.fuel);
+  EXPECT_EQ(*m->timers[0].limits.fuel, 1000);
+  EXPECT_EQ(*m->internal[0].limits.fuel, 2000);
+  EXPECT_EQ(*m->jobs[0].limits.fuel, 3000);
+
+  auto refused = [&](const char* limits, const char* why, const char* where = "http") {
+    std::string text = std::string(R"({"box":"b","domains":["*"],"routes":{)") +
+                       (std::string_view(where) == "http"    ? R"("http":{"/x":{"post":{"name":"x","public":true,"limits":)"
+                        : std::string_view(where) == "get"   ? R"("http":{"/x":{"get":{"name":"x","public":true,"limits":)"
+                        : std::string_view(where) == "sse"   ? R"("sse":{"/x":{"subscribe":{"name":"x","public":true,"wake":["a"],"limits":)"
+                                                             : R"("timer":{"x":{"name":"x","every-ms":60000,"limits":)") +
+                       limits + (std::string_view(where) == "timer" ? "}}}}" : "}}}}}");
+    std::string e;
+    EXPECT_FALSE(parse_manifest(text, &e)) << text;
+    EXPECT_NE(e.find(why), std::string::npos) << e;
+  };
+  refused(R"({})", "limits is an object of fuel, rate, concurrent, and body-max-bytes");
+  refused(R"({"speed":1})", "unknown key speed");
+  refused(R"({"timeout-ms":100})", "a route's timeout is its own timeout-ms");
+  refused(R"({"rate":"off"})", "can't be \"off\"");
+  refused(R"({"fuel":0})", ".fuel must be a whole number of at least 1");
+  refused(R"({"fuel":1.5})", ".fuel must be a whole number");
+  refused(R"({"rate":60})", ".rate is an object");
+  refused(R"({"body-max-bytes":10})", "a get carries no body", "get");
+  refused(R"({"body-max-bytes":10})", "a subscription carries no body", "sse");
+  refused(R"({"rate":{"per-minute":1}})", "only fuel applies here", "timer");
+  refused(R"({"closed":true})", "unknown key closed");
+}

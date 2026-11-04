@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <unordered_map>
 #include <string>
 
 #include "goober/attachments/attachments.h"
@@ -301,6 +302,10 @@ class Host {
     // A per-domain control's timeout-ms for this request (047 § 3), or 0: the call's timeout is
     // the lower of it and the box's own.
     int64_t control_timeout_ms = 0;
+    // A control's fuel for this call (047 § 13): nullopt when no control names it (the route's
+    // own limits.fuel, else the box's), 0 when one lifts it (the box's behavior.fuel or the
+    // host's default), else the fuel, at most the host's limits.fuel max.
+    std::optional<int64_t> control_fuel;
   };
   BoxCall call_box(const boxes::RouteRef& ref, const boost::json::object& doc, const std::string& tenant,
                    const std::string& request_id, const std::optional<SignedIn>& who, const CallOptions& options);
@@ -961,7 +966,9 @@ class Host {
   bool control_gate(server::http::Request& req, Finish& finish, const std::string& domain, const std::string& tenant,
                     const router::NormalizedPath& path, int64_t started_us);
   // The API a request belongs to (box:<name>, content, mcp, identity).
-  std::string control_api(const server::http::Request& req, const router::NormalizedPath& path, const std::string& domain);
+  // `route`, when given, is set to the box route the request reaches (or null), for its own limits.
+  std::string control_api(const server::http::Request& req, const router::NormalizedPath& path, const std::string& domain,
+                          const manifest::HttpRoute** route = nullptr);
   // A signed-in caller's account for `by: user` rates, looked up off the network thread and kept
   // a minute; "" until it is known, or for nobody.
   std::string control_user_key(const server::http::Request& req, const std::string& tenant);
@@ -971,6 +978,61 @@ class Host {
   void control_rows_to_traffic(int64_t now_ms);
   // A control's timeout-ms the gate put on the request, or 0.
   static int64_t control_timeout(const server::http::Request& req);
+  // A control's fuel the gate put on the request (047 § 13): nullopt for none, 0 for lifted.
+  static std::optional<int64_t> control_fuel(const server::http::Request& req);
+  // Box routes' own limits (047 § 13), compiled from the active set when it changes, never per
+  // request: keyed by the route, which the set they came from keeps alive.
+  struct BoxLimits {
+    std::shared_ptr<const boxes::ActiveSet> set;
+    std::unordered_map<const manifest::HttpRoute*, controls::Control> routes;
+    bool every_domain = false;  // a box with limits serves "*"
+    std::set<std::string, std::less<>> domains;
+    // Every route that declares limits, gated (http, sse, tools: in `routes`) or not (fuel only,
+    // enforced at the call), for control_list and control_report.
+    struct Entry {
+      std::string box, version, id, what;  // id: box:<box>/<route>; what: "POST /cart", "tool search", ...
+      const manifest::Manifest* manifest = nullptr;
+      const manifest::HttpRoute* route = nullptr;
+      bool gated = false;
+      std::string error;  // limits the host can no longer take (its own limits were lowered)
+    };
+    std::vector<Entry> entries;
+    bool applies(std::string_view domain) const { return every_domain || domains.count(domain) > 0; }
+    const controls::Control* find(const manifest::HttpRoute* r) const {
+      auto it = routes.find(r);
+      return it == routes.end() ? nullptr : &it->second;
+    }
+  };
+  std::shared_ptr<const BoxLimits> box_limits(const std::shared_ptr<const boxes::ActiveSet>& active);
+  // Every route's limits in range and only lower than the host's (body, fuel): at every upload,
+  // store, check, and promotion (route_check and version_upload included).
+  bool check_limits(const manifest::Manifest& m, std::string* error);
+  std::mutex box_limits_mu_;
+  std::shared_ptr<const BoxLimits> box_limits_;
+  // A box tool call's own gate (047 § 13): the tool's limits and TOOL overrides. refused: the
+  // call is answered "rate limit reached" (or the body's refusal); otherwise ticket is held
+  // until the call ends, and fuel is the call's.
+  struct ToolGate {
+    bool refused = false;
+    int status = 0;
+    std::string message;
+    std::optional<int64_t> fuel;
+    std::shared_ptr<controls::Ticket> ticket;
+  };
+  ToolGate control_tool(const boxes::RouteRef& ref, const std::string& domain, const std::string& tenant,
+                        const SignedIn& who, const server::http::Request& req, int64_t input_bytes);
+  // The control change both the tools and the panel make (047 § 5, § 9): `audit_action` names the
+  // audit line (control.set, or panel.control_set for a person in the panel).
+  mcp::ToolResult control_set(const boost::json::object& args, const std::string& audit_action);
+  mcp::ToolResult control_remove(const boost::json::object& args, const std::string& audit_action);
+  // The panel's control edits: a person with host:owner or host:operator, in their scope (028 § 2).
+  std::pair<int, boost::json::object> panel_control(const SignedIn& who, const std::string& what,
+                                                    const boost::json::object& args, const std::string& request_id);
+  // Every route's own limits in a manifest: [{route, kind, id, limits}], for version_get.
+  static boost::json::array route_limits_json(const manifest::Manifest& m);
+  // A host refusal that says only "rate limit reached" (2026-11-03): the host-wide limiter, the
+  // anonymous-write budget, subscriptions, and controls' rate and concurrent refusals.
+  server::http::Response rate_limited(const std::string& tenant, int status, const std::string& request_id) const;
   // Change sets (design/machine/042.ChangeSets.md; changesets.cpp): schema adds, box versions,
   // content, and flags previewed, applied, and rolled back together; one JSON file each in
   // storage/operations/changesets.

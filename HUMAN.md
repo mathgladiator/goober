@@ -428,7 +428,27 @@ Grok to:
 To close a domain or a box at once (moving data, an incident), use `"set": {"closed":
 {"retry-after-s": 600, "message": "Back soon."}}` with `"mode": "enforce"`. Visitors get a 503
 with your message, and no box wakes. `control_remove` opens it again. Every change is in the
-change log, and in the audit log with its why.
+change log, and in the audit log with its why. Visitors refused by a rate or concurrency limit
+read only "rate limit reached", never which limit.
+
+**A control is bum: override it yourself.** You don't need Grok, and nothing waits for
+approval. Sign in to the panel as `host:owner` or `host:operator` and open **Controls**, then
+pick the domain:
+
+- **Switch to observe** stops a control refusing anything at once, while still counting what it
+  would refuse. **Enforce** turns it back on. **Remove** takes it away.
+- **Edit…** changes its properties (JSON like `{"rate": {"per-minute": 600}}`) or its match.
+- **Add a control** makes an override for one endpoint: an id, a match like `POST /cart/{id}`
+  (or `TOOL /search` for an agent tool), the properties, and observe or enforce.
+- A box's own limits (from its manifest, shown as `box:<box>/<route>`) can't be edited, but
+  **Override…** makes an override that beats them at once.
+
+Each needs a why. The audit log says `panel.control_set` or `panel.control_remove` with your
+address, and the change log has it under `control`:
+
+```sh
+sudo grep '"panel.control_' /srv/goober/host/storage/logs/audit.log | tail -n 5
+```
 
 ## Where is a site's heat?
 

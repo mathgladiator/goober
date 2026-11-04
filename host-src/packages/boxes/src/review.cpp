@@ -114,6 +114,54 @@ void compare_roles(const std::string& what, const manifest::RoleChange* x, const
           y.on ? what + " may now " + verb + " " + after : what + " no longer " + verb + "s roles", f, before, after);
 }
 
+// A route's own limits (047 § 13), one change per property: a limit added or lowered narrows what
+// callers may do, removed or raised widens it, and a change of shape (a rate's by) is neutral.
+double limit_number(const bj::value* v, const char* key) {
+  const bj::value* x = v;
+  if (x && key) x = x->is_object() ? x->as_object().if_contains(key) : nullptr;
+  if (!x) return -1;  // none: no limit
+  if (x->is_int64()) return double(x->as_int64());
+  if (x->is_uint64()) return double(x->as_uint64());
+  if (x->is_double()) return x->as_double();
+  return -1;
+}
+// -1 when b is looser than a, 1 when tighter, 0 when neither (or mixed); none is the loosest.
+int tighter(double a, double b) {
+  if (a == b) return 0;
+  if (a < 0) return 1;
+  if (b < 0) return -1;
+  return b < a ? 1 : -1;
+}
+void compare_limits(const std::string& what, const manifest::RouteLimits& x, const manifest::RouteLimits& y, Changes& out) {
+  for (const char* key : {"fuel", "rate", "concurrent", "body-max-bytes"}) {
+    const bj::value* a = x.set.if_contains(key);
+    const bj::value* b = y.set.if_contains(key);
+    std::string before = a ? json::dump(*a) : "(none)", after = b ? json::dump(*b) : "(none)";
+    if (before == after) continue;
+    std::vector<int> votes;
+    if (std::string_view(key) == "rate") {
+      int t = tighter(limit_number(a, "per-minute"), limit_number(b, "per-minute"));
+      if (t == 0) t = tighter(limit_number(a, "burst"), limit_number(b, "burst"));
+      votes.push_back(t);
+    } else if (std::string_view(key) == "concurrent") {
+      votes.push_back(tighter(a ? limit_number(a, "max") : -1, b ? limit_number(b, "max") : -1));
+      votes.push_back(tighter(a ? limit_number(a, "per-client") : -1, b ? limit_number(b, "per-client") : -1));
+      if (!a || !b) votes = {a ? -1 : 1};
+    } else {
+      votes.push_back(tighter(limit_number(a, nullptr), limit_number(b, nullptr)));
+    }
+    bool narrows = std::all_of(votes.begin(), votes.end(), [](int v) { return v >= 0; }) &&
+                   std::any_of(votes.begin(), votes.end(), [](int v) { return v > 0; });
+    bool widens = std::all_of(votes.begin(), votes.end(), [](int v) { return v <= 0; }) &&
+                  std::any_of(votes.begin(), votes.end(), [](int v) { return v < 0; });
+    std::string text = !b ? what + " no longer limits its " + key
+                       : !a ? what + " now limits its " + key + " to " + after
+                            : what + "'s " + key + " limit is now " + after + " (was " + before + ")";
+    out.add("routes", what, "changed", widens ? "widens" : narrows ? "narrows" : "neutral", text,
+            std::string("limits.") + key, before, after);
+  }
+}
+
 void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
   std::map<std::string, Named> before = a ? routes_of(*a) : std::map<std::string, Named>{};
   std::map<std::string, Named> after = routes_of(b);
@@ -127,6 +175,10 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
       if (n.route->client_ip) {
         out.add("routes", what, "added", "widens", "new " + what + " receives each caller's IP address (client-ip)",
                 "client-ip", "false", "true");
+      }
+      if (n.route->limits.any()) {
+        out.add("routes", what, "added", "neutral", "new " + what + " declares limits " + json::dump(n.route->limits.set),
+                "limits", "", json::dump(n.route->limits.set));
       }
       if (n.route->grantable.on) compare_roles(what, nullptr, n.route->grantable, true, out);
       if (n.route->revocable.on) compare_roles(what, nullptr, n.route->revocable, false, out);
@@ -216,6 +268,7 @@ void compare_routes(const Manifest* a, const Manifest& b, Changes& out) {
     field("automatic", x.mail_automatic ? "true" : "false", y.mail_automatic ? "true" : "false", "neutral",
           what + (y.mail_automatic ? " now receives automatic mail" : " no longer receives automatic mail"));
     field("wake", join(x.wake), join(y.wake), "neutral", what + " now wakes on " + join(y.wake));
+    compare_limits(what, x.limits, y.limits, out);
   }
   for (const auto& [k, n] : before) {
     if (after.count(k)) continue;
