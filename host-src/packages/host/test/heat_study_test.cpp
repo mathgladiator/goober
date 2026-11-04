@@ -6,6 +6,8 @@
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
+#include <chrono>
+#include <cstdio>
 #include <fstream>
 
 #include "goober/base/encoding.h"
@@ -153,24 +155,30 @@ TEST_F(HeatStudyHostTest, RequestsAreKeyedByEndpointAndGetSuggestions) {
   for (int i = 0; i < 2; ++i) fetch(port, "acme.example.com", bhttp::verb::get, "/about");
   fetch(port, "acme.example.com", bhttp::verb::get, "/no/such/page");
   fetch(port, "other.example.com", bhttp::verb::get, "/items/1");  // not studied
+  // The host's own paths aren't studied at all: /goober/* and CORS preflights.
+  fetch(port, "acme.example.com", bhttp::verb::get, "/goober/ready");
+  fetch(port, "acme.example.com", bhttp::verb::get, "/goober/health");
+  fetch(port, "acme.example.com", bhttp::verb::options, "/items/1",
+        {{"origin", "https://elsewhere.example.com"}, {"access-control-request-method", "GET"}});
 
   auto got = op("heat_study_get", {{"id", id}});
   ASSERT_FALSE(got.at("isError").as_bool()) << got.at("text");
   const auto& rep = got.at("value");
   EXPECT_EQ(rep.at("state").as_string(), "running");
   EXPECT_GT(rep.at("remaining_ms").as_int64(), 0);
-  // The operator's own tool calls on the domain aren't its traffic.
+  // The operator's own tool calls on the domain aren't its traffic, nor the host's own paths.
   EXPECT_EQ(rep.at("totals").at("requests").as_int64(), 31) << json::dump(rep);
+  EXPECT_EQ(json::dump(rep).find("/goober"), std::string::npos);
+  EXPECT_EQ(json::dump(rep).find("preflight"), std::string::npos);
 
   const auto* items = endpoint(rep, "GET /items/{id}");
   ASSERT_TRUE(items) << json::dump(rep);
   EXPECT_EQ(items->at("api").as_string(), "box:shop");
   EXPECT_EQ(items->at("requests").as_int64(), 25);
   EXPECT_EQ(items->at("status").at("2xx").as_int64(), 25);
-  EXPECT_EQ(items->at("classes").at("browser").as_int64(), 25);
   EXPECT_EQ(items->at("clients").at("distinct").as_int64(), 1);
   EXPECT_GT(items->at("bytes").at("out").as_int64(), 0);
-  EXPECT_GE(items->at("heat").at("fuel").as_int64(), 0);
+  EXPECT_GT(items->at("heat_us").as_int64(), 0);
   const auto& suggest = items->at("suggest").as_object();
   ASSERT_TRUE(suggest.contains("control_set")) << json::dump(suggest);
   EXPECT_EQ(suggest.at("control_set").at("mode").as_string(), "observe");
@@ -183,19 +191,18 @@ TEST_F(HeatStudyHostTest, RequestsAreKeyedByEndpointAndGetSuggestions) {
   const auto* members = endpoint(rep, "GET /members");
   ASSERT_TRUE(members) << json::dump(rep);
   EXPECT_EQ(members->at("status").at("4xx").as_int64(), 3);
-  EXPECT_EQ(members->at("classes").at("bot").as_int64(), 3);
   const auto* about = endpoint(rep, "GET /about");
   ASSERT_TRUE(about);
   EXPECT_EQ(about->at("api").as_string(), "content");
   EXPECT_TRUE(about->at("suggest").as_object().contains("none"));  // two requests
   ASSERT_TRUE(endpoint(rep, "(not found)"));
-  EXPECT_EQ(rep.at("ranks").at("by_heat").as_array().size(), 4u);
+  EXPECT_EQ(rep.at("endpoints").as_array().size(), 4u) << json::dump(rep);
 
   // Nothing private: no address, no user id, only keyed hashes of clients.
   std::string text = json::dump(rep);
   EXPECT_EQ(text.find("127.0.0.1"), std::string::npos);
   EXPECT_EQ(text.find("user_id"), std::string::npos);
-  EXPECT_EQ(rep.at("top_clients").at(0).at("client_h").as_string().size(), 16u);
+  EXPECT_EQ(rep.at("clients").at("top").at(0).at("client_h").as_string().size(), 16u);
 
   // Listed, then stopped early with what was gathered kept.
   auto list = op("heat_study_list", {{"domain", "acme.example.com"}});
@@ -215,6 +222,35 @@ TEST_F(HeatStudyHostTest, RequestsAreKeyedByEndpointAndGetSuggestions) {
   auto health = op("host_health");
   EXPECT_TRUE(health.at("value").at("ready").at("checks").at("limits").as_object().contains("studies"))
       << json::dump(health.at("value").at("ready").at("checks").at("limits"));
+}
+
+// The hook's whole cost per request with a study running (048 § 3.1): keying a box route by its
+// pattern, the client's keyed hash, its class, and the accumulators. Printed; bounded loosely.
+TEST_F(HeatStudyHostTest, HookCost) {
+  ASSERT_FALSE(op("heat_study_start", {{"domain", "acme.example.com"}, {"minutes", 60}, {"why", "cost"}}).at("isError").as_bool());
+  std::vector<server::http::Request> reqs;
+  for (int i = 0; i < 2000; ++i) {
+    server::http::Request r;
+    r.method = i % 5 ? "get" : "head";
+    r.path = i % 3 ? "/items/" + std::to_string(i) : "/members";
+    r.target = r.path;
+    r.remote = "198.51.100." + std::to_string(i % 250);
+    r.headers = {{"host", "acme.example.com"},
+                 {"user-agent", "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"},
+                 {"accept", "text/html"}};
+    reqs.push_back(std::move(r));
+  }
+  bj::object line{{"status", 200}, {"us", 850}, {"route", "item"}, {"box", "shop"}, {"fuel", 1200}};
+  constexpr int kN = 200000;
+  auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < kN; ++i) {
+    if (host->heat_studies()->watching("acme.example.com")) host->heat_observe(reqs[size_t(i) % reqs.size()], line, "acme.example.com", 13);
+  }
+  double ns = double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()) / kN;
+  std::printf("heat study hook: %.0f ns a request with a study running\n", ns);
+  auto rep = op("heat_study_get", {{"id", 1}});
+  EXPECT_EQ(rep.at("value").at("totals").at("requests").as_int64(), kN);
+  EXPECT_LT(ns, 200000);
 }
 
 TEST_F(HeatStudyHostTest, StartIsCheckedAndOnePerDomain) {

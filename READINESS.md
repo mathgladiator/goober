@@ -151,7 +151,8 @@ each ranch's site weekly.
     be read.
   - Archives are at most 5 GiB.
   - The nightly needs room on disk for one more copy of storage, and the local nightly copies
-    (`backups/`, 14 nights) have no budget (`design/machine/045.Limits.md` § 6). `/goober/ready`'s `disk`
+    (`backups/`, the newest 3 with S3 backups on, 14 with them off) have no byte budget, but
+    `/goober/ready`'s `limits` check counts them as `local-copies` (`design/machine/045.Limits.md` § 6). Its `disk`
     check says how much is free (`low` under 10% or 2 GiB; failing under 256 MiB).
   - Nothing outside watches yet: point an uptime checker or a Prometheus at `/goober/ready`
     (`?format=prometheus`); its `health` has error ratios, latency, the outbox, free disk,

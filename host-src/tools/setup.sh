@@ -463,7 +463,8 @@ Description=Back up the goober host ($DIR)
 [Service]
 Type=oneshot
 User=${GOOBER_USER:-$(id -un)}
-ExecStart=/bin/sh -c '$BIN backup "$DIR/backups/\$\$(date +%%F)" --config "$CONFIG" && find "$DIR/backups" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +'
+# goober-host backup keeps the newest dated copies itself: 3 with S3 backups on, 14 with them off.
+ExecStart=/bin/sh -c '$BIN backup "$DIR/backups/\$\$(date +%%F)" --config "$CONFIG"'
 UNIT
   cat >"$DIR/deploy/goober-backup.timer" <<UNIT
 # Install next to goober-host.service, then: sudo systemctl enable --now goober-backup.timer
@@ -478,7 +479,7 @@ Persistent=true
 WantedBy=timers.target
 UNIT
   good "wrote $DIR/deploy/goober-host.service"
-  good "wrote $DIR/deploy/goober-backup.service and .timer (nightly, two weeks kept)"
+  good "wrote $DIR/deploy/goober-backup.service and .timer (nightly; the newest 3 kept with S3 backups on, 14 with them off)"
   good "wrote $DIR/deploy/Caddyfile"
   if [[ "$BIN" == */build/dev/* ]]; then
     note "The host binary is the dev build at $BIN. For a server, build the server preset"

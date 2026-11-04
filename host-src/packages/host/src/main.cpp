@@ -69,7 +69,8 @@ constexpr const char* kUsage =
     "       goober-host db describe TENANT DATABASE [--config host.json]\n"
     "       goober-host db query TENANT DATABASE SQL [--config host.json]\n"
     "       goober-host db exec TENANT DATABASE SQL [--config host.json]\n"
-    "       goober-host backup DIR [--config host.json]\n"
+    "       goober-host backup DIR [--config host.json]   (a DIR named YYYY-MM-DD keeps its dated siblings to the\n"
+    "                                    newest 3 with S3 backups on, 14 with them off)\n"
     "       goober-host restore DIR [--config host.json]\n"
     "       goober-host key set NAME [--hosts H,...] [--tenant T] [--config host.json]   (the value on stdin)\n"
     "       goober-host key list [--config host.json]\n"
@@ -603,6 +604,21 @@ int main(int argc, char** argv) {
     if (!ok) return std::cerr << "goober-host: " << err << "\n", 1;
     std::cout << (positional[0] == "backup" ? "backed up " : "restored ") << report.databases << " databases and "
               << report.files << " files (" << report.bytes / 1024 << " KiB)\n";
+    // A dated copy (setup's nightly, backups/YYYY-MM-DD) keeps its dated siblings to the newest
+    // 3 when S3 backups are on, 14 when off (046 A12).
+    if (positional[0] == "backup" && goober::host::is_dated_copy_name(std::filesystem::path(positional[1]).lexically_normal().filename().string())) {
+      int keep = goober::host::local_copies_to_keep(config->backup.enabled());
+      std::string perr;
+      auto removed = goober::host::prune_local_copies(positional[1], keep, &perr);
+      std::cout << "kept the newest " << keep << " dated copies beside it (" << (config->backup.enabled() ? "S3 backups on" : "S3 backups off")
+                << ")";
+      if (!removed.empty()) {
+        std::cout << "; removed";
+        for (const auto& r : removed) std::cout << " " << r;
+      }
+      std::cout << "\n";
+      if (!perr.empty()) std::cerr << "goober-host: " << perr << "\n";
+    }
     return 0;
   }
   if (!positional.empty() && positional[0] != "check") {

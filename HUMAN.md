@@ -19,7 +19,7 @@ the host runs but something is wrong:
 - `disk` says how much room is left where storage lives. `"low": true` (under 10% or 2 GiB)
   is a warning; under 256 MiB fails the check, since every write (data, logs, backups) is
   about to. `sudo sh -c 'du -sh /srv/goober/host/storage/* /srv/goober/host/backups'`
-  shows what holds it (inside `sh -c`, since only `goober` can list storage to expand the `*`); `backups/` is a local copy of storage for each of the last 14 nights.
+  shows what holds it (inside `sh -c`, since only `goober` can list storage to expand the `*`); `backups/` holds a local copy of storage for each night, the newest 3 kept with S3 backups on and 14 with them off (`goober-host backup` removes older ones); the `limits` check's `local-copies` says how many there are and how much they hold.
 - `boxes` lists any box with an active version that isn't served (`not_loaded`).
 - `stores` lists any shared file that wouldn't open at start (`consent`, `web`, `source`). A
   broken web or source store was moved aside (`*.unreadable-<time>`, kept) and a fresh one
@@ -441,7 +441,8 @@ rate or concurrency limits, or when the site feels slow:
    domain, and four at most on the host.
 2. **Read it.** Open the panel's **Studies** view, or have Grok run `heat_study_get {id}`.
    "Where the heat is" shows which endpoints take the time; the endpoints table shows how hard
-   the busiest clients push each one (client p99 per minute) and how many bots.
+   the busiest clients push each one (client p99 per minute) and how many run at once. The
+   host's own paths (`/goober/*`) aren't counted.
 3. **Send the suggestions in observe mode.** Each endpoint's suggested controls are ready
    `control_set` arguments with `mode: "observe"` and the reason for each number. Have Grok send
    the ones you agree with as they are.

@@ -67,7 +67,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
 | 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window (the host's own paths left out), with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log, `principal_kind`, alerts. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
@@ -101,8 +101,9 @@ written and dry-run here, not yet run against a real server), with these caveats
 - **Backups go to S3** when `backup.s3` is set: sealed with a backup key that must also be
   kept off the machine (`goober-host backup key`), or nothing can be restored. Rehydrate is
   tested end to end against a stand-in S3. Without a bucket, backups are local copies only:
-  one of storage each night in `backups/`, kept 14 nights on the same disk, with no byte
-  budget (045 § 6).
+  one of storage each night in `backups/`, the newest 14 kept on the same disk (3 once S3
+  backups are on), counted as `local-copies` in the `limits` check, with no byte budget
+  (045 § 6).
 - **Nobody is told** when something is wrong: nothing alerts. Point an outside monitor at
   `/goober/ready` (HUMAN.md § 1; 044 § 4.1 is the open decision).
 - **Logs rotate** daily or at 256 MiB, stay 7 days on the machine, and are archived sealed
@@ -932,8 +933,8 @@ the operational insights." (046.Operations.md):
       and box versions as never pruned, the 30-day window, approvals, and verified senders.
 - [x] What 045's table missed: the local nightly copies (`backups/`, 14 nights, no budget), the
       change log, source projects, and `jobs.db`; HUMAN.md's disk hint names `backups/`.
-- [ ] A budget for the local nightly copies, or fewer once S3 backups are on (046 § 9, A12):
-      the human's call.
+- [x] A budget for the local nightly copies, or fewer once S3 backups are on (046 § 9, A12):
+      decided 2026-11-03, built in Phase 52.
 
 ### Phase 50: heat studies by endpoint (2026-11-03)
 The human: "I want a way to do a study on a domain to discover heat by endpoint." It goes with
@@ -962,8 +963,8 @@ per-domain controls (047), whose numbers a study suggests (048):
 - [x] The panel's **Studies** view; a test that it reads and can't start one.
 - [ ] The view checked in a browser.
 - [x] 047 merged: suggestions in `control_set`'s shape (`endpoint: {id, match}`, `set`); MCP tools
-      get none, since 047 matches paths (048 § 4.3).
-- [ ] Five decisions (048 § 11).
+      got none, since 047 matched paths; since Phase 52 they match as `TOOL /<name>` (048 § 4.3).
+- [x] The five decisions (048 § 11), made in Phase 52.
 
 ### Phase 51: per-domain controls (2026-11-03)
 The human: "I want rate limiting, concurrent limits, and other operational controls per API per
@@ -986,6 +987,29 @@ monitored as well to determine effectiveness." (`design/machine/047.Controls.md`
 - [x] The panel's **Controls** view; the change log's `control` kind.
 - [ ] The view checked in a browser.
 - [ ] Requests per day, alerts on verdicts, and the other decisions in 047 § 12.
+
+### Phase 52: heat studies made lean; local nightly copies kept by policy (2026-11-03)
+The human, on the heat study: "(6) Clean it up for performance, don't worry about internal, and
+make it crisp and clean." On the local copies: "For (1), I like that policy and keep it simple."
+- [x] Host-internal paths (`/goober/*`, CORS preflights) aren't studied at all; the `host` API
+      is gone from studies (048 § 3.1, decision 2); tests.
+- [x] The request path: running studies in four lock-free slots; one lock per study, held about
+      100 ns; endpoints keyed by a hash of their parts, their names built once; a client's
+      keyed log hash made once per endpoint it asks, not per request; no domain-wide client
+      table or concurrency ring. Measured (048 § 3.8): a recorded request about 100 ns (was
+      380 to 580), the whole hook about 290 ns (was about 1,230), nothing running 2 ns; tests
+      that print each number.
+- [x] The report cut to what finds heat and sets controls: client classes, fuel, the ranks
+      lists, per-endpoint series, the domain's busiest-minute and concurrency, and the
+      candidates' bookkeeping are gone (048 § 12); top clients come from the endpoints' tables,
+      each with the endpoint it asked most; the Studies view to match.
+- [x] Decisions 1, 3, and 4 of 048 kept as recommended; decision 5 decided: an MCP tool's
+      suggestion matches it as `"TOOL /<name>"` on api `mcp` (047's tool match); tests.
+- [x] `goober-host backup DIR`, for a DIR named YYYY-MM-DD, keeps its dated siblings to the
+      newest 3 with `backup.s3` set and 14 without; nothing else beside it is touched;
+      setup's `goober-backup.service` no longer runs `find` (an old unit's is harmless); tests.
+- [x] `local-copies` in the `limits` check of `/goober/ready` and `host_health`: how many, their
+      bytes, and how many are kept; no budget, as the host doesn't own them (045, 046 A12); tests.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

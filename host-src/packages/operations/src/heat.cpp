@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <system_error>
+#include <unordered_map>
 
 #include "goober/base/files.h"
 #include "goober/json/json.h"
@@ -15,36 +16,6 @@ namespace bj = boost::json;
 namespace fs = std::filesystem;
 
 // ------------------------------------------------------------------ small pieces
-
-ClientClass classify_client(std::string_view user_agent, bool agent) {
-  if (agent) return ClientClass::kAgent;
-  std::string ua;
-  ua.reserve(std::min<size_t>(user_agent.size(), 512));
-  for (char c : user_agent.substr(0, 512)) ua.push_back(char(std::tolower(static_cast<unsigned char>(c))));
-  static const char* const kBots[] = {"bot",     "crawl",  "spider",         "slurp",       "curl/",       "wget/",
-                                      "python",  "go-http-client", "java/", "libwww",      "scrapy",      "httpclient",
-                                      "okhttp",  "axios",  "node-fetch",     "headless",    "monitor",     "uptime",
-                                      "feedfetcher", "facebookexternalhit", "lighthouse"};
-  for (const char* b : kBots) {
-    if (ua.find(b) != std::string::npos) return ClientClass::kBot;
-  }
-  if (ua.starts_with("mozilla/")) return ClientClass::kBrowser;
-  return ClientClass::kOther;
-}
-
-const char* client_class_name(ClientClass c) {
-  switch (c) {
-    case ClientClass::kBrowser:
-      return "browser";
-    case ClientClass::kBot:
-      return "bot";
-    case ClientClass::kAgent:
-      return "agent";
-    case ClientClass::kOther:
-      break;
-  }
-  return "other";
-}
 
 std::string endpoint_match(std::string_view method, std::string_view pattern) {
   std::string out;
@@ -63,11 +34,11 @@ std::string endpoint_match(std::string_view method, std::string_view pattern) {
     }
     std::string_view inside = pattern.substr(i + 1, close - i - 1);
     inside = inside.substr(0, inside.find(':'));
-    std::string name;
+    out.push_back('{');
     for (char c : inside) {
-      if (!std::isspace(static_cast<unsigned char>(c))) name.push_back(c);
+      if (!std::isspace(static_cast<unsigned char>(c))) out.push_back(c);
     }
-    out += "{" + name + "}";
+    out.push_back('}');
     i = close;
   }
   return out;
@@ -120,6 +91,8 @@ uint64_t mix(uint64_t x) {
   return x ^ (x >> 31);
 }
 
+uint64_t hash_of(std::string_view s) { return std::hash<std::string_view>{}(s); }
+
 }  // namespace
 
 void DistinctCounter::add(uint64_t hash) {
@@ -152,7 +125,7 @@ int64_t DistinctCounter::estimate() const {
 namespace {
 
 int64_t round_up(int64_t v, int64_t step) { return (v + step - 1) / step * step; }
-std::string clients_text(int64_t n) { return std::to_string(n) + (n == 1 ? " client" : " clients"); }
+std::string count_of(int64_t n, const char* one, const char* many) { return std::to_string(n) + " " + (n == 1 ? one : many); }
 
 // An override id from the endpoint, as 047 allows (letters, digits, _; not a leading digit; at
 // most 64): "POST /cart/{id}" is post_cart_id.
@@ -174,19 +147,16 @@ std::string override_id(const std::string& endpoint) {
 }  // namespace
 
 bj::object suggest_controls(const SuggestInput& in) {
-  if (in.api == "other" || in.api == "host" || in.endpoint.empty() || in.endpoint.front() == '(') {
+  if (in.api == "other" || in.endpoint.empty() || in.endpoint.front() == '(') {
     return bj::object{{"none", "not an endpoint a control names"}};
   }
   if (in.requests < 20) {
-    return bj::object{{"none", "only " + std::to_string(in.requests) + (in.requests == 1 ? " request" : " requests") +
+    return bj::object{{"none", "only " + count_of(in.requests, "request", "requests") +
                                    ": too few to suggest from; study longer, or at a busier time"}};
   }
-  // 047 matches "METHOD /path", and every MCP call is POST /mcp: one tool can't be singled out.
-  if (in.api == "mcp") {
-    return bj::object{{"none", "a control can't single out one MCP tool (047 matches paths, and every call is POST /mcp); "
-                               "a control on api mcp covers all of /mcp"}};
-  }
-  bj::object args{{"domain", in.domain}, {"api", in.api}, {"endpoint", bj::object{{"id", override_id(in.endpoint)}, {"match", in.endpoint}}}};
+  // One MCP tool is matched as "TOOL /<name>" on api mcp (047).
+  std::string match = in.api == "mcp" ? "TOOL /" + in.endpoint : in.endpoint;
+  bj::object args{{"domain", in.domain}, {"api", in.api}, {"endpoint", bj::object{{"id", override_id(match)}, {"match", match}}}};
   bj::object set;
   bj::object reasons;
   // A per-client rate protects against one client; when the endpoint carries much of the
@@ -199,7 +169,7 @@ bj::object suggest_controls(const SuggestInput& in) {
     by = "all";
     per_minute = std::max<int64_t>(10, 2 * int64_t(in.peak_minute));
     reasons["rate"] = "by all, as this endpoint holds " + std::to_string(int(std::lround(in.heat_share * 100))) +
-                      "% of the domain's heat over " + clients_text(in.clients) +
+                      "% of the domain's heat over " + count_of(in.clients, "client", "clients") +
                       ", none above 10% of its requests: per-minute " + std::to_string(per_minute) +
                       " = max(10, 2 x " + std::to_string(in.peak_minute) +
                       ", the endpoint's busiest minute); burst is half that";
@@ -208,7 +178,7 @@ bj::object suggest_controls(const SuggestInput& in) {
     per_minute = std::max<int64_t>(10, 2 * int64_t(in.p99_client_minute));
     reasons["rate"] = "per-minute " + std::to_string(per_minute) + " = max(10, 2 x " +
                       std::to_string(in.p99_client_minute) + ", the p99 of each client's busiest minute over " +
-                      clients_text(in.clients) + "); burst is half that";
+                      count_of(in.clients, "client", "clients") + "); burst is half that";
   }
   int64_t burst = std::max<int64_t>(1, (per_minute + 1) / 2);
   set["rate"] = bj::object{{"per-minute", per_minute}, {"burst", burst}, {"by", by}};
@@ -221,8 +191,8 @@ bj::object suggest_controls(const SuggestInput& in) {
   if (in.max_body_bytes > 0) {
     int64_t b = std::max<int64_t>(1024, round_up(2 * in.max_body_bytes, 1024));
     set["body-max-bytes"] = b;
-    reasons["body-max-bytes"] = std::to_string(b) + " = max(1024, 2 x " + std::to_string(in.max_body_bytes) +
-                                " bytes, the largest body seen, rounded up to a KiB)";
+    reasons["body-max-bytes"] = std::to_string(b) + " = max(1024, 2 x " + count_of(in.max_body_bytes, "byte", "bytes") +
+                                ", the largest body seen, rounded up to a KiB)";
   }
   if (in.api.starts_with("box:")) {
     int64_t ms = std::max<int64_t>(1000, round_up((2 * in.max_us + 999) / 1000, 100));
@@ -240,10 +210,95 @@ bj::object suggest_controls(const SuggestInput& in) {
 
 namespace {
 
+// An endpoint's key: a hash of its parts, so the request path builds no string. Its strings are
+// built once, when the endpoint is first seen. Two endpoints share a key with odds of about one
+// in 10^12 for 5,500 of them.
+uint64_t endpoint_key(const HeatSample& s) {
+  uint64_t h = mix(uint64_t(s.api) + 1);
+  h = mix(h ^ hash_of(s.box));
+  h = mix(h ^ hash_of(s.method));
+  return mix(h ^ hash_of(s.what));
+}
+
+std::string api_name(const HeatSample& s) {
+  switch (s.api) {
+    case HeatApi::kBox:
+      return "box:" + std::string(s.box);
+    case HeatApi::kMcp:
+      return "mcp";
+    case HeatApi::kIdentity:
+      return "identity";
+    case HeatApi::kContent:
+      break;
+  }
+  return "content";
+}
+
+std::string endpoint_name(const HeatSample& s) {
+  if (s.method.empty()) return std::string(s.what);
+  if (s.api == HeatApi::kBox) return endpoint_match(s.method, s.what);
+  std::string out;
+  for (char c : s.method) out.push_back(char(std::toupper(static_cast<unsigned char>(c))));
+  out.push_back(' ');
+  out.append(s.what);
+  return out;
+}
+
+// What every row counts, the whole domain's included.
+struct Counts {
+  int64_t requests = 0, us = 0, bytes_in = 0, bytes_out = 0, max_in = 0, max_us = 0;
+  std::array<int64_t, 5> status{};  // 2xx, 3xx, 4xx (not 429), 5xx, 429
+  std::vector<uint32_t> minutes;    // requests per minute since the study began
+  Histogram latency;
+
+  void add(const HeatSample& s, int64_t minute) {
+    int64_t us_ = std::max<int64_t>(0, s.us);
+    ++requests;
+    us += us_;
+    bytes_in += s.bytes_in;
+    bytes_out += s.bytes_out;
+    max_in = std::max(max_in, s.bytes_in);
+    max_us = std::max(max_us, us_);
+    int st = s.status;
+    ++status[st == 429 ? 4 : st >= 500 ? 3 : st >= 400 ? 2 : st >= 300 ? 1 : 0];
+    if (minutes.size() <= size_t(minute)) minutes.resize(size_t(minute) + 1);
+    ++minutes[size_t(minute)];
+    latency.add(us_);
+  }
+  void merge(const Counts& o) {
+    requests += o.requests;
+    us += o.us;
+    bytes_in += o.bytes_in;
+    bytes_out += o.bytes_out;
+    max_in = std::max(max_in, o.max_in);
+    max_us = std::max(max_us, o.max_us);
+    for (size_t i = 0; i < status.size(); ++i) status[i] += o.status[i];
+    if (minutes.size() < o.minutes.size()) minutes.resize(o.minutes.size());
+    for (size_t i = 0; i < o.minutes.size(); ++i) minutes[i] += o.minutes[i];
+    latency.merge(o.latency);
+  }
+  std::pair<uint32_t, int64_t> peak_minute() const {
+    uint32_t peak = 0;
+    int64_t at = 0;
+    for (size_t i = 0; i < minutes.size(); ++i) {
+      if (minutes[i] > peak) peak = minutes[i], at = int64_t(i);
+    }
+    return {peak, at};
+  }
+  bj::object latency_json() const {
+    return bj::object{{"p50", std::min(latency.percentile(0.5), max_us)},
+                      {"p99", std::min(latency.percentile(0.99), max_us)},
+                      {"max", max_us}};
+  }
+  bj::object status_json() const {
+    return bj::object{{"2xx", status[0]}, {"3xx", status[1]}, {"4xx", status[2]}, {"5xx", status[3]}, {"429", status[4]}};
+  }
+};
+
 struct ClientState {
   int64_t minute = -1;
   uint32_t in_minute = 0, best = 0, requests = 0;
-  ClientClass cls = ClientClass::kOther;
+  uint64_t log_h = 0;  // the keyed hash a report shows, made once
   uint32_t busiest() const { return std::max(best, in_minute); }
 };
 
@@ -259,7 +314,7 @@ struct ClientTable {
   bool evicted = false;
   DistinctCounter distinct;
 
-  void add(uint64_t client, int64_t minute, ClientClass cls) {
+  void add(uint64_t client, std::string_view key, int64_t minute, const HeatStudies::ClientHash& hash) {
     distinct.add(client);
     auto it = live.find(client);
     if (it == live.end()) {
@@ -281,11 +336,11 @@ struct ClientTable {
         return;
       }
       it = live.emplace(client, ClientState{}).first;
-      it->second.cls = cls;
+      it->second.log_h = hash(key);
     }
     ClientState& c = it->second;
     ++c.requests;
-    if (c.minute == minute || minute < c.minute) {
+    if (c.minute >= minute) {
       ++c.in_minute;
     } else {
       c.best = c.busiest();
@@ -308,8 +363,8 @@ struct ClientTable {
 };
 
 // Peak concurrency from finished requests: each one's interval is checked against the last
-// `cap` finished on the same key, both ways, so the count at every start is exact while no more
-// than `cap` overlap.
+// `cap` finished on the same endpoint, both ways, so the count at every start is exact while no
+// more than `cap` overlap.
 struct Overlap {
   struct Interval {
     int64_t s = 0, e = 0;
@@ -345,54 +400,26 @@ struct Overlap {
 };
 
 struct Endpoint {
-  std::string api, endpoint, method;
+  std::string api, endpoint;
   int64_t tracked_from_ms = 0;
   int64_t prior = 0;  // requests counted in "other" before it was tracked
-  int64_t requests = 0, us = 0, fuel = 0, bytes_in = 0, bytes_out = 0, max_in = 0, max_us = 0;
-  std::array<int64_t, 5> status{};   // 2xx, 3xx, 4xx (not 429), 5xx, 429
-  std::array<int64_t, 4> classes{};  // browser, bot, agent, other
-  std::vector<uint32_t> minutes;     // requests per minute since the study began
-  Histogram latency;
+  Counts n;
   ClientTable clients;
   Overlap overlap;
 
-  Endpoint(std::string a, std::string e, std::string m, size_t client_cap, size_t ring_cap)
-      : api(std::move(a)), endpoint(std::move(e)), method(std::move(m)) {
-    clients.cap = client_cap;
-    overlap.cap = ring_cap;
+  Endpoint(std::string a, std::string e, const HeatStudies::Caps& caps) : api(std::move(a)), endpoint(std::move(e)) {
+    clients.cap = caps.endpoint_clients;
+    overlap.cap = caps.endpoint_ring;
   }
 
-  void add(const HeatSample& s, int64_t minute) {
-    ++requests;
-    us += std::max<int64_t>(0, s.us);
-    fuel += std::max<int64_t>(0, s.fuel);
-    bytes_in += s.bytes_in;
-    bytes_out += s.bytes_out;
-    max_in = std::max(max_in, s.bytes_in);
-    max_us = std::max(max_us, s.us);
-    int st = s.status;
-    status[st == 429 ? 4 : st >= 500 ? 3 : st >= 400 ? 2 : st >= 300 ? 1 : 0] += 1;
-    classes[size_t(s.cls)] += 1;
-    if (minutes.size() <= size_t(minute)) minutes.resize(size_t(minute) + 1);
-    ++minutes[size_t(minute)];
-    latency.add(std::max<int64_t>(0, s.us));
-    clients.add(s.client, minute, s.cls);
-    overlap.add(s.end_us - std::max<int64_t>(0, s.us), s.end_us, s.client);
+  void add(const HeatSample& s, uint64_t client, int64_t minute, const HeatStudies::ClientHash& hash) {
+    n.add(s, minute);
+    clients.add(client, s.client, minute, hash);
+    overlap.add(s.end_us - std::max<int64_t>(0, s.us), s.end_us, client);
   }
 
   void fold_into(Endpoint& o) const {
-    o.requests += requests;
-    o.us += us;
-    o.fuel += fuel;
-    o.bytes_in += bytes_in;
-    o.bytes_out += bytes_out;
-    o.max_in = std::max(o.max_in, max_in);
-    o.max_us = std::max(o.max_us, max_us);
-    for (size_t i = 0; i < status.size(); ++i) o.status[i] += status[i];
-    for (size_t i = 0; i < classes.size(); ++i) o.classes[i] += classes[i];
-    if (o.minutes.size() < minutes.size()) o.minutes.resize(minutes.size());
-    for (size_t i = 0; i < minutes.size(); ++i) o.minutes[i] += minutes[i];
-    o.latency.merge(latency);
+    o.n.merge(n);
     o.clients.done.merge(clients.busiest());
     o.clients.done_top = std::max(o.clients.done_top, clients.top_requests());
     o.clients.distinct.merge(clients.distinct);
@@ -403,7 +430,7 @@ struct Endpoint {
   }
 
   int64_t memory() const {
-    return int64_t(sizeof(Endpoint)) + int64_t(minutes.capacity()) * 4 + int64_t(clients.live.size()) * 56 +
+    return int64_t(sizeof(Endpoint)) + int64_t(n.minutes.capacity()) * 4 + int64_t(clients.live.size()) * 64 +
            int64_t(overlap.ring.capacity()) * int64_t(sizeof(Overlap::Interval)) + int64_t(api.size() + endpoint.size());
   }
 };
@@ -421,6 +448,7 @@ std::string hex16(uint64_t v) {
 struct Study {
   mutable std::mutex mu;
   HeatStudies::Caps caps;
+  const HeatStudies::ClientHash* hash = nullptr;
   int64_t id = 0;
   std::string domain, tenant, why, by, stopped_by;
   int minutes = 60;
@@ -428,39 +456,39 @@ struct Study {
   std::atomic<int64_t> file_bytes{0};
   int64_t promoted_minute = -1;
   bool ended = false;
-  std::map<std::string, std::unique_ptr<Endpoint>> endpoints;  // api \n endpoint
+  bj::object final_report;  // between the end and its file being written
+  Counts all;               // the whole domain
+  std::unordered_map<uint64_t, std::unique_ptr<Endpoint>> endpoints;
   struct Candidate {
-    std::string api, endpoint, method;
+    std::string api, endpoint;
     int64_t requests = 0;
   };
-  std::unordered_map<std::string, Candidate> candidates;
-  int64_t candidates_dropped = 0, promoted = 0;
-  std::unique_ptr<Endpoint> other, all;
+  std::unordered_map<uint64_t, Candidate> candidates;
+  int64_t promoted = 0;
+  std::unique_ptr<Endpoint> other;
 
   void add(const HeatSample& s) {
     if (ended || s.at_ms < started_ms || s.at_ms >= ends_ms) return;
     int64_t minute = (s.at_ms - started_ms) / 60000;
-    all->add(s, minute);
-    std::string key = s.api + "\n" + s.endpoint;
+    uint64_t client = hash_of(s.client);
+    all.add(s, minute);
+    uint64_t key = endpoint_key(s);
     auto it = endpoints.find(key);
     if (it == endpoints.end()) {
-      if (endpoints.size() < caps.endpoints) {
-        auto ep = std::make_unique<Endpoint>(s.api, s.endpoint, s.method, caps.endpoint_clients, caps.endpoint_ring);
-        ep->tracked_from_ms = started_ms;
-        it = endpoints.emplace(key, std::move(ep)).first;
-      } else {
+      if (endpoints.size() >= caps.endpoints) {
         if (auto c = candidates.find(key); c != candidates.end()) {
           ++c->second.requests;
         } else if (candidates.size() < caps.candidates) {
-          candidates.emplace(key, Candidate{s.api, s.endpoint, s.method, 1});
-        } else {
-          ++candidates_dropped;
+          candidates.emplace(key, Candidate{api_name(s), endpoint_name(s), 1});
         }
-        other->add(s, minute);
+        other->add(s, client, minute, *hash);
         return;
       }
+      auto ep = std::make_unique<Endpoint>(api_name(s), endpoint_name(s), caps);
+      ep->tracked_from_ms = started_ms;
+      it = endpoints.emplace(key, std::move(ep)).first;
     }
-    it->second->add(s, minute);
+    it->second->add(s, client, minute, *hash);
   }
 
   // Once a minute: an untracked endpoint busier than the least busy tracked one takes its place;
@@ -470,23 +498,23 @@ struct Study {
     if (minute == promoted_minute) return;
     promoted_minute = minute;
     if (candidates.empty() || endpoints.empty()) return;
-    std::vector<std::pair<int64_t, std::string>> ranked;
+    std::vector<std::pair<int64_t, uint64_t>> ranked;
     for (const auto& [k, c] : candidates) ranked.emplace_back(c.requests, k);
     std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    auto seen = [](const Endpoint& e) { return e.n.requests + e.prior; };
     for (size_t i = 0; i < ranked.size() && i < 50; ++i) {
       auto low = endpoints.begin();
       for (auto e = endpoints.begin(); e != endpoints.end(); ++e) {
-        if (e->second->requests + e->second->prior < low->second->requests + low->second->prior) low = e;
+        if (seen(*e->second) < seen(*low->second)) low = e;
       }
-      int64_t low_n = low->second->requests + low->second->prior;
+      int64_t low_n = seen(*low->second);
       if (ranked[i].first <= low_n) break;
       low->second->fold_into(*other);
-      Candidate back{low->second->api, low->second->endpoint, low->second->method, low_n};
-      std::string back_key = low->first;
+      Candidate back{low->second->api, low->second->endpoint, low_n};
+      uint64_t back_key = low->first;
       endpoints.erase(low);
       auto c = candidates.find(ranked[i].second);
-      auto ep = std::make_unique<Endpoint>(c->second.api, c->second.endpoint, c->second.method, caps.endpoint_clients,
-                                           caps.endpoint_ring);
+      auto ep = std::make_unique<Endpoint>(c->second.api, c->second.endpoint, caps);
       ep->tracked_from_ms = now_ms;
       ep->prior = c->second.requests;
       endpoints.emplace(c->first, std::move(ep));
@@ -496,91 +524,82 @@ struct Study {
     }
   }
 
+  // The counts are freed once the report is written; the shell stays for the request path.
+  void release() {
+    all = Counts{};
+    endpoints.clear();
+    candidates.clear();
+    other.reset();
+  }
+
   int64_t memory() const {
-    int64_t m = int64_t(sizeof(Study)) + other->memory() + all->memory();
-    for (const auto& [k, e] : endpoints) m += e->memory() + int64_t(k.size()) + 48;
+    int64_t m = int64_t(sizeof(Study)) + int64_t(all.minutes.capacity()) * 4 + (other ? other->memory() : 0);
+    for (const auto& [k, e] : endpoints) m += e->memory() + 32;
     m += int64_t(candidates.size()) * 96;
     return m;
+  }
+
+  const Endpoint* hottest() const {
+    const Endpoint* h = nullptr;
+    for (const auto& [k, e] : endpoints) {
+      if (!h || e->n.us > h->n.us || (e->n.us == h->n.us && e->endpoint < h->endpoint)) h = e.get();
+    }
+    return h;
   }
 
   bj::object summary(const std::string& state, const std::string& ended_by, int64_t ended_ms) const {
     bj::object row{{"id", id},          {"domain", domain},        {"tenant", tenant}, {"state", state},
                    {"why", why},        {"by", by},                {"minutes", minutes}, {"started_ms", started_ms},
-                   {"ends_ms", ends_ms}, {"requests", all->requests}, {"endpoints", int64_t(endpoints.size())}};
+                   {"ends_ms", ends_ms}, {"requests", all.requests}, {"endpoints", int64_t(endpoints.size())}};
     if (state != "running") {
       row["ended_ms"] = ended_ms;
       row["ended_by"] = ended_by;
     }
     if (!stopped_by.empty()) row["stopped_by"] = stopped_by;
-    const Endpoint* hottest = nullptr;
-    for (const auto& [k, e] : endpoints) {
-      if (!hottest || e->us > hottest->us) hottest = e.get();
-    }
-    if (hottest && all->us > 0) {
-      row["hottest"] = bj::object{{"endpoint", hottest->endpoint}, {"api", hottest->api},
-                                  {"heat_share", round4(double(hottest->us) / double(all->us))}};
+    if (const Endpoint* h = hottest(); h && all.us > 0) {
+      row["hottest"] = bj::object{{"endpoint", h->endpoint}, {"api", h->api}, {"heat_share", round4(double(h->n.us) / double(all.us))}};
     }
     return row;
   }
 
-  bj::object endpoint_json(const Endpoint& e, bool detailed, bool series, int64_t elapsed_minutes) const {
-    double total_us = double(std::max<int64_t>(1, all->us));
-    double total_n = double(std::max<int64_t>(1, all->requests));
-    double total_b = double(std::max<int64_t>(1, all->bytes_in + all->bytes_out));
-    double heat_share = round4(double(e.us) / total_us);
+  bj::object endpoint_json(const Endpoint& e, bool detailed) const {
+    double heat_share = round4(double(e.n.us) / double(std::max<int64_t>(1, all.us)));
     bj::object o{{"endpoint", e.endpoint},
                  {"api", e.api},
-                 {"requests", e.requests},
+                 {"requests", e.n.requests},
                  {"heat_share", heat_share},
-                 {"requests_share", round4(double(e.requests) / total_n)},
-                 {"bytes_share", round4(double(e.bytes_in + e.bytes_out) / total_b)}};
+                 {"requests_share", round4(double(e.n.requests) / double(std::max<int64_t>(1, all.requests)))},
+                 {"bytes_share", round4(double(e.n.bytes_in + e.n.bytes_out) /
+                                        double(std::max<int64_t>(1, all.bytes_in + all.bytes_out)))}};
     if (!detailed) return o;
-    uint32_t peak = 0;
-    int64_t peak_at = 0;
-    for (size_t i = 0; i < e.minutes.size(); ++i) {
-      if (e.minutes[i] > peak) peak = e.minutes[i], peak_at = int64_t(i);
-    }
+    auto [peak, peak_at] = e.n.peak_minute();
     auto busiest = e.clients.busiest();
     int64_t clients = e.clients.count();
-    o["heat"] = bj::object{{"us", e.us}, {"fuel", e.fuel}};
-    o["bytes"] = bj::object{{"in", e.bytes_in}, {"out", e.bytes_out}, {"max_in", e.max_in}};
-    o["latency_us"] = bj::object{{"p50", std::min(e.latency.percentile(0.5), e.max_us)},
-                                 {"p99", std::min(e.latency.percentile(0.99), e.max_us)},
-                                 {"max", e.max_us}};
-    o["per_minute"] = bj::object{{"peak", int64_t(peak)},
-                                 {"peak_at_ms", started_ms + peak_at * 60000},
-                                 {"mean", round4(double(e.requests) / double(std::max<int64_t>(1, elapsed_minutes)))}};
-    double top_share = e.requests ? double(e.clients.top_requests()) / double(e.requests) : 0;
-    o["clients"] = bj::object{{"distinct", clients},
-                              {"exact", e.clients.exact()},
-                              {"busiest_minute", bj::object{{"p50", int64_t(busiest.percentile(0.5))},
-                                                            {"p99", int64_t(busiest.percentile(0.99))},
-                                                            {"max", int64_t(busiest.max())}}},
-                              {"top_share", round4(top_share)}};
-    if (e.clients.overflow) o["clients"].as_object()["unattributed_requests"] = e.clients.overflow;
-    o["concurrent"] = bj::object{{"peak", int64_t(e.overlap.peak)},
-                                 {"per_client_peak", int64_t(e.overlap.peak_same)},
-                                 {"exact_up_to", int64_t(e.overlap.cap)}};
-    o["status"] = bj::object{{"2xx", e.status[0]}, {"3xx", e.status[1]}, {"4xx", e.status[2]},
-                             {"5xx", e.status[3]}, {"429", e.status[4]}};
-    o["classes"] = bj::object{{"browser", e.classes[0]}, {"bot", e.classes[1]}, {"agent", e.classes[2]},
-                              {"other", e.classes[3]}};
+    double top_share = e.n.requests ? double(e.clients.top_requests()) / double(e.n.requests) : 0;
+    o["heat_us"] = e.n.us;
+    o["bytes"] = bj::object{{"in", e.n.bytes_in}, {"out", e.n.bytes_out}, {"max_in", e.n.max_in}};
+    o["latency_us"] = e.n.latency_json();
+    o["per_minute"] = bj::object{{"peak", int64_t(peak)}, {"peak_at_ms", started_ms + peak_at * 60000}};
+    bj::object c{{"distinct", clients},
+                 {"exact", e.clients.exact()},
+                 {"busiest_minute", bj::object{{"p50", int64_t(busiest.percentile(0.5))},
+                                               {"p99", int64_t(busiest.percentile(0.99))},
+                                               {"max", int64_t(busiest.max())}}},
+                 {"top_share", round4(top_share)}};
+    if (e.clients.overflow) c["unattributed_requests"] = e.clients.overflow;
+    o["clients"] = std::move(c);
+    o["concurrent"] = bj::object{{"peak", int64_t(e.overlap.peak)}, {"per_client_peak", int64_t(e.overlap.peak_same)}};
+    o["status"] = e.n.status_json();
     if (e.tracked_from_ms > started_ms) {
       o["tracked_from_ms"] = e.tracked_from_ms;
       o["before_tracked"] = e.prior;
-    }
-    if (series) {
-      bj::array pts;
-      for (int64_t i = 0; i < elapsed_minutes; ++i) pts.push_back(i < int64_t(e.minutes.size()) ? int64_t(e.minutes[size_t(i)]) : 0);
-      o["series"] = std::move(pts);
     }
     SuggestInput in;
     in.study_id = id;
     in.domain = domain;
     in.api = e.api;
     in.endpoint = e.endpoint;
-    in.method = e.method;
-    in.requests = e.requests;
+    in.requests = e.n.requests;
     in.clients = clients;
     in.p99_client_minute = busiest.percentile(0.99);
     in.peak_minute = peak;
@@ -588,118 +607,84 @@ struct Study {
     in.peak_client_concurrent = e.overlap.peak_same;
     in.heat_share = heat_share;
     in.top_client_share = top_share;
-    in.max_body_bytes = e.max_in;
-    in.max_us = e.max_us;
+    in.max_body_bytes = e.n.max_in;
+    in.max_us = e.n.max_us;
     o["suggest"] = suggest_controls(in);
     return o;
   }
 
+  // The domain's clients, from the endpoints' tables: distinct (a union of their estimates), and
+  // the ten that asked most, by keyed hash, with the endpoint each asked most.
+  bj::object clients_json(const std::vector<const Endpoint*>& eps) const {
+    DistinctCounter distinct;
+    struct Seen {
+      uint64_t log_h = 0;
+      int64_t requests = 0, most = 0;
+      const Endpoint* where = nullptr;
+    };
+    std::unordered_map<uint64_t, Seen> seen;
+    for (const Endpoint* e : eps) {
+      distinct.merge(e->clients.distinct);
+      for (const auto& [h, c] : e->clients.live) {
+        Seen& s = seen[h];
+        s.log_h = c.log_h;
+        s.requests += c.requests;
+        if (int64_t(c.requests) > s.most) s.most = c.requests, s.where = e;
+      }
+    }
+    std::vector<const Seen*> top;
+    for (const auto& [h, s] : seen) top.push_back(&s);
+    std::sort(top.begin(), top.end(), [](const Seen* x, const Seen* y) {
+      return x->requests != y->requests ? x->requests > y->requests : x->log_h < y->log_h;
+    });
+    bj::array rows;
+    for (size_t i = 0; i < top.size() && i < 10; ++i) {
+      rows.push_back(bj::object{{"client_h", hex16(top[i]->log_h)},
+                                {"requests", top[i]->requests},
+                                {"endpoint", top[i]->where->endpoint},
+                                {"api", top[i]->where->api}});
+    }
+    return bj::object{{"distinct", distinct.estimate()}, {"top", std::move(rows)}};
+  }
+
   bj::object report(int64_t now_ms, const std::string& state, const std::string& ended_by, int64_t ended_ms,
-                    size_t detailed, size_t series) const {
+                    size_t detailed) const {
     int64_t end = state == "running" ? std::min(now_ms, ends_ms) : ended_ms;
     int64_t elapsed = std::max<int64_t>(0, end - started_ms);
     int64_t elapsed_minutes = std::max<int64_t>(1, (elapsed + 59999) / 60000);
     bj::object out = summary(state, ended_by, ended_ms);
     out["elapsed_ms"] = elapsed;
     out["saved_ms"] = saved_ms;
-    const Endpoint& a = *all;
-    out["totals"] = bj::object{
-        {"requests", a.requests},
-        {"heat_us", a.us},
-        {"fuel", a.fuel},
-        {"bytes_in", a.bytes_in},
-        {"bytes_out", a.bytes_out},
-        {"status", bj::object{{"2xx", a.status[0]}, {"3xx", a.status[1]}, {"4xx", a.status[2]}, {"5xx", a.status[3]},
-                              {"429", a.status[4]}}},
-        {"classes", bj::object{{"browser", a.classes[0]}, {"bot", a.classes[1]}, {"agent", a.classes[2]},
-                               {"other", a.classes[3]}}},
-        {"latency_us", bj::object{{"p50", std::min(a.latency.percentile(0.5), a.max_us)},
-                                  {"p99", std::min(a.latency.percentile(0.99), a.max_us)},
-                                  {"max", a.max_us}}}};
-    {
-      bj::array pts;
-      uint32_t peak = 0;
-      int64_t peak_at = 0;
-      for (int64_t i = 0; i < elapsed_minutes; ++i) {
-        uint32_t v = i < int64_t(a.minutes.size()) ? a.minutes[size_t(i)] : 0;
-        if (v > peak) peak = v, peak_at = i;
-        pts.push_back(int64_t(v));
-      }
-      out["per_minute"] = bj::object{{"series", std::move(pts)},
-                                     {"peak", int64_t(peak)},
-                                     {"peak_at_ms", started_ms + peak_at * 60000},
-                                     {"mean", round4(double(a.requests) / double(elapsed_minutes))}};
-    }
-    auto busiest = a.clients.busiest();
-    out["clients"] = bj::object{
-        {"distinct", a.clients.count()},
-        {"exact", a.clients.exact()},
-        {"busiest_minute", bj::object{{"p50", int64_t(busiest.percentile(0.5))}, {"p99", int64_t(busiest.percentile(0.99))}, {"max", int64_t(busiest.max())}}}};
-    if (a.clients.overflow) out["clients"].as_object()["unattributed_requests"] = a.clients.overflow;
-    out["concurrent"] = bj::object{{"peak", int64_t(a.overlap.peak)},
-                                   {"per_client_peak", int64_t(a.overlap.peak_same)},
-                                   {"exact_up_to", int64_t(a.overlap.cap)}};
-    // The busiest clients, by keyed hash only: the same hash as the access log's client_h, so
-    // the log dive finds their lines; never an address.
-    {
-      std::vector<std::pair<uint64_t, const ClientState*>> cs;
-      for (const auto& [h, c] : a.clients.live) cs.emplace_back(h, &c);
-      std::sort(cs.begin(), cs.end(), [](const auto& x, const auto& y) {
-        return x.second->requests != y.second->requests ? x.second->requests > y.second->requests : x.first < y.first;
-      });
-      bj::array top;
-      for (size_t i = 0; i < cs.size() && i < 10; ++i) {
-        top.push_back(bj::object{{"client_h", hex16(cs[i].first)},
-                                 {"requests", int64_t(cs[i].second->requests)},
-                                 {"busiest_minute", int64_t(cs[i].second->busiest())},
-                                 {"class", client_class_name(cs[i].second->cls)}});
-      }
-      out["top_clients"] = std::move(top);
-    }
+    out["totals"] = bj::object{{"requests", all.requests},       {"heat_us", all.us},
+                               {"bytes_in", all.bytes_in},       {"bytes_out", all.bytes_out},
+                               {"status", all.status_json()},    {"latency_us", all.latency_json()}};
+    bj::array series;
+    for (int64_t i = 0; i < elapsed_minutes; ++i) series.push_back(i < int64_t(all.minutes.size()) ? int64_t(all.minutes[size_t(i)]) : 0);
+    auto [peak, peak_at] = all.peak_minute();
+    out["per_minute"] = bj::object{{"series", std::move(series)}, {"peak", int64_t(peak)}, {"peak_at_ms", started_ms + peak_at * 60000}};
     std::vector<const Endpoint*> eps;
     for (const auto& [k, e] : endpoints) eps.push_back(e.get());
-    if (other->requests > 0) eps.push_back(other.get());
-    auto sorted_by = [&](auto key) {
-      std::vector<const Endpoint*> v = eps;
-      std::stable_sort(v.begin(), v.end(), [&](const Endpoint* x, const Endpoint* y) { return key(*x) > key(*y); });
-      return v;
-    };
-    auto by_heat = sorted_by([](const Endpoint& e) { return std::make_pair(e.us, e.requests); });
+    if (other && other->n.requests > 0) eps.push_back(other.get());
+    out["clients"] = clients_json(eps);
+    // Ranked by heat; ties by requests, then by name, so a report reads the same each time.
+    std::sort(eps.begin(), eps.end(), [](const Endpoint* x, const Endpoint* y) {
+      if (x->n.us != y->n.us) return x->n.us > y->n.us;
+      if (x->n.requests != y->n.requests) return x->n.requests > y->n.requests;
+      return x->endpoint < y->endpoint;
+    });
     bj::array rows;
-    for (size_t i = 0; i < by_heat.size(); ++i) {
-      rows.push_back(endpoint_json(*by_heat[i], i < detailed, i < series, elapsed_minutes));
-    }
+    for (size_t i = 0; i < eps.size(); ++i) rows.push_back(endpoint_json(*eps[i], i < detailed));
     out["endpoints"] = std::move(rows);
-    auto rank = [&](const std::vector<const Endpoint*>& v, auto share) {
-      bj::array r;
-      for (size_t i = 0; i < v.size() && i < 20; ++i) {
-        r.push_back(bj::object{{"endpoint", v[i]->endpoint}, {"api", v[i]->api}, {"share", round4(share(*v[i]))}});
-      }
-      return r;
-    };
-    double tu = double(std::max<int64_t>(1, a.us)), tn = double(std::max<int64_t>(1, a.requests)),
-           tb = double(std::max<int64_t>(1, a.bytes_in + a.bytes_out));
-    out["ranks"] = bj::object{
-        {"by_heat", rank(by_heat, [&](const Endpoint& e) { return double(e.us) / tu; })},
-        {"by_requests", rank(sorted_by([](const Endpoint& e) { return e.requests; }), [&](const Endpoint& e) { return double(e.requests) / tn; })},
-        {"by_bytes", rank(sorted_by([](const Endpoint& e) { return e.bytes_in + e.bytes_out; }),
-                          [&](const Endpoint& e) { return double(e.bytes_in + e.bytes_out) / tb; })}};
     out["tracked"] = bj::object{{"endpoints", int64_t(endpoints.size())},
                                 {"cap", int64_t(caps.endpoints)},
-                                {"other_requests", other->requests},
-                                {"candidates", int64_t(candidates.size())},
-                                {"candidates_dropped", candidates_dropped},
-                                {"promoted", promoted},
-                                {"detailed", int64_t(std::min(detailed, by_heat.size()))}};
+                                {"other_requests", other ? other->n.requests : 0},
+                                {"promoted", promoted}};
     out["memory_bytes"] = memory();
     out["notes"] = bj::array{
-        "heat is the time spent serving each request (µs), the measure hot_boxes uses; fuel is the box's own count "
-        "where a box ran",
-        "a client is a keyed hash of its address (an IPv6 /64 is one), as the host's rate limiter counts clients; "
-        "the report holds no address and no user id",
-        "a client's busiest minute is its most requests in one minute of the study; distinct clients are exact while "
-        "clients.exact is true, else a HyperLogLog estimate (about 6.5%)",
-        "concurrency is exact up to exact_up_to requests in flight at once on an endpoint",
+        "heat is the time spent serving (µs); a client is the host's keyed hash of its address (an IPv6 /64 is one), "
+        "the log's client_h; no address and no user id is kept",
+        "a client's busiest minute is its most requests on the endpoint in one minute of the study; concurrency is "
+        "counted from finished requests, exact up to " + std::to_string(caps.endpoint_ring) + " at once",
         "suggestions are in observe mode: send one with control_set, read control_report, and enforce once it holds"};
     return out;
   }
@@ -709,7 +694,8 @@ struct Study {
 
 HeatStudies::HeatStudies(fs::path dir) : HeatStudies(std::move(dir), Caps{}) {}
 
-HeatStudies::HeatStudies(fs::path dir, Caps caps) : dir_(std::move(dir)), caps_(caps) {
+HeatStudies::HeatStudies(fs::path dir, Caps caps, ClientHash hash)
+    : dir_(std::move(dir)), caps_(caps), hash_(hash ? std::move(hash) : ClientHash([](std::string_view k) { return mix(hash_of(k)); })) {
   std::error_code ec;
   fs::create_directories(dir_, ec);
   for (auto it = fs::directory_iterator(dir_, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
@@ -733,8 +719,8 @@ HeatStudies::HeatStudies(fs::path dir, Caps caps) : dir_(std::move(dir)), caps_(
       o["ended_by"] = "restart";
       int64_t saved = o.contains("saved_ms") && o.at("saved_ms").is_int64() ? o.at("saved_ms").as_int64() : 0;
       o["ended_ms"] = saved;
-      std::string body = json::dump(o);
-      base::write_file_durable(p, body);
+      o.erase("remaining_ms");
+      base::write_file_durable(p, json::dump(o));
       recovered_.push_back("heat study " + stem + " was running when the host stopped; kept as interrupted");
     }
     Row row;
@@ -750,24 +736,19 @@ HeatStudies::HeatStudies(fs::path dir, Caps caps) : dir_(std::move(dir)), caps_(
 
 HeatStudies::~HeatStudies() = default;
 
-bool HeatStudies::watching(std::string_view domain) const {
-  if (running_.load(std::memory_order_relaxed) == 0) return false;
-  std::lock_guard lock(mu_);
-  for (const auto& [id, st] : live_) {
-    if (st->domain == domain) return true;
+Study* HeatStudies::find(std::string_view domain) const {
+  if (running_.load(std::memory_order_relaxed) == 0) return nullptr;
+  for (const auto& slot : slots_) {
+    Study* st = slot.load(std::memory_order_acquire);
+    if (st && st->domain == domain) return st;
   }
-  return false;
+  return nullptr;
 }
 
+bool HeatStudies::watching(std::string_view domain) const { return find(domain) != nullptr; }
+
 void HeatStudies::record(std::string_view domain, const HeatSample& s) {
-  if (running_.load(std::memory_order_relaxed) == 0) return;
-  std::shared_ptr<Study> st;
-  {
-    std::lock_guard lock(mu_);
-    for (const auto& [id, x] : live_) {
-      if (x->domain == domain) st = x;
-    }
-  }
+  Study* st = find(domain);
   if (!st) return;
   std::lock_guard lock(st->mu);
   st->add(s);
@@ -795,11 +776,13 @@ std::optional<bj::object> HeatStudies::start(const std::string& domain, const st
                std::nullopt;
       }
     }
-    if (int(live_.size()) >= kMaxRunning) {
+    auto free = std::find_if(slots_.begin(), slots_.end(), [](const auto& s) { return !s.load(std::memory_order_relaxed); });
+    if (free == slots_.end()) {
       return *error = std::to_string(kMaxRunning) + " heat studies already run on this host (the most at once); stop one or wait",
              std::nullopt;
     }
     st->caps = caps_;
+    st->hash = &hash_;
     st->id = next_id_++;
     st->domain = domain;
     st->tenant = tenant;
@@ -809,24 +792,22 @@ std::optional<bj::object> HeatStudies::start(const std::string& domain, const st
     st->started_ms = now_ms;
     st->ends_ms = now_ms + int64_t(minutes) * 60000;
     st->saved_ms = now_ms;
-    st->other = std::make_unique<Endpoint>("other", "other", "", caps_.endpoint_clients, caps_.endpoint_ring);
-    st->all = std::make_unique<Endpoint>("all", "all", "", caps_.domain_clients, caps_.domain_ring);
+    st->other = std::make_unique<Endpoint>("other", "other", caps_);
     live_[st->id] = st;
+    free->store(st.get(), std::memory_order_release);
     running_.fetch_add(1, std::memory_order_relaxed);
   }
   // Written at once, so a crash in the first minute still leaves a record.
-  bj::object rep;
+  bj::object rep, row;
   {
     std::lock_guard lock(st->mu);
-    rep = st->report(now_ms, "running", "", 0, caps_.detailed, caps_.series);
+    rep = st->report(now_ms, "running", "", 0, caps_.detailed);
+    row = st->summary("running", "", 0);
   }
   int64_t bytes = 0;
   write(st->id, rep, &bytes);
-  {
-    std::lock_guard lock(st->mu);
-    st->file_bytes = bytes;
-    return st->summary("running", "", 0);
-  }
+  st->file_bytes = bytes;
+  return row;
 }
 
 std::optional<bj::object> HeatStudies::finish(const std::shared_ptr<Study>& st, const std::string& state,
@@ -837,18 +818,27 @@ std::optional<bj::object> HeatStudies::finish(const std::shared_ptr<Study>& st, 
     if (st->ended) return std::nullopt;
     st->ended = true;
     st->saved_ms = ended_ms;
-    // Small: past kReportMaxBytes, the series go first, then the detail of the cooler endpoints.
-    const std::pair<size_t, size_t> shapes[] = {{caps_.detailed, caps_.series}, {caps_.detailed, 0}, {50, 0}, {20, 0}, {0, 0}};
-    for (auto [detailed, series] : shapes) {
-      rep = st->report(ended_ms, state, ended_by, ended_ms, detailed, series);
+    // Small: past kReportMaxBytes, the detail of the cooler endpoints goes first.
+    for (size_t detailed : {caps_.detailed, size_t(50), size_t(20), size_t(0)}) {
+      rep = st->report(ended_ms, state, ended_by, ended_ms, std::min(detailed, caps_.detailed));
       if (json::dump(rep).size() <= kReportMaxBytes) break;
     }
     row = st->summary(state, ended_by, ended_ms);
+    st->release();
+    st->final_report = rep;
   }
   int64_t bytes = 0;
   write(st->id, rep, &bytes);
+  {
+    std::lock_guard lock(st->mu);
+    st->final_report = {};
+  }
   std::lock_guard lock(mu_);
+  for (auto& slot : slots_) {
+    if (slot.load(std::memory_order_relaxed) == st.get()) slot.store(nullptr, std::memory_order_release);
+  }
   if (live_.erase(st->id)) running_.fetch_sub(1, std::memory_order_relaxed);
+  ended_.push_back(st);
   done_[st->id] = Row{row, bytes};
   return row;
 }
@@ -870,7 +860,7 @@ std::optional<bj::object> HeatStudies::stop(int64_t id, const std::string& by, i
   }
   {
     std::lock_guard lock(st->mu);
-    st->stopped_by = by;
+    if (!st->ended) st->stopped_by = by;
   }
   auto row = finish(st, "stopped", "operator", now_ms);
   if (!row) return *error = "heat study " + std::to_string(id) + " already ended", std::nullopt;
@@ -889,9 +879,12 @@ std::optional<bj::object> HeatStudies::get(int64_t id, int64_t now_ms, std::stri
   }
   if (st) {
     std::lock_guard lock(st->mu);
-    auto rep = st->report(now_ms, "running", "", 0, caps_.detailed, caps_.series);
-    rep["remaining_ms"] = std::max<int64_t>(0, st->ends_ms - now_ms);
-    return rep;
+    if (!st->ended) {
+      auto rep = st->report(now_ms, "running", "", 0, caps_.detailed);
+      rep["remaining_ms"] = std::max<int64_t>(0, st->ends_ms - now_ms);
+      return rep;
+    }
+    if (!st->final_report.empty()) return st->final_report;
   }
   auto text = base::read_file(dir_ / (std::to_string(id) + ".json"));
   std::string err;
@@ -945,30 +938,25 @@ std::vector<bj::object> HeatStudies::tick(int64_t now_ms, int64_t budget_bytes) 
     for (const auto& [id, st] : live_) live.push_back(st);
   }
   for (const auto& st : live) {
-    bool due = false, save = false;
+    bool due = false;
+    bj::object rep;
     {
       std::lock_guard lock(st->mu);
       if (st->ended) continue;
       due = now_ms >= st->ends_ms;
       if (!due) {
         st->promote(now_ms);
-        save = now_ms - st->saved_ms >= kSaveEveryMs;
+        if (now_ms - st->saved_ms >= kSaveEveryMs) {
+          st->saved_ms = now_ms;
+          rep = st->report(now_ms, "running", "", 0, caps_.detailed);
+        }
       }
     }
     if (due) {
       if (auto row = finish(st, "done", "time", st->ends_ms)) ended.push_back(std::move(*row));
-      continue;
-    }
-    if (save) {
-      bj::object rep;
-      {
-        std::lock_guard lock(st->mu);
-        st->saved_ms = now_ms;
-        rep = st->report(now_ms, "running", "", 0, caps_.detailed, caps_.series);
-      }
+    } else if (!rep.empty()) {
       int64_t bytes = 0;
       write(st->id, rep, &bytes);
-      std::lock_guard lock(st->mu);
       st->file_bytes = bytes;
     }
   }
