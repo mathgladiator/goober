@@ -87,7 +87,12 @@
   3. `agent_token_mint` gives it a token for up to a year.
   4. It calls box tools at `/mcp`.
   5. Your account page shows it and revokes it.
+- **If it misbehaves.** Each agent has a strict rate (120 calls a minute, 30 at once) and a
+  fixed queue: past two at once its calls wait their turn, and nothing it sends starves another
+  agent or the site's pages. Grok on the operator endpoint gets the same, wider (600 a minute,
+  120 at once). Refusals say only "rate limit reached" (`design/machine/047.Controls.md` § 13).
 - **Proof.** `just products-e2e` plays GrokBot through both products, and every check passes.
+  `mcp_queue_test` floods `/mcp` from one agent while another is served in turn.
 
 **3a. Ads that collect emails and surveys: yes.**
 - **The flow.**

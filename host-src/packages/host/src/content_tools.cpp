@@ -173,6 +173,10 @@ covers some of them. It takes rate {per-minute}, concurrent {max}, or closed {re
 message}; the message shows on the 503 page as {{message}}. Start with mode "observe", read
 control_report (what it would have refused, and from how many clients), then set mode
 "enforce" (design/machine/047.Controls.md).
+You, like every agent, get a strict rate and a fixed queue on the operator MCP: 600 calls a
+minute (120 at once; a batch's calls each count). Front-load a push freely: calls past your two
+running wait their turn, up to 128, for 120 s. "rate limit reached" means slow down and retry
+after Retry-After; mcp_queue_report shows what waited.
 
 ## Error pages: your own 404, 403, and the rest [content_put]
 When the host answers an error itself (no such page, a gate, a limit, a box that failed), a

@@ -499,6 +499,12 @@ see or change its controls. To add one:
 control_list shows each control's effective values and where they come from. To pause a box
 while data moves, set closed on api "box:<name>" (or use a flag the box reads).
 
+Agents get a strict rate and a fixed queue on every MCP endpoint, beneath any control: on /mcp,
+120 calls a minute (30 at once), and on the operator MCP, 600 (120 at once); a batch's calls
+each count. Front-load freely: calls past an agent's two running wait their turn, up to 32 for
+30 s (128 for 120 s on the operator MCP). "rate limit reached" (429 or 503, with Retry-After)
+means slow down. mcp_queue_report shows what waited and what was refused (047 § 13).
+
 ## Calling other services
 
 A box has no sockets. It calls services the manifest declares, through the host:

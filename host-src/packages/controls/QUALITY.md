@@ -3,8 +3,10 @@
 Per-domain operational controls (`design/machine/047.Controls.md`): the parsed and checked
 values an operator sets (`spec.h`), the gate that applies them to a request and counts what each
 control saw (`gate.h`), and the report that turns those counts into series, effects, and
-verdicts (`report.h`). The host stores, changes, and wires them; this package has no disk and no
-clock of its own.
+verdicts (`report.h`). MCP's strict rate and fixed queue (`queue.h`, 047 § 13) live here too: the
+JSON-RPC call counter, the per-agent rate, the queue with its running caps, its rows, and its
+report. The host stores, changes, and wires them; this package has no disk, and the queue's clock
+is injected.
 
 ## Quality bar
 
@@ -22,5 +24,12 @@ clock of its own.
 - **No client is named.** Distinct clients are a 256-bit sketch; the busiest is a keyed hash. Raw
   client keys live only in memory, bounded (1024 a bucket, idle rate buckets forgotten after 15
   minutes).
-- **Tests per behavior:** matcher specificity, per-property merge, each refusal and its status,
+- **The queue is fixed and fair.** Its limits are constants, not settings. Each agent's calls
+  run first in first out, freed slots go round-robin across queues and agents, and a queue and
+  all MCP together run at most what the pool allows. A waiting call is a parked callback, never a
+  thread. A slot is released once, by `release()` or its destructor. Every refusal is "rate limit
+  reached", and nothing else.
+- **Tests per behavior:** the call counter (batches, cheap methods, ids), the rate per agent, FIFO,
+  round-robin, the caps, the wait limit, full, gone, release on every path, rows, health, the
+  report, and a flood that doesn't starve a polite agent; matcher specificity, per-property merge, each refusal and its status,
   observe, `by: user`, release on every path, reports and verdicts, and validation errors.

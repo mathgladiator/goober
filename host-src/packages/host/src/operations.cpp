@@ -131,6 +131,7 @@ void Host::handle_operations(const Request& req, const Finish& finish) {
                                                      std::string(kOperationsMcpPath) + "\"");
     return finish(std::move(res), R"({"why":"operations token"})");
   }
+  mcp_remember(req, "operator", operator_name, "operator");  // its calls count as this operator's (047 § 13)
   if (req.method != "post") {
     auto res = json_response(405, "");
     res.headers.emplace_back("allow", "POST");
@@ -397,6 +398,9 @@ bj::object Host::health(int64_t now_ms) {
       {"controls", bj::object{{"refused_ratio", ratio(s.n[P::kControlRefused], requests)},
                               {"would_refuse_ratio", ratio(s.n[P::kControlWould], requests)},
                               {"matched_ratio", ratio(s.n[P::kControlled], requests)}}},
+      // MCP's strict rate and fixed queue (047 § 13), every queue together: of the calls that
+      // arrived, the share that waited, was refused, or left; the wait's p99; running over its cap.
+      {"mcp", mcp_queue_ ? mcp_queue_->health() : bj::object{}},
       {"outbox",
        bj::object{{"depth", outbox_depth_.load()}, {"oldest_age_s", age_s(outbox_oldest_ms_.load())}, {"dead", outbox_dead_.load()}}},
       {"workers", bj::object{{"queued", int64_t(pool_ ? pool_->queued() : 0)},
@@ -528,6 +532,12 @@ std::string Host::prometheus_text(const bj::object& ready) {
          "Share of requests a per-domain control refused, last 5 minutes."},
         {"goober_control_would_refuse_ratio", {"controls", "would_refuse_ratio"}, "gauge",
          "Share of requests an observing per-domain control would have refused, last 5 minutes."},
+        {"goober_mcp_waited_ratio", {"mcp", "waited_ratio"}, "gauge", "Share of MCP calls that waited in the queue, last 5 minutes."},
+        {"goober_mcp_refused_ratio", {"mcp", "refused_ratio"}, "gauge",
+         "Share of MCP calls refused (rate limit reached), last 5 minutes."},
+        {"goober_mcp_gone_ratio", {"mcp", "gone_ratio"}, "gauge", "Share of MCP calls whose client left while they waited, last 5 minutes."},
+        {"goober_mcp_wait_p99_milliseconds", {"mcp", "wait_p99_ms"}, "gauge", "99th percentile wait of MCP calls that waited, last 5 minutes."},
+        {"goober_mcp_busy_ratio", {"mcp", "busy_ratio"}, "gauge", "MCP calls running over the most that may run at once."},
         {"goober_outbox_depth", {"outbox", "depth"}, "gauge", "Outbox elements waiting for delivery."},
         {"goober_outbox_oldest_age_seconds", {"outbox", "oldest_age_s"}, "gauge", "Age of the oldest waiting outbox element."},
         {"goober_outbox_dead", {"outbox", "dead"}, "gauge", "Outbox dead letters kept."},

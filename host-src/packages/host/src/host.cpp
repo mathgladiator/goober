@@ -308,7 +308,9 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "served (version_upload activate: false, then version_promote); a \"dry run\" checks everything and stores "
       "nothing, changes nothing. file_etag is a stored file's etag, the one if_etag compares; body_etag is the "
       "served body's, after templates and partials. Host ids (users, uploads, rows keyed by id, job runs) are "
-      "strings in JSON. If you are focused on some tenants (operator_scope), tools outside them are refused.");
+      "strings in JSON. If you are focused on some tenants (operator_scope), tools outside them are refused. "
+      "You get a strict rate (600 calls a minute, 120 at once; a batch's calls each count) and a fixed queue: front-load "
+      "freely, calls past your two running wait their turn (up to 128, for 120 s). \"rate limit reached\" means slow down.");
   init_web();
   register_tools();
   register_content_tools();
@@ -344,6 +346,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_spec_tools();
   register_approval_tools();
   register_heat_study_tools();
+  register_mcp_queue_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "
@@ -355,6 +358,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                     return mcp::ToolResult::ok(bus_status(std::string(t->as_string())));
                   }});
   pool_ = std::make_unique<WorkerPool>(config->box_threads, config->pin_boxes);
+  mcp_queue_ = controls::McpQueue::make(config->box_threads);  // its running caps from the pool (047 § 13)
   max_queued_ = size_t(256) * size_t(std::max(1, config->box_threads));
 }
 
@@ -498,6 +502,7 @@ uint16_t Host::start() {
     if (status.contains("key_warning")) startup_notes_.push_back(std::string(status.at("key_warning").as_string()));
   }
   sse_thread_ = std::thread([this] { sse_loop(); });
+  mcp_queue_start();
   return server_->port();
 }
 
@@ -523,6 +528,8 @@ void Host::stop() {
   // Open subscriptions first: they hold connections, not workers, and would keep a graceful
   // stop waiting for nothing.
   sse_stop();
+  // MCP calls still waiting are refused; the running ones finish below (047 § 13).
+  mcp_queue_stop();
   if (timer_thread_.joinable()) {
     {
       std::lock_guard lock(timer_thread_mu_);
@@ -568,6 +575,7 @@ void Host::stop() {
   } catch (const std::exception& e) {
     std::cerr << "goober-host: box failures: " << e.what() << "\n";
   }
+  mcp_queue_flush();  // the MCP queue's rows, open buckets too (047 § 13), written just below
   // What every control counted, open buckets too (047 § 6).
   try {
     if (gate_ && traffic_) {
@@ -993,7 +1001,8 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
     return;
   }
   if (path && path->path == kOperationsMcpPath) {
-    pool_->post([this, req, finish] { handle_operations(req, finish); });
+    // A strict rate and a fixed queue for every agent (047 § 13; mcp_queue.cpp).
+    mcp_enter(controls::QueueKind::kOperator, req, finish, "", "", [this, req](const Finish& f) { handle_operations(req, f); });
     return;
   }
   if (panel) {
@@ -1015,12 +1024,13 @@ void Host::handle(Request req, Responder respond, bool panel_listener) {
   // domain, its APIs, and its endpoints, inside the host-wide shield above (controls.cpp).
   if (control_gate(req, finish, domain, *tenant, *path, started)) return;
   if (path->path == "/mcp") {
-    pool_->post([this, req, finish, domain, tenant = *tenant] {
+    // A strict rate and a fixed queue for every agent, inside the domain's controls (047 § 13).
+    mcp_enter(controls::QueueKind::kMcp, req, finish, domain, *tenant, [this, req, domain, tenant = *tenant](const Finish& f) {
       try {
-        handle_tenant_mcp(req, finish, domain, tenant);
+        handle_tenant_mcp(req, f, domain, tenant);
       } catch (const std::exception& e) {
         std::cerr << "goober-host: mcp: " << e.what() << "\n";
-        finish(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"mcp failed"})");
+        f(error_page(tenant, 500, req.header("goober-request-id")), R"({"why":"mcp failed"})");
       }
     });
     return;

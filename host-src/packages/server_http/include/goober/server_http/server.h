@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -18,6 +19,9 @@ struct Request {
   std::vector<std::pair<std::string, std::string>> headers;  // names lowercase
   std::string body;
   std::string remote;  // the peer address
+  // Set by the server once the client closed its connection while this request still waits for
+  // its response; null when the server doesn't watch. Work nobody will receive can be dropped.
+  std::shared_ptr<const std::atomic<bool>> peer_gone;
 
   // The first header with this lowercase name, or "".
   std::string header(std::string_view name) const;

@@ -1,6 +1,9 @@
 #include "goober/server_http/server.h"
 
 #include <fcntl.h>
+#include <sys/socket.h>
+
+#include <cerrno>
 
 #include <atomic>
 #include <deque>
@@ -192,10 +195,26 @@ class Session : public std::enable_shared_from_this<Session> {
     stream_.expires_never();
     auto self = shared_from_this();
     auto responded = std::make_shared<std::atomic<bool>>(false);
+    auto gone = std::make_shared<std::atomic<bool>>(false);
+    req.peer_gone = gone;
     handler_(std::move(req), [self, responded](Response res) {
       if (responded->exchange(true)) return;
       asio::post(self->stream_.get_executor(),
                  [self, res = std::move(res)]() mutable { self->write(std::move(res)); });
+    });
+    watch_gone(responded, gone);
+  }
+
+  // While a request waits for its response, notices the client closing the connection: the
+  // socket turns readable with nothing to read (or an error). Bytes of a pipelined next request
+  // end the watch without marking anything; they are read once the response is written.
+  void watch_gone(std::shared_ptr<std::atomic<bool>> responded, std::shared_ptr<std::atomic<bool>> gone) {
+    if (responded->load()) return;
+    stream_.socket().async_wait(tcp::socket::wait_read, [self = shared_from_this(), responded, gone](beast::error_code ec) {
+      if (ec || responded->load()) return;
+      char c;
+      ssize_t n = ::recv(self->stream_.socket().native_handle(), &c, 1, MSG_PEEK | MSG_DONTWAIT);
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) gone->store(true);
     });
   }
 

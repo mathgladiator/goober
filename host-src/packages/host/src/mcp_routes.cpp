@@ -41,6 +41,9 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
     res.body = R"({"error":"sign in with OAuth: a bearer token from this domain's realm"})";
     return finish(std::move(res), R"({"mcp":"unauthorized"})");
   }
+  // From now this token's calls count as its agent's (the OAuth client and the person), not its
+  // address's (047 § 13).
+  mcp_remember(req, tenant, who->client_id + ":" + std::to_string(who->user.user_id), who->agent ? "agent" : "person");
   if (req.method != "post") {
     Response res;
     res.status = 405;
@@ -82,7 +85,9 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
   mcp::McpServer server(
       "goober", std::string(kVersion) + "+" + base::sha256_hex(tool_set).substr(0, 12),
       "Tools from " + domain + ", acting for " + who->user.email + (who->agent ? " as an agent" : "") +
-          ". Each tool says what it does; inputs are checked before anything runs." + none);
+          ". Each tool says what it does; inputs are checked before anything runs. You get a strict rate (120 calls a "
+          "minute, 30 at once) and a fixed queue: front-load freely, calls past your two running wait their turn (up to "
+          "32, for 30 s). \"rate limit reached\" means slow down." + none);
   std::string audit_tool;
   int audit_status = 0;
   std::string audit_input, audit_result;

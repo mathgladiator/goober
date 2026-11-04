@@ -82,6 +82,25 @@ struct ControlRow {
 // Two sketches of 64 hex digits, unioned; an empty one is nothing.
 std::string sketch_union(const std::string& a, const std::string& b);
 
+// The MCP queue's five minutes (design/machine/047.Controls.md § 13) for one queue (`mcp`, a
+// domain's /mcp, or `operator`, the operator MCP) and one class of agent: what arrived, what
+// waited and for how long, what ran, and what was refused and why. Agents are never named.
+struct McpQueueRow {
+  int64_t t = 0;               // the bucket's start
+  std::string queue;           // mcp or operator
+  std::string tenant, domain;  // "" for the operator MCP
+  std::string cls;             // agent, person, unknown, or operator
+  int64_t offered = 0;         // calls that arrived (each call of a batch counts)
+  int64_t queued = 0;          // of the admitted, those that waited for a slot
+  int64_t ran = 0;             // started, at once or after waiting
+  int64_t refused_rate = 0, refused_full = 0, refused_wait = 0;  // the strict rate, a full queue, waited too long
+  int64_t gone = 0;            // left while waiting (the client disconnected): removed, never run
+  int64_t peak_waiting = 0, peak_running = 0;  // the most of this class waiting, and running, at once in its queue
+  Histogram waited;            // how long the calls that waited waited (µs)
+  int64_t refused() const { return refused_rate + refused_full + refused_wait; }
+  void merge(const McpQueueRow& o);
+};
+
 class Traffic {
  public:
   // `logs` holds access.log, egress.log, and mail.log (and their rotations).
@@ -170,6 +189,12 @@ class Traffic {
   void add_control_rows(std::vector<ControlRow> rows);
   // Rows of a domain (and one control, or "" for all) with from_ms <= t < to_ms, oldest first.
   std::vector<ControlRow> control_rows(const std::string& domain, const std::string& control, int64_t from_ms, int64_t to_ms);
+  // The MCP queue (047 § 13): five-minute rows the queue hands over, kept like the controls' rows.
+  void add_mcp_queue_rows(std::vector<McpQueueRow> rows);
+  // Rows of one queue (mcp with a domain, or "" for every domain; operator with "") with
+  // from_ms <= t < to_ms, oldest first.
+  std::vector<McpQueueRow> mcp_queue_rows(const std::string& queue, const std::string& domain, int64_t from_ms,
+                                          int64_t to_ms);
 
  private:
   struct Window;
@@ -197,6 +222,9 @@ class Traffic {
   void flush_controls();
   std::mutex control_mu_;
   std::vector<ControlRow> control_pending_;
+  void flush_mcp_queue();
+  std::mutex mcp_queue_mu_;
+  std::vector<McpQueueRow> mcp_queue_pending_;
   int64_t last_drop_ms_ = 0;
 };
 

@@ -16,6 +16,7 @@
 #include "goober/config/config.h"
 #include "goober/content/content.h"
 #include "goober/controls/gate.h"
+#include "goober/controls/queue.h"
 #include "goober/router/path.h"
 #include "goober/db/database.h"
 #include "goober/identity/identity.h"
@@ -971,6 +972,34 @@ class Host {
   void control_rows_to_traffic(int64_t now_ms);
   // A control's timeout-ms the gate put on the request, or 0.
   static int64_t control_timeout(const server::http::Request& req);
+  // MCP: a strict rate and a fixed queue (design/machine/047.Controls.md § 13; mcp_queue.cpp).
+  // Every call to /mcp and to the operator MCP is counted against its agent's strict rate, then
+  // runs, waits its turn (holding no worker), or is refused with "rate limit reached".
+  std::shared_ptr<controls::McpQueue> mcp_queue_;
+  void mcp_enter(controls::QueueKind kind, const server::http::Request& req, const Finish& finish,
+                 const std::string& domain, const std::string& tenant, std::function<void(const Finish&)> handle);
+  // A bearer token proved good by its handler: from now its calls count as this agent's, not
+  // as its client address's (who it is, kept ten minutes by the token's hash).
+  void mcp_remember(const server::http::Request& req, const std::string& realm, const std::string& agent,
+                    const std::string& cls);
+  std::pair<std::string, std::string> mcp_agent(const server::http::Request& req, const std::string& realm);
+  std::mutex mcp_agents_mu_;
+  std::map<std::string, std::pair<int64_t, std::pair<std::string, std::string>>> mcp_agents_;  // hash -> (at, (agent, cls))
+  void mcp_queue_start();
+  void mcp_queue_stop();   // refuses what waits; the running calls finish
+  void mcp_queue_flush();  // every row, open buckets too, to the traffic rollups
+  std::thread mcp_sweep_thread_;
+  std::mutex mcp_sweep_mu_;
+  std::condition_variable mcp_sweep_cv_;
+  bool mcp_sweep_stopping_ = false;
+  void register_mcp_queue_tools();
+
+ public:
+  // One queue's report (047 § 13): the domain's /mcp, or the operator MCP when domain is "".
+  boost::json::object mcp_queue_report(const std::string& domain, const std::string& window);
+  controls::QueueStats mcp_queue_stats() const { return mcp_queue_ ? mcp_queue_->stats() : controls::QueueStats{}; }
+
+ private:
   // Change sets (design/machine/042.ChangeSets.md; changesets.cpp): schema adds, box versions,
   // content, and flags previewed, applied, and rolled back together; one JSON file each in
   // storage/operations/changesets.

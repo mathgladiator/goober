@@ -67,7 +67,7 @@ listed), **none** (not started), **n/a** (philosophy, or not a host feature).
 | 110 Languages | none | Boxes are written by hand in WAT or Rust against the JSON ABI. | C and Rust generators. |
 | 120 Boundary | partial | Bounds-checked pointers, host-copied results; a JSON request document (005 §3). | Struct layouts, pickup and relocation, arenas. |
 | 150 Deep manifest | partial | The fields above. Unknown fields refused, unbuilt known ones warned. | Most fields; deploy-time defaults and hash-named versions. |
-| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
+| 300 Operating panel | partial | Access log, box logs, `host_health`, `access_log` and `box_logs` tools. The panel (028): its own origin (`operations.domain` or `operations.listen`), host-role sign-in, look-only; traffic rollups from the access, egress, and mail logs (five-minute buckets, 7 days, within `limits.traffic-bytes`: 045), errors, box failures, external services, log volume and uploads, key graphs, `/goober/ready`'s `health` for an outside monitor (with Prometheus text), the heat map, data-flow graphs, the change log from the WAL, operator actions, a read-only database explorer, and per-domain controls with their reports (047); `host:observer` read-only over MCP too. Heat studies (048): a domain's heat, weight, rates, and concurrency by endpoint over a chosen window, with suggested controls, and the Studies view. MCP calls have a strict rate per agent and a fixed queue, with its report (047 § 13), the one built queue: box routes have none yet. | Version approvals, tuning instances and queues, counters, traces, cost, memory, a box's request queue depth, client classes in the access log (a study classifies its own), `principal_kind`, alerts. |
 | 305 Approvals | none | Dev policy: an upload that passes the checker goes live (005 §9). | The registry by hash, diffs, policies, modes. |
 | 310 Deployments | partial | Versions kept; promote rolls back. | Shadowing, comparison reports, splitting. |
 | 315 Static bundles | none | Content is written straight to disk. | Bundles, rogue-content checks. |
@@ -986,6 +986,30 @@ monitored as well to determine effectiveness." (`design/machine/047.Controls.md`
 - [x] The panel's **Controls** view; the change log's `control` kind.
 - [ ] The view checked in a browser.
 - [ ] Requests per day, alerts on verdicts, and the other decisions in 047 § 12.
+
+### Phase 52: MCP's strict rate and fixed queue (2026-11-03)
+The human: "we should assume agents may behave badly. Beyond a strict rate limit, MCP should
+also have a queue for operations to front-load. The queue should be fixed such that we aim to
+maximize reliability." Refusals say only "rate limit reached" (`design/machine/047.Controls.md`
+§ 13):
+- [x] Who an agent is: a bearer token's OAuth client and person on `/mcp`, the operator's name on
+      the operator MCP, the client address until a token is known good; tests.
+- [x] A strict rate per agent before anything is queued (`/mcp` 120 a minute, burst 30; operator
+      600, burst 120), each call of a batch counted, cheap methods a fifth, a batch past the burst
+      a 400; beneath the domain's controls; tests.
+- [x] A fixed queue: 2 running and 32 waiting per agent (128 on the operator MCP), first in first
+      out, round-robin across agents and queues, half the box threads per queue and a quarter
+      always left to everything else, 30 s (120 s) at most waiting; a waiting call holds no
+      worker; tests, with a flood that doesn't starve a polite agent or the pages.
+- [x] Every way out releases its slot: the finish, a dropped finish (a throw), the wait limit, a
+      client gone while waiting (the HTTP server's new `peer_gone`), the pool refusing, the host
+      stopping; a call held for approval holds no slot; tests.
+- [x] Monitoring: `mcp_queue_5m` rows in `traffic.db` within `traffic-bytes` (045's table),
+      `mcp_queue_report`, `control_report`'s `mcp_queue`, the panel's Controls view, and
+      `health.mcp` ratios with their Prometheus lines; tests.
+- [x] Guides, tool and server instructions, HUMAN.md, and CHANGES.md say it in a paragraph.
+- [ ] The view checked in a browser.
+- [ ] Three decisions (047 § 13.10): the per-address `mcp` bucket, alerts, and fixed constants.
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

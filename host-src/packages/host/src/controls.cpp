@@ -722,7 +722,8 @@ void Host::register_control_tools() {
            if (!in.mode && in.rows.empty() && !only) continue;
            reports.push_back(controls::report(in, window, now));
          }
-         return ToolResult::ok(bj::object{{"domain", domain}, {"tenant", tenant}, {"window", window}, {"controls", std::move(reports)}});
+         return ToolResult::ok(bj::object{{"domain", domain}, {"tenant", tenant}, {"window", window}, {"controls", std::move(reports)},
+                                          {"mcp_queue", mcp_queue_report(domain, window)}});  // /mcp's queue (047 § 13)
        }});
 }
 
