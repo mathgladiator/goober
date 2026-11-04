@@ -134,6 +134,14 @@ class BoxRegistry {
   // A disabled box's last active version and why it was disabled, or nullopt.
   std::optional<Disabled> disabled(const std::string& box) const;
 
+  // Drops a box for good (design/machine/051.Cleanup.md § 3): out of the active set if it is
+  // live, its disabled record gone, every stored version deleted leaving its tombstone (with
+  // "dropped": true), and boxes/$box/dropped holding `record`. The name stays usable: uploading
+  // the box again starts it afresh. Answers the versions deleted.
+  std::optional<std::vector<std::string>> drop(const std::string& box, const boost::json::object& record, std::string* error);
+  // A dropped box's record, or nullopt (also once it is uploaded again).
+  std::optional<boost::json::object> dropped(const std::string& box) const;
+
   std::shared_ptr<const ActiveSet> active() const;
   std::vector<std::string> box_names() const;
   std::vector<VersionInfo> versions(const std::string& box) const;

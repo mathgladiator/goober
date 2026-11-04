@@ -1655,6 +1655,88 @@ const views = {
     return [h('h1', {}, 'Database'), h('div', { class: 'cols' }, side, h('div', {}, right.length ? right : h('p', { class: 'muted' }, 'Pick a table.')))];
   },
 
+  // Cleanup (051 § 5): what an agent asked to drop, waiting for an owner; every box and database
+  // with what dropping it would take and what blocks it; and what was dropped. An owner approves
+  // a request, or drops directly, by typing the name of what goes.
+  async cleanup() {
+    const [rep, appr] = await Promise.all([api('cleanup_report', {}), api('approvals')]);
+    const owner = (state.me.roles || []).includes('host:owner');
+    const may = owner || (state.me.roles || []).includes('host:operator');
+    const status = h('p', { class: 'muted small' });
+    const drops = appr.pending.filter(isDrop);
+    const others = appr.pending.length - drops.length;
+    const act = async (fn, okText) => {
+      try { const out = await fn(); status.textContent = okText(out); render(false); } catch (e) { status.textContent = e.message; }
+    };
+    const nameOf = (r) => r.tool === 'box_drop' ? r.args.box : r.args.table ? r.args.database + '.' + r.args.table : r.args.database;
+    const blockedList = (c) => (c.blocked || []).length ? h('ul', { class: 'err small' }, c.blocked.map((b) => h('li', {}, b))) : null;
+    const dropDirect = (args, name, what) => owner ? h('button', { type: 'button', class: 'small', onclick: () => {
+      const typed = prompt(`Drop ${what} ${name}? This can't be undone here (backups can).\nType ${name} to go ahead.`);
+      if (typed === null) return;
+      const why = prompt('Why? (kept in the change log)') || '';
+      act(() => api('write/drop', Object.assign({ confirm: typed, why }, args)),
+        (out) => `Dropped ${out.dropped}.` + (out.snapshot ? ` Its snapshot: ${out.snapshot}.` : ''));
+    } }, 'Drop…') : null;
+    const request = (r) => {
+      const c = r.drop || {};
+      const name = nameOf(r);
+      const approve = owner && !(c.blocked || []).length ? h('button', { type: 'button', class: 'small', onclick: () => {
+        const typed = prompt(`Approve ${r.agent}'s request to drop ${name}?\n${c.takes || ''}\nType ${name} to approve.`);
+        if (typed === null) return;
+        act(() => api('write/decide', { id: r.id, decision: 'approve', confirm: true, confirm_name: typed }),
+          (out) => out.is_error ? `#${r.id} ran and failed: ${typeof out.result === 'string' ? out.result : JSON.stringify(out.result)}` : `Dropped ${name}.`);
+      } }, 'Approve…') : null;
+      const deny = may ? h('button', { type: 'button', class: 'small secondary', onclick: () => {
+        if (!confirm(`Deny dropping ${name}?`)) return;
+        act(() => api('write/decide', { id: r.id, decision: 'deny', confirm: true }), () => `#${r.id} denied.`);
+      } }, 'Deny') : null;
+      return h('div', { class: 'card' },
+        h('div', { class: 'bar' }, h('b', {}, (r.tool === 'box_drop' ? 'Drop box ' : r.args.table ? 'Drop table ' : 'Drop database ')),
+          h('span', { class: 'mono' }, (r.args.tenant ? r.args.tenant + ' / ' : '') + name),
+          c.state ? h('span', { class: 'pill' + (c.state === 'live' ? ' deploy' : '') }, c.state) : null,
+          h('span', { class: 'muted small' }, '#' + r.id + ' · ' + r.agent + ' · ' + fmt.ago(r.at_ms)), approve, deny),
+        r.args.why ? h('p', {}, 'Why: ', r.args.why) : h('p', { class: 'muted small' }, 'No why given.'),
+        dropFacts(c), blockedList(c));
+    };
+    return [
+      h('h1', {}, 'Cleanup'),
+      h('p', { class: 'muted small' }, 'Boxes and databases that can go. An agent asks with box_drop or db_drop; the request waits here ' +
+        'for a host:owner, whatever its approvals switch says, and its checks run again when approved. You can also drop directly. ' +
+        'A database is snapshotted first; a box leaves tombstones, and its databases stay for their own drop.' +
+        (owner ? '' : ' Only host:owner approves or drops.')),
+      status,
+      wideCard(`Waiting for you (${drops.length})`, drops.length ? drops.map(request) : h('p', { class: 'muted' }, 'No drop requests.'),
+        others ? h('p', { class: 'muted small' }, `${others} other request${others > 1 ? 's' : ''} wait in `, h('a', { href: '#/operators' }, 'Operators'), '.') : null),
+      wideCard(`Boxes (${rep.boxes.length})`, rep.boxes.length ? table([
+        { label: 'Box', get: (b) => h('a', { href: '#/box/' + encodeURIComponent(b.box) }, b.box), cls: () => 'mono' },
+        { label: 'State', get: (b) => h('span', { class: 'pill' + (b.state === 'live' ? ' deploy' : '') }, b.state) },
+        { label: 'Versions', num: true, get: (b) => String(b.versions ?? 0) },
+        { label: 'Size', num: true, get: (b) => fmt.bytes(b.bytes) },
+        { label: 'Databases', get: (b) => (b.databases || []).map((d) => d.tenant + '/' + d.database).join(', '), cls: () => 'mono small' },
+        { label: 'Blocked', get: (b) => (b.blocked || []).join('; '), cls: () => 'err small' },
+        { label: '', get: (b) => (b.blocked || []).length ? '' : dropDirect({ kind: 'box', box: b.box }, b.box, 'box') || '' },
+      ], rep.boxes) : h('p', { class: 'muted' }, 'No boxes.')),
+      wideCard(`Databases (${rep.databases.length})`, rep.databases.length ? table([
+        { label: 'Tenant', get: (d) => d.tenant, cls: () => 'mono' },
+        { label: 'Database', get: (d) => d.database, cls: () => 'mono' },
+        { label: 'Size', num: true, get: (d) => fmt.bytes(d.bytes) },
+        { label: 'Rows', num: true, get: (d) => fmt.n(d.rows) },
+        { label: 'Bound by', get: (d) => (d.bound_by || []).map((b) => b.box + '.' + b.strategy + (b.disabled ? ' (disabled)' : '')).join(', ') || 'no box',
+          cls: (d) => (d.bound_by || []).length ? 'muted small' : 'small' },
+        { label: '', get: (d) => (d.blocked || []).length ? '' : dropDirect({ kind: 'database', tenant: d.tenant, database: d.database }, d.database, 'database') || '' },
+      ], rep.databases) : h('p', { class: 'muted' }, 'No databases.'),
+        h('p', { class: 'muted small' }, 'Unbound tables, schemas, and snapshots: the ', h('a', { href: '#/db' }, 'Database'), ' view, per tenant.' +
+          (rep.snapshots.length ? ' Snapshots kept: ' + rep.snapshots.map((s) => `${s.tenant} ${s.snapshots} (${fmt.bytes(s.bytes)})`).join(', ') + '.' : ''))),
+      rep.dropped.length ? wideCard(`Dropped boxes (${rep.dropped.length})`, table([
+        { label: 'Box', get: (d) => d.box, cls: () => 'mono' },
+        { label: 'When', get: (d) => d.dropped_ms ? fmt.time(d.dropped_ms) : '', cls: () => 'muted' },
+        { label: 'By', get: (d) => d.by || '', cls: () => 'muted small' },
+        { label: 'Approved by', get: (d) => d.approved_by || '', cls: () => 'muted small' },
+        { label: 'Why', get: (d) => clip(d.why || '', 80) },
+      ], rep.dropped)) : null,
+    ];
+  },
+
   // Skills and playbooks (050 § 6): search and read what the host's engineers wrote down, by role.
   // Look-only: operators write them with skill_put and skill_delete.
   async skills(params) {
@@ -1712,6 +1794,23 @@ const views = {
     ];
   },
 };
+
+function isDrop(r) { return (r.tool === 'box_drop' || r.tool === 'db_drop') && !(r.args && r.args.dry_run); }
+
+// What a drop would take, as a held request's check says it (051 § 5).
+function dropFacts(c) {
+  if (!c || !c.state && c.exists === undefined) return null;
+  const facts = [];
+  if (c.state) {
+    facts.push(`${c.versions || 0} version${c.versions === 1 ? '' : 's'}, ${fmt.bytes(c.bytes)}` + (c.mission ? ` · ${c.mission}` : ''));
+    for (const d of c.databases || []) facts.push(`database ${d.tenant}/${d.database}: ${d.after}`);
+    if ((c.controls_on_domains || []).length) facts.push('controls on its API stay on ' + c.controls_on_domains.join(', ') + ' (control_remove them)');
+  } else if (c.exists) {
+    facts.push(`${fmt.bytes(c.bytes)}, ${fmt.n(c.rows)} rows` + (c.tables ? ` in ${c.tables.length} tables` : ''));
+  }
+  if (c.takes) facts.push('Takes: ' + c.takes);
+  return h('ul', { class: 'small' }, facts.map((f) => h('li', {}, f)));
+}
 
 // A skill's markdown as elements, every piece of it placed as text: headings, paragraphs, lists,
 // quotes, fenced code, tables, rules, and inline code, bold, emphasis, and http(s) links.
@@ -2031,7 +2130,8 @@ async function approvalsCard() {
     } });
     return h('label', {}, box, ' ', ag.approvals ? 'on' : 'off');
   };
-  const decide = (r, decision) => h('button', { class: 'small' + (decision === 'deny' ? ' secondary' : ''), onclick: async () => {
+  const decide = (r, decision) => isDrop(r) && decision === 'approve' ? h('a', { href: '#/cleanup' }, 'In Cleanup →')
+    : h('button', { class: 'small' + (decision === 'deny' ? ' secondary' : ''), onclick: async () => {
     if (!confirm((decision === 'approve' ? 'Run ' : 'Deny ') + r.tool + ' for ' + r.agent + '?')) return;
     try {
       const out = await api('write/decide', { id: r.id, decision, confirm: true });
@@ -2382,7 +2482,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'controls', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job', 'studies'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'controls', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job', 'studies', 'cleanup'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

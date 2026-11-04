@@ -341,8 +341,8 @@ void Host::register_db_admin_tools() {
        "Read tool. A tenant's databases and tables that no box binds (active or disabled), and stored schemas no box names: what a "
        "person might drop or retire in the panel; and held_schemas: stored schemas whose step drops or rewrites data, "
        "waiting for a person to approve them in the panel, each with its step and what it would do to each database "
-       "(design/machine/041.SchemaEvolution.md § 6). Dropping and approving are a person's acts, never a tool's: an "
-       "agent can only point at these.",
+       "(design/machine/041.SchemaEvolution.md § 6). Dropping and approving are a person's acts: an agent "
+       "asks with db_drop (or box_drop for a box), which waits for a host:owner in the panel's Cleanup view.",
        object_schema({{"tenant", tenant_prop}}, {"tenant"}), [this](const bj::object& args) {
          std::string tenant = text_arg(args, "tenant");
          bj::array dbs;
@@ -470,28 +470,92 @@ std::pair<int, bj::object> Host::panel_drop(const SignedIn& who, const bj::objec
     record("db_snapshot_delete", bj::object{{"tenant", tenant}, {"snapshot", snapshot}});
     return {200, bj::object{{"deleted", snapshot}}};
   }
+  if (kind == "box") {
+    if (!scope.all) return {403, bj::object{{"error", "dropping a box needs a person focused on every tenant"}}};
+    if (confirm != text_arg(args, "box")) return {400, bj::object{{"error", "type the box's name to drop it"}}};
+    return drop_box(confirm, by, why, "", request_id);
+  }
   if (kind != "database" && kind != "table") {
-    return {400, bj::object{{"error", "kind is database, table, schema, snapshot, or schema_approve"}}};
+    return {400, bj::object{{"error", "kind is box, database, table, schema, snapshot, or schema_approve"}}};
   }
   if (!databases_->exists(tenant, database)) return {400, bj::object{{"error", "tenant " + tenant + " has no database " + database}}};
   std::string target = kind == "table" ? database + "." + table : database;
   if (confirm != target) return {400, bj::object{{"error", "type " + target + " to drop it"}}};
-  std::string list;
+  return drop_database(tenant, database, kind == "table" ? table : "", by, why, "", request_id);
+}
+
+bj::object Host::db_drop_check(const std::string& tenant, const std::string& database, const std::string& table) {
+  std::string target = table.empty() ? database : database + "." + table;
+  bj::object out{{"tenant", tenant}, {"database", database}, {"target", target}};
+  if (!base::is_valid_name(tenant) || !databases_->exists(tenant, database)) {
+    out["exists"] = false;
+    out["blocked"] = bj::array{bj::value("tenant " + tenant + " has no database " + database)};
+    return out;
+  }
+  out["exists"] = true;
+  auto file = databases_->file(tenant, database);
+  std::error_code ec;
+  int64_t bytes = 0;
+  for (const char* ext : {"", "-wal"}) {
+    auto n = fs::file_size(file.string() + ext, ec);
+    if (!ec) bytes += int64_t(n);
+  }
+  out["bytes"] = bytes;
+  auto tables = tables_of(file);
+  bool found = table.empty();
+  int64_t rows = 0;
+  for (const auto& t : tables) {
+    if (!table.empty() && t.at("table").as_string() == table) {
+      found = true;
+      rows = t.at("rows").as_int64();
+    } else if (table.empty()) {
+      rows += t.at("rows").as_int64();
+    }
+  }
+  out["tables"] = table.empty() ? bj::value(tables) : bj::value(nullptr);
+  out["rows"] = rows;
+  bj::array blocked, by;
+  if (!found) blocked.push_back(bj::value("database " + database + " has no table " + table));
   for (const auto& b : db_bindings(tenant, database)) {
-    if (kind == "table" && !b.tables.count(table)) continue;
-    list += (list.empty() ? "" : ", ") + b.box + "." + b.strategy + (b.disabled ? " (disabled)" : "");
+    if (!table.empty() && !b.tables.count(table)) continue;
+    by.push_back(bj::object{{"box", b.box}, {"strategy", b.strategy}, {"disabled", b.disabled}});
+    blocked.push_back(bj::value("bound by " + b.box + "." + b.strategy + (b.disabled ? " (disabled)" : "") +
+                                ": drop the box first (box_drop), or deploy a version that no longer binds it"));
   }
-  if (!list.empty()) {
-    return {409, bj::object{{"error", target + " is bound by " + list + "; drop it once no box binds it"}}};
+  out["bound_by"] = std::move(by);
+  out["blocked"] = std::move(blocked);
+  out["takes"] = "a snapshot first (kept until a person deletes it), then " + std::string(table.empty() ? "the database" : "the table") +
+                 " and its rows";
+  return out;
+}
+
+std::pair<int, bj::object> Host::drop_database(const std::string& tenant, const std::string& database, const std::string& table,
+                                               const std::string& by, const std::string& why, const std::string& approved_by,
+                                               const std::string& request_id) {
+  auto check = db_drop_check(tenant, database, table);
+  std::string target = std::string(check.at("target").as_string());
+  if (!check.at("blocked").as_array().empty()) {
+    std::string list;
+    for (const auto& b : check.at("blocked").as_array()) list += (list.empty() ? "" : "; ") + std::string(b.as_string());
+    return {409, bj::object{{"error", target + " can't be dropped now: " + list}, {"check", std::move(check)}}};
   }
+  std::string err;
   auto snap = take_snapshot(tenant, database, "before dropping " + target + (why.empty() ? "" : ": " + why), by, true, &err);
   if (!snap) return {500, bj::object{{"error", "the snapshot before the drop failed, so nothing was dropped: " + err}}};
-  bool ok = kind == "table" ? databases_->drop_table(tenant, database, table, &err)
-                            : databases_->drop_database(tenant, database, &err);
+  bool ok = !table.empty() ? databases_->drop_table(tenant, database, table, &err) : databases_->drop_database(tenant, database, &err);
   if (!ok) return {400, bj::object{{"error", err}, {"snapshot", snap->at("snapshot")}}};
-  record(kind == "table" ? "table_drop" : "db_drop",
-         bj::object{{"tenant", tenant}, {"target", target}, {"snapshot", snap->at("snapshot")}});
-  return {200, bj::object{{"dropped", target}, {"snapshot", snap->at("snapshot")}}};
+  bj::object detail{{"tenant", tenant}, {"target", target}, {"snapshot", snap->at("snapshot")}, {"why", why.substr(0, 500)},
+                    {"rows", check.at("rows")}};
+  if (!approved_by.empty()) detail["approved_by"] = approved_by;
+  if (changes_) {
+    try {
+      changes_->record_action(operations::Action{base::now_unix_ms(), by, !table.empty() ? "table_drop" : "db_drop", request_id, detail, false});
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: change log: " << e.what() << "\n";
+    }
+  }
+  audit(!table.empty() ? "drop.table" : "drop.database", by, tenant + "/" + target, "ok", detail);
+  return {200, bj::object{{"dropped", target}, {"tenant", tenant}, {"snapshot", snap->at("snapshot")}}};
 }
 
 }  // namespace goober::host

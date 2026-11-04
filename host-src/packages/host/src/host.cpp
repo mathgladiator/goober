@@ -354,6 +354,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_heat_study_tools();
   register_mcp_queue_tools();
   register_skill_tools();
+  register_cleanup_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "

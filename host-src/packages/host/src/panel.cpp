@@ -63,7 +63,8 @@ const std::set<std::string, std::less<>> kReadTools = {
     "route_try",
     "changeset_show", "changeset_list", "changeset_preview",
     "heat_study_get", "heat_study_list",
-    "skill_list", "skill_search", "skill_get"};
+    "skill_list", "skill_search", "skill_get",
+    "cleanup_report"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 
@@ -119,6 +120,8 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   };
   if (tool == "mail_unsubscribed") return !args.contains("set");
   if (tool == "version_upload" || tool == "schema_apply") return flag("dry_run");
+  // A drop's dry run only checks (051 § 4); the drop itself always waits for a person.
+  if (tool == "box_drop" || tool == "db_drop") return flag("dry_run");
   // A content dry run stores nothing; staging builds only the operator's own draft, which no
   // one sees until a content_deploy (which waits) writes it.
   if (tool == "content_deploy") return flag("dry_run");

@@ -100,7 +100,7 @@ Read these before doing design work:
     `data.sqlite3` strategies with `pattern: "sql"`, `goober_sql`, request transactions,
     the operator's db tools and CLI, sealed CSV exports a person fetches (§ 7.1), and grants as a box's whole reach with `grant_usage`
     (§ 4.1); snapshots, restoring to a new database, `db_create`, and drops only a person
-    makes in the panel (§ 11).
+    makes or approves in the panel (§ 11; agents ask with `db_drop`, 051).
   - `design/machine/009.OAuth.md`: OAuth 2.1 for the terminal and agents: person and agent
     clients, PKCE codes with consent, rotating refresh tokens, the device flow, bearer tokens,
     and `"agents": true`.
@@ -162,7 +162,8 @@ Read these before doing design work:
     for an outside monitor, ratios and ages but no counts, also as Prometheus text (§ 4.6); the Logs and uploads
     view of log volume, who writes it, and uploads per day (§ 4.7); the Studies view of heat studies
     (heat by endpoint, clients, suggested controls; § 4.8, 048); the Skills view of skills and
-    playbooks by role (§ 4.10, 050); the Controls view of each domain's
+    playbooks by role (§ 4.10, 050); the Cleanup view of drop requests an owner approves, every box and
+    database with what dropping it takes, and what was dropped (§ 4.11, 051); the Controls view of each domain's
     controls, their effective values, and what each did, where `host:owner` and `host:operator`
     change any control at any time (§ 4.9, 047 § 9); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
@@ -191,7 +192,7 @@ Read these before doing design work:
     multipart, and raw bodies, chunked uploads, polling, limits; Hevy, Strava, X, and POSSE.
   - `design/machine/035.Approvals.md`: approvals per connected agent: a switch in the panel, off
     by default; when on, the agent's changing tool calls wait as requests a person approves (run
-    as the agent) or denies; read tools never wait.
+    as the agent) or denies; read tools never wait; drops always wait, for an owner (051).
   - `design/machine/036.Bus.md`: the bus in-process: `publish` on strategies moved on commit,
     `routes.sse` subscriptions evaluated read-only, coalesced, and shared, over SSE.
   - `design/machine/037.Caching.md`: reads and caching: GETs change nothing; per-database
@@ -278,6 +279,13 @@ Read these before doing design work:
     (with its change log history), `skill_put` (if_etag, revisions), `skill_delete`; focused operators
     read but can't write; the panel's Skills view searches and reads by role, drawing markdown as
     text; `limits.skills-bytes`; five decisions for the human.
+  - `design/machine/051.Cleanup.md`: drops an agent asks for and a person approves: `box_drop` and
+    `db_drop` (a table with `table`) always wait for a person whatever the approvals switch says,
+    only a `host:owner` approves one, typing the name, and the checks run again then; `dry_run`
+    answers what it would take and what blocks it; a box drop takes it out of service, deletes every
+    version leaving tombstones and its flags, keeps its databases (unbound for their own drop), and is
+    refused while another box calls it; the name can be uploaded again; `cleanup_report`; the panel's
+    Cleanup view of requests, boxes, databases, and what was dropped; five decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

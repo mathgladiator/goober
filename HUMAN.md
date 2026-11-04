@@ -337,13 +337,25 @@ A deployed revision's files, with the box versions and build log, are in
 - **Pages, data, everything:** restore a backup onto your laptop to look first
   (`just rehydrate ~/copy`), then decide.
 
-## Drop an old database or table
+## Clean up: drop old boxes and databases
 
-The panel's **Database** view lists, under "Unbound, and snapshots", the databases, tables,
-and schemas no box uses. Signed in as host:owner, press **Drop** (or **Retire** for a schema),
-type its name, and say why. The host refuses while any box uses it, and snapshots it first
-(the answer names the snapshot; `db_snapshots` lists them). Grok can't drop anything; it can
-list what could go (`db_unbound`) and ask you.
+Open the panel's **Cleanup** view (`design/machine/051.Cleanup.md`). Signed in as host:owner:
+
+- **Grok asks, you decide.** Tell Grok "ask to drop the boxes the migration replaced, and their
+  databases". It runs `box_drop` and `db_drop`; nothing goes until you press **Approve…** under
+  "Waiting for you" and type the name. Each request shows what it takes and what blocks it.
+- **Or drop it yourself.** Every box and database is listed; press **Drop…**, type its name,
+  and say why.
+- **Order matters.** A database is refused while a box uses it, and a box is refused while
+  another box calls it: drop the box first, then its database (it shows as bound by no box).
+- **What goes.** A box: out of service, every version (tombstones say what each was), its flags.
+  Its databases stay until their own drop. A database: snapshotted first (the answer names the
+  snapshot; `db_snapshots` lists them).
+- **Undo.** A database: `db_restore_to_new` from its snapshot. A box: deploy it again from its
+  source project, or rehydrate a backup from before the drop.
+
+Unbound tables, schemas, and snapshots are still in the **Database** view, under "Unbound, and
+snapshots".
 
 ## Fetch an export Grok made
 

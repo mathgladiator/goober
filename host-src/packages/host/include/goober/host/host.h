@@ -790,6 +790,24 @@ class Host {
     std::set<std::string> tables;
   };
   std::vector<DbBinding> db_bindings(const std::string& tenant, const std::string& database);
+  // Cleanup (design/machine/051.Cleanup.md; cleanup.cpp, db_admin.cpp): box and database drops
+  // an agent asks for and only a host:owner approves in the panel, or a person makes there.
+  // A drop tool's call always waits for a person, whatever the agent's approvals switch says.
+  static bool always_held(std::string_view tool, const boost::json::object& args);
+  // What a drop would take and what stops it now ("blocked"), changing nothing.
+  boost::json::object box_drop_check(const std::string& box);
+  boost::json::object db_drop_check(const std::string& tenant, const std::string& database, const std::string& table);
+  // The drops themselves, checked again first. `approved_by` is the person who approved an
+  // agent's request, or "" when the person made it.
+  std::pair<int, boost::json::object> drop_box(const std::string& box, const std::string& by, const std::string& why,
+                                               const std::string& approved_by, const std::string& request_id);
+  std::pair<int, boost::json::object> drop_database(const std::string& tenant, const std::string& database,
+                                                    const std::string& table, const std::string& by, const std::string& why,
+                                                    const std::string& approved_by, const std::string& request_id);
+  boost::json::object cleanup_report();
+  void register_cleanup_tools();
+  // Who approved the call running on this thread now (panel_decide sets it), or "".
+  static std::string& approved_by_now();
 
  private:
   std::mutex upload_tickets_mu_;

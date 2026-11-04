@@ -368,9 +368,12 @@ through the mail service. Failures are retried in order, then given up after 8 t
   (before a migration), db_snapshots lists them, and db_restore_to_new makes a NEW database
   from one, never over an existing one. db_unbound lists databases, tables, and schemas no box
   binds or names.
-- Dropping a database or a table, or retiring a schema, is a person's act in the panel
-  (Database view), never a tool's: the host refuses while any box (active or disabled) binds
-  it, and takes a snapshot first. An agent asks a person, pointing at db_unbound's answer.
+- Dropping a database or a table, or retiring a schema, is a person's act in the panel: the
+  host refuses while any box (active or disabled) binds it, and takes a snapshot first. An
+  agent asks with db_drop {tenant, database, table?, why} (and box_drop {box, why} for a box no
+  one will run again): the call always waits for a host:owner, who approves it in the panel's
+  Cleanup view by typing the name. dry_run: true first says what it would take and what blocks
+  it. Drop a box before its database: a bound database is refused.
 - The From address: a mail service's "from" is fixed in the manifest, per service, and a box
   can't choose another per call. A box sending as admin@ and another as agent@ each declare
   their own mail service with that "from".

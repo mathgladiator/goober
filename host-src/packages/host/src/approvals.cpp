@@ -157,7 +157,8 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
   // Looking never waits; nor does asking about one's own requests.
   // A route_try changes nothing real (its writes run on copies), so it never waits either.
   if (is_read_call(tool, args) || tool == "approval_status" || tool == "route_try") return std::nullopt;
-  if (!approvals_on(agent)) return std::nullopt;
+  bool drop = always_held(tool, args);  // a drop waits for a person whatever the switch says (051 § 4)
+  if (!drop && !approvals_on(agent)) return std::nullopt;
   bj::object held = args;
   // A deploy or build held without a revision is pinned to the head now, so the person approves
   // exactly what will run, not whatever head is when they click.
@@ -179,6 +180,14 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
     sqlite::Stmt s(db, "INSERT INTO requests (at_ms, agent, tool, args, request_id) VALUES (?, ?, ?, ?, ?)");
     s.bind(1, base::now_unix_ms()).bind(2, agent).bind(3, tool).bind(4, text).bind(5, current_request_id()).run();
     id = db.last_insert_rowid();
+  }
+  if (drop) {
+    return mcp::ToolResult::ok(bj::object{
+        {"pending_approval", id},
+        {"tool", tool},
+        {"note", "A drop always waits for a person: a host:owner approves or denies it in the panel's Cleanup view. It "
+                 "hasn't run, and its checks run again when approved. Ask approval_status {id} for the outcome; a "
+                 "request not decided in a day expires."}});
   }
   return mcp::ToolResult::ok(bj::object{
       {"pending_approval", id},
@@ -269,6 +278,14 @@ bj::object Host::panel_approvals(const SignedIn& who) {
         } else {
           o["review_error"] = rerr.empty() ? "unreadable" : rerr;
         }
+      }
+      // A held drop shows what it would take and what blocks it, checked now (051 § 5).
+      if (o.at("tool") == "box_drop" || o.at("tool") == "db_drop") {
+        std::string err;
+        auto held = json::parse(s.text(4), &err);
+        bj::object a = held && held->is_object() ? held->as_object() : bj::object{};
+        o["drop"] = o.at("tool") == "box_drop" ? box_drop_check(text_arg(a, "box"))
+                                                : db_drop_check(text_arg(a, "tenant"), text_arg(a, "database"), text_arg(a, "table"));
       }
       // A held change set shows its preview (without tries): every member and what widens.
       if (o.at("tool") == "changeset_apply") {
@@ -365,6 +382,19 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
     if (!owner && person_of(agent) != who.user.email) {
       return {403, bj::object{{"error", "only a host:owner decides for another operator's agents or a token"}}};
     }
+    // A drop (051 § 4): only an owner approves one, typing the name of what goes, as a drop made
+    // in the panel takes. Anyone who may decide may deny it.
+    std::string perr;
+    auto held = json::parse(args_text, &perr);
+    bj::object held_args = held && held->is_object() ? held->as_object() : bj::object{};
+    if (decision == "approve" && always_held(tool, held_args)) {
+      if (!owner) return {403, bj::object{{"error", "only a host:owner approves a drop"}}};
+      std::string target = tool == "box_drop" ? text_arg(held_args, "box")
+                           : text_arg(held_args, "table").empty()
+                               ? text_arg(held_args, "database")
+                               : text_arg(held_args, "database") + "." + text_arg(held_args, "table");
+      if (text_arg(args, "confirm_name") != target) return {400, bj::object{{"error", "type " + target + " to approve dropping it"}}};
+    }
     // An agent that can no longer sign in (its token revoked, the config's token removed) has its
     // requests denied, never run with the roles it used to have.
     if (decision == "approve" && !agent_still_signs_in(agent)) {
@@ -399,6 +429,12 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
   mcp::HttpReply reply;
   try {
     OperatorContext as(*this, agent, request_id);
+    // A drop tool runs only with a person's approval on this thread (cleanup.cpp).
+    struct Approved {
+      std::string saved;
+      explicit Approved(const std::string& by) : saved(approved_by_now()) { approved_by_now() = by; }
+      ~Approved() { approved_by_now() = saved; }
+    } approved(by);
     reply = mcp_->handle(json::dump(call), policy);
   } catch (const std::exception& e) {
     reply = mcp::HttpReply{500, json::dump(bj::object{{"error", std::string("the call failed: ") + e.what()}})};

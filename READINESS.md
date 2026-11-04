@@ -238,6 +238,8 @@ each ranch's site weekly.
   - a database explorer with a read-only SQL box;
   - heat studies (the Studies view): one domain's heat, rates, and concurrency by endpoint over
     an hour or a day, with suggested controls in observe mode (`design/machine/048.HeatStudy.md`);
+  - cleanup (the Cleanup view): old boxes and databases Grok asks to drop wait there for you
+    to approve, or you drop them yourself (`design/machine/051.Cleanup.md`);
   - skills and playbooks (the Skills view): what Grok's engineers wrote down for each role,
     searched and read; agents write them with `skill_put` (`design/machine/050.Skills.md`).
   - each domain's controls (rate, concurrency, body size, timeouts, fuel, closing; per domain,

@@ -68,6 +68,10 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     // some tenants writes it, as it is read by agents of every tenant.
     for (const char* t : {"skill_list", "skill_search", "skill_get"}) m[t] = Rule::kOpen;
     for (const char* t : {"skill_put", "skill_delete"}) m[t] = Rule::kHost;
+    // Cleanup (051): a box's drop by its box, a database's by its tenant; the report is host-wide.
+    m["box_drop"] = Rule::kBox;
+    m["db_drop"] = Rule::kTenant;
+    m["cleanup_report"] = Rule::kHost;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",
@@ -470,8 +474,11 @@ std::optional<std::string> Host::scope_filter(const OperatorScope& scope, const 
 
 mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, bool read_only, bool hold) {
   mcp::McpServer::Policy policy;
-  if (hold && approvals_on(operator_name)) {
-    policy.hold = [this, operator_name](const std::string& tool, const bj::object& args) {
+  // A drop always waits for a person (051 § 4); everything else only when approvals are on.
+  if (hold) {
+    bool on = approvals_on(operator_name);
+    policy.hold = [this, operator_name, on](const std::string& tool, const bj::object& args) -> std::optional<mcp::ToolResult> {
+      if (!on && !always_held(tool, args)) return std::nullopt;
       return hold_for_approval(operator_name, tool, args);
     };
   }

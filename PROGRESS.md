@@ -1119,6 +1119,24 @@ create/delete/modify each skill/playbook." (`design/machine/050.Skills.md`):
 - [ ] Decisions (050 § 9): free role names, focused operators can't write, writes wait for
       approval, the panel only reads, no export command yet.
 
+### Phase 57: cleanup, drops an agent asks for and a person approves (2026-11-04)
+The human: "For removing existing boxes, I want to see approvals in the operational panel such
+that I can clean the machine up. I want to be able to approval database drops, box drops."
+(`design/machine/051.Cleanup.md`):
+- [x] The box registry drops a box: out of service, every version deleted leaving tombstones
+      marked dropped, a `dropped` record; the name usable again; tests.
+- [x] `box_drop` and `db_drop` (with `table`): `dry_run` checks; otherwise always held for a
+      person whatever the approvals switch, approved only by a `host:owner` typing the name, the
+      checks run again, the tool refuses to drop outside an approval; flags removed, databases
+      kept and named; refused while another box calls it; audit and change log with
+      `approved_by`; tests.
+- [x] `cleanup_report`; the panel's own drop takes `kind: "box"`; tests.
+- [x] The panel's Cleanup view: requests with their checks, approve by typing the name, deny;
+      every box and database with Drop…; dropped boxes. Operators sends drops there.
+- [ ] Not opened in a browser yet: the Cleanup view.
+- [ ] Decisions (051 § 8): owners alone approve, drops always wait, a live box drops in one step,
+      a box drop keeps its databases, no undrop.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

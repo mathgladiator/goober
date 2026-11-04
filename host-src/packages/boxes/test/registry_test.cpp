@@ -230,3 +230,49 @@ TEST_F(RegistryTest, VersionsWithoutARecordStartTheirTimeAtTheFirstPruning) {
   ASSERT_EQ(later.archived.size(), 1u);
   EXPECT_EQ(later.archived[0].second, a->version);
 }
+
+TEST_F(RegistryTest, ADroppedBoxLeavesOnlyTombstonesAndItsNameStaysUsable) {
+  std::string err;
+  auto v1 = reg->upload(manifest_for("old", "*", "/old", "old_get"), module_for({"old_get"}), &err);
+  auto v2 = reg->upload(manifest_for("old", "*", "/older", "old_get"), module_for({"old_get"}), &err);
+  ASSERT_TRUE(v1 && v2) << err;
+  ASSERT_TRUE(reg->upload(manifest_for("keep", "*", "/keep", "keep_get"), module_for({"keep_get"}), &err)) << err;
+  auto gone = reg->drop("old", boost::json::object{{"by", "panel:owner@example.com"}, {"why", "tidy"}}, &err);
+  ASSERT_TRUE(gone) << err;
+  EXPECT_EQ(gone->size(), 2u);
+  // Out of service; the other box still serves.
+  EXPECT_FALSE(reg->active()->boxes.count("old"));
+  EXPECT_FALSE(reg->active()->table_for("x").match({"older"}, "get").value);
+  EXPECT_TRUE(reg->active()->table_for("x").match({"keep"}, "get").value);
+  // Only tombstones and the record are left.
+  EXPECT_FALSE(fs::exists(root / "boxes/old/versions" / v1->version));
+  EXPECT_FALSE(fs::exists(root / "boxes/old/active"));
+  auto t = reg->tombstone("old", v2->version);
+  ASSERT_TRUE(t);
+  EXPECT_TRUE(t->at("dropped").as_bool());
+  auto rec = reg->dropped("old");
+  ASSERT_TRUE(rec);
+  EXPECT_EQ(rec->at("why"), "tidy");
+  EXPECT_EQ(rec->at("versions").as_array().size(), 2u);
+  for (const auto& v : reg->versions("old")) EXPECT_EQ(v.state, "deleted");
+  EXPECT_FALSE(reg->drop("old", {}, &err));
+  EXPECT_NE(err.find("dropped already"), std::string::npos) << err;
+  EXPECT_FALSE(reg->drop("never", {}, &err));
+  // A restart doesn't bring it back.
+  boxes::BoxRegistry again(*w, engine());
+  again.load_all();
+  EXPECT_FALSE(again.active()->boxes.count("old"));
+  // Uploading the name again is a new box.
+  ASSERT_TRUE(reg->upload(manifest_for("old", "*", "/new", "old_get"), module_for({"old_get"}), &err)) << err;
+  EXPECT_FALSE(reg->dropped("old"));
+  EXPECT_TRUE(reg->active()->table_for("x").match({"new"}, "get").value);
+}
+
+TEST_F(RegistryTest, ADisabledBoxDrops) {
+  std::string err;
+  ASSERT_TRUE(reg->upload(manifest_for("off", "*", "/off", "off_get"), module_for({"off_get"}), &err)) << err;
+  ASSERT_TRUE(reg->disable("off", "paused", &err)) << err;
+  ASSERT_TRUE(reg->drop("off", {}, &err)) << err;
+  EXPECT_FALSE(reg->disabled("off"));
+  EXPECT_TRUE(reg->dropped("off"));
+}

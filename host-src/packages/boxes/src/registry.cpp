@@ -309,6 +309,11 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
   }
   if (!types_text.empty()) bundle.push_back({wal::FileChange::Kind::kWrite, dir + "/types.json", std::string(types_text)});
   if (mode != Mode::kCheck) {
+    // A dropped box uploaded again is a box again.
+    std::error_code dec;
+    if (fs::exists(wal_.root() / "boxes" / box / "dropped", dec)) {
+      bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/dropped", ""});
+    }
     // Its life (045 § 3.1): stored now, unless it was before; uploading an archived version
     // again brings it back, its inactive time started again.
     int64_t now = base::now_unix_ms();
@@ -457,6 +462,76 @@ std::vector<std::string> stored_versions(const fs::path& root, const std::string
 }
 
 }  // namespace
+
+std::optional<std::vector<std::string>> BoxRegistry::drop(const std::string& box, const boost::json::object& record,
+                                                          std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box)) return *error = "bad box name", std::nullopt;
+  fs::path root = wal_.root() / "boxes" / box;
+  std::error_code ec;
+  if (!fs::is_directory(root, ec)) return *error = "no box named " + box, std::nullopt;
+  if (fs::exists(root / "dropped", ec)) return *error = "box " + box + " was dropped already", std::nullopt;
+  auto current = active();
+  std::shared_ptr<ActiveSet> next;
+  wal::Bundle bundle;
+  int64_t now = base::now_unix_ms();
+  if (current->boxes.count(box)) {
+    next = std::make_shared<ActiveSet>();
+    for (const auto& [name, b] : current->boxes) {
+      if (name != box) next->boxes[name] = b;
+    }
+    if (!next->build(error)) return std::nullopt;
+  }
+  if (fs::exists(root / "active", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""});
+  if (fs::exists(root / "disabled", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
+  std::vector<std::string> gone;
+  for (const auto& v : stored_versions(wal_.root(), box)) {
+    auto l = life(box, v);
+    fs::path dir = root / "versions" / v;
+    auto wasm = base::read_file(dir / "box.wasm").value_or("");
+    boost::json::object t{{"box", box},
+                          {"version", v},
+                          {"module_sha256", base::sha256_hex(wasm)},
+                          {"module_bytes", int64_t(wasm.size())},
+                          {"stored_ms", num(l, "stored_ms")},
+                          {"stored_by", l.contains("stored_by") ? l.at("stored_by") : boost::json::value(nullptr)},
+                          {"live", l.contains("live") ? l.at("live") : boost::json::array{}},
+                          {"inactive_since_ms", num(l, "inactive_since_ms")},
+                          {"archived_ms", num(l, "archived_ms")},
+                          {"deleted_ms", now},
+                          {"dropped", true}};
+    bundle.push_back({wal::FileChange::Kind::kWrite, "boxes/" + box + "/deleted/" + v + ".json", json::dump(t)});
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+      if (entry.is_regular_file()) {
+        bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/versions/" + v + "/" + entry.path().filename().string(), ""});
+      }
+    }
+    gone.push_back(v);
+  }
+  boost::json::object rec = record;
+  rec["box"] = box;
+  rec["dropped_ms"] = now;
+  boost::json::array versions;
+  for (const auto& v : gone) versions.push_back(boost::json::value(v));
+  rec["versions"] = std::move(versions);
+  bundle.push_back({wal::FileChange::Kind::kWrite, "boxes/" + box + "/dropped", json::dump(rec)});
+  if (!wal_.commit(bundle, error)) return std::nullopt;
+  for (const auto& v : gone) fs::remove(root / "versions" / v, ec);  // empty now
+  if (next) {
+    std::lock_guard snap(snapshot_mu_);
+    active_ = next;
+  }
+  return gone;
+}
+
+std::optional<boost::json::object> BoxRegistry::dropped(const std::string& box) const {
+  if (!base::is_valid_name(box)) return std::nullopt;
+  auto text = base::read_file(wal_.root() / "boxes" / box / "dropped");
+  if (!text) return std::nullopt;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  return v && v->is_object() ? std::optional<boost::json::object>(v->as_object()) : boost::json::object{};
+}
 
 std::vector<VersionInfo> BoxRegistry::versions(const std::string& box) const {
   std::vector<VersionInfo> out;

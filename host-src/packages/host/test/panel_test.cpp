@@ -597,9 +597,12 @@ TEST_F(PanelTest, OperatorsSnapshotAndCreateOnlyAPersonDrops) {
   EXPECT_NE(error_of(call("db_restore_to_new", R"({"tenant":"playground","snapshot":"shop/../../x","database":"y"})"))
                 .find("no snapshot"),
             std::string::npos);
-  // No tool drops anything.
+  // No tool drops anything by itself: db_drop only asks, and waits for a person (051 § 4).
   auto list = mcp(token, R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").body;
-  for (const char* t : {"db_drop", "table_drop", "schema_retire"}) EXPECT_EQ(list.find(t), std::string::npos) << t;
+  for (const char* t : {"table_drop", "schema_retire"}) EXPECT_EQ(list.find(t), std::string::npos) << t;
+  auto asked = call("db_drop", R"({"tenant":"playground","database":"shop_copy","why":"test"})");
+  EXPECT_TRUE(asked.as_object().contains("pending_approval")) << json::dump(asked);
+  EXPECT_TRUE(host->databases().exists("playground", "shop_copy"));
 
   // The panel: an observer can't; the owner types the name; bound things stay.
   std::string watcher = sign_in("watcher@example.com");
