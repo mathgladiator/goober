@@ -360,6 +360,40 @@ TEST(HeatStudy, StopKeepsWhatWasGathered) {
   EXPECT_EQ(hs.get(1, kT0 + 5 * kMin, &err)->at("totals").at("requests").as_int64(), 30);
 }
 
+// A minute's save built just before a stop never lands after the final report (code review C5):
+// the file says "stopped", so a restart doesn't find it "running" and call it interrupted.
+TEST(HeatStudy, ASaveRacingAStopNeverOverwritesTheFinalReport) {
+  auto dir = fresh("save_race");
+  HeatStudies hs(dir);
+  std::string err;
+  ASSERT_TRUE(hs.start("a.example.com", "a", 60, "why", "op", kT0, &err));
+  hs.record("a.example.com", sample(kT0 + 1000, "GET /x", 1));
+  bool stopped = false;
+  hs.set_before_save_for_test([&](int64_t id) { stopped = hs.stop(id, "grok", kT0 + 2 * kMin, &err).has_value(); });
+  EXPECT_TRUE(hs.tick(kT0 + 2 * kMin).empty());
+  ASSERT_TRUE(stopped) << err;
+  auto text = goober::base::read_file(dir / "1.json");
+  ASSERT_TRUE(text);
+  auto v = goober::json::parse(*text, &err);
+  ASSERT_TRUE(v) << err;
+  EXPECT_EQ(v->at("state").as_string(), "stopped");
+  hs.set_before_save_for_test({});
+  HeatStudies again(dir);
+  EXPECT_EQ(again.get(1, kT0 + 3 * kMin, &err)->at("state").as_string(), "stopped");
+}
+
+// A name a visitor chose (an MCP tool's, a path) is kept to 200 bytes, cut on a character.
+TEST(HeatStudy, EndpointNamesAreCappedAt200Bytes) {
+  HeatStudies hs(fresh("cap"));
+  std::string err;
+  ASSERT_TRUE(hs.start("a.example.com", "a", 60, "", "op", kT0, &err));
+  std::string name = std::string(199, 'x') + "\xc3\xa9" + std::string(100, 'y');  // é across byte 200
+  hs.record("a.example.com", sample(kT0 + 1000, name, 1, 1000, "mcp"));
+  auto rep = *hs.get(1, kT0 + kMin, &err);
+  ASSERT_EQ(rep.at("endpoints").as_array().size(), 1u);
+  EXPECT_EQ(rep.at("endpoints").at(0).at("endpoint").as_string(), std::string(199, 'x'));
+}
+
 TEST(HeatStudy, EndsWhenTimeIsUp) {
   HeatStudies hs(fresh("timeup"));
   std::string err;

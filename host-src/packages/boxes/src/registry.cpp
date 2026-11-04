@@ -465,7 +465,7 @@ std::vector<VersionInfo> BoxRegistry::versions(const std::string& box) const {
   auto r = retention();
   std::map<std::string, boost::json::object> lives;
   for (const auto& v : stored_versions(wal_.root(), box)) lives[v] = life(box, v);
-  auto keep = kept(box, lives);
+  auto keep = kept(box, lives, protected_versions());
   for (const auto& [v, l] : lives) {
     VersionInfo info;
     info.version = v;
@@ -574,15 +574,20 @@ Retention BoxRegistry::retention() const {
   return retention_;
 }
 
-std::map<std::string, std::string> BoxRegistry::kept(const std::string& box,
-                                                     const std::map<std::string, boost::json::object>& lives) const {
+BoxRegistry::Protected BoxRegistry::protected_versions() const {
   Protector protector;
   {
     std::lock_guard lock(policy_mu_);
     protector = protector_;
   }
+  return protector ? protector() : Protected{};
+}
+
+std::map<std::string, std::string> BoxRegistry::kept(const std::string& box,
+                                                     const std::map<std::string, boost::json::object>& lives,
+                                                     const Protected& protected_) const {
   std::map<std::string, std::string> out;
-  if (protector) out = protector(box);
+  if (auto it = protected_.find(box); it != protected_.end()) out = it->second;
   if (auto d = disabled(box); d && !d->version.empty()) {
     out[d->version] = "the version of the disabled box: box_enable serves it again";
   }
@@ -625,6 +630,7 @@ PruneReport BoxRegistry::prune(int64_t now_ms, const Annotate& annotate) {
   std::lock_guard lock(mu_);
   PruneReport report;
   auto r = retention();
+  auto protected_ = protected_versions();  // once for every box
   for (const auto& box : box_names()) {
     auto active = base::read_file(wal_.root() / "boxes" / box / "active").value_or("");
     std::map<std::string, boost::json::object> lives;
@@ -642,7 +648,7 @@ PruneReport BoxRegistry::prune(int64_t now_ms, const Annotate& annotate) {
       }
       lives[v] = std::move(l);
     }
-    auto keep = kept(box, lives);
+    auto keep = kept(box, lives, protected_);
     for (auto& [v, l] : lives) {
       if (v == active || keep.count(v)) continue;
       int64_t inactive = num(l, "inactive_since_ms");

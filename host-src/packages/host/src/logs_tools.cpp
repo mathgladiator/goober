@@ -17,6 +17,7 @@
 #include "goober/logs/logs.h"
 #include "goober/site/site.h"
 #include "backups.h"
+#include "disk_usage.h"
 #include "timer_state.h"
 
 namespace goober::host {
@@ -190,11 +191,21 @@ void Host::logs_housekeeping(int64_t now_ms) {
   }
 }
 
+void Host::refresh_log_velocity(int64_t now_ms) {
+  {
+    std::lock_guard lock(log_velocity_mu_);
+    if (log_velocity_at_ms_ && now_ms - log_velocity_at_ms_ < 60000) return;
+  }
+  log_velocity_report("7d", "", false);
+}
+
 bj::object Host::log_velocity_report(const std::string& window, const std::string& log, bool cached) {
   int64_t now = base::now_unix_ms();
   if (cached) {
+    // Only what the traffic loop (or a whole-host log_velocity call) last computed: readiness
+    // never computes it, since that reads the traffic store a catch_up may hold for a while.
     std::lock_guard lock(log_velocity_mu_);
-    if (now - log_velocity_at_ms_ < 60000 && !log_velocity_cache_.empty()) return log_velocity_cache_;
+    return log_velocity_cache_;
   }
   auto cfg = config_.get();
   bj::object out = traffic_ ? traffic_->log_velocity(window, log, now)
@@ -221,23 +232,24 @@ bj::object Host::log_velocity_report(const std::string& window, const std::strin
     }
   }
   // The projection (032 § 10): rotated files stay 7 days, so at today's rate the directory settles at
-  // 8 days of lines (7 rotated and today's), plus what waits in the archive queue for upload.
+  // 8 days of lines (7 rotated and today's), plus what waits in the archive queue for upload and
+  // is no longer among them. A queued file is a hard link to its numbered file while that is
+  // kept, so it counts once: on disk by inode, and in the projection only when its twin is gone.
   if (log.empty()) {
-    int64_t on_disk = 0, queued = 0;
+    int64_t queued = 0;
     std::error_code ec;
     fs::path dir = cfg->storage / "logs";
-    for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    int64_t on_disk = bytes_on_disk(dir);
+    for (auto it = fs::directory_iterator(dir / "archive", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
       std::error_code e2;
-      if (!it->is_regular_file(e2)) continue;
-      int64_t size = int64_t(it->file_size(e2));
-      on_disk += size;
-      if (it->path().parent_path() == dir / "archive" && it->path().extension() == ".log") queued += size;
+      if (it->path().extension() == ".log" && it->is_regular_file(e2)) queued += int64_t(it->file_size(e2));
     }
-    int64_t projected = per_day * (kLocalKeepMs / kDay + 1) + queued;
+    int64_t queued_only = archive_only_bytes(dir / "archive");
+    int64_t projected = per_day * (kLocalKeepMs / kDay + 1) + queued_only;
     int64_t budget = cfg->disk.logs_bytes;
     out["disk"] = bj::object{{"on_disk_bytes", on_disk},
                              {"archive_queued_bytes", queued},
+                             {"archive_only_bytes", queued_only},
                              {"per_day_bytes", per_day},
                              {"projected_bytes", projected},
                              {"budget_bytes", budget},
@@ -253,7 +265,7 @@ bj::object Host::log_velocity_report(const std::string& window, const std::strin
     }
   }
   out["warnings"] = std::move(warnings);
-  if (cached) {
+  if (window == "7d" && log.empty()) {
     std::lock_guard lock(log_velocity_mu_);
     log_velocity_cache_ = out;
     log_velocity_at_ms_ = now;

@@ -234,14 +234,51 @@ TEST_F(LogsHostTest, ALogGrowingFastWarnsAndSaysWhoWritesIt) {
   auto ready = fetch(port, "acme.example.com", bhttp::verb::get, "/goober/ready");
   auto r = json::parse(ready.body, &err);
   ASSERT_TRUE(r) << ready.body;
-  EXPECT_NE(json::dump(r->at("checks").at("limits").at("near")).find("audit wrote"), std::string::npos) << ready.body;
+  EXPECT_NE(json::dump(r->at("checks").at("limits").at("near")).find("audit grew 5"), std::string::npos) << ready.body;
   EXPECT_EQ(ready.body.find("shop"), std::string::npos) << ready.body;
   EXPECT_NE(ready.body.find("a box's log grew"), std::string::npos);
+  // Public: ratios only, never the bytes a log wrote or its usual day (security M3).
+  EXPECT_EQ(ready.body.find("MiB"), std::string::npos) << ready.body;
+  for (const auto& kv : r->at("checks").at("limits").as_object()) {
+    if (kv.key() == "ok" || kv.key() == "near") continue;
+    for (const auto& f : kv.value().as_object()) EXPECT_TRUE(f.key() == "share" || f.key() == "warn") << f.key();
+  }
+  // Operators read the bytes.
+  EXPECT_NE(json::dump(op("host_health").at("value").at("ready").at("checks").at("limits").at("near")).find("audit wrote 5.0 MiB"),
+            std::string::npos);
   EXPECT_NEAR(r->at("health").at("logs").at("growth").at("boxes").as_double(), 4.0, 0.05);
   EXPECT_NEAR(r->at("health").at("logs").at("growth").at("audit").as_double(), 5.0, 0.05);  // and the tests' own lines
   auto prom = fetch(port, "acme.example.com", bhttp::verb::get, "/goober/ready?format=prometheus");
   EXPECT_NE(prom.body.find("goober_log_growth_ratio{log=\"audit\"} 5"), std::string::npos) << prom.body;
   EXPECT_NE(prom.body.find("goober_logs_projected_budget_ratio"), std::string::npos);
+}
+
+// A rotated log and its place in the archive queue are one file with two names (a hard link):
+// the logs budget counts it once, and the projection adds a queued file only once its numbered
+// twin is gone (code review C2).
+TEST_F(LogsHostTest, HardLinkedRotationsAreCountedOnce) {
+  auto measure = [&] {
+    auto h = op("host_health");
+    auto v = op("log_velocity");
+    return std::tuple{h.at("value").at("ready").at("checks").at("limits").at("logs").at("used_bytes").as_int64(),
+                      v.at("value").at("disk").at("on_disk_bytes").as_int64(),
+                      v.at("value").at("disk").at("projected_bytes").as_int64() -
+                          v.at("value").at("disk").at("per_day_bytes").as_int64() * 8};
+  };
+  auto [used0, disk0, queued0] = measure();
+  fs::create_directories(root / "storage/logs/archive");
+  base::write_file_durable(root / "storage/logs/quiet.log.1", std::string(1 << 20, 'x'));
+  fs::create_hard_link(root / "storage/logs/quiet.log.1", root / "storage/logs/archive/quiet-20261101.log");
+  auto [used1, disk1, queued1] = measure();
+  EXPECT_NEAR(double(used1 - used0), double(1 << 20), 65536);  // and the audit lines these calls wrote
+  EXPECT_NEAR(double(disk1 - disk0), double(1 << 20), 65536);  // and the audit lines these calls wrote
+  EXPECT_EQ(queued1, queued0);  // its bytes are among the rotated files already
+  // The numbered file left after 7 days; the queued one, still waiting, now holds them alone.
+  fs::remove(root / "storage/logs/quiet.log.1");
+  auto [used2, disk2, queued2] = measure();
+  EXPECT_NEAR(double(used2 - used0), double(1 << 20), 65536);  // and the audit lines these calls wrote
+  EXPECT_EQ(queued2 - queued0, 1 << 20);
+  EXPECT_EQ(op("log_velocity").at("value").at("disk").at("archive_only_bytes").as_int64(), 1 << 20);
 }
 
 TEST_F(LogsHostTest, AnAgentGoingHamIsFlagged) {

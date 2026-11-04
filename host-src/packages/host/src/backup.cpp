@@ -229,13 +229,24 @@ std::vector<std::string> dated_copies(const fs::path& dir) {
 
 }  // namespace
 
+fs::path dated_copy_dir(const fs::path& dest) {
+  fs::path d = dest.lexically_normal();
+  if (d.filename().empty()) d = d.parent_path();  // backups/2026-11-03/ names the same directory
+  return is_dated_copy_name(d.filename().string()) ? d : fs::path();
+}
+
 std::vector<std::string> prune_local_copies(const fs::path& dest, int keep, std::string* error) {
   std::vector<std::string> removed;
-  fs::path d = dest.lexically_normal();
-  if (d.filename().empty()) d = d.parent_path();
+  fs::path d = dated_copy_dir(dest);
+  if (d.empty()) return removed;
   std::string own = d.filename().string();
-  if (!is_dated_copy_name(own)) return removed;
+  // Only what `goober-host backup` made: a dated directory holding BACKUP.json. Anything else
+  // beside it, dated or not, is someone else's and is never removed nor counted.
   auto names = dated_copies(d.parent_path());
+  std::erase_if(names, [&](const std::string& n) {
+    std::error_code ec;
+    return n != own && !fs::is_regular_file(fs::symlink_status(d.parent_path() / n / "BACKUP.json", ec));
+  });
   // This night's copy stays, whatever its name says, and with it the newest others by name, to
   // `keep` in all.
   std::erase(names, own);

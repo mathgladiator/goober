@@ -26,34 +26,37 @@ std::optional<std::string> text_of(const bj::object& args, const char* key) {
   return std::string(it->value().get_string());
 }
 
-// Every version of `box` an object names: {"box": box, and "version", "active", or "disabled"}.
-void versions_named(const bj::value& v, const std::string& box, std::set<std::string>* out) {
+// Every version each box an object names: {"box": box, and "version", "active", or "disabled"}.
+void versions_named(const bj::value& v, std::map<std::string, std::set<std::string>>* out) {
   if (const auto* o = v.if_object()) {
     const auto* b = o->if_contains("box");
-    if (b && b->is_string() && b->as_string() == box) {
+    if (b && b->is_string()) {
       for (const char* k : {"version", "active", "disabled"}) {
-        if (const auto* x = o->if_contains(k); x && x->is_string()) out->insert(std::string(x->as_string()));
+        if (const auto* x = o->if_contains(k); x && x->is_string()) (*out)[std::string(b->as_string())].insert(std::string(x->as_string()));
       }
     }
-    for (const auto& kv : *o) versions_named(kv.value(), box, out);
+    for (const auto& kv : *o) versions_named(kv.value(), out);
   } else if (const auto* a = v.if_array()) {
-    for (const auto& x : *a) versions_named(x, box, out);
+    for (const auto& x : *a) versions_named(x, out);
   }
 }
 
 }  // namespace
 
-std::map<std::string, std::string> Host::changeset_versions(const std::string& box) {
-  std::map<std::string, std::string> out;
+boxes::BoxRegistry::Protected Host::changeset_versions() {
+  // One pass over the kept change sets for every box (a pruning used to read them all per box).
+  boxes::BoxRegistry::Protected out;
   std::error_code ec;
   for (const auto& e : fs::directory_iterator(changeset_file("0").parent_path(), ec)) {
     if (e.path().extension() != ".json") continue;
     auto cs = load_changeset(e.path().stem().string());
     if (!cs) continue;
-    std::set<std::string> named;
-    versions_named(*cs, box, &named);
-    for (const auto& v : named) {
-      out.emplace(v, "named by change set " + e.path().stem().string() + ", kept until it is deleted (042 § 9)");
+    std::map<std::string, std::set<std::string>> named;
+    versions_named(*cs, &named);
+    for (const auto& [box, versions] : named) {
+      for (const auto& v : versions) {
+        out[box].emplace(v, "named by change set " + e.path().stem().string() + ", kept until it is deleted (042 § 9)");
+      }
     }
   }
   return out;
@@ -63,7 +66,7 @@ void Host::setup_version_keeping() {
   auto cfg = config_.get();
   boxes_->set_retention(boxes::Retention{cfg->disk.version_archive_days * kDayMs, cfg->disk.version_delete_days * kDayMs,
                                          cfg->disk.version_keep});
-  boxes_->set_protector([this](const std::string& box) { return changeset_versions(box); });
+  boxes_->set_protector([this] { return changeset_versions(); });
   boxes_->set_actor([] { return current_operator(); });
 }
 

@@ -5,7 +5,10 @@
 #include <iostream>
 #include <set>
 
+#include <sys/stat.h>
+
 #include "backups.h"
+#include "disk_usage.h"
 #include "goober/base/time.h"
 #include "goober/host/backup.h"
 #include "goober/host/host.h"
@@ -32,6 +35,35 @@ int64_t bytes_under(const fs::path& root) {
 std::string mib(int64_t bytes) { return std::to_string((bytes + (1 << 20) - 1) >> 20) + " MiB"; }
 
 }  // namespace
+
+int64_t bytes_on_disk(const fs::path& root) {
+  int64_t total = 0;
+  std::set<std::pair<uint64_t, uint64_t>> seen;  // (device, inode) of files with more than one name
+  std::error_code ec;
+  for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    std::error_code e2;
+    if (!it->is_regular_file(e2) || it->is_symlink(e2)) continue;
+    if (it->hard_link_count(e2) > 1) {
+      struct stat st{};
+      if (::stat(it->path().c_str(), &st) == 0 && !seen.insert({uint64_t(st.st_dev), uint64_t(st.st_ino)}).second) continue;
+    }
+    total += int64_t(it->file_size(e2));
+  }
+  return total;
+}
+
+int64_t archive_only_bytes(const fs::path& archive) {
+  int64_t total = 0;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator(archive, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    std::error_code e2;
+    if (it->path().extension() != ".log" || !it->is_regular_file(e2)) continue;
+    if (it->hard_link_count(e2) > 1) continue;  // its numbered twin still holds these bytes
+    total += int64_t(it->file_size(e2));
+  }
+  return total;
+}
 
 std::string Host::free_space_refused(int64_t bytes, const std::string& what) const {
   auto cfg = config_.get();
@@ -97,7 +129,14 @@ bj::object Host::limits_report(bool name_tenants) {
   auto cfg = config_.get();
   const auto& d = cfg->disk;
   bj::object out;
-  bj::array near;
+  // What nears or passes a budget. Operators read `near`; /goober/ready is public, so its words
+  // are ratios only (`near_public`): no bytes, no counts, no tenant or box.
+  bj::array near, near_public;
+  auto warn = [&](const std::string& text, const std::string& public_text) {
+    near.push_back(bj::value(text));
+    near_public.push_back(bj::value(public_text));
+  };
+  auto pct = [](int64_t used, int64_t limit) { return std::to_string(limit > 0 ? used * 100 / limit : 0) + "%"; };
   auto add = [&](const std::string& name, int64_t used, int64_t limit, const char* key, bj::object more = {}) {
     more["used_bytes"] = used;
     more["limit_bytes"] = limit;
@@ -105,7 +144,8 @@ bj::object Host::limits_report(bool name_tenants) {
     more["key"] = std::string("limits.") + key;
     if (limit > 0 && used * 10 >= limit * 8) {
       more["warn"] = true;
-      near.push_back(bj::value(name + " at " + std::to_string(used * 100 / limit) + "% of limits." + key));
+      std::string text = name + " at " + pct(used, limit) + " of limits." + key;
+      warn(text, text);
     }
     out[name] = std::move(more);
   };
@@ -113,14 +153,8 @@ bj::object Host::limits_report(bool name_tenants) {
                    bytes_under(cfg->storage / "tmp" / "jobs"),
       d.try_bytes, "try-bytes", bj::object{{"note", "copies of the tries running now; each try alone is held to the limit"}});
   add("exports", bytes_under(cfg->storage / "exports"), d.exports_bytes, "exports-bytes");
-  int64_t traffic = 0;
-  if (traffic_) {
-    try {
-      traffic = traffic_->size_bytes();
-    } catch (const std::exception&) {
-    }
-  }
-  add("traffic", traffic, d.traffic_bytes, "traffic-bytes",
+  // The size the traffic loop's last catch_up measured: never waits on the store.
+  add("traffic", traffic_ ? traffic_->size_bytes() : 0, d.traffic_bytes, "traffic-bytes",
       bj::object{{"dropped_hours", traffic_ ? traffic_->budget_drops() : 0}});
   // Snapshots are a person's to delete: the fullest tenant is reported, and every tenant near.
   {
@@ -143,8 +177,9 @@ bj::object Host::limits_report(bool name_tenants) {
       }
       std::string tenant = it->path().filename().string();
       if (files * 10 >= d.snapshot_files * 8) {
-        near.push_back(bj::value((name_tenants ? "tenant " + tenant + "'s" : std::string("a tenant's")) + " snapshots: " + std::to_string(files) + " of limits.snapshot-files (" +
-                                 std::to_string(d.snapshot_files) + ")"));
+        warn("tenant " + tenant + "'s snapshots: " + std::to_string(files) + " of limits.snapshot-files (" +
+                 std::to_string(d.snapshot_files) + ")",
+             "a tenant's snapshots at " + pct(files, d.snapshot_files) + " of limits.snapshot-files");
       }
       if (bytes >= worst) {
         worst = bytes;
@@ -153,32 +188,37 @@ bj::object Host::limits_report(bool name_tenants) {
       }
     }
     add("snapshots", worst, d.snapshot_bytes, "snapshot-bytes",
-        bj::object{{"tenant", name_tenants ? worst_tenant : std::string()}, {"files", worst_files}, {"files_limit", d.snapshot_files},
+        bj::object{{"tenant", worst_tenant}, {"files", worst_files}, {"files_limit", d.snapshot_files},
                    {"note", "per tenant: the fullest; past the limit db_snapshot refuses and a person deletes old ones"}});
   }
   {
-    // How fast they grow (032 § 10): the projection in 7 days, and a log far past its usual day.
+    // How fast they grow (032 § 10): the projection in 7 days, and a log far past its usual day,
+    // as the traffic loop last computed them (readiness never computes them).
     bj::object more{{"note", "rotated files leave after 7 days; the budget is reported, not yet enforced"}};
-    try {
-      auto v = log_velocity_report("7d", "", true);
-      if (const auto* disk = v.if_contains("disk"); disk && disk->is_object()) {
-        for (const char* k : {"per_day_bytes", "projected_bytes", "archive_queued_bytes"}) {
-          if (const auto* x = disk->as_object().if_contains(k)) more[k] = *x;
-        }
+    auto v = log_velocity_report("7d", "", true);
+    if (const auto* disk = v.if_contains("disk"); disk && disk->is_object()) {
+      for (const char* k : {"per_day_bytes", "projected_bytes", "archive_queued_bytes", "projected_share"}) {
+        if (const auto* x = disk->as_object().if_contains(k)) more[k] = *x;
       }
-      for (const auto& w : v.at("warnings").as_array()) {
+    }
+    if (const auto* ws = v.if_contains("warnings"); ws && ws->is_array()) {
+      for (const auto& w : ws->as_array()) {
         const auto& o = w.as_object();
         std::string log(o.at("log").as_string());
-        std::string text(o.at("text").as_string());
-        // /goober/ready is public: a box's log is named only for operators.
-        if (!name_tenants && log.starts_with("boxes/")) {
-          text = "a box's log grew " + json::dump(o.at("growth")) + " times its usual day (log_velocity names it)";
+        std::string pub;
+        if (o.at("kind") == "grew") {
+          // A box's log is named only for operators.
+          pub = (log.starts_with("boxes/") ? std::string("a box's log") : log) + " grew " + json::dump(o.at("growth")) +
+                " times its usual day (log_velocity says more)";
+        } else {
+          double share = more.contains("projected_share") ? more.at("projected_share").to_number<double>() : 0;
+          pub = "at today's rate the logs would reach " + std::to_string(int64_t(share * 100)) +
+                "% of limits.logs-bytes within 7 days (log_velocity says more)";
         }
-        near.push_back(bj::value(text));
+        warn(std::string(o.at("text").as_string()), pub);
       }
-    } catch (const std::exception&) {
     }
-    add("logs", bytes_under(cfg->storage / "logs"), d.logs_bytes, "logs-bytes", std::move(more));
+    add("logs", bytes_on_disk(cfg->storage / "logs"), d.logs_bytes, "logs-bytes", std::move(more));
   }
   // What backups put in the bucket today (019 § 9): past the budget, log archives, the source
   // mirror, and increments wait for the next day.
@@ -196,20 +236,33 @@ bj::object Host::limits_report(bool name_tenants) {
   }
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
+  // /goober/ready is public: each budget as its share and whether it warns, and the warnings as
+  // ratios. Local copies (no budget) and the disk (its own check) are for operators.
+  if (!name_tenants) {
+    bj::object pub;
+    for (const auto& kv : out) {
+      const auto& row = kv.value().as_object();
+      bj::object r{{"share", row.at("share")}};
+      if (row.contains("warn")) r["warn"] = true;
+      pub[kv.key()] = std::move(r);
+    }
+    if (!near_public.empty()) pub["near"] = std::move(near_public);
+    return pub;
+  }
   // The nightly copies setup's timer makes beside storage (046 A12): told, not budgeted. The
   // host doesn't own them; `goober-host backup` keeps the newest 3 (S3 on) or 14 (off).
   {
     fs::path dir = local_copies_dir(cfg->storage);
     auto copies = local_copies(dir);
     int keep = local_copies_to_keep(cfg->backup.enabled());
-    bj::object row{{"used_bytes", copies.bytes},
-                   {"copies", copies.copies},
-                   {"keep", keep},
-                   {"note", "nightly copies of storage beside it (backups/YYYY-MM-DD/); goober-host backup keeps the newest " +
-                                std::to_string(keep) + (cfg->backup.enabled() ? " (S3 backups on)" : " (S3 backups off)") +
-                                "; no budget: the host doesn't own them, but they share the disk the disk check reads"}};
-    if (name_tenants) row["dir"] = dir.string();
-    out["local-copies"] = std::move(row);
+    out["local-copies"] = bj::object{
+        {"used_bytes", copies.bytes},
+        {"copies", copies.copies},
+        {"keep", keep},
+        {"dir", dir.string()},
+        {"note", "nightly copies of storage beside it (backups/YYYY-MM-DD/); goober-host backup keeps the newest " +
+                     std::to_string(keep) + (cfg->backup.enabled() ? " (S3 backups on)" : " (S3 backups off)") +
+                     "; no budget: the host doesn't own them, but they share the disk the disk check reads"}};
   }
   std::error_code ec;
   auto space = fs::space(cfg->storage, ec);

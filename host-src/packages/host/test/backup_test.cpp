@@ -102,7 +102,10 @@ TEST(Backup, LocalCopiesKeepTheNewestDatedOnes) {
       char name[16];
       std::snprintf(name, sizeof name, "2026-10-%02d", day);
       fs::create_directories(root / "backups" / name);
+      base::write_file_durable(root / "backups" / name / "BACKUP.json", R"({"bytes": 0})");  // a copy a backup made
     }
+    // Dated but not a backup's (no BACKUP.json): someone else's, never removed (security L3).
+    fs::create_directories(root / "backups/2026-08-01/photos");
     // None of these is a dated copy: they stay, whatever their age.
     base::write_file_durable(root / "backups/2026-09-01", "a file");
     fs::create_directories(root / "backups/notes");
@@ -127,8 +130,8 @@ TEST(Backup, LocalCopiesKeepTheNewestDatedOnes) {
   auto removed = host::prune_local_copies(root / "backups/2026-10-21", 3, &err);
   EXPECT_EQ(removed.size(), 18u);
   EXPECT_EQ(removed.front(), "2026-10-01");
-  EXPECT_EQ(dated(), (std::vector<std::string>{"2026-10-19", "2026-10-20", "2026-10-21"}));
-  for (const char* kept : {"2026-09-01", "notes", "2026-13-01", "2026-09-02"}) {
+  EXPECT_EQ(dated(), (std::vector<std::string>{"2026-08-01", "2026-10-19", "2026-10-20", "2026-10-21"}));
+  for (const char* kept : {"2026-09-01", "notes", "2026-13-01", "2026-09-02", "2026-08-01/photos"}) {
     EXPECT_TRUE(fs::exists(fs::symlink_status(root / "backups" / kept))) << kept;
   }
   EXPECT_TRUE(fs::exists(root / "elsewhere/2026-09-02"));  // a link's target is never followed
@@ -138,25 +141,34 @@ TEST(Backup, LocalCopiesKeepTheNewestDatedOnes) {
   ASSERT_TRUE(host::backup_storage(root / "storage", root / "backups/2026-10-21", &report, &err)) << err;
   host::prune_local_copies(root / "backups/2026-10-21", 14, &err);
   auto fourteen = dated();
-  ASSERT_EQ(fourteen.size(), 14u);
-  EXPECT_EQ(fourteen.front(), "2026-10-08");
+  ASSERT_EQ(fourteen.size(), 15u);
+  EXPECT_EQ(fourteen.at(0), "2026-08-01");
+  EXPECT_EQ(fourteen.at(1), "2026-10-08");
+
+  // A trailing slash names the same directory (code review C8).
+  setup();
+  ASSERT_TRUE(host::backup_storage(root / "storage", root / "backups/2026-10-21", &report, &err)) << err;
+  EXPECT_EQ(host::dated_copy_dir((root / "backups/2026-10-21").string() + "/"), (root / "backups/2026-10-21").lexically_normal());
+  EXPECT_TRUE(host::dated_copy_dir(root / "backups/manual/").empty());
+  EXPECT_EQ(host::prune_local_copies((root / "backups/2026-10-21").string() + "/", 3, &err).size(), 18u);
+  EXPECT_EQ(dated(), (std::vector<std::string>{"2026-08-01", "2026-10-19", "2026-10-20", "2026-10-21"}));
 
   // This night's copy stays even when its name is older than the rest.
   setup();
   ASSERT_TRUE(host::backup_storage(root / "storage", root / "backups/2026-01-01", &report, &err)) << err;
   host::prune_local_copies(root / "backups/2026-01-01", 3, &err);
-  EXPECT_EQ(dated(), (std::vector<std::string>{"2026-01-01", "2026-10-19", "2026-10-20"}));
+  EXPECT_EQ(dated(), (std::vector<std::string>{"2026-01-01", "2026-08-01", "2026-10-19", "2026-10-20"}));
 
   // A directory not named for a date prunes nothing.
   setup();
   ASSERT_TRUE(host::backup_storage(root / "storage", root / "backups/manual", &report, &err)) << err;
   EXPECT_TRUE(host::prune_local_copies(root / "backups/manual", 3, &err).empty());
-  EXPECT_EQ(dated().size(), 20u);
+  EXPECT_EQ(dated().size(), 21u);
 
   // Counted: a whole copy by its BACKUP.json, one a failed run left by measuring it.
-  base::write_file_durable(root / "backups/2026-10-01/partial.db", std::string(1000, 'x'));
+  base::write_file_durable(root / "backups/2026-08-01/partial.db", std::string(1000, 'x'));
   auto copies = host::local_copies(root / "backups");
-  EXPECT_EQ(copies.copies, 20);
+  EXPECT_EQ(copies.copies, 21);
   EXPECT_EQ(copies.bytes, 1000);
   EXPECT_EQ(host::local_copies_dir(root / "storage"), fs::absolute(root / "backups").lexically_normal());
 }
@@ -184,8 +196,8 @@ TEST(Backup, LimitsReportTheLocalCopies) {
     EXPECT_EQ(row.at("used_bytes").as_int64(), report.bytes);
     EXPECT_EQ(row.at("keep").as_int64(), 14);
     EXPECT_TRUE(row.contains("dir"));
-    // /goober/ready is public: the path isn't named there.
-    EXPECT_FALSE(h.limits_report(false).at("local-copies").as_object().contains("dir"));
+    // /goober/ready is public: the copies, their count, bytes, and path, aren't there at all.
+    EXPECT_FALSE(h.limits_report(false).contains("local-copies"));
   }
   host::Host s3(config_for(R"(, "backup": {"s3": {"bucket": "goober-backups", "region": "us-east-1"}})"));
   EXPECT_EQ(s3.limits_report(true).at("local-copies").at("keep").as_int64(), 3);

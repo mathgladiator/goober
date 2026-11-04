@@ -155,8 +155,10 @@ class BoxRegistry {
   // box's version, the newest retention.keep versions that were live before, and what the
   // host's protector names (versions a kept change set may roll back to).
   void set_retention(const Retention& r);
-  // Versions of a box kept for the host's reasons, each with why.
-  using Protector = std::function<std::map<std::string, std::string>(const std::string& box)>;
+  // Versions kept for the host's reasons, each with why, by box: every box's at once, so a
+  // pruning reads the host's reasons (every change set) once, not once per box.
+  using Protected = std::map<std::string, std::map<std::string, std::string>>;  // box -> version -> why
+  using Protector = std::function<Protected()>;
   void set_protector(Protector p);
   // Who is storing a version now (the operator), kept in its life record as stored_by.
   void set_actor(std::function<std::string()> actor);
@@ -180,8 +182,9 @@ class BoxRegistry {
   bool live_moves(wal::Bundle& bundle, const std::string& box, const std::string& version, boost::json::object* next,
                   int64_t now_ms) const;
   // Why each version is kept from archiving and deleting.
-  std::map<std::string, std::string> kept(const std::string& box,
-                                          const std::map<std::string, boost::json::object>& lives) const;
+  std::map<std::string, std::string> kept(const std::string& box, const std::map<std::string, boost::json::object>& lives,
+                                          const Protected& protected_) const;
+  Protected protected_versions() const;
   Retention retention() const;
   bool archived(const std::string& box, const std::string& version, std::string* error) const;
 

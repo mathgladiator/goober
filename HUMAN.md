@@ -19,7 +19,7 @@ the host runs but something is wrong:
 - `disk` says how much room is left where storage lives. `"low": true` (under 10% or 2 GiB)
   is a warning; under 256 MiB fails the check, since every write (data, logs, backups) is
   about to. `sudo sh -c 'du -sh /srv/goober/host/storage/* /srv/goober/host/backups'`
-  shows what holds it (inside `sh -c`, since only `goober` can list storage to expand the `*`); `backups/` holds a local copy of storage for each night, the newest 3 kept with S3 backups on and 14 with them off (`goober-host backup` removes older ones); the `limits` check's `local-copies` says how many there are and how much they hold.
+  shows what holds it (inside `sh -c`, since only `goober` can list storage to expand the `*`); `backups/` holds a local copy of storage for each night, the newest 3 kept with S3 backups on and 14 with them off (`goober-host backup` removes older ones: only dated folders it made, with a `BACKUP.json`); `host_health`'s `limits` check (ask Grok, or the panel) has `local-copies`: how many there are and how much they hold.
 - `boxes` lists any box with an active version that isn't served (`not_loaded`).
 - `stores` lists any shared file that wouldn't open at start (`consent`, `web`, `source`). A
   broken web or source store was moved aside (`*.unreadable-<time>`, kept) and a fresh one
@@ -368,7 +368,10 @@ See how full each one is:
 curl -s https://example.com/goober/ready | jq '.checks.limits'
 ```
 
-`near` lists anything at 80% or more. Usually the host handles it itself: it drops old traffic
+Each one is a `share` of its limit (0.85 is 85%), and `near` lists anything at 80% or more. The
+page is public, so it shows shares only; the bytes and counts behind them are in `host_health`
+(ask Grok, or the panel's Overview). The shares are measured at most every 30 seconds. Usually
+the host handles it itself: it drops old traffic
 numbers, and it refuses a try or an export that wouldn't fit, saying which limit. Snapshots are
 yours: delete old ones in the panel's **Database** view. To raise a limit, set it in host.json
 and reload:
@@ -381,8 +384,9 @@ and reload:
 sudo systemctl reload goober-host
 ```
 
-**A log is growing fast.** `near` says "access wrote 40 MiB in the last 24 hours, 6 times its
-usual 7 MiB a day", or that the logs would pass `limits.logs-bytes` within 7 days. Open the
+**A log is growing fast.** `near` says "access grew 6 times its usual day", or that at today's
+rate the logs would reach some share of `limits.logs-bytes` within 7 days (`host_health` says it
+in MiB: "access wrote 40 MiB in the last 24 hours, 6 times its usual 7 MiB a day"). Open the
 panel's **Logs and uploads** view (or have Grok run `log_velocity`). Its "Who writes the most"
 table names the tenant, box, and route behind it. Then:
 - **A box logging too much:** Grok ships a version that logs less.

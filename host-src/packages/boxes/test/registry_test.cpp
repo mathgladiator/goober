@@ -143,7 +143,13 @@ TEST_F(RegistryTest, OldVersionsAreArchivedThenDeleted) {
   ASSERT_TRUE(dark) << err;
   // v[2] is named by a kept change set.
   std::string protect = v[2];
-  reg->set_protector([protect](const std::string&) { return std::map<std::string, std::string>{{protect, "change set 7"}}; });
+  // The host's reasons are read once per pruning for every box (P4), not once per box.
+  ASSERT_TRUE(reg->upload(manifest_for("other", "*", "/other", "say_other"), module_for({"say_other"}), &err)) << err;
+  int protector_calls = 0;
+  reg->set_protector([protect, &protector_calls] {
+    ++protector_calls;
+    return boxes::BoxRegistry::Protected{{"hello", {{protect, "change set 7"}}}, {"other", {}}};
+  });
   auto state = [&](const std::string& version) {
     for (const auto& i : reg->versions("hello")) {
       if (i.version == version) return i.state + (i.kept.empty() ? "" : "+kept");
@@ -157,8 +163,10 @@ TEST_F(RegistryTest, OldVersionsAreArchivedThenDeleted) {
   EXPECT_EQ(state(v[0]), "stored");
 
   int64_t now = base::now_unix_ms();
+  protector_calls = 0;
   auto none = reg->prune(now);
   EXPECT_TRUE(none.archived.empty() && none.deleted.empty());
+  EXPECT_EQ(protector_calls, 1);
 
   auto month = reg->prune(now + 31 * kDay);
   EXPECT_EQ(month.archived.size(), 3u);  // v[0], v[1], and the dark one

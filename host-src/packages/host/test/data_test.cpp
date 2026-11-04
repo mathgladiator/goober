@@ -847,12 +847,46 @@ TEST_F(DataRoutesTest, DiskLimitsRefuseWorkPastThemAndReportUse) {
   for (const char* k : {"tries", "exports", "traffic", "snapshots", "logs", "tmp"}) {
     EXPECT_TRUE(limits.contains(k)) << k;
   }
-  EXPECT_EQ(limits.at("exports").at("key"), "limits.exports-bytes");
-  EXPECT_EQ(limits.at("snapshots").at("files"), 3);
-  EXPECT_EQ(limits.at("snapshots").at("tenant"), "");
-  EXPECT_NE(json::dump(limits.at("near")).find("a tenant's snapshots"), std::string::npos) << json::dump(limits);
+  EXPECT_NE(json::dump(limits.at("near")).find("a tenant's snapshots at 100% of limits.snapshot-files"), std::string::npos)
+      << json::dump(limits);
+  // It is public: each budget is its share and whether it warns, and the warnings are ratios. No
+  // bytes, no file or copy counts, no tenant (security M3).
+  for (const auto& kv : limits) {
+    if (kv.key() == "ok" || kv.key() == "near") continue;
+    for (const auto& field : kv.value().as_object()) {
+      EXPECT_TRUE(field.key() == "share" || field.key() == "warn") << kv.key() << "." << field.key();
+    }
+  }
+  EXPECT_FALSE(limits.contains("local-copies"));
+  EXPECT_FALSE(limits.contains("disk"));
+  EXPECT_EQ(json::dump(limits).find("MiB"), std::string::npos) << json::dump(limits);
+  EXPECT_EQ(json::dump(limits).find("of limits.snapshot-files (3)"), std::string::npos) << json::dump(limits);
+  EXPECT_EQ(json::dump(limits).find("playground"), std::string::npos);
+  auto prom = fetch(port, bhttp::verb::get, "/goober/ready?format=prometheus");
+  EXPECT_EQ(prom.body.find("bytes\""), std::string::npos) << prom.body;
+  EXPECT_EQ(prom.body.find("playground"), std::string::npos) << prom.body;
+  // host_health is for operators: the bytes, counts, and the tenant.
   auto health = tool("host_health", {});
-  EXPECT_EQ(health.at("ready").at("checks").at("limits").at("snapshots").at("tenant"), "playground");
+  const auto& full = health.at("ready").at("checks").at("limits").as_object();
+  EXPECT_EQ(full.at("snapshots").at("tenant"), "playground");
+  EXPECT_EQ(full.at("snapshots").at("files"), 3);
+  EXPECT_EQ(full.at("exports").at("key"), "limits.exports-bytes");
+  EXPECT_TRUE(full.at("exports").as_object().contains("used_bytes"));
+  EXPECT_NE(json::dump(full.at("near")).find("tenant playground's snapshots: 3 of limits.snapshot-files (3)"),
+            std::string::npos);
+
+  // The public report is measured at most every 30 s (P2): an export made now shows only once
+  // the cache is passed, as tests do with a cache of 0.
+  double before = limits.at("exports").at("share").as_double();
+  base::write_file_durable(root / "storage/exports/filler.bin", std::string(512 << 10, 'x'));
+  auto share_now = [&] {
+    auto r = json::parse(fetch(port, bhttp::verb::get, "/goober/ready").body, &err);
+    return r->at("checks").at("limits").at("exports").at("share").as_double();
+  };
+  EXPECT_EQ(share_now(), before);
+  host->set_limits_cache_ms(0);
+  EXPECT_GT(share_now(), before);
+  fs::remove(root / "storage/exports/filler.bin");
 
   // tmp: what's older than limits.tmp-hours goes; what's new and jobs' copies stay.
   fs::create_directories(root / "storage/tmp/tries/stale");

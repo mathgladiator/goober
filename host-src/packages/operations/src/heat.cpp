@@ -459,6 +459,9 @@ struct Study {
   std::atomic<int64_t> file_bytes{0};
   int64_t promoted_minute = -1;
   bool ended = false;
+  // Held across each write of the study's file, with `ended` read again under it: a running save
+  // built before the end never lands after the final report.
+  std::mutex write_mu;
   bj::object final_report;  // between the end and its file being written
   Counts all;               // the whole domain
   std::unordered_map<uint64_t, std::unique_ptr<Endpoint>> endpoints;
@@ -684,8 +687,9 @@ struct Study {
                                 {"promoted", promoted}};
     out["memory_bytes"] = memory();
     out["notes"] = bj::array{
-        "heat is the time spent serving (µs); a client is the host's keyed hash of its address (an IPv6 /64 is one), "
-        "the log's client_h; no address and no user id is kept",
+        "heat is the time spent serving (µs); a client is the host's keyed hash of its rate-limit key: an IPv4 "
+        "address (the audit log's client_h for the same address), or an IPv6 /64, whose hash no log line carries; "
+        "no address and no user id is kept",
         "a client's busiest minute is its most requests on the endpoint in one minute of the study; concurrency is "
         "counted from finished requests, exact up to " + std::to_string(caps.endpoint_ring) + " at once",
         "suggestions are in observe mode: send one with control_set, read control_report, and enforce once it holds"};
@@ -750,9 +754,17 @@ Study* HeatStudies::find(std::string_view domain) const {
 
 bool HeatStudies::watching(std::string_view domain) const { return find(domain) != nullptr; }
 
-void HeatStudies::record(std::string_view domain, const HeatSample& s) {
+void HeatStudies::record(std::string_view domain, const HeatSample& sample) {
   Study* st = find(domain);
   if (!st) return;
+  // A visitor may choose the name (a path, a tool): at most kEndpointNameMax bytes of it, cut
+  // on a character's boundary, so a long one is neither kept nor told apart from its prefix.
+  HeatSample s = sample;
+  if (s.what.size() > kEndpointNameMax) {
+    size_t n = kEndpointNameMax;
+    while (n > 0 && (static_cast<unsigned char>(s.what[n]) & 0xC0) == 0x80) --n;
+    s.what = s.what.substr(0, n);
+  }
   std::lock_guard lock(st->mu);
   st->add(s);
 }
@@ -807,9 +819,19 @@ std::optional<bj::object> HeatStudies::start(const std::string& domain, const st
     rep = st->report(now_ms, "running", "", 0, caps_.detailed);
     row = st->summary("running", "", 0);
   }
-  int64_t bytes = 0;
-  write(st->id, rep, &bytes);
-  st->file_bytes = bytes;
+  {
+    std::lock_guard w(st->write_mu);
+    bool ended = false;
+    {
+      std::lock_guard lock(st->mu);
+      ended = st->ended;  // stopped already: its final report is written, or will be after this
+    }
+    if (!ended) {
+      int64_t bytes = 0;
+      write(st->id, rep, &bytes);
+      st->file_bytes = bytes;
+    }
+  }
   return row;
 }
 
@@ -831,7 +853,10 @@ std::optional<bj::object> HeatStudies::finish(const std::shared_ptr<Study>& st, 
     st->final_report = rep;
   }
   int64_t bytes = 0;
-  write(st->id, rep, &bytes);
+  {
+    std::lock_guard w(st->write_mu);
+    write(st->id, rep, &bytes);
+  }
   {
     std::lock_guard lock(st->mu);
     st->final_report = {};
@@ -958,9 +983,18 @@ std::vector<bj::object> HeatStudies::tick(int64_t now_ms, int64_t budget_bytes) 
     if (due) {
       if (auto row = finish(st, "done", "time", st->ends_ms)) ended.push_back(std::move(*row));
     } else if (!rep.empty()) {
-      int64_t bytes = 0;
-      write(st->id, rep, &bytes);
-      st->file_bytes = bytes;
+      if (before_save_) before_save_(st->id);
+      std::lock_guard w(st->write_mu);
+      bool ended = false;
+      {
+        std::lock_guard lock(st->mu);
+        ended = st->ended;  // a stop came between: its final report stands
+      }
+      if (!ended) {
+        int64_t bytes = 0;
+        write(st->id, rep, &bytes);
+        st->file_bytes = bytes;
+      }
     }
   }
   if (!ended.empty() && budget_bytes > 0) prune(now_ms, budget_bytes);

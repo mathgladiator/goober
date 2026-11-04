@@ -441,6 +441,10 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
       " refused_rate INTEGER NOT NULL, refused_full INTEGER NOT NULL, refused_wait INTEGER NOT NULL, gone INTEGER NOT NULL,"
       " peak_waiting INTEGER NOT NULL, peak_running INTEGER NOT NULL, waited TEXT NOT NULL,"
       " PRIMARY KEY (queue, domain, cls, t))");
+  // Housekeeping deletes by t and the budget asks each table's min(t): their primary keys
+  // start elsewhere, so t has its own index (made on open, for stores made before it).
+  db_->exec("CREATE INDEX IF NOT EXISTS control_5m_t ON control_5m (t)");
+  db_->exec("CREATE INDEX IF NOT EXISTS mcp_queue_5m_t ON mcp_queue_5m (t)");
   if (old) {
     {
       sqlite::Stmt q(*db_, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'gauge_minutes'");
@@ -461,6 +465,7 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
   }
   // The write-ahead log is cut back to this after a checkpoint, not left at its high mark.
   db_->exec("PRAGMA journal_size_limit = 1048576");
+  size_bytes_ = size_bytes_locked();
 }
 
 Traffic::~Traffic() = default;
@@ -478,6 +483,7 @@ size_t Traffic::catch_up(int64_t now_ms) {
     trim_service_failures(now_ms);
   }
   service_failures_added_ = false;
+  size_bytes_ = size_bytes_locked();
   return lines;
 }
 
@@ -697,11 +703,6 @@ int64_t Traffic::size_bytes_locked() {
     return q.step() ? q.int64(0) : int64_t(0);
   };
   return (pragma("page_count") - pragma("freelist_count")) * pragma("page_size");
-}
-
-int64_t Traffic::size_bytes() {
-  std::lock_guard lock(mu_);
-  return size_bytes_locked();
 }
 
 void Traffic::set_budget(int64_t bytes) {

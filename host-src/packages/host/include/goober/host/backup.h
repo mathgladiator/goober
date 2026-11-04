@@ -69,10 +69,13 @@ bool is_dated_copy_name(std::string_view name);
 int local_copies_to_keep(bool s3_backups);
 // The directory beside storage that setup's timer backs up into: <storage's parent>/backups.
 std::filesystem::path local_copies_dir(const std::filesystem::path& storage);
-// After a backup into `dest`: when `dest` is named YYYY-MM-DD, the dated directories beside it
-// are removed but for the newest by name, `keep` in all with `dest`, which always stays.
-// Nothing else beside it (files, links, other names) is touched. Answers the names removed,
-// oldest first.
+// `dest` without a trailing separator when it is named YYYY-MM-DD, else empty.
+std::filesystem::path dated_copy_dir(const std::filesystem::path& dest);
+// After a backup into `dest`: when `dest` is named YYYY-MM-DD (a trailing slash or not), the
+// dated copies beside it (directories named YYYY-MM-DD holding a BACKUP.json, so ones a backup
+// made) are removed but for the newest by name, `keep` in all with `dest`, which always stays.
+// Nothing else beside it (files, links, other names, dated directories without BACKUP.json) is
+// touched. Answers the names removed, oldest first.
 std::vector<std::string> prune_local_copies(const std::filesystem::path& dest, int keep, std::string* error);
 // The dated copies in `dir`: how many, and their bytes (BACKUP.json's count for a whole copy,
 // measured for one a failed run left).

@@ -64,8 +64,16 @@ void Host::heat_observe(const Request& req, const bj::object& line, const std::s
     s.method = {};
   } else if (p.starts_with("/identity/") || p == "/oauth" || p.starts_with("/oauth/") || p.starts_with("/.well-known/")) {
     s.api = operations::HeatApi::kIdentity;
-    // Invite links are capabilities: one endpoint, never a token.
-    s.what = p.starts_with("/identity/invite/") ? std::string_view("/identity/invite/{rest*}") : p;
+    if (p.starts_with("/identity/invite/")) {
+      s.what = "/identity/invite/{rest*}";  // invite links are capabilities: one endpoint, never a token
+    } else if (s.status >= 400 && s.status < 500) {
+      // A visitor chooses these paths: what the host didn't find or refused goes together, so a
+      // scan neither names endpoints in the report nor pushes the real ones out.
+      s.what = s.status == 404 ? "(not found)" : "(refused)";
+      s.method = {};
+    } else {
+      s.what = p;  // HeatStudies::record keeps at most kEndpointNameMax bytes of it
+    }
   } else if (p == "/attachment" || p.starts_with("/attachment/")) {
     s.what = "/attachment/{file}";
   } else {

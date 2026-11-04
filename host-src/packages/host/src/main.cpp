@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
               << report.files << " files (" << report.bytes / 1024 << " KiB)\n";
     // A dated copy (setup's nightly, backups/YYYY-MM-DD) keeps its dated siblings to the newest
     // 3 when S3 backups are on, 14 when off (046 A12).
-    if (positional[0] == "backup" && goober::host::is_dated_copy_name(std::filesystem::path(positional[1]).lexically_normal().filename().string())) {
+    if (positional[0] == "backup" && !goober::host::dated_copy_dir(positional[1]).empty()) {
       int keep = goober::host::local_copies_to_keep(config->backup.enabled());
       std::string perr;
       auto removed = goober::host::prune_local_copies(positional[1], keep, &perr);

@@ -397,6 +397,7 @@ void Host::run_traffic() {
       control_rows_to_traffic(base::now_unix_ms());
       traffic_->catch_up(base::now_unix_ms());
       if (failures_) failures_->flush(base::now_unix_ms());
+      refresh_log_velocity(base::now_unix_ms());  // what readiness reads, so it never computes it
       loop_beat("traffic");
     } catch (const std::exception& e) {
       std::cerr << "goober-host: traffic rollups: " << e.what() << "\n";

@@ -110,8 +110,9 @@ class Traffic {
   Traffic& operator=(const Traffic&) = delete;
 
   // The bytes the rollups hold (free pages left out), and the budget past which the oldest
-  // hours go (0: none). Safe from any thread.
-  int64_t size_bytes();
+  // hours go (0: none). Safe from any thread. size_bytes is what the last catch_up (or the open)
+  // measured, kept in an atomic so /goober/ready never waits behind a catch_up holding the store.
+  int64_t size_bytes() const { return size_bytes_.load(); }
   void set_budget(int64_t bytes);
   // Hours dropped to keep within the budget since the host started.
   int64_t budget_drops() const { return budget_drops_; }
@@ -201,6 +202,7 @@ class Traffic {
   size_t tail(const std::string& name, int64_t now_ms);
   void drop_old(int64_t now_ms);
   int64_t size_bytes_locked();
+  std::atomic<int64_t> size_bytes_{0};
   int64_t budget_bytes_ = 0;
   std::atomic<int64_t> budget_drops_{0};
 

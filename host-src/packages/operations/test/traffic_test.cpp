@@ -3,6 +3,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <thread>
 
 #include "goober/base/files.h"
 #include "goober/base/time.h"
@@ -543,4 +544,56 @@ TEST_F(TrafficTest, ControlRowsAddUpAndAgeOut) {
   EXPECT_EQ(t->control_rows("acme.example", "", kNoon - 1, kNoon + 600000).size(), 1u);
   t->catch_up(kNoon + 8 * 24 * 3600 * 1000LL);
   EXPECT_TRUE(t->control_rows("acme.example", "", 0, kNoon + 600000).empty());
+}
+
+// Housekeeping by time: control_5m's and mcp_queue_5m's keys start with the domain or queue, so
+// t has its own index, added to stores made before it.
+TEST_F(TrafficTest, ControlAndMcpQueueRowsAreIndexedByTime) {
+  {
+    sqlite::Db db(root / "traffic.db");
+    db.exec("CREATE TABLE control_5m (t INTEGER NOT NULL, tenant TEXT NOT NULL, domain TEXT NOT NULL,"
+            " control TEXT NOT NULL, matched INTEGER NOT NULL, allowed INTEGER NOT NULL, rate INTEGER NOT NULL,"
+            " concurrent INTEGER NOT NULL, body INTEGER NOT NULL, closed INTEGER NOT NULL, would INTEGER NOT NULL,"
+            " n5 INTEGER NOT NULL, peak INTEGER NOT NULL, clients TEXT NOT NULL, would_clients TEXT NOT NULL,"
+            " top_client TEXT NOT NULL, top_n INTEGER NOT NULL, would_top TEXT NOT NULL, would_top_n INTEGER NOT NULL,"
+            " hist TEXT NOT NULL, PRIMARY KEY (domain, control, t))");
+  }
+  open().reset();
+  sqlite::Db db(root / "traffic.db");
+  for (const char* table : {"control_5m", "mcp_queue_5m"}) {
+    sqlite::Stmt q(db, std::string("EXPLAIN QUERY PLAN DELETE FROM ") + table + " WHERE t < 5");
+    std::string plan;
+    while (q.step()) plan += q.text(3) + "\n";
+    EXPECT_NE(plan.find(std::string(table) + "_t"), std::string::npos) << table << ": " << plan;
+  }
+}
+
+// /goober/ready reads the store's size: it is what the last catch_up measured, so reading it
+// never waits while a long catch_up holds the store.
+TEST_F(TrafficTest, TheSizeIsReadWithoutWaitingForACatchUp) {
+  {
+    std::ofstream out(root / "logs" / "access.log");
+    for (int i = 0; i < 150000; ++i) {
+      out << R"({"at":")" << at(kNoon + i) << R"(","domain":"acme.example","box":"acme","route":"r)" << (i % 50)
+          << R"(","status":200,"us":10})" << "\n";
+    }
+  }
+  auto t = open();
+  int64_t before = t->size_bytes();
+  EXPECT_GT(before, 0);
+  std::atomic<bool> done{false};
+  std::thread worker([&] {
+    t->catch_up(kNoon + 3600 * 1000);
+    done = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  auto start = std::chrono::steady_clock::now();
+  int64_t during = t->size_bytes();
+  auto waited = std::chrono::steady_clock::now() - start;
+  bool still_running = !done.load();
+  worker.join();
+  EXPECT_TRUE(still_running) << "the catch-up finished too soon for the test to mean anything";
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(), 10);
+  EXPECT_EQ(during, before);
+  EXPECT_GE(t->size_bytes(), before);  // measured again at the end of the catch_up
 }

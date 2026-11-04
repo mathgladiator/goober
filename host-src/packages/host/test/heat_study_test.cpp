@@ -280,6 +280,28 @@ TEST_F(HeatStudyHostTest, HookCost) {
   EXPECT_LT(ns, 200000);
 }
 
+// Visitors choose the paths under /identity/, /oauth/, and /.well-known/: what the host didn't
+// find or refused there is one row each, never the path, and any name is at most 200 bytes
+// (security L5).
+TEST_F(HeatStudyHostTest, VisitorPathsUnderIdentityAreFoldedAndCapped) {
+  ASSERT_FALSE(op("heat_study_start", {{"domain", "acme.example.com"}, {"why", "scan"}}).at("isError").as_bool());
+  for (const char* p : {"/identity/secret-probe-1", "/oauth/secret-probe-2", "/.well-known/secret-probe-3"}) {
+    auto r = fetch(port, "acme.example.com", bhttp::verb::get, p);
+    EXPECT_GE(r.status, 400) << p;
+    EXPECT_LT(r.status, 500) << p;
+  }
+  fetch(port, "acme.example.com", bhttp::verb::get, "/identity/" + std::string(300, 'a'));
+  auto rep = op("heat_study_get", {{"id", 1}});
+  ASSERT_FALSE(rep.at("isError").as_bool()) << rep.at("text");
+  std::string text = json::dump(rep.at("value"));
+  EXPECT_EQ(text.find("secret-probe"), std::string::npos) << text;
+  EXPECT_EQ(text.find(std::string(201, 'a')), std::string::npos);
+  EXPECT_TRUE(endpoint(rep.at("value"), "(not found)") || endpoint(rep.at("value"), "(refused)")) << text;
+  for (const auto& e : rep.at("value").at("endpoints").as_array()) {
+    EXPECT_LE(e.at("endpoint").as_string().size(), 200u + 8) << e.at("endpoint");  // and a method
+  }
+}
+
 TEST_F(HeatStudyHostTest, StartIsCheckedAndOnePerDomain) {
   EXPECT_TRUE(op("heat_study_start", {{"domain", "nope.example.com"}, {"why", "x"}}).at("isError").as_bool());
   EXPECT_TRUE(op("heat_study_start", {{"domain", "acme.example.com"}}).at("isError").as_bool());  // no why

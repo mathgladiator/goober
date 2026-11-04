@@ -107,6 +107,7 @@ class HeatStudies {
   static constexpr int64_t kKeepMs = int64_t(30) * 24 * 3600 * 1000;
   static constexpr int64_t kSaveEveryMs = 60 * 1000;
   static constexpr size_t kReportMaxBytes = 256 * 1024;
+  static constexpr size_t kEndpointNameMax = 200;  // bytes of a sample's `what` kept
   struct Caps {
     size_t endpoints = 500;         // tracked; the rest are folded into "other"
     size_t candidates = 5000;       // untracked endpoints counted, to promote the busy ones
@@ -114,7 +115,8 @@ class HeatStudies {
     size_t endpoint_ring = 64;      // concurrency is exact up to this many at once per endpoint
     size_t detailed = 100;          // endpoints with every number and a suggestion in the report
   };
-  // The client's keyed hash as the report shows it (the host's log hash, client_h, as 64 bits).
+  // The client's keyed hash as the report shows it: the host's log hash of the rate-limit key,
+  // which equals the audit log's client_h only for an IPv4 client (an IPv6 one is its /64).
   using ClientHash = std::function<uint64_t(std::string_view client)>;
 
   // `dir` holds one <id>.json per study. A study found "running" was cut short by a crash or a
@@ -154,6 +156,9 @@ class HeatStudies {
   int64_t bytes() const;  // every report on disk
   int running() const { return running_.load(std::memory_order_relaxed); }
   std::vector<std::string> recovered() const;  // notes from the constructor
+  // Tests only: called in tick between building a running study's save and writing it, where a
+  // stop on another thread may end the study.
+  void set_before_save_for_test(std::function<void(int64_t id)> f) { before_save_ = std::move(f); }
 
  private:
   struct Row {
@@ -179,6 +184,7 @@ class HeatStudies {
   std::map<int64_t, Row> done_;                     // finished, from their files
   int64_t next_id_ = 1;
   std::vector<std::string> recovered_;
+  std::function<void(int64_t)> before_save_;
 };
 
 }  // namespace goober::operations

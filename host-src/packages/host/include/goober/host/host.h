@@ -729,9 +729,12 @@ class Host {
   // Hourly: rotate quiet logs, and keep 7 days of rotated files on the machine (§ 2).
   void logs_housekeeping(int64_t now_ms);
   // Log volume (032 § 10): the traffic store's log_velocity, with the logs directory's size, the
-  // archive queue, the projection against limits.logs-bytes, and warnings. With `cached`, the
-  // whole-host answer (window 7d, every log) is computed at most once a minute, for readiness.
+  // archive queue, the projection against limits.logs-bytes, and warnings. The whole-host answer
+  // (window 7d, every log) is kept when computed; with `cached`, that kept answer is returned
+  // (empty before the first) and nothing is computed, so readiness never waits on the store.
   boost::json::object log_velocity_report(const std::string& window, const std::string& log, bool cached);
+  // From the traffic loop: the whole-host answer again when the kept one is a minute old.
+  void refresh_log_velocity(int64_t now_ms);
   std::mutex log_velocity_mu_;
   int64_t log_velocity_at_ms_ = 0;
   boost::json::object log_velocity_cache_;
@@ -934,8 +937,9 @@ class Host {
   // sets may roll back to, and version_restore.
   void setup_version_keeping();
   void register_version_keeping_tools();
-  // Each version of a box a kept change set names (it may roll back to it), with why.
-  std::map<std::string, std::string> changeset_versions(const std::string& box);
+  // Each version a kept change set names (it may roll back to it), with why, for every box: one
+  // read of the change sets per pruning or version_list.
+  boxes::BoxRegistry::Protected changeset_versions();
   std::optional<boost::json::object> review_upload(const boost::json::object& args, std::string* error);
   // Operators and databases (db_admin.cpp): snapshots, restoring to a new database, db_create,
   // db_unbound.
@@ -1107,8 +1111,11 @@ class Host {
  public:
   // Each budget's use: {name: {used_bytes, limit_bytes, share, key, warn?}} plus what nears or
   // passes its limit, for /goober/ready's limits check and host_health. Tenants are named only
-  // for operators: /goober/ready is public.
+  // for operators: /goober/ready is public. With name_tenants false (the public /goober/ready), each budget is only {share, warn?} and the
+  // warnings are ratios: no bytes, counts, tenants, or boxes.
   boost::json::object limits_report(bool name_tenants);
+  // How long the public /goober/ready reuses its limits report (30 s; tests set 0 for fresh).
+  void set_limits_cache_ms(int64_t ms) { limits_cache_ms_ = ms; }
   // Files in storage/tmp older than limits.tmp-hours go (jobs' copies aside, which their run
   // removes). Returns how many went.
   int sweep_tmp(int64_t now_ms);
@@ -1119,6 +1126,11 @@ class Host {
   std::string free_space_refused(int64_t bytes, const std::string& what) const;
 
  private:
+  std::mutex limits_cache_mu_;
+  int64_t limits_cache_at_ms_ = 0;
+  boost::json::object limits_cache_;
+  std::atomic<int64_t> limits_cache_ms_{30000};
+
   // Last, so it is destroyed first: no build runs while the rest of the host goes away.
   std::unique_ptr<class BuildJobs> jobs_;
 };

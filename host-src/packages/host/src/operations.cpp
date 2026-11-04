@@ -274,8 +274,24 @@ std::pair<int, bj::object> Host::readiness(bool probe_storage) {
   // Limits (045): what each thing the host grows on its disk holds against its budget. A
   // budget near or past is a warning (in "near"), never a failure: the host drops or refuses on
   // its own, and only a nearly full disk (the disk check) fails readiness.
+  // The public /goober/ready (probed) walks the disk for it at most every limits_cache_ms_ (30 s):
+  // a monitor polling it never makes the host walk exports, snapshots, and logs each time. The
+  // storage probe and the disk check above stay live; host_health always measures afresh.
   try {
-    auto report = limits_report(!probe_storage);  // probed: the public /goober/ready
+    bj::object report;
+    int64_t now = base::now_unix_ms();
+    if (probe_storage) {
+      std::lock_guard lock(limits_cache_mu_);
+      if (limits_cache_at_ms_ && now >= limits_cache_at_ms_ && now - limits_cache_at_ms_ < limits_cache_ms_.load()) {
+        report = limits_cache_;
+      } else {
+        report = limits_report(false);  // public: shares and ratios only
+        limits_cache_ = report;
+        limits_cache_at_ms_ = now;
+      }
+    } else {
+      report = limits_report(true);
+    }
     report["ok"] = true;
     checks["limits"] = std::move(report);
   } catch (const std::exception& e) {
