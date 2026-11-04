@@ -450,6 +450,19 @@ address, and the change log has it under `control`:
 sudo grep '"panel.control_' /srv/goober/host/storage/logs/audit.log | tail -n 5
 ```
 
+Agents, Grok included, get a strict rate and a fixed queue on MCP (`/mcp` and the operator
+endpoint), whatever controls say: they can front-load calls freely, and calls past two at once
+wait their turn instead of failing. "rate limit reached" means slow down. See how often it
+happens:
+
+```sh
+curl -s https://example.com/goober/ready | jq '.health.mcp'
+```
+
+`refused_ratio` near 0 is right; a high `waited_ratio` means agents are front-loading, which is
+fine. The Controls view shows each queue, and `mcp_queue_report` explains it
+(`design/machine/047.Controls.md` § 13).
+
 ## Where is a site's heat?
 
 A heat study counts one domain's requests by endpoint for a while, then keeps a report 30 days

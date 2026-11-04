@@ -245,3 +245,72 @@ TEST(Server, SlowBodiesAreBoundedPerClientAndByProgress) {
     EXPECT_EQ(res.body(), "500");
   }
 }
+
+// A request whose client closes the connection before its answer is marked gone (the MCP queue
+// drops such a call rather than run it, design/machine/047.Controls.md § 14); one whose client
+// waits, or sends a next request on the same connection, is not.
+TEST(Server, MarksARequestWhoseClientLeftBeforeItsAnswer) {
+  std::mutex mu;
+  std::vector<std::pair<std::shared_ptr<const std::atomic<bool>>, Responder>> pending;
+  Server server({"127.0.0.1", 0, 1, 1024}, [&](Request req, Responder respond) {
+    std::lock_guard lock(mu);
+    pending.emplace_back(req.peer_gone, std::move(respond));
+  });
+  server.start();
+  auto send = [&](tcp::socket& s, const std::string& path) {
+    std::string text = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    asio::write(s, asio::buffer(text));
+  };
+  auto wait_for = [&](size_t n) {
+    for (int i = 0; i < 400; ++i) {
+      {
+        std::lock_guard lock(mu);
+        if (pending.size() >= n) return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  };
+  asio::io_context io;
+  tcp::socket leaves(io), stays(io), pipelines(io);
+  tcp::endpoint ep(asio::ip::make_address("127.0.0.1"), server.port());
+  leaves.connect(ep);
+  send(leaves, "/a");
+  ASSERT_TRUE(wait_for(1));
+  stays.connect(ep);
+  send(stays, "/b");
+  ASSERT_TRUE(wait_for(2));
+  pipelines.connect(ep);
+  send(pipelines, "/c");
+  ASSERT_TRUE(wait_for(3));
+  send(pipelines, "/d");  // a next request while /c waits
+  leaves.close();
+  bool marked = false;
+  for (int i = 0; i < 400 && !marked; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::lock_guard lock(mu);
+    marked = pending[0].first && pending[0].first->load();
+  }
+  EXPECT_TRUE(marked);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  {
+    std::lock_guard lock(mu);
+    ASSERT_TRUE(pending[1].first && pending[2].first);
+    EXPECT_FALSE(pending[1].first->load());
+    EXPECT_FALSE(pending[2].first->load());
+    for (auto& [g, respond] : pending) respond(Response{});  // answering the one that left is harmless
+  }
+  // The pipelined request is still served once /c is answered.
+  ASSERT_TRUE(wait_for(4));
+  {
+    std::lock_guard lock(mu);
+    pending[3].second(Response{});
+  }
+  beast::flat_buffer buf;
+  for (int i = 0; i < 2; ++i) {
+    bhttp::response<bhttp::string_body> res;
+    bhttp::read(pipelines, buf, res);
+    EXPECT_EQ(res.result_int(), 200);
+  }
+  server.stop();
+}

@@ -1013,6 +1013,30 @@ operation as well so each box has fuel/limits that are enforced by the host."
 - [ ] Two new decisions (047 § 12, 5 and 6): box limits looser than an API's control, and two
       body limits.
 
+### Phase 52: MCP's strict rate and fixed queue (2026-11-03)
+The human: "we should assume agents may behave badly. Beyond a strict rate limit, MCP should
+also have a queue for operations to front-load. The queue should be fixed such that we aim to
+maximize reliability." Refusals say only "rate limit reached" (`design/machine/047.Controls.md`
+§ 13):
+- [x] Who an agent is: a bearer token's OAuth client and person on `/mcp`, the operator's name on
+      the operator MCP, the client address until a token is known good; tests.
+- [x] A strict rate per agent before anything is queued (`/mcp` 120 a minute, burst 30; operator
+      600, burst 120), each call of a batch counted, cheap methods a fifth, a batch past the burst
+      a 400; beneath the domain's controls; tests.
+- [x] A fixed queue: 2 running and 32 waiting per agent (128 on the operator MCP), first in first
+      out, round-robin across agents and queues, half the box threads per queue and a quarter
+      always left to everything else, 30 s (120 s) at most waiting; a waiting call holds no
+      worker; tests, with a flood that doesn't starve a polite agent or the pages.
+- [x] Every way out releases its slot: the finish, a dropped finish (a throw), the wait limit, a
+      client gone while waiting (the HTTP server's new `peer_gone`), the pool refusing, the host
+      stopping; a call held for approval holds no slot; tests.
+- [x] Monitoring: `mcp_queue_5m` rows in `traffic.db` within `traffic-bytes` (045's table),
+      `mcp_queue_report`, `control_report`'s `mcp_queue`, the panel's Controls view, and
+      `health.mcp` ratios with their Prometheus lines; tests.
+- [x] Guides, tool and server instructions, HUMAN.md, and CHANGES.md say it in a paragraph.
+- [ ] The view checked in a browser.
+- [ ] Three decisions (047 § 14.10): the per-address `mcp` bucket, alerts, and fixed constants.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

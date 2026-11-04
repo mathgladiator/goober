@@ -250,7 +250,9 @@ Read these before doing design work:
     7 days in traffic-bytes; `health.controls` ratios; refused clients read only "rate limit reached"
     (§ 3); a person edits any control in the panel at any time (§ 9); a box route's own `limits` in
     its manifest, between an API and an override, monitored as `box:<box>/<route>`, `TOOL /name`
-    overrides for tools (§ 13); departures, the human's 2026-11-03 decisions, and the open ones.
+    overrides for tools (§ 13); MCP's strict rate per agent and fixed queue (2 running, 32 or 128
+    waiting, round-robin, 30 or 120 s; `mcp_queue_report`, `health.mcp`; § 14); departures, the
+    human's 2026-11-03 decisions, and the open ones.
   - `design/machine/048.HeatStudy.md`: heat studies: `heat_study_start {domain, minutes, why}` counts one
     domain's requests by endpoint (a box route's declared pattern, an MCP tool, a page's path) for 5 to
     1440 minutes, one per domain and 4 at once, never waiting for approval; per endpoint requests per

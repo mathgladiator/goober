@@ -434,6 +434,13 @@ Traffic::Traffic(fs::path db_file, fs::path logs, TenantOf tenant_of)
       " n5 INTEGER NOT NULL, peak INTEGER NOT NULL, clients TEXT NOT NULL, would_clients TEXT NOT NULL,"
       " top_client TEXT NOT NULL, top_n INTEGER NOT NULL, would_top TEXT NOT NULL, would_top_n INTEGER NOT NULL,"
       " hist TEXT NOT NULL, PRIMARY KEY (domain, control, t))");
+  // The MCP queue (047 § 14): one row per queue, domain, and class of agent per five minutes.
+  db_->exec(
+      "CREATE TABLE IF NOT EXISTS mcp_queue_5m (t INTEGER NOT NULL, queue TEXT NOT NULL, tenant TEXT NOT NULL,"
+      " domain TEXT NOT NULL, cls TEXT NOT NULL, offered INTEGER NOT NULL, queued INTEGER NOT NULL, ran INTEGER NOT NULL,"
+      " refused_rate INTEGER NOT NULL, refused_full INTEGER NOT NULL, refused_wait INTEGER NOT NULL, gone INTEGER NOT NULL,"
+      " peak_waiting INTEGER NOT NULL, peak_running INTEGER NOT NULL, waited TEXT NOT NULL,"
+      " PRIMARY KEY (queue, domain, cls, t))");
   if (old) {
     {
       sqlite::Stmt q(*db_, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'gauge_minutes'");
@@ -464,6 +471,7 @@ size_t Traffic::catch_up(int64_t now_ms) {
   flush_gauges();
   flush_logs();
   flush_controls();
+  flush_mcp_queue();
   if (now_ms - last_drop_ms_ > 10 * kMinuteMs) {
     drop_old(now_ms);
   } else if (service_failures_added_) {
@@ -638,7 +646,7 @@ size_t Traffic::tail(const std::string& name, int64_t) {
 
 namespace {
 constexpr const char* kRollups[] = {"route_5m", "edge_5m", "error_5m", "service_5m", "service_status_5m", "gauge_5m", "log_5m",
-                                    "control_5m"};
+                                    "control_5m", "mcp_queue_5m"};
 constexpr int64_t kDayMs = 24 * kHourMs;
 constexpr int64_t kLogDaysKeptMs = 90 * kDayMs;
 std::string base_day(int64_t ms) { return base::format_utc_ms(ms).substr(0, 10); }
@@ -662,7 +670,8 @@ void Traffic::drop_old(int64_t now_ms) {
     int64_t oldest = 0;
     {
       sqlite::Stmt q(*db_, "SELECT min(t) FROM (SELECT min(t) AS t FROM route_5m UNION ALL SELECT min(t) FROM service_5m"
-                           " UNION ALL SELECT min(t) FROM gauge_5m UNION ALL SELECT min(t) FROM control_5m)");
+                           " UNION ALL SELECT min(t) FROM gauge_5m UNION ALL SELECT min(t) FROM control_5m"
+                           " UNION ALL SELECT min(t) FROM mcp_queue_5m)");
       if (!q.step() || q.is_null(0)) break;
       oldest = q.int64(0);
     }
@@ -1444,6 +1453,101 @@ std::vector<ControlRow> Traffic::control_rows(const std::string& domain, const s
                            " FROM control_5m WHERE domain = ? AND (? = '' OR control = ?) AND t >= ? AND t < ? ORDER BY t");
   s.bind(1, domain).bind(2, control).bind(3, control).bind(4, from_ms).bind(5, to_ms);
   while (s.step()) out.push_back(control_row_of(s));
+  return out;
+}
+
+void McpQueueRow::merge(const McpQueueRow& o) {
+  offered += o.offered;
+  queued += o.queued;
+  ran += o.ran;
+  refused_rate += o.refused_rate;
+  refused_full += o.refused_full;
+  refused_wait += o.refused_wait;
+  gone += o.gone;
+  peak_waiting = std::max(peak_waiting, o.peak_waiting);
+  peak_running = std::max(peak_running, o.peak_running);
+  waited.merge(o.waited);
+}
+
+void Traffic::add_mcp_queue_rows(std::vector<McpQueueRow> rows) {
+  if (rows.empty()) return;
+  std::lock_guard lock(mcp_queue_mu_);
+  for (auto& r : rows) mcp_queue_pending_.push_back(std::move(r));
+}
+
+namespace {
+
+constexpr const char* kMcpQueueColumns =
+    "t, queue, tenant, domain, cls, offered, queued, ran, refused_rate, refused_full, refused_wait, gone, peak_waiting, "
+    "peak_running, waited";
+
+McpQueueRow mcp_queue_row_of(const sqlite::Stmt& s) {
+  McpQueueRow r;
+  r.t = s.int64(0);
+  r.queue = s.text(1);
+  r.tenant = s.text(2);
+  r.domain = s.text(3);
+  r.cls = s.text(4);
+  r.offered = s.int64(5);
+  r.queued = s.int64(6);
+  r.ran = s.int64(7);
+  r.refused_rate = s.int64(8);
+  r.refused_full = s.int64(9);
+  r.refused_wait = s.int64(10);
+  r.gone = s.int64(11);
+  r.peak_waiting = s.int64(12);
+  r.peak_running = s.int64(13);
+  r.waited = Histogram::decode(s.text(14));
+  return r;
+}
+
+}  // namespace
+
+void Traffic::flush_mcp_queue() {
+  std::vector<McpQueueRow> pending;
+  {
+    std::lock_guard lock(mcp_queue_mu_);
+    pending.swap(mcp_queue_pending_);
+  }
+  if (pending.empty()) return;
+  db_->exec("BEGIN IMMEDIATE");
+  try {
+    for (auto& r : pending) {
+      r.t = r.t / kBucketMs * kBucketMs;
+      // A bucket handed over in parts (a report's early take, a restart) adds to what is there.
+      {
+        sqlite::Stmt q(*db_, std::string("SELECT ") + kMcpQueueColumns +
+                                 " FROM mcp_queue_5m WHERE queue = ? AND domain = ? AND cls = ? AND t = ?");
+        q.bind(1, r.queue).bind(2, r.domain).bind(3, r.cls).bind(4, r.t);
+        if (q.step()) {
+          auto old = mcp_queue_row_of(q);
+          old.merge(r);
+          old.tenant = r.tenant;
+          r = std::move(old);
+        }
+      }
+      sqlite::Stmt w(*db_, std::string("INSERT OR REPLACE INTO mcp_queue_5m (") + kMcpQueueColumns +
+                               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      w.bind(1, r.t).bind(2, r.queue).bind(3, r.tenant).bind(4, r.domain).bind(5, r.cls).bind(6, r.offered);
+      w.bind(7, r.queued).bind(8, r.ran).bind(9, r.refused_rate).bind(10, r.refused_full).bind(11, r.refused_wait);
+      w.bind(12, r.gone).bind(13, r.peak_waiting).bind(14, r.peak_running).bind(15, r.waited.encode());
+      w.run();
+    }
+    db_->exec("COMMIT");
+  } catch (...) {
+    db_->exec("ROLLBACK");
+    throw;
+  }
+}
+
+std::vector<McpQueueRow> Traffic::mcp_queue_rows(const std::string& queue, const std::string& domain, int64_t from_ms,
+                                                 int64_t to_ms) {
+  std::lock_guard lock(mu_);
+  std::vector<McpQueueRow> out;
+  sqlite::Stmt s(*db_, std::string("SELECT ") + kMcpQueueColumns +
+                           " FROM mcp_queue_5m WHERE queue = ? AND (? = '' OR domain = ?) AND t >= ? AND t < ? ORDER BY t");
+  s.bind(1, queue).bind(2, domain).bind(3, domain).bind(4, from_ms).bind(5, to_ms);
+  while (s.step()) out.push_back(mcp_queue_row_of(s));
   return out;
 }
 

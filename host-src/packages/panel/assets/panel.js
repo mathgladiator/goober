@@ -209,6 +209,34 @@ function stackedChart(series, parts, of, ofLabel, aria, unit = fmt.n) {
   return h('div', {}, g, h('div', { class: 'legend' }, parts.map((x) => h('span', {}, h('i', { class: x.cls }), x.label))));
 }
 
+// One MCP queue's report (047 § 14): what arrived, waited, ran, and was refused, and the fixed
+// limits it runs under. Agents are never named, only their class.
+function mcpQueueCard(r, title) {
+  const t = r.totals, l = r.limits;
+  const kids = [h('p', { class: 'muted small' }, 'Every agent gets a strict rate (' + l.per_minute + ' calls a minute, ' + l.burst +
+      ' at once) and a fixed queue: ' + l.agent_running + ' running and ' + l.agent_waiting + ' waiting per agent, ' + l.queue_running +
+      ' running in this queue, waits up to ' + (l.max_wait_ms / 1000) + ' s. Now ' + r.now.running + ' running, ' + r.now.waiting + ' waiting.'),
+    h('div', { class: 'stats' }, stat(fmt.n(t.offered), 'calls'), stat(fmt.n(t.queued), 'waited'), stat(fmt.n(t.ran), 'ran'),
+      stat(fmt.n(t.refused_rate), 'refused: rate'), stat(fmt.n(t.refused_full), 'refused: full'),
+      stat(fmt.n(t.refused_wait), 'refused: waited too long'), stat(fmt.n(t.gone), 'left while waiting'),
+      stat(fmt.n(t.peak_waiting), 'peak waiting'), stat(fmt.us(t.wait_p99_ms * 1000), 'p99 wait'))];
+  if (r.verdicts.length) kids.push(h('div', { class: 'notice' }, r.verdicts.map((v) => h('p', {}, v))));
+  const series = { ...r, points: r.points.map((p) => ({ ...p, started: p.ran - Math.min(p.ran, p.queued) })) };
+  kids.push(stackedChart(series, [
+    { key: 'started', cls: 's2', label: 'ran at once' }, { key: 'queued', cls: 's3', label: 'waited' },
+    { key: 'refused_rate', cls: 's4', label: 'refused: rate' }, { key: 'refused_full', cls: 's5', label: 'refused: full' },
+    { key: 'refused_wait', cls: 'fp', label: 'refused: waited too long' }], 'offered', 'calls', title + ' over time'));
+  const classes = Object.entries(r.by_class || {});
+  if (classes.length) {
+    kids.push(table([
+      { label: 'Class', get: (x) => x[0], cls: () => 'mono' },
+      { label: 'Calls', get: (x) => fmt.n(x[1].offered) }, { label: 'Waited', get: (x) => fmt.n(x[1].queued) },
+      { label: 'Refused', get: (x) => fmt.n(x[1].refused) }, { label: 'p50 wait', get: (x) => fmt.us(x[1].wait_p50_ms * 1000) },
+      { label: 'p99 wait', get: (x) => fmt.us(x[1].wait_p99_ms * 1000) }], classes));
+  }
+  return wideCard(title, kids);
+}
+
 // p50 and p99 latency per point, on a log scale.
 function latencyChart(series) {
   const pts = series.points, W = 900, H = 130, L = 44, B = 22, T = 8;
@@ -767,6 +795,9 @@ const views = {
     const seen = new Set();
     for (const c of row.controls) { seen.add(c.id); cards.push(reportCard(c.id, c)); }
     for (const r of report.controls) if (!seen.has(r.id)) cards.push(reportCard(r.id, null));
+    // MCP's strict rate and fixed queue (047 § 14): this domain's /mcp, and the operator MCP.
+    if (report.mcp_queue) cards.push(mcpQueueCard(report.mcp_queue, 'MCP queue · ' + domain + '/mcp'));
+    try { cards.push(mcpQueueCard(await api('mcp_queue_report', { window: state.window }), 'MCP queue · the operator MCP')); } catch (e) { /* not this person's to see */ }
     return cards;
   },
 

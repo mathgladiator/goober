@@ -308,6 +308,10 @@ TEST_F(ScopeTest, ApprovalsHoldAnAgentsChangesUntilAPersonDecides) {
   ASSERT_TRUE(std::regex_search(text, m, std::regex(R"re("pending_approval": ([0-9]+))re"))) << text;
   std::string id = m[1];
   EXPECT_EQ(*base::read_file(root / "storage/content/acme/a.txt"), "one");
+  // A held call answered at once: it holds no slot in the MCP queue while it waits for a person
+  // (047 § 14), and the approved call later runs on the panel's request, outside the queue.
+  EXPECT_EQ(host->mcp_queue_stats().running, 0);
+  EXPECT_EQ(host->mcp_queue_stats().waiting, 0);
   // A scope refusal is still a refusal, not a request.
   focus_grok(R"(["acme"])");
   EXPECT_TRUE(call("content_put", R"({"tenant":"other","path":"a.txt","text":"x"})").at("isError").as_bool());

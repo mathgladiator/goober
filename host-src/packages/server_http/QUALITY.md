@@ -9,5 +9,8 @@ handler, and write responses posted back from any thread.
   be called later, from any thread, exactly once (extra calls are ignored).
 - The body limit and the idle timeout are always on, so a slow or huge client costs at most
   one connection's buffers.
+- A request waiting for its answer carries `peer_gone`, set once the client closes the
+  connection (end-of-file or an error, never a pipelined next request), so work nobody will
+  receive can be dropped. Watching it costs one pending wait per connection.
 - This package knows nothing about goober: no routing, no tenants, no boxes. It turns
   bytes into `Request` and `Response` into bytes.

@@ -58,7 +58,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "deletions",
     "schema_check",
     "flag_list",
-    "control_list", "control_report",
+    "control_list", "control_report", "mcp_queue_report",
     "db_snapshots", "db_unbound",
     "route_try",
     "changeset_show", "changeset_list", "changeset_preview",
