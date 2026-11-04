@@ -9,6 +9,7 @@
 
 #include <iostream>
 
+#include "goober/base/bounded.h"
 #include "goober/base/encoding.h"
 #include "goober/base/hash.h"
 #include "goober/base/time.h"
@@ -89,11 +90,20 @@ void Host::mcp_remember(const Request& req, const std::string& realm, const std:
   std::string key = base::sha256_hex(realm + "\n" + token);
   int64_t now = base::now_unix_ms();
   std::lock_guard lock(mcp_agents_mu_);
-  if (mcp_agents_.size() >= kAgentsMax && !mcp_agents_.count(key)) {
-    std::erase_if(mcp_agents_, [&](const auto& kv) { return now - kv.second.first >= kAgentKeptMs; });
-    if (mcp_agents_.size() >= kAgentsMax) mcp_agents_.clear();
+  // Full: the stale, then the oldest few go, never every agent at once (a flood of new tokens
+  // can't put the agents in use back on their addresses' buckets).
+  if (!mcp_agents_.count(key)) {
+    base::make_room(mcp_agents_, kAgentsMax, now, kAgentKeptMs, [](const auto& v) { return v.first; });
   }
   mcp_agents_[key] = {now, {"id:" + agent, cls}};
+}
+
+void Host::mcp_forget(const Request& req, const std::string& realm) {
+  std::string token = bearer_of(req);
+  if (token.empty()) return;
+  std::string key = base::sha256_hex(realm + "\n" + token);
+  std::lock_guard lock(mcp_agents_mu_);
+  mcp_agents_.erase(key);
 }
 
 void Host::mcp_enter(controls::QueueKind kind, const Request& req, const Finish& finish, const std::string& domain,

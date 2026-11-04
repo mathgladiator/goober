@@ -298,3 +298,21 @@ TEST(ControlsGate, ToolCallsMeetTheBoxsLimits) {
   EXPECT_EQ(two.control, "box:shop/search");
   EXPECT_EQ(two.status, 503);
 }
+
+// 047 § 6: an idle bucket is forgotten only once it has filled again, so a slow rate (one token
+// every ten minutes) doesn't hand a client a whole new burst after fifteen idle minutes.
+TEST(ControlsGate, AnIdleBucketIsKeptUntilItHasRefilled) {
+  Gate g;
+  auto d = compiled(R"({"endpoints":[{"id":"slow","match":"POST /signup","mode":"enforce",
+                                       "set":{"rate":{"per-minute":0.1,"burst":5}}}]})");
+  for (int i = 0; i < 5; ++i) EXPECT_FALSE(ask(g, *d, Req{.method = "post", .path = {"signup"}}).refused) << i;
+  EXPECT_TRUE(ask(g, *d, Req{.method = "post", .path = {"signup"}}).refused);
+  // Sixteen minutes on, enough other clients pass to sweep the buckets.
+  int64_t later = kT0 + 16 * 60 * 1000;
+  for (int i = 0; i < 4100; ++i) {
+    ask(g, *d, Req{.method = "post", .path = {"signup"}, .client = "198.51.100." + std::to_string(i), .now = later});
+  }
+  // 1.6 tokens came back, not 5.
+  EXPECT_FALSE(ask(g, *d, Req{.method = "post", .path = {"signup"}, .now = later}).refused);
+  EXPECT_TRUE(ask(g, *d, Req{.method = "post", .path = {"signup"}, .now = later}).refused);
+}

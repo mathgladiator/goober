@@ -214,7 +214,11 @@ class Session : public std::enable_shared_from_this<Session> {
       if (ec || responded->load()) return;
       char c;
       ssize_t n = ::recv(self->stream_.socket().native_handle(), &c, 1, MSG_PEEK | MSG_DONTWAIT);
-      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) gone->store(true);
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+        gone->store(true);
+      } else if (n < 0) {
+        self->watch_gone(responded, gone);  // woken with nothing there after all: keep watching
+      }
     });
   }
 

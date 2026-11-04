@@ -94,6 +94,11 @@ struct State {
   struct Bucket {
     double tokens = 0;
     int64_t last_ms = 0;
+    double per_minute = 0, burst = 0;  // its rate, last taken at
+    // Full again by now: forgetting it changes nothing, as a fresh one starts full.
+    bool refilled(int64_t now_ms) const {
+      return tokens + double(std::max<int64_t>(0, now_ms - last_ms)) * per_minute / 60000.0 >= burst;
+    }
   };
 
   Gate::Hasher hash;
@@ -159,12 +164,16 @@ struct State {
   // A token bucket: 0 when a token was taken, else the seconds until one is there.
   int64_t take(const std::string& k, const Rate& r, int64_t now_ms) {
     if (++takes % 4096 == 0) {
+      // Only buckets that have filled again go: a slow rate's empty bucket is kept until it has,
+      // or a client would get a whole burst early.
       for (auto it = buckets.begin(); it != buckets.end();) {
-        it = now_ms - it->second.last_ms > 15 * 60 * 1000 ? buckets.erase(it) : std::next(it);
+        it = it->second.refilled(now_ms) ? buckets.erase(it) : std::next(it);
       }
     }
-    auto [it, fresh] = buckets.try_emplace(k, Bucket{r.burst, now_ms});
+    auto [it, fresh] = buckets.try_emplace(k, Bucket{r.burst, now_ms, r.per_minute, r.burst});
     Bucket& b = it->second;
+    b.per_minute = r.per_minute;
+    b.burst = r.burst;
     if (!fresh) {
       double elapsed = double(std::max<int64_t>(0, now_ms - b.last_ms));
       b.tokens = std::min(r.burst, b.tokens + elapsed * r.per_minute / 60000.0);

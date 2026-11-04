@@ -343,7 +343,11 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       if (!p) return std::nullopt;  // the tool says there's no such project
       int64_t rev = p->head;
       if (tool == "source_deploy" || tool == "source_build") {
-        if (const auto* r = args.if_contains("rev"); r && r->is_int64() && r->as_int64() > 0) rev = r->as_int64();
+        // Read as the tool reads it: a number or a string of digits ("ids are strings"), so the
+        // revision checked is the revision built.
+        auto r = mcp::integer_arg(args, "rev");
+        if (r.present && !r.ok) return who + ", and rev must be a whole number" + widen;
+        if (r.ok && r.value > 0) rev = r.value;
       }
       // A commit is checked as the project will be after it: the files it writes, over the head.
       const bj::array* changes = nullptr;
@@ -387,10 +391,13 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       return std::nullopt;
     }
     case Rule::kStudy: {
-      const auto* v = args.if_contains("id");
-      if (!v || !v->is_int64() || !heat_) return std::nullopt;  // the tool says what's wrong
-      auto t = heat_->tenant_of(v->as_int64());
-      if (t && !in(*t)) return who + ", and heat study " + std::to_string(v->as_int64()) + " is of " + *t + widen;
+      // Read as the tool reads it (mcp::integer_arg); an id of any other shape is refused here,
+      // never let through for the tool to read another way. The refusal names no tenant.
+      auto id = mcp::integer_arg(args, "id");
+      if (id.present && !id.ok) return who + ", and id must be a whole number" + widen;
+      if (!id.present || !heat_) return std::nullopt;  // the tool says id is required
+      auto t = heat_->tenant_of(id.value);
+      if (t && !in(*t)) return who + ", and heat study " + std::to_string(id.value) + " is outside your scope" + widen;
       return std::nullopt;
     }
     case Rule::kTicket: {

@@ -1,5 +1,8 @@
 #include "goober/mcp/mcp.h"
 
+#include <cmath>
+#include <cstdint>
+
 #include "goober/base/hash.h"
 
 namespace goober::mcp {
@@ -72,6 +75,9 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     std::string name(n->value().get_string());
     bj::object args;
     if (auto a = params.find("arguments"); a != params.end() && a->value().is_object()) args = a->value().get_object();
+    // Aliases and argument types first, so the policy's checks read what the tool will.
+    std::optional<std::string> wrong;
+    if (tools_.count(name)) wrong = admit(tools_.at(name), args);
     if (policy.prepare && tools_.count(name)) policy.prepare(tools_.at(name), args);
     if (allowed && tools_.count(name) && !allowed(name)) {
       std::string why = "its access is read-only";
@@ -83,7 +89,8 @@ bj::value McpServer::dispatch(const bj::object& request, bool* is_notification, 
     }
     if (!tools_.count(name)) return error_body(id, -32602, "unknown tool: " + name);
     std::optional<ToolResult> called;
-    if (policy.check) {
+    if (wrong) called = ToolResult::fail(*wrong);
+    if (!called && policy.check) {
       if (auto refused = policy.check(name, args)) called = ToolResult::fail(*refused);
     }
     bool held = false;
@@ -111,12 +118,7 @@ std::optional<ToolResult> McpServer::call(const std::string& name, const bj::obj
   auto tool = tools_.find(name);
   if (tool == tools_.end()) return std::nullopt;
   bj::object args = in;
-  for (const auto& [old_name, current] : tool->second.aliases) {
-    if (auto* v = args.if_contains(old_name)) {
-      if (!args.contains(current)) args[current] = *v;
-      args.erase(old_name);
-    }
-  }
+  if (auto wrong = admit(tool->second, args)) return ToolResult::fail(*wrong);
   bj::array ignored;
   if (auto* props = tool->second.input_schema.if_contains("properties"); props && props->is_object()) {
     for (auto it = args.begin(); it != args.end();) {
@@ -141,6 +143,71 @@ std::optional<ToolResult> McpServer::call(const std::string& name, const bj::obj
   } catch (const std::exception& e) {
     return ToolResult::fail(std::string("tool failed: ") + e.what());
   }
+}
+
+std::optional<std::string> McpServer::admit(const Tool& tool, bj::object& args) const {
+  for (const auto& [old_name, current] : tool.aliases) {
+    if (auto* v = args.if_contains(old_name)) {
+      if (!args.contains(current)) args[current] = *v;
+      args.erase(old_name);
+    }
+  }
+  if (!checked_types_) return std::nullopt;
+  const auto* props = tool.input_schema.if_contains("properties");
+  if (!props || !props->is_object()) return std::nullopt;
+  for (auto& kv : args) {
+    const auto* p = props->as_object().if_contains(kv.key());
+    if (!p || !p->is_object() || kv.value().is_null()) continue;
+    const auto* t = p->as_object().if_contains("type");
+    if (!t || !t->is_string()) continue;
+    std::string_view type = t->as_string();
+    bj::value& v = kv.value();
+    if (type == "integer") {
+      auto n = integer_value(v);
+      if (!n.ok) return "argument " + std::string(kv.key()) + " must be a whole number";
+      v = n.value;
+    } else if (type == "boolean") {
+      if (v.is_bool()) continue;
+      if (v.is_string() && (v.as_string() == "true" || v.as_string() == "false")) {
+        v = v.as_string() == "true";
+        continue;
+      }
+      return "argument " + std::string(kv.key()) + " must be true or false";
+    }
+  }
+  return std::nullopt;
+}
+
+IntArg integer_value(const bj::value& v) {
+  IntArg out;
+  if (v.is_null()) return out;
+  out.present = true;
+  if (v.is_int64()) {
+    out.ok = true;
+    out.value = v.as_int64();
+  } else if (v.is_uint64()) {
+    if (v.as_uint64() <= uint64_t(INT64_MAX)) out.ok = true, out.value = int64_t(v.as_uint64());
+  } else if (v.is_double()) {
+    double d = v.as_double();
+    // Whole and well inside int64 (2^62), so the conversion is exact and defined.
+    if (std::isfinite(d) && std::floor(d) == d && d > -4.6e18 && d < 4.6e18) out.ok = true, out.value = int64_t(d);
+  } else if (v.is_string()) {
+    std::string_view s = v.as_string();
+    bool neg = !s.empty() && s.front() == '-';
+    if (neg) s.remove_prefix(1);
+    if (!s.empty() && s.size() <= 18 && s.find_first_not_of("0123456789") == std::string_view::npos) {
+      int64_t n = 0;
+      for (char c : s) n = n * 10 + (c - '0');
+      out.ok = true;
+      out.value = neg ? -n : n;
+    }
+  }
+  return out;
+}
+
+IntArg integer_arg(const bj::object& args, std::string_view key) {
+  const auto* v = args.if_contains(key);
+  return v ? integer_value(*v) : IntArg{};
 }
 
 const Tool* McpServer::tool(const std::string& name) const {

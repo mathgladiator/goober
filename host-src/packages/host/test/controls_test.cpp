@@ -336,6 +336,27 @@ TEST_F(ControlsTest, ByUserCountsTheAccountNotTheAddress) {
   EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items").status, 429);
 }
 
+// by: user knows a person by their session cookie alone: other cookies that change from request to
+// request (an analytics id) don't make them a stranger counted as the address.
+TEST_F(ControlsTest, ByUserKnowsThePersonWhateverOtherCookiesTheySend) {
+  auto ann = sign_in("ann@example.com");
+  ASSERT_FALSE(ann.empty());
+  auto set = tool("control_set", {{"domain", "example.com"},
+                                  {"endpoint", bj::object{{"id", "per_person"}, {"match", "GET /api/items"}}},
+                                  {"set", bj::object{{"rate", bj::object{{"per-minute", 1}, {"burst", 1}, {"by", "user"}}}}},
+                                  {"mode", "enforce"},
+                                  {"why", "one each"}});
+  ASSERT_FALSE(set.as_object().contains("error")) << json::dump(set);
+  // The first request counts as the address (its one) while the account is looked up.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items", {{"cookie", "visit=1; " + ann}}).status, 200);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  // Another analytics cookie, the same session: ann's own bucket, not the spent address's.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items", {{"cookie", "visit=2; " + ann}}).status, 200);
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items", {{"cookie", ann + "; visit=3"}}).status, 429);
+  // Cookies without a session are nobody: the address's bucket, spent.
+  EXPECT_EQ(fetch(port, bhttp::verb::get, "/api/items", {{"cookie", "visit=4"}}).status, 429);
+}
+
 TEST_F(ControlsTest, TheToolsRefuseWhatTheyCantKeep) {
   bj::object rate{{"rate", bj::object{{"per-minute", 60}}}};
   auto base = [&](bj::object extra) {
@@ -568,4 +589,32 @@ TEST_F(ControlsTest, FuelLimitsTrapTheCall) {
                    .contains("error"));
   fetch(port, bhttp::verb::get, "/api/spin");
   EXPECT_NE(access_log().find(R"("outcome":"timeout")"), std::string::npos);
+}
+
+// A reload that lowers the host's own limits reaches box route limits at once: a route limit
+// past the new limit is no longer applied, and control_list says so (047 § 13).
+TEST_F(ControlsTest, BoxRouteLimitsAreCheckedAgainAfterAReload) {
+  std::string err;
+  std::string manifest = kManifest;
+  manifest.replace(manifest.find(R"({"name":"cart","public":true})"), 29,
+                   R"({"name":"cart","public":true,"limits":{"body-max-bytes":100}})");
+  ASSERT_TRUE(host->boxes().upload(manifest, kWat, &err)) << err;
+  auto entry = [&]() -> bj::object {
+    auto list = tool("control_list", {{"domain", "example.com"}});
+    for (const auto& c : list.at(0).at("controls").as_array()) {
+      if (c.at("id") == "box:shop/cart") return c.as_object();
+    }
+    return {};
+  };
+  ASSERT_FALSE(entry().empty());
+  EXPECT_FALSE(entry().contains("note")) << json::dump(entry());
+  EXPECT_EQ(fetch(port, bhttp::verb::post, "/api/cart/1", kSameSite, std::string(101, 'x')).status, 413);
+  // host.json now says 50 bytes: the box's 100 is past it.
+  auto lowered = config::parse_config(config_text(R"(, "limits": {"body-max-bytes": 50})"), root, &err);
+  ASSERT_TRUE(lowered) << err;
+  host->config().replace(config::local_mode(lowered));
+  auto after = entry();
+  ASSERT_FALSE(after.empty());
+  ASSERT_TRUE(after.contains("note")) << json::dump(after);
+  EXPECT_NE(std::string(after.at("note").as_string()).find("not applied"), std::string::npos) << json::dump(after);
 }

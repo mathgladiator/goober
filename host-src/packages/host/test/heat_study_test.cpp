@@ -323,8 +323,22 @@ TEST_F(HeatStudyHostTest, AFocusedOperatorStudiesOnlyItsTenants) {
   int64_t other_id = theirs.at("value").at("id").as_int64();
   auto peek = call(grok, "heat_study_get", {{"id", other_id}});
   ASSERT_TRUE(peek.at("isError").as_bool());
-  EXPECT_NE(std::string(peek.at("text").as_string()).find("of other"), std::string::npos) << peek.at("text");
+  // Outside the scope, and whose it is isn't said (no tenant named).
+  EXPECT_NE(std::string(peek.at("text").as_string()).find("outside your scope"), std::string::npos) << peek.at("text");
+  EXPECT_EQ(std::string(peek.at("text").as_string()).find("other"), std::string::npos) << peek.at("text");
   EXPECT_TRUE(call(grok, "heat_study_stop", {{"id", other_id}}).at("isError").as_bool());
+  // The same id in another shape (a whole double, a string of digits) is the same study, and is
+  // refused the same; a shape that isn't a whole number is refused, never read another way.
+  for (const bj::value& id : {bj::value(double(other_id)), bj::value(std::to_string(other_id)),
+                              bj::value(double(other_id) + 0.5), bj::value(true), bj::value(bj::array{other_id})}) {
+    for (const char* tool : {"heat_study_get", "heat_study_stop"}) {
+      auto r = call(grok, tool, {{"id", id}});
+      EXPECT_TRUE(r.at("isError").as_bool()) << tool << " " << json::dump(id) << " " << r.at("text");
+    }
+  }
+  // The other tenant's study is still running: no shape of its id stopped it.
+  auto still = op("heat_study_get", {{"id", other_id}});
+  EXPECT_EQ(still.at("value").at("state").as_string(), "running") << still.at("text");
   auto list = call(grok, "heat_study_list");
   ASSERT_EQ(list.at("value").as_array().size(), 1u) << list.at("text");
   EXPECT_EQ(list.at("value").at(0).at("tenant").as_string(), "acme");

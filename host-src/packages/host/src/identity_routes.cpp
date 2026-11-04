@@ -81,6 +81,12 @@ std::string Host::session_cookie_name() const {
   return config_.get()->identity.cookie_secure ? "__Host-goober-session" : "goober-session";
 }
 
+std::string Host::session_cookie(const Request& req) const {
+  std::string value = read_cookie(req, session_cookie_name());
+  if (value.size() < 3 || value[1] != '.' || (value[0] != 'h' && value[0] != 't')) return "";
+  return value;
+}
+
 std::optional<SignedIn> Host::signed_in(const Request& req, const std::string& tenant) {
   // A bearer token (OAuth, 009) speaks for itself: a bad one is nobody, never the cookie.
   std::string auth = req.header("authorization");
@@ -94,8 +100,8 @@ std::optional<SignedIn> Host::signed_in(const Request& req, const std::string& t
 }
 
 std::optional<SignedIn> Host::browser_session(const Request& req, const std::string& tenant) {
-  std::string value = read_cookie(req, session_cookie_name());
-  if (value.size() < 3 || value[1] != '.') return std::nullopt;
+  std::string value = session_cookie(req);
+  if (value.empty()) return std::nullopt;
   std::string token = value.substr(2);
   int64_t now = base::now_unix_ms();
   if (value[0] == 'h') {

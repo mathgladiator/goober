@@ -312,6 +312,9 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "strings in JSON. If you are focused on some tenants (operator_scope), tools outside them are refused. "
       "You get a strict rate (600 calls a minute, 120 at once; a batch's calls each count) and a fixed queue: front-load "
       "freely, calls past your two running wait their turn (up to 128, for 120 s). \"rate limit reached\" means slow down.");
+  // Integer and boolean arguments are checked and put in one form before the scope rules and the
+  // tools read them: no argument can mean one thing to a rule and another to its tool (030 § 3).
+  mcp_->set_checked_types(true);
   init_web();
   register_tools();
   register_content_tools();
@@ -529,7 +532,10 @@ void Host::stop() {
   // Open subscriptions first: they hold connections, not workers, and would keep a graceful
   // stop waiting for nothing.
   sse_stop();
-  // MCP calls still waiting are refused; the running ones finish below (047 § 14).
+  // MCP calls still waiting are refused; the running ones finish below (047 § 14). This must
+  // come before pool_->shutdown(): each slot a running call frees starts the next waiting call
+  // by posting it to the pool, so the queue would keep feeding the graceful drain, and a call
+  // posted just before shutdown is cleared unstarted, its client never answered.
   mcp_queue_stop();
   if (timer_thread_.joinable()) {
     {

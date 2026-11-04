@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
+#include <map>
 #include <sstream>
 
 #include <filesystem>
 
+#include "goober/base/bounded.h"
 #include "goober/base/chacha20.h"
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
@@ -237,4 +239,32 @@ TEST(Process, AChildInheritsOnlyItsStandardStreams) {
     ++count;
   }
   EXPECT_LE(count, 4) << r.out;
+}
+
+// A full cache drops the expired, then the oldest sixteenth: never everything at once, even when
+// every entry was set in the same millisecond.
+TEST(Bounded, MakesRoomByDroppingTheOldestNotEverything) {
+  std::map<std::string, int64_t> m;
+  auto at = [](int64_t v) { return v; };
+  for (int i = 0; i < 32; ++i) m["k" + std::to_string(i)] = 1000 + i;
+  goober::base::make_room(m, 64, 2000, 600000, at);
+  EXPECT_EQ(m.size(), 32u);  // not full: nothing goes
+  goober::base::make_room(m, 32, 2000, 600000, at);
+  EXPECT_EQ(m.size(), 30u);  // the oldest two (32 / 16)
+  EXPECT_FALSE(m.count("k0"));
+  EXPECT_FALSE(m.count("k1"));
+  EXPECT_TRUE(m.count("k2"));
+  EXPECT_TRUE(m.count("k31"));
+  // Expired entries go first; then nothing else needs to.
+  m["old"] = 0;
+  m["old2"] = 1;
+  goober::base::make_room(m, 32, 600001, 600000, at);
+  EXPECT_FALSE(m.count("old"));
+  EXPECT_FALSE(m.count("old2"));
+  EXPECT_EQ(m.size(), 30u);
+  // All set at once: only a sixteenth goes.
+  std::map<std::string, int64_t> same;
+  for (int i = 0; i < 160; ++i) same["s" + std::to_string(i)] = 5;
+  goober::base::make_room(same, 160, 10, 600000, at);
+  EXPECT_EQ(same.size(), 150u);
 }
