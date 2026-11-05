@@ -1167,8 +1167,12 @@ production, promotion in-host first and shaped for a remote host later):
       beta; `version_upload {channel: "beta"}`, `version_promote {channel: "beta"}`,
       `beta_status`, `beta_clear`; timers, identity events, inbound mail, outbox results, and
       internal calls pick the beta version for beta tenants; splits never on beta; tests.
-- [ ] Step 3: beta mail captured; the viewer and injector; `beta_mail_*`.
-- [ ] Step 4: effects that fail in beta unless allowed.
+- [x] Step 3: a beta tenant's mail (host and box) captured in `mail/beta/<tenant>/` (newest 2000,
+      30 days), never sent; mail from outside refused for beta; `beta_mail_list`, `beta_mail_get`,
+      `beta_mail_send` (injected through the MTA hook's own delivery, its From trusted, threaded by
+      in_reply_to); tests.
+- [x] Step 4: from a beta tenant, service calls fail unless the service says `"beta": "allow"` and
+      the method is read-only; push is captured in the mailbox; tests.
 - [ ] Step 5: beta-ops (panel and operator MCP), `host:beta`, scope.
 - [ ] Step 6: promotion as a change set, in-host.
 - [ ] Step 7: the deploy audit's two offers.

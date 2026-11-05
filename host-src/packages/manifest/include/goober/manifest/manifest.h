@@ -279,6 +279,9 @@ struct ExternalService {
   bool mail = false;
   // "push": {} sends Web Push to the tenant's subscribers, through the outbox (782.PWA.md § 5).
   bool push = false;
+  // "beta": "allow" (053 § 5): from a beta tenant, this service's methods whose effect is none
+  // are called as usual; without it (or "fail") every call from beta fails.
+  bool beta_allow = false;
   std::string mail_from_name;
   std::string mail_from;  // "" means the host mailer's address
   // A mail service's lists (design/machine/029.Invites.md § 4): name -> title and about.

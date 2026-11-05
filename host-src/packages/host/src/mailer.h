@@ -47,6 +47,9 @@ class MailQueue {
   // Where mail.log lines go (the host's logs, 032); without one, nothing is logged.
   using LogFn = std::function<void(const std::string& log, boost::json::object line)>;
   void set_log(LogFn log) { log_ = std::move(log); }
+  // Where a beta tenant's mail goes instead of out (design/machine/053.Beta.md § 4).
+  using CaptureFn = std::function<void(const identity::Mail&, const std::string& tenant)>;
+  void set_capture(CaptureFn capture) { capture_ = std::move(capture); }
   // Queues a mail for the background thread, with three tries.
   void send(identity::Mail mail);
   // Delivers one mail now, on the calling thread, once; the outbox calls this.
@@ -56,6 +59,7 @@ class MailQueue {
 
  private:
   LogFn log_;
+  CaptureFn capture_;
   void run();
   bool deliver_smtp(const config::HostConfig& cfg, const identity::Mail& mail, std::string* error);
 

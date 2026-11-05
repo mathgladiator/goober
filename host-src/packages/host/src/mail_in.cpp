@@ -355,6 +355,8 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   log["box"] = box.manifest.box;
   log["route"] = route.name;
   log["tenant"] = match->tenant;
+  // A beta site takes no mail from outside (053 § 4): its operator injects it in beta-ops.
+  if (cfg->is_beta_tenant(match->tenant)) return answer(hook_reject(550, "5.1.1", "No such recipient here"), "beta");
   if (stage == "rcpt") return answer(hook_accept(), "rcpt_accepted");
 
   // DATA: the whole message.
@@ -362,10 +364,6 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   if (!msg || !msg->is_object()) return answer(hook_reject(451, "4.3.0", "Try again later"), "no_message");
   const auto& mo = msg->as_object();
   int64_t size = mo.contains("size") && mo.at("size").is_int64() ? mo.at("size").as_int64() : int64_t(req.body.size());
-  log["bytes"] = size;
-  if (size > std::min<int64_t>(*route.max_body_bytes, in.max_bytes)) {
-    return answer(hook_reject(552, "5.3.4", "Message too big for this address"), "too_big");
-  }
   inbound::Headers headers;
   if (const auto* hs = mo.if_contains("headers"); hs && hs->is_array()) {
     for (const auto& h : hs->as_array()) {
@@ -375,18 +373,35 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     }
   }
   std::string body = str(mo.if_contains("contents"));
+  auto [reply, outcome] = deliver_mail_in(*match, from, headers, body, size, req.header("goober-request-id"), log, false);
+  return answer(reply, outcome.c_str());
+}
+
+// A message for one matched route: checked against its limits, attachments stored, the box
+// called, and its answer turned into the SMTP answer (and outcome). The hook calls it with what
+// Stalwart handed over; beta's injector (053 § 4) with what an operator wrote, trusting its From.
+std::pair<bj::object, std::string> Host::deliver_mail_in(const MailMatch& m, const std::string& from, const inbound::Headers& headers,
+                                                         const std::string& body, int64_t size, const std::string& request_id,
+                                                         bj::object& log, bool trust_from) {
+  const auto* match = &m;
+  const auto& in = config_.get()->mail.inbound;
+  const auto& route = *match->ref.route;
+  const auto& box = *match->ref.box;
+  log["bytes"] = size;
+  if (size > std::min<int64_t>(*route.max_body_bytes, in.max_bytes)) {
+    return {hook_reject(552, "5.3.4", "Message too big for this address"), "too_big"};
+  }
   auto message = inbound::parse_message(headers, body);
   bool automatic = inbound::is_automatic(headers, from);
   if (automatic && !route.mail_automatic) {
     // Taken and dropped: answering a bounce or an auto-reply is how loops start (038).
-    return answer(hook_discard(), "automatic_dropped");
+    return {hook_discard(), "automatic_dropped"};
   }
   if (int64_t(message.attachments.size()) > route.mail_attachments) {
-    return answer(hook_reject(550, "5.3.4", route.mail_attachments == 0 ? "This address takes no attachments"
-                                                                         : "This address takes at most " +
-                                                                               std::to_string(route.mail_attachments) +
-                                                                               " attachments"),
-                  "too_many_attachments");
+    return {hook_reject(550, "5.3.4", route.mail_attachments == 0 ? "This address takes no attachments"
+                                                                  : "This address takes at most " +
+                                                                        std::to_string(route.mail_attachments) + " attachments"),
+            "too_many_attachments"};
   }
   // Attachments go to the host's store; the box gets handles (038 § Attachments).
   int64_t now = base::now_unix_ms();
@@ -421,9 +436,8 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
     }
   };
 
-  std::string request_id = req.header("goober-request-id");
   bj::object doc = mail_route_doc(*match, headers, body, message, from, size, automatic, std::move(attachments), request_id,
-                                  &log);
+                                  &log, trust_from);
   CallOptions options;
   options.timeout_ms = route.timeout_ms;
   options.no_response_ok = true;
@@ -469,17 +483,22 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   } else {
     drop_attachments();
   }
-  return answer(reply, outcome.c_str());
+  return {reply, outcome};
 }
 
 bj::object Host::mail_route_doc(const MailMatch& m, const inbound::Headers& headers, const std::string& body,
                                 const inbound::Message& message, const std::string& from, int64_t size, bool automatic,
-                                bj::array attachments, const std::string& request_id, bj::object* log) {
+                                bj::array attachments, const std::string& request_id, bj::object* log, bool trust_from) {
   // The sender, as a verified claim or not at all (038): see design/machine/024.MailIn.md § 5.
   // A verified sender with an account in this tenant's realm (not deleted, not disabled) is
   // named by its user id; the box still runs as nobody (decided 2026-10-31, 038 § 10).
   std::string sender_why;
-  std::string sender = verified_sender(headers, body, &sender_why);
+  std::string sender = trust_from ? std::string() : verified_sender(headers, body, &sender_why);
+  // Beta's injector (053 § 4): the From an operator wrote is taken as verified, and says so.
+  if (trust_from && message.from) {
+    sender = base::to_lower(message.from->address);
+    sender_why = "beta: the injector's From is taken as verified";
+  }
   std::optional<int64_t> from_user_id;
   if (!sender.empty()) {
     try {

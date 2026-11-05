@@ -189,6 +189,21 @@ void MailQueue::drain() {
 MailOutcome MailQueue::deliver(const identity::Mail& mail) {
   auto cfg = config_();
   MailOutcome out;
+  // A beta tenant's mail never leaves (053 § 4): its box's mail by tenant, host mail by realm.
+  if (std::string tenant = mail.tenant.empty() ? mail.realm : mail.tenant; capture_ && !tenant.empty() && cfg->is_beta_tenant(tenant)) {
+    out.via = "beta";
+    try {
+      capture_(mail, tenant);
+      out.sent = true;
+    } catch (const std::exception& e) {
+      out.error = std::string("beta's mailbox failed: ") + e.what();
+    }
+    bj::object line{{"at", base::format_utc_ms(base::now_unix_ms())}, {"to", mail.to}, {"subject", mail.subject},
+                    {"via", "beta"}, {"status", out.sent ? "captured" : "failed"}, {"tenant", tenant}};
+    if (!out.sent) line["error"] = out.error;
+    if (log_) log_("mail", std::move(line));
+    return out;
+  }
   // A sandbox (a devbox) never mails anyone: everything goes to the dev mailer.
   if (cfg->sandbox || cfg->identity.mailer == "dev") {
     out.via = "dev";

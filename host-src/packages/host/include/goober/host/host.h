@@ -562,7 +562,14 @@ class Host {
   boost::json::object mail_route_doc(const MailMatch& m, const mail::inbound::Headers& headers, const std::string& body,
                                      const mail::inbound::Message& message, const std::string& envelope_from, int64_t size,
                                      bool automatic, boost::json::array attachments, const std::string& request_id,
-                                     boost::json::object* log);
+                                     boost::json::object* log, bool trust_from = false);
+  // One message for a matched mail route, delivered as the MTA hook does (attachments stored,
+  // the box called): the SMTP answer and the outcome. `trust_from` takes the message's From as
+  // verified (beta's injector, 053 § 4).
+  std::pair<boost::json::object, std::string> deliver_mail_in(const MailMatch& m, const std::string& from,
+                                                              const mail::inbound::Headers& headers, const std::string& body,
+                                                              int64_t size, const std::string& request_id,
+                                                              boost::json::object& log, bool trust_from);
   // What the sending server hears for a mail route's answer: discard (delivered), or a reject
   // with its SMTP status; `outcome` is delivered, box_rejected, or box_deferred.
   static boost::json::object mail_hook_reply(const runtime::wasm::CallResult& r, std::string* outcome);
@@ -811,6 +818,15 @@ class Host {
   static std::string& approved_by_now();
   // Beta (design/machine/053.Beta.md; beta.cpp).
   boost::json::object beta_status();
+  // Beta's mailbox (053 § 4): mail/beta/<tenant>/, each message a JSON file, the newest 2000
+  // kept for 30 days. Out: what the tenant would have sent; in: what an operator injected.
+  void beta_capture(const identity::Mail& mail, const std::string& tenant);
+  std::string beta_mail_keep(const std::string& tenant, boost::json::object message);
+  boost::json::array beta_mail_list(const std::string& tenant, int64_t limit);
+  std::optional<boost::json::object> beta_mail_get(const std::string& tenant, const std::string& id);
+  // Injects one message to a beta address, delivered as the MTA hook delivers (053 § 4).
+  boost::json::object beta_mail_inject(const std::string& to, const std::string& from, const std::string& subject,
+                                       const std::string& text, const std::string& in_reply_to, std::string* error);
   void register_beta_tools();
   // A/B splits and the traffic controller (design/machine/052.Splits.md; splits.cpp).
   struct SplitArm {

@@ -150,3 +150,83 @@ TEST_F(BetaTest, ABoxOnlyInBetaAnswersOnlyThere) {
   EXPECT_TRUE(found);
   EXPECT_TRUE(op("version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("x")}, {"channel", "staging"}}).at("isError").as_bool());
 }
+
+TEST_F(BetaTest, BetaMailIsCapturedAndInjectedMailReachesTheBox) {
+  // A sign-in on beta: its code is captured in beta's mailbox, never sent.
+  auto start = fetch(port, "beta.example.com", bhttp::verb::post, "/identity/email/start",
+                     {{"content-type", "application/x-www-form-urlencoded"}}, "email=tester@example.org");
+  EXPECT_LT(start.status, 500) << start.body;
+  host->drain_mail();
+  auto list = op("beta_mail_list", {{"tenant", "acme_beta"}});
+  ASSERT_FALSE(list.at("isError").as_bool()) << text(list);
+  ASSERT_EQ(list.at("value").as_array().size(), 1u) << text(list);
+  const auto& code = list.at("value").at(0);
+  EXPECT_EQ(code.at("direction"), "out");
+  EXPECT_EQ(code.at("to"), "tester@example.org");
+  std::error_code ec;
+  EXPECT_TRUE(!fs::exists(root / "storage/mail/outbox", ec) || fs::is_empty(root / "storage/mail/outbox", ec));
+  auto got = op("beta_mail_get", {{"tenant", "acme_beta"}, {"id", code.at("id")}});
+  ASSERT_FALSE(got.at("isError").as_bool()) << text(got);
+  EXPECT_FALSE(std::string(got.at("value").at("text").as_string()).empty());
+  EXPECT_TRUE(op("beta_mail_list", {{"tenant", "acme"}}).at("isError").as_bool());  // production has no mailbox
+  EXPECT_TRUE(op("beta_mail_get", {{"tenant", "acme_beta"}, {"id", "../../keys"}}).at("isError").as_bool());
+
+  // A box with a mail route, staged for beta: injected mail reaches it, and the outcome is kept.
+  std::string mail_manifest = R"({"box":"desk","domains":["example.com"],"routes":{"mail":{"support@":{"receive":{"name":"support_inbox","public":true}}}}})";
+  auto up = op("version_upload", {{"manifest", mail_manifest}, {"wat", module_saying("ok", {"support_inbox"})}, {"channel", "beta"}});
+  ASSERT_FALSE(up.at("isError").as_bool()) << text(up);
+  auto sent = op("beta_mail_send", {{"to", "support@beta.example.com"}, {"from", "ann@example.org"}, {"subject", "Help"},
+                                    {"text", "My order is late."}, {"in_reply_to", code.at("id")}});
+  ASSERT_FALSE(sent.at("isError").as_bool()) << text(sent);
+  EXPECT_EQ(sent.at("value").at("outcome"), "delivered") << text(sent);
+  EXPECT_EQ(sent.at("value").at("box"), "desk");
+  auto in = op("beta_mail_get", {{"tenant", "acme_beta"}, {"id", sent.at("value").at("id")}});
+  EXPECT_EQ(in.at("value").at("direction"), "in");
+  EXPECT_EQ(in.at("value").at("in_reply_to"), got.at("value").at("message_id"));
+  // Only beta takes injected mail.
+  auto prod = op("beta_mail_send", {{"to", "support@example.com"}, {"from", "ann@example.org"}, {"subject", "x"}, {"text", "x"}});
+  ASSERT_TRUE(prod.at("isError").as_bool());
+  EXPECT_NE(text(prod).find("isn't a beta domain"), std::string::npos) << text(prod);
+}
+
+namespace {
+
+// ask: calls svc.lookup and answers what came back.
+const char* kAskWat = R"wat((module
+  (import "goober" "goober_call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "goober" "goober_result_read" (func $result (param i32 i32) (result i32)))
+  (import "goober" "goober_respond" (func $respond (param i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "application/json")
+  (data (i32.const 16) "svc")
+  (data (i32.const 20) "lookup")
+  (data (i32.const 48) "{}")
+  (func (export "goober_route_ask") (result i32)
+    (local $n i32)
+    (local.set $n (call $call (i32.const 16) (i32.const 3) (i32.const 20) (i32.const 6) (i32.const 48) (i32.const 2)))
+    (drop (call $result (i32.const 4096) (local.get $n)))
+    (drop (call $respond (i32.const 200) (i32.const 0) (i32.const 16) (i32.const 4096) (local.get $n)))
+    (i32.const 0))))wat";
+
+std::string ask_manifest(const std::string& beta) {
+  return R"({"box":"asker","domains":["example.com"],
+    "external":{"svc":{"base":"http://127.0.0.1:9",)" + beta + R"("methods":{"lookup":{"verb":"get","path":"/x"}}}},
+    "routes":{"http":{"/ask":{"get":{"name":"ask","public":true}}}}})";
+}
+
+}  // namespace
+
+TEST_F(BetaTest, ServicesFailInBetaUnlessTheyAllowReads) {
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(ask_manifest(""), kAskWat, &err)) << err;
+  auto beta = fetch(port, "beta.example.com", bhttp::verb::get, "/ask").body;
+  EXPECT_NE(beta.find("isn't reached from beta"), std::string::npos) << beta;
+  // Production calls it (and fails to connect: there's no one at port 9), never refused for beta.
+  auto prod = fetch(port, "example.com", bhttp::verb::get, "/ask").body;
+  EXPECT_EQ(prod.find("beta"), std::string::npos) << prod;
+  // "beta": "allow" lets a read-only method through from beta.
+  ASSERT_TRUE(host->boxes().upload(ask_manifest(R"("beta":"allow",)"), kAskWat, &err)) << err;
+  auto allowed = fetch(port, "beta.example.com", bhttp::verb::get, "/ask").body;
+  EXPECT_EQ(allowed.find("isn't reached from beta"), std::string::npos) << allowed;
+  EXPECT_FALSE(host->boxes().upload(ask_manifest(R"("beta":"sometimes",)"), kAskWat, &err));
+}

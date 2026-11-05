@@ -78,6 +78,8 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     // Beta (053).
     m["beta_status"] = Rule::kHost;
     m["beta_clear"] = Rule::kBox;
+    for (const char* t : {"beta_mail_list", "beta_mail_get"}) m[t] = Rule::kTenant;
+    m["beta_mail_send"] = Rule::kOpen;  // checked by the address's beta tenant in beta-ops' scope (053 § 6)
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",

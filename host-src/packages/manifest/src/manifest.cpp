@@ -646,6 +646,15 @@ bool parse_external(const bj::object& ext, Manifest* m, std::string* error) {
           k == "headers" || k == "limits") {
         continue;
       }
+      // Beta (design/machine/053.Beta.md § 5): "allow" lets a beta tenant reach this service's
+      // read-only methods (effect none); everything else fails in beta.
+      if (k == "beta") {
+        if (!f.value().is_string() || (f.value().as_string() != "allow" && f.value().as_string() != "fail")) {
+          return *error = where + ".beta is \"allow\" (read-only methods reach the service from beta) or \"fail\"", false;
+        }
+        svc.beta_allow = f.value().as_string() == "allow";
+        continue;
+      }
       if (k == "openapi" || k == "operation") {
         m->warnings.push_back(where + "." + k + " is accepted but not read in v1; methods declare verb and path");
         continue;

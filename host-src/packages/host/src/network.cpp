@@ -378,6 +378,27 @@ std::string Host::external_call(CallContext& ctx, std::string_view service, std:
   if (svc->mail && m.name == "preferences") return mail_preferences_call(ctx, request);
   if (svc->invites) return invites_call(ctx, *svc, m, request);
   if (svc->mail) return mail_call(ctx, *svc, m, request);
+  // Beta (053 § 5): push is captured in beta's mailbox; a service is reached from beta only for
+  // a read-only method of a service that allows it. Mail is captured by the mailer; the web is
+  // read-only; other boxes are beta's own.
+  if (config_.get()->is_beta_tenant(ctx.tenant)) {
+    if (svc->push) {
+      beta_mail_keep(ctx.tenant, bj::object{{"direction", "push"}, {"from", ctx.manifest ? ctx.manifest->box : ""}, {"to", "push"},
+                                            {"subject", svc->name + "." + m.name}, {"text", json::dump(request)}, {"html", ""}});
+      return json::dump(bj::object{{"accepted", true}, {"captured", "beta"}});
+    }
+    std::string effect = m.effect;
+    if (!m.op.empty() && !m.effect_given) {
+      std::string err;
+      if (auto spec = specs_->get(svc->spec, &err)) {
+        if (const auto* op = spec->find(m.op)) effect = op->verb == "get" || op->verb == "head" ? "none" : "outbox";
+      }
+    }
+    if (!svc->beta_allow || effect != "none") {
+      return fail("beta: " + svc->name + "." + m.name + " isn't reached from beta (design/machine/053.Beta.md § 5): only a "
+                  "read-only method of a service that says \"beta\": \"allow\" is");
+    }
+  }
   if (svc->push) return push_call(ctx, *svc, m, request);
   // A service spoken in 034's language: specs, auth kinds, sealed secrets, bodies, uploads, polls.
   if (uses_httpx(*svc, m)) return httpx_call(ctx, *svc, m, request);

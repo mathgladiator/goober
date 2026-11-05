@@ -270,6 +270,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   mail_ = std::make_unique<MailQueue>([this] { return config_.get(); }, [this] { return keys_->aws_credentials(); },
                                       [this](const identity::Mail& m) { write_dev_mail(m); });
   mail_->set_log([this](const std::string& log, bj::object line) { log_line(log, std::move(line)); });
+  mail_->set_capture([this](const identity::Mail& m, const std::string& tenant) { beta_capture(m, tenant); });
   mail_templates_ = std::make_unique<mail::templates::Store>(config->storage / "mail" / "templates");
   // Who each tenant may mail (design/machine/029.Invites.md): the old unsubscribes become blocks once.
   // The shared stores open here, and one that won't is never a crash (systemd would restart
