@@ -1,3 +1,4 @@
+#include <atomic>
 #include "goober/manifest/manifest.h"
 #include "goober/mail_inbound/address.h"
 #include "goober/timers/cron.h"
@@ -19,9 +20,30 @@ using goober::json::get_int;
 using goober::json::get_object;
 using goober::json::get_string;
 
+namespace {
+
+std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>>& aliases() {
+  static std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>> a{
+      std::make_shared<const std::map<std::string, std::string, std::less<>>>()};
+  return a;
+}
+
+}  // namespace
+
+void set_domain_aliases(std::map<std::string, std::string, std::less<>> a) {
+  aliases().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(a)));
+}
+
 bool Manifest::applies_to(std::string_view domain) const {
   for (const auto& d : domains) {
     if (d == "*" || d == domain) return true;
+  }
+  // A beta domain answers as its production domain (design/machine/053.Beta.md § 2).
+  auto a = aliases().load();
+  if (auto it = a->find(domain); it != a->end()) {
+    for (const auto& d : domains) {
+      if (d == it->second) return true;
+    }
   }
   return false;
 }

@@ -329,3 +329,43 @@ TEST_F(RegistryTest, OnlyCompatibleVersionsOfALiveBoxSplit) {
   EXPECT_FALSE(reg->split_record("ab"));
   EXPECT_FALSE(reg->split_end("ab", &err));
 }
+
+TEST_F(RegistryTest, ABetaVersionAnswersOnlyOnBetaDomains) {
+  std::string err;
+  manifest::set_domain_aliases({{"beta.example.com", "example.com"}});
+  reg->set_beta_domains({"beta.example.com"});
+  auto v1 = reg->upload(manifest_for("site", "example.com", "/page", "page_get"), module_for({"page_get"}), &err);
+  ASSERT_TRUE(v1) << err;
+  // Before a beta version, beta answers with the live one.
+  EXPECT_EQ(reg->active()->table_for("beta.example.com").match({"page"}, "get").value->box->version, v1->version);
+  // A beta version that adds a route.
+  auto v2 = reg->store(R"({"box":"site","domains":["example.com"],"routes":{"http":{"/page":{"get":{"name":"page_get","public":true}},
+      "/new":{"get":{"name":"page_new","public":true}}}}})", module_for({"page_get", "page_new"}), "", &err);
+  ASSERT_TRUE(v2) << err;
+  ASSERT_TRUE(reg->beta_set("site", v2->version, &err)) << err;
+  auto set = reg->active();
+  EXPECT_EQ(set->table_for("beta.example.com").match({"page"}, "get").value->box->version, v2->version);
+  EXPECT_TRUE(set->table_for("beta.example.com").match({"new"}, "get").value);
+  EXPECT_EQ(set->table_for("example.com").match({"page"}, "get").value->box->version, v1->version);
+  EXPECT_FALSE(set->table_for("example.com").match({"new"}, "get").value);
+  EXPECT_EQ(set->box_for("site", true)->version, v2->version);
+  EXPECT_EQ(set->box_for("site", false)->version, v1->version);
+  EXPECT_EQ(*reg->beta_version("site"), v2->version);
+  // A box only in beta.
+  auto only = reg->store(manifest_for("fresh", "example.com", "/fresh", "fresh_get"), module_for({"fresh_get"}), "", &err);
+  ASSERT_TRUE(only) << err;
+  ASSERT_TRUE(reg->beta_set("fresh", only->version, &err)) << err;
+  EXPECT_TRUE(reg->active()->table_for("beta.example.com").match({"fresh"}, "get").value);
+  EXPECT_FALSE(reg->active()->table_for("example.com").match({"fresh"}, "get").value);
+  // A new live version keeps the beta slot; a restart keeps both.
+  ASSERT_TRUE(reg->upload(manifest_for("other", "example.com", "/other", "other_get"), module_for({"other_get"}), &err)) << err;
+  EXPECT_TRUE(reg->active()->table_for("beta.example.com").match({"new"}, "get").value);
+  boxes::BoxRegistry again(*w, engine());
+  again.set_beta_domains({"beta.example.com"});
+  again.load_all();
+  EXPECT_TRUE(again.active()->table_for("beta.example.com").match({"fresh"}, "get").value);
+  // Cleared, beta follows live again.
+  ASSERT_TRUE(reg->beta_clear("site", &err)) << err;
+  EXPECT_FALSE(reg->active()->table_for("beta.example.com").match({"new"}, "get").value);
+  manifest::set_domain_aliases({});
+}

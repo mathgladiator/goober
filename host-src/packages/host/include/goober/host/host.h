@@ -809,6 +809,9 @@ class Host {
   void register_cleanup_tools();
   // Who approved the call running on this thread now (panel_decide sets it), or "".
   static std::string& approved_by_now();
+  // Beta (design/machine/053.Beta.md; beta.cpp).
+  boost::json::object beta_status();
+  void register_beta_tools();
   // A/B splits and the traffic controller (design/machine/052.Splits.md; splits.cpp).
   struct SplitArm {
     int64_t requests = 0, errors = 0;

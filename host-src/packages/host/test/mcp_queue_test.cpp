@@ -46,8 +46,11 @@ Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target,
   req.prepare_payload();
   bhttp::write(stream, req);
   beast::flat_buffer buf;
-  bhttp::response<bhttp::string_body> res;
-  bhttp::read(stream, buf, res);
+  // A batch of a hundred whats_new answers is past beast's 8 MB default.
+  bhttp::response_parser<bhttp::string_body> parser;
+  parser.body_limit(std::uint64_t(256) << 20);
+  bhttp::read(stream, buf, parser);
+  auto res = parser.release();
   Reply r{int(res.result_int()), res.body(), {}};
   for (const auto& f : res) r.headers[base::to_lower(std::string(f.name_string()))] = std::string(f.value());
   return r;

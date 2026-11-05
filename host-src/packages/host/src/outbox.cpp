@@ -553,10 +553,10 @@ int Host::outbox_deliver(const std::string& tenant, const std::string& database,
 bool Host::deliver_result(const std::string& tenant, const std::string& box, const std::string& route,
                           const bj::object& outcome, const std::optional<SignedIn>& who) {
   auto active = boxes_->active();
-  auto it = active->boxes.find(box);
+  auto found = active->box_for(box, config_.get()->is_beta_tenant(tenant));  // beta's own on beta (053 § 3)
   const manifest::HttpRoute* target = nullptr;
-  if (it != active->boxes.end()) {
-    for (const auto& r : it->second->manifest.results) {
+  if (found) {
+    for (const auto& r : found->manifest.results) {
       if (r.name == route) target = &r;
     }
   }
@@ -588,7 +588,7 @@ bool Host::deliver_result(const std::string& tenant, const std::string& box, con
   CallOptions options;
   options.timeout_ms = target->timeout_ms;
   options.no_response_ok = true;
-  auto call = call_box(boxes::RouteRef{it->second, target}, doc, tenant, request_id, who, options);
+  auto call = call_box(boxes::RouteRef{found, target}, doc, tenant, request_id, who, options);
   bool ok = (call.result.outcome == runtime::wasm::CallResult::Outcome::kOk && call.result.status < 500) ||
             call.result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
   call.extra["result"] = route;

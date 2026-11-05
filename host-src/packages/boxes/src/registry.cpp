@@ -101,14 +101,22 @@ std::optional<ActiveSet::Split> split_of(std::shared_ptr<const ActiveBox> candid
   return sp;
 }
 
-// Every split but `except`'s, from one active set to the next.
-void carry_splits(const ActiveSet& from, ActiveSet& to, const std::string& except) {
-  for (const auto& [box, sp] : from.splits) {
-    if (box != except && to.boxes.count(box)) to.splits[box] = sp;
+}  // namespace
+
+std::shared_ptr<const ActiveBox> ActiveSet::box_for(const std::string& name, bool on_beta) const {
+  if (on_beta) {
+    if (auto it = beta.find(name); it != beta.end()) return it->second;
   }
+  auto it = boxes.find(name);
+  return it == boxes.end() ? nullptr : it->second;
 }
 
-}  // namespace
+std::map<std::string, std::shared_ptr<const ActiveBox>> ActiveSet::versions(bool on_beta) const {
+  if (!on_beta) return boxes;
+  auto out = boxes;
+  for (const auto& [name, box] : beta) out[name] = box;
+  return out;
+}
 
 bool ActiveSet::build(std::string* error) {
   tables_.clear();
@@ -117,9 +125,13 @@ bool ActiveSet::build(std::string* error) {
   for (const auto& [_, box] : boxes) {
     for (const auto& d : box->manifest.domains) keys.insert(d);
   }
+  // Every beta domain has its own tables, from the beta versions (053 § 3).
+  for (const auto& d : beta_domains) keys.insert(d);
+  std::map<std::string, std::shared_ptr<const ActiveBox>> on_beta = boxes;
+  for (const auto& [name, box] : beta) on_beta[name] = box;
   for (const auto& key : keys) {
     auto& table = tables_[key];
-    for (const auto& [name, box] : boxes) {
+    for (const auto& [name, box] : beta_domains.count(key) ? on_beta : boxes) {
       if (!box->manifest.applies_to(key)) continue;
       for (const auto& route : box->manifest.routes) {
         if (!table.add(route.pattern, route.verb, RouteRef{box, &route})) {
@@ -243,6 +255,28 @@ std::vector<std::string> BoxRegistry::load_all() {
     }
     next->build(&err);
   }
+  // Beta versions (053 § 3), on the beta domains: one that can't be loaded or conflicts there is
+  // left out, said.
+  next->beta_domains = beta_domains_;
+  for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes", ec)) {
+    std::string box = entry.path().filename().string();
+    auto version = base::read_file(entry.path() / "beta");
+    if (!base::is_valid_name(box) || !version) continue;
+    auto loaded = load_version(box, *version, &err);
+    if (!loaded) {
+      warnings.push_back("box " + box + ": beta version " + *version + " not loaded: " + err);
+      continue;
+    }
+    auto trial = std::make_shared<ActiveSet>(*next);
+    trial->beta[box] = std::make_shared<const ActiveBox>(std::move(*loaded));
+    std::string why;
+    if (trial->build(&why)) {
+      next = trial;
+    } else {
+      warnings.push_back("box " + box + ": beta version " + *version + " not loaded: " + why);
+    }
+  }
+  next->build(&err);
   // Splits (052): each box's candidate, loaded again; one that can't be is left out, said.
   for (const auto& [box, live] : next->boxes) {
     auto text = base::read_file(wal_.root() / "boxes" / box / "split");
@@ -306,6 +340,61 @@ bool BoxRegistry::split_set(const std::string& box, const std::string& version, 
   return true;
 }
 
+bool BoxRegistry::beta_set(const std::string& box, const std::string& version, std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box) || !valid_version(version)) return *error = "bad box or version", false;
+  if (archived(box, version, error)) return false;
+  auto loaded = load_version(box, version, error);
+  if (!loaded) return false;
+  if (check_ && !check_(loaded->manifest, error)) return false;
+  auto current = active();
+  auto next = std::make_shared<ActiveSet>(*current);
+  next->beta[box] = std::make_shared<const ActiveBox>(std::move(*loaded));
+  if (!next->build(error)) return false;
+  wal::Bundle bundle = {{wal::FileChange::Kind::kWrite, "boxes/" + box + "/beta", version}};
+  std::error_code ec;
+  if (fs::exists(wal_.root() / "boxes" / box / "dropped", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/dropped", ""});
+  if (!wal_.commit(bundle, error)) return false;
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+  return true;
+}
+
+bool BoxRegistry::beta_clear(const std::string& box, std::string* error) {
+  std::lock_guard lock(mu_);
+  if (!base::is_valid_name(box)) return *error = "bad box name", false;
+  std::error_code ec;
+  if (!fs::exists(wal_.root() / "boxes" / box / "beta", ec)) return *error = "box " + box + " has no beta version", false;
+  auto current = active();
+  auto next = std::make_shared<ActiveSet>(*current);
+  next->beta.erase(box);
+  if (!next->build(error)) return false;
+  if (!wal_.commit({{wal::FileChange::Kind::kDelete, "boxes/" + box + "/beta", ""}}, error)) return false;
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+  return true;
+}
+
+std::optional<std::string> BoxRegistry::beta_version(const std::string& box) const {
+  if (!base::is_valid_name(box)) return std::nullopt;
+  return base::read_file(wal_.root() / "boxes" / box / "beta");
+}
+
+void BoxRegistry::set_beta_domains(std::set<std::string> domains) {
+  std::lock_guard lock(mu_);
+  beta_domains_ = std::move(domains);
+  auto next = std::make_shared<ActiveSet>(*active());
+  next->beta_domains = beta_domains_;
+  std::string err;
+  if (!next->build(&err)) {
+    // A beta version that conflicts on a newly named beta domain: beta answers with live there.
+    next->beta.clear();
+    next->build(&err);
+  }
+  std::lock_guard snap(snapshot_mu_);
+  active_ = next;
+}
+
 bool BoxRegistry::split_end(const std::string& box, std::string* error) {
   std::lock_guard lock(mu_);
   if (!base::is_valid_name(box)) return *error = "bad box name", false;
@@ -347,8 +436,7 @@ std::vector<std::string> BoxRegistry::unloaded() const {
 bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
                            bool dry_run) {
   auto current = active();
-  auto next = std::make_shared<ActiveSet>();
-  next->boxes = current->boxes;
+  auto next = std::make_shared<ActiveSet>(*current);  // its splits, beta versions, and beta domains too
   const std::string& name = candidate->manifest.box;
   // Names are unique across the host: no route name may repeat in another box.
   std::set<std::string> mine;
@@ -410,7 +498,7 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   if (!next->build(error)) return false;
   if (dry_run) return true;
   // A new live version ends the box's split (052 § 4).
-  carry_splits(*current, *next, name);
+  next->splits.erase(name);
   wal::Bundle all = bundle;
   std::error_code sec;
   if (fs::exists(wal_.root() / "boxes" / name / "split", sec)) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/split", ""});
@@ -529,12 +617,10 @@ std::optional<std::string> BoxRegistry::disable(const std::string& box, const st
   auto it = current->boxes.find(box);
   if (it == current->boxes.end()) return *error = "no active box named " + box, std::nullopt;
   std::string version = it->second->version;
-  auto next = std::make_shared<ActiveSet>();
-  for (const auto& [name, b] : current->boxes) {
-    if (name != box) next->boxes[name] = b;
-  }
+  auto next = std::make_shared<ActiveSet>(*current);
+  next->boxes.erase(box);
+  next->splits.erase(box);
   if (!next->build(error)) return std::nullopt;
-  carry_splits(*current, *next, box);
   std::string record = json::dump(boost::json::object{{"version", version}, {"why", why.substr(0, 500)}});
   wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
                         {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
@@ -637,14 +723,14 @@ std::optional<std::vector<std::string>> BoxRegistry::drop(const std::string& box
   std::shared_ptr<ActiveSet> next;
   wal::Bundle bundle;
   int64_t now = base::now_unix_ms();
-  if (current->boxes.count(box)) {
-    next = std::make_shared<ActiveSet>();
-    for (const auto& [name, b] : current->boxes) {
-      if (name != box) next->boxes[name] = b;
-    }
+  if (current->boxes.count(box) || current->beta.count(box)) {
+    next = std::make_shared<ActiveSet>(*current);
+    next->boxes.erase(box);
+    next->splits.erase(box);
+    next->beta.erase(box);
     if (!next->build(error)) return std::nullopt;
-    carry_splits(*current, *next, box);
   }
+  if (fs::exists(root / "beta", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/beta", ""});
   if (fs::exists(root / "split", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""});
   if (fs::exists(root / "active", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""});
   if (fs::exists(root / "disabled", ec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/disabled", ""});
@@ -830,6 +916,7 @@ std::map<std::string, std::string> BoxRegistry::kept(const std::string& box,
   if (auto d = disabled(box); d && !d->version.empty()) {
     out[d->version] = "the version of the disabled box: box_enable serves it again";
   }
+  if (auto b = beta_version(box)) out[*b] = "the beta version: it answers on beta domains";
   if (auto sp = split_record(box); sp && sp->contains("version") && sp->at("version").is_string()) {
     out[std::string(sp->at("version").as_string())] = "the candidate of a split: it serves a share of the traffic";
   }

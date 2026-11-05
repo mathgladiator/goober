@@ -75,6 +75,9 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     // Splits (052): by the box; the list keeps the scope's boxes.
     for (const char* t : {"split_start", "split_set", "split_stop", "split_report"}) m[t] = Rule::kBox;
     m["split_list"] = Rule::kFiltered;
+    // Beta (053).
+    m["beta_status"] = Rule::kHost;
+    m["beta_clear"] = Rule::kBox;
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",

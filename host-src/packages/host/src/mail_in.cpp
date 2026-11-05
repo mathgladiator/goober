@@ -252,7 +252,7 @@ std::optional<Host::MailMatch> Host::match_mail(const std::string& address, std:
   std::optional<Candidate> best;
   std::vector<std::shared_ptr<const boxes::ActiveBox>> boxes;
   if (only) boxes.push_back(only);
-  else for (const auto& [name, b] : active->boxes) boxes.push_back(b);
+  else for (const auto& [name, b] : active->versions(!cfg->beta_of(domain).empty())) boxes.push_back(b);  // 053 § 3
   for (const auto& box : boxes) {
     if (!box->manifest.applies_to(domain)) continue;
     for (const auto& r : box->manifest.mail) {

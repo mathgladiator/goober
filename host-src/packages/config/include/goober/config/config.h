@@ -26,6 +26,9 @@ struct Limit {
 struct DomainEntry {
   std::string tenant;
   std::string owner;  // the first owner's email, granted "owner" when that address first signs in; or ""
+  // A beta domain (design/machine/053.Beta.md § 2): the production domain it is the beta of,
+  // or "". Its tenant is the production tenant's beta tenant.
+  std::string beta_of;
 };
 
 // The built-in identity service (013.Identity.md; design/machine/006.LocalIdentity.md).
@@ -111,6 +114,17 @@ struct HostConfig {
   std::string operations_domain;
   std::string operations_listen_address = "127.0.0.1";
   std::optional<uint16_t> operations_listen_port;
+  // beta-ops (053 § 6): the panel and operator MCP for beta tenants only, or "".
+  std::string operations_beta_domain;
+  // Beta (053): the production domain a beta domain answers as, or "".
+  std::string beta_of(std::string_view domain) const;
+  // Whether a tenant is a beta tenant; a production tenant's beta tenant ("" for none); a beta
+  // tenant's production tenant ("" when it isn't one).
+  bool is_beta_tenant(std::string_view tenant) const;
+  std::string beta_tenant_of(std::string_view tenant) const;
+  std::string production_tenant_of(std::string_view beta_tenant) const;
+  // Every beta domain and the production domain it answers as.
+  std::map<std::string, std::string, std::less<>> domain_aliases() const;
   // The panel's domain: operations.domain, or ops.localhost in local mode, or "" (off).
   std::string panel_domain() const { return !operations_domain.empty() ? operations_domain : local ? "ops.localhost" : ""; }
   // The operations audit's checks the human asked not to be suggested again (audit.quiet),

@@ -101,7 +101,7 @@ void Host::handle_tenant_mcp(const Request& req, const Finish& finish, const std
     auto ref = listed_ref;
     std::string split_version;
     bool candidate = false;
-    if (auto it = active->splits.find(ref.box->manifest.box); it != active->splits.end()) {
+    if (auto it = active->splits.find(ref.box->manifest.box); it != active->splits.end() && config_.get()->beta_of(domain).empty()) {
       split_version = it->second.candidate->version;
       if (auto arm = split_arm(*active, ref, "u:" + domain + ":" + std::to_string(who->user.user_id))) {
         ref = *arm;

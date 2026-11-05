@@ -849,6 +849,9 @@ void Host::register_tools() {
                       {"schemas", mcp::any_property("With dry_run: schemas the manifest uses that aren't stored yet "
                                                     "(a list of schema objects or JSON texts), checked as schema_check "
                                                     "checks them and used as if stored. Nothing is stored.")},
+                      {"channel", mcp::enum_property("\"beta\" stores it as the box's beta version: it answers on beta "
+                                                     "domains only (design/machine/053.Beta.md); \"live\" (the default) as before.",
+                                                     {"live", "beta"})},
                       {"activate", mcp::boolean_property("false stores the version without making it active (every "
                                                          "check still runs); version_promote makes it live. Default true.")},
                       {"wat", string_property("The module as WebAssembly text.")},
@@ -933,6 +936,15 @@ void Host::register_tools() {
          // activate: false stores a version dark: every check runs, and version_promote makes it live.
          bool activate = true;
          if (auto a = args.find("activate"); a != args.end() && a->value().is_bool()) activate = a->value().get_bool();
+         // channel "beta" (053 § 3): stored, then the box's beta version, answering on beta domains only.
+         bool beta = false;
+         if (auto c = args.find("channel"); c != args.end()) {
+           if (!c->value().is_string() || (c->value().as_string() != "beta" && c->value().as_string() != "live")) {
+             return ToolResult::fail("channel is \"live\" (the default) or \"beta\"");
+           }
+           beta = c->value().as_string() == "beta";
+           if (beta) activate = false;
+         }
          // The review is against the version that was live before this one: taken first.
          bj::object reviewed;
          attach_review(reviewed);
@@ -945,6 +957,17 @@ void Host::register_tools() {
          if (auto live = boxes_->active(); live->boxes.count(box_name)) replaced = live->boxes.at(box_name)->version;
          auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err);
          if (!result) return ToolResult::fail(err);
+         if (beta) {
+           if (!boxes_->beta_set(box_name, result->version, &err)) return ToolResult::fail("stored " + result->version + ", but not as the beta version: " + err);
+           bj::array warnings;
+           for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
+           bj::object out{{"version", result->version}, {"active", false}, {"beta", true}, {"warnings", warnings},
+                          {"next", "answering on beta domains now; promotion_preview shows what would go to production"}};
+           if (!module_sha256.empty()) out["module_sha256"] = module_sha256;
+           for (auto& kv : reviewed) out[kv.key()] = std::move(kv.value());
+           audit("beta.version", current_operator(), "box:" + box_name, "ok", bj::object{{"version", result->version}});
+           return ToolResult::ok(std::move(out));
+         }
          if (activate && job_runs_) job_runs_->replaced(box_name, replaced, result->version, current_operator(), base::now_unix_ms());
          bj::array warnings;
          for (const auto& w : result->warnings) warnings.push_back(bj::value(w));
@@ -1126,12 +1149,21 @@ void Host::register_tools() {
                   "saying so. schemas: each schema the version names, per database it opens, \"applied\" or \"pending\" (a "
                   "schema applies on the first call that opens the database, or now with schema_apply). Try first "
                   "(route_try, job_dry_run), then promote, then version_health.",
-                  object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")}},
+                  object_schema({{"box", string_property("The box name.")}, {"version", string_property("The version.")},
+                                 {"channel", mcp::enum_property("\"beta\" makes it the box's beta version (beta domains "
+                                                                "only, 053); \"live\" (the default) makes it live.",
+                                                                {"live", "beta"})}},
                                 {"box", "version"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
                     auto version = arg(args, "version");
                     if (!box || !version) return ToolResult::fail("box and version are required");
+                    if (arg(args, "channel").value_or("live") == "beta") {
+                      std::string err;
+                      if (!boxes_->beta_set(*box, *version, &err)) return ToolResult::fail(err);
+                      audit("beta.version", current_operator(), "box:" + *box, "ok", bj::object{{"version", *version}});
+                      return ToolResult::ok(bj::object{{"box", *box}, {"beta", *version}});
+                    }
                     std::string replaced;
                     if (auto active = boxes_->active(); active->boxes.count(*box)) replaced = active->boxes.at(*box)->version;
                     std::string err;

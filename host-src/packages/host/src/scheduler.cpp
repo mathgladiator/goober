@@ -61,6 +61,15 @@ std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostCo
   return {out.begin(), out.end()};
 }
 
+std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg, const manifest::Manifest& m, bool beta) {
+  auto all = tenants_of(cfg, m);
+  std::vector<std::pair<std::string, std::string>> out;
+  for (auto& p : all) {
+    if (cfg.is_beta_tenant(p.first) == beta) out.push_back(std::move(p));
+  }
+  return out;
+}
+
 namespace {
 
 std::string rows_cache_key(const std::string& tenant, const std::string& box, const std::string& source) {
@@ -141,7 +150,9 @@ void Host::timer_tick(int64_t now_ms) {
   std::set<std::string> seen;  // every key planned this tick; the rest are gone
   {
     std::lock_guard lock(st.mu);
-    for (const auto& [box_name, box] : active->boxes) {
+    // Production's tenants with the live versions, beta's with the beta versions (053 § 3).
+    for (bool on_beta : {false, true})
+    for (const auto& [box_name, box] : active->versions(on_beta)) {
       for (const auto& t : box->manifest.timers) {
         boxes::RouteRef ref{box, &t};
         std::optional<timers::Cron> cron;
@@ -170,7 +181,9 @@ void Host::timer_tick(int64_t now_ms) {
           }
           if (!all_fixed) fixed.clear();
         }
-        for (const auto& [own_tenant, domain] : tenants_of(*cfg, box->manifest)) {
+        // A fixed tenant is on one side only.
+        if (!fixed.empty() && cfg->is_beta_tenant(fixed) != on_beta) continue;
+        for (const auto& [own_tenant, domain] : tenants_of(*cfg, box->manifest, on_beta)) {
           // One tenant's trouble (its timers.db or its rows unreadable) is its own: logged,
           // and every other tenant's timers fire.
           try {
@@ -374,7 +387,7 @@ bj::array Host::timers_due() {
 
 std::optional<int> Host::run_timer_now(const std::string& name, const std::string& tenant, std::string* error) {
   auto active = boxes_->active();
-  for (const auto& [box_name, box] : active->boxes) {
+  for (const auto& [box_name, box] : active->versions(config_.get()->is_beta_tenant(tenant))) {
     for (const auto& t : box->manifest.timers) {
       if (t.name != name) continue;
       bool serves = false;

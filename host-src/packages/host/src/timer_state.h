@@ -36,5 +36,7 @@ struct Host::TimerState {
 
 // The tenants a box's timers and identity routes run for, each with a domain of its own.
 std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg, const manifest::Manifest& m);
+// Only the beta tenants (053), or only the others: a box version answers the one side or the other.
+std::vector<std::pair<std::string, std::string>> tenants_of(const config::HostConfig& cfg, const manifest::Manifest& m, bool beta);
 
 }  // namespace goober::host

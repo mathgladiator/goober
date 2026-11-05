@@ -313,10 +313,11 @@ constexpr int kMaxInternalDepth = 4;
 std::string Host::call_as_box(const std::string& box, const std::string& tenant, const std::string& service,
                               const std::string& method, const std::string& request, const std::string& user_id) {
   auto active = boxes_->active();
-  auto it = active->boxes.find(box);
-  if (it == active->boxes.end()) return R"({"error":"no such box"})";
+  // A beta tenant's call reaches the box's beta version (053 § 3).
+  auto found = active->box_for(box, config_.get()->is_beta_tenant(tenant));
+  if (!found) return R"({"error":"no such box"})";
   CallContext ctx;
-  ctx.manifest = &it->second->manifest;
+  ctx.manifest = &found->manifest;
   ctx.tenant = tenant;
   ctx.domain = site_of(tenant);
   ctx.request_id = "test-" + std::to_string(base::now_unix_ms()) + "-" + std::to_string(base::os_random_u64() % 100000);
@@ -325,7 +326,7 @@ std::string Host::call_as_box(const std::string& box, const std::string& tenant,
   std::string out = external_call(ctx, service, method, request);
   if (!ctx.pending.empty()) {
     std::string err;
-    if (!enqueue_outbox(it->second->manifest, tenant, ctx.pending, nullptr, &err)) return json::dump(bj::object{{"error", err}});
+    if (!enqueue_outbox(found->manifest, tenant, ctx.pending, nullptr, &err)) return json::dump(bj::object{{"error", err}});
   }
   return out;
 }
@@ -740,10 +741,10 @@ std::string Host::internal_call(CallContext& ctx, const manifest::ExternalServic
                                 const bj::value& request) {
   auto fail = [](std::string why) { return json::dump(bj::object{{"error", std::move(why)}}); };
   auto active = boxes_->active();
-  auto it = active->boxes.find(svc.box);
-  if (it == active->boxes.end()) return fail("box " + svc.box + " isn't running");
+  auto found = active->box_for(svc.box, config_.get()->is_beta_tenant(ctx.tenant));  // beta's own on beta (053 § 3)
+  if (!found) return fail("box " + svc.box + " isn't running");
   const manifest::HttpRoute* route = nullptr;
-  for (const auto& r : it->second->manifest.internal) {
+  for (const auto& r : found->manifest.internal) {
     if (r.name == m.name) route = &r;
   }
   // Both sides agree at upload; checked again here, since a box can be promoted back.
@@ -751,7 +752,7 @@ std::string Host::internal_call(CallContext& ctx, const manifest::ExternalServic
     return fail(svc.box + "." + m.name + " doesn't take calls from " + ctx.manifest->box);
   }
   if (internal_depth >= kMaxInternalDepth) return fail("internal calls nest deeper than " + std::to_string(kMaxInternalDepth));
-  const auto& callee = *it->second;
+  const auto& callee = *found;
   uint8_t rnd[8];
   base::os_random_fill(rnd);
   std::string request_id = base::hex_encode(std::string_view(reinterpret_cast<char*>(rnd), sizeof rnd));
@@ -773,7 +774,7 @@ std::string Host::internal_call(CallContext& ctx, const manifest::ExternalServic
   int64_t started = base::monotonic_us();
   BoxCall call;
   try {
-    call = call_box(boxes::RouteRef{it->second, route}, doc, ctx.tenant, request_id, ctx.who, options);
+    call = call_box(boxes::RouteRef{found, route}, doc, ctx.tenant, request_id, ctx.who, options);
   } catch (...) {
     --internal_depth;
     throw;

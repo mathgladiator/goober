@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -50,6 +51,18 @@ class ActiveSet {
     std::map<std::string, const manifest::HttpRoute*> routes;  // "verb name" -> the candidate's route
   };
   std::map<std::string, Split> splits;  // by box
+
+  // Beta (design/machine/053.Beta.md § 3): each box's beta version, and the beta domains whose
+  // tables are built from them. On a beta domain a box answers with its beta version, else its
+  // live one; a box only in beta answers only there.
+  std::map<std::string, std::shared_ptr<const ActiveBox>> beta;
+  std::set<std::string> beta_domains;
+  // The version that answers for box `name`: its beta version when `on_beta` and it has one,
+  // else its live version; null when neither.
+  std::shared_ptr<const ActiveBox> box_for(const std::string& name, bool on_beta) const;
+  // Every box that answers on production (the live versions), or on beta (each box's beta
+  // version, else its live one).
+  std::map<std::string, std::shared_ptr<const ActiveBox>> versions(bool on_beta) const;
   // The candidate's route for `ref` when its box is split and `bucket` (0 to 9999) falls under
   // the share, else nullopt (the live version answers).
   std::optional<RouteRef> candidate_for(const RouteRef& ref, int64_t bucket) const;
@@ -170,6 +183,14 @@ class BoxRegistry {
   // A box's split record, or nullopt.
   std::optional<boost::json::object> split_record(const std::string& box) const;
 
+  // Beta (053 § 3): makes a stored version the box's beta version (a box with no live version
+  // too), kept in boxes/$box/beta; refused when it conflicts on a beta domain. beta_clear makes
+  // beta follow the live version again. set_beta_domains says which domains are beta.
+  bool beta_set(const std::string& box, const std::string& version, std::string* error);
+  bool beta_clear(const std::string& box, std::string* error);
+  std::optional<std::string> beta_version(const std::string& box) const;
+  void set_beta_domains(std::set<std::string> domains);
+
   // A dropped box's record, or nullopt (also once it is uploaded again).
   std::optional<boost::json::object> dropped(const std::string& box) const;
 
@@ -246,6 +267,7 @@ class BoxRegistry {
   Retention retention_;
   Protector protector_;
   std::function<std::string()> actor_;
+  std::set<std::string> beta_domains_;  // under mu_
 };
 
 }  // namespace goober::boxes

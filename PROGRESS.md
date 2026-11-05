@@ -1157,10 +1157,22 @@ The human: "I'd like the ability to train so let's get a/b traffic flow started.
       comparison report; cost as a guardrail; splits between two boxes.
 - [ ] Decisions (052 § 9).
 
-### Phase 59: a beta site on the production host (proposed, 2026-11-04)
-`design/machine/053.Beta.md`: waits for the human's seven decisions, the first being the conflict
-with 310's "a staging environment is just another goober host".
-- [ ] Decisions (053 § 9).
+### Phase 59: a beta site on the production host (2026-11-04)
+`design/machine/053.Beta.md`, decided by the human (staging on the same host, linked to
+production, promotion in-host first and shaped for a remote host later):
+- [x] Step 1: `beta-of` on a domain (one beta tenant per site, its own tenant),
+      `operations.beta-domain`; a beta domain matches every manifest its production domain does;
+      tests.
+- [x] Step 2: the registry's beta slot (`boxes/<box>/beta`), beta route tables, a box only in
+      beta; `version_upload {channel: "beta"}`, `version_promote {channel: "beta"}`,
+      `beta_status`, `beta_clear`; timers, identity events, inbound mail, outbox results, and
+      internal calls pick the beta version for beta tenants; splits never on beta; tests.
+- [ ] Step 3: beta mail captured; the viewer and injector; `beta_mail_*`.
+- [ ] Step 4: effects that fail in beta unless allowed.
+- [ ] Step 5: beta-ops (panel and operator MCP), `host:beta`, scope.
+- [ ] Step 6: promotion as a change set, in-host.
+- [ ] Step 7: the deploy audit's two offers.
+- [x] Decisions (053 § 9).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

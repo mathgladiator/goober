@@ -373,3 +373,35 @@ TEST(Config, ControlDefaultsAreCheckedAgainstTheHostsLimits) {
       "controls":{"defaults":{"fuel":6000000}}})", "/", &err));
   EXPECT_NE(err.find("limits.fuel max"), std::string::npos) << err;
 }
+
+TEST(Config, BetaDomainsLinkToProduction) {
+  std::string err;
+  auto cfg = parse_config(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"},
+      "other.com": {"tenant": "other"}}, "operations": {"domain": "ops.example.com", "beta-domain": "beta-ops.example.com"}})", "/", &err);
+  ASSERT_TRUE(cfg) << err;
+  EXPECT_EQ(cfg->beta_of("beta.example.com"), "example.com");
+  EXPECT_EQ(cfg->beta_of("example.com"), "");
+  EXPECT_TRUE(cfg->is_beta_tenant("acme_beta"));
+  EXPECT_FALSE(cfg->is_beta_tenant("acme"));
+  EXPECT_EQ(cfg->beta_tenant_of("acme"), "acme_beta");
+  EXPECT_EQ(cfg->beta_tenant_of("other"), "");
+  EXPECT_EQ(cfg->production_tenant_of("acme_beta"), "acme");
+  EXPECT_EQ(cfg->operations_beta_domain, "beta-ops.example.com");
+  EXPECT_EQ(cfg->domain_aliases().size(), 1u);
+
+  auto bad = [&](const std::string& text, const std::string& want) {
+    std::string e;
+    EXPECT_FALSE(parse_config(text, "/", &e)) << text;
+    EXPECT_NE(e.find(want), std::string::npos) << e;
+  };
+  bad(R"({"domains": {"beta.example.com": {"tenant": "b", "beta-of": "nowhere.com"}}})", "isn't a production domain");
+  bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme", "beta-of": "example.com"}}})",
+      "tenant of its own");
+  bad(R"({"domains": {"example.com": {"tenant": "acme"}, "a.example.com": {"tenant": "b1", "beta-of": "example.com"},
+      "b.example.com": {"tenant": "b2", "beta-of": "example.com"}}})", "two beta tenants");
+  bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "b", "beta-of": "example.com"},
+      "loose.com": {"tenant": "b"}}})", "has no beta-of");
+  bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "b", "beta-of": "example.com"},
+      "gamma.example.com": {"tenant": "c", "beta-of": "beta.example.com"}}})", "isn't a production domain");
+  bad(R"({"domains": {"example.com": {"tenant": "acme"}}, "operations": {"beta-domain": "example.com"}})", "domain of its own");
+}

@@ -110,9 +110,11 @@ void Host::identity_tick(int64_t now_ms) {
     std::vector<identity::Event> events;
   };
   std::vector<Delivery> work;
-  for (const auto& [box_name, box] : active->boxes) {
+  // Production's tenants to the live versions, beta's to the beta versions (053 § 3).
+  for (bool on_beta : {false, true})
+  for (const auto& [box_name, box] : active->versions(on_beta)) {
     for (const auto& r : box->manifest.identity) {
-      for (const auto& [tenant, domain] : tenants_of(*cfg, box->manifest)) {
+      for (const auto& [tenant, domain] : tenants_of(*cfg, box->manifest, on_beta)) {
         // One tenant's unreadable cursors or realm never hold up another tenant's events.
         try {
           std::string key = tenant + "|" + box_name + "|" + r.name;

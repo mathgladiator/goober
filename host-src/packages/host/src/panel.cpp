@@ -64,7 +64,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "changeset_show", "changeset_list", "changeset_preview",
     "heat_study_get", "heat_study_list",
     "skill_list", "skill_search", "skill_get",
-    "cleanup_report", "split_report", "split_list"};
+    "cleanup_report", "split_report", "split_list", "beta_status"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
 

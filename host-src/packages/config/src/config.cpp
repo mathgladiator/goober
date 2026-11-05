@@ -101,6 +101,39 @@ bool is_loopback_address(std::string_view address) {
   return parts == 3 && digits > 0;
 }
 
+std::string HostConfig::beta_of(std::string_view domain) const {
+  auto it = domains.find(std::string(domain));
+  return it == domains.end() ? std::string() : it->second.beta_of;
+}
+
+bool HostConfig::is_beta_tenant(std::string_view tenant) const { return !production_tenant_of(tenant).empty(); }
+
+std::string HostConfig::beta_tenant_of(std::string_view tenant) const {
+  for (const auto& [d, e] : domains) {
+    if (e.beta_of.empty()) continue;
+    auto p = domains.find(e.beta_of);
+    if (p != domains.end() && p->second.tenant == tenant) return e.tenant;
+  }
+  return "";
+}
+
+std::string HostConfig::production_tenant_of(std::string_view beta_tenant) const {
+  for (const auto& [d, e] : domains) {
+    if (e.beta_of.empty() || e.tenant != beta_tenant) continue;
+    auto p = domains.find(e.beta_of);
+    if (p != domains.end()) return p->second.tenant;
+  }
+  return "";
+}
+
+std::map<std::string, std::string, std::less<>> HostConfig::domain_aliases() const {
+  std::map<std::string, std::string, std::less<>> out;
+  for (const auto& [d, e] : domains) {
+    if (!e.beta_of.empty()) out[d] = e.beta_of;
+  }
+  return out;
+}
+
 std::shared_ptr<const HostConfig> local_mode(std::shared_ptr<const HostConfig> config) {
   auto out = std::make_shared<HostConfig>(*config);
   out->local = true;
@@ -244,7 +277,7 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       std::string domain = base::to_lower(kv.key());
       if (!kv.value().is_object()) return *error = "domains." + domain + " must be an object", nullptr;
       const auto& entry = kv.value().get_object();
-      if (!check_keys(entry, {"tenant", "owner", "redirect-to"}, "domains." + domain, &err)) return *error = err, nullptr;
+      if (!check_keys(entry, {"tenant", "owner", "redirect-to", "beta-of"}, "domains." + domain, &err)) return *error = err, nullptr;
       if (entry.contains("redirect-to")) {
         // A redirect is only that: no tenant, no owner (015.Domains.md).
         if (entry.size() != 1) return *error = "domains." + domain + " has \"redirect-to\", so it takes nothing else", nullptr;
@@ -259,11 +292,42 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
       }
       std::string owner = base::to_lower(get_string(entry, "owner", &err).value_or(""));
       if (!owner.empty() && !is_email(owner)) return *error = "domains." + domain + ".owner must be an email", nullptr;
-      cfg->domains[domain] = DomainEntry{*tenant, owner};
+      std::string beta_of = base::to_lower(get_string(entry, "beta-of", &err).value_or(""));
+      cfg->domains[domain] = DomainEntry{*tenant, owner, beta_of};
+    }
+    // Beta domains (053 § 2): each the beta of a production domain, in a tenant of its own that
+    // holds only beta domains of one production tenant; one beta tenant per production tenant.
+    std::map<std::string, std::string> beta_tenant_of, prod_tenant_of;
+    for (const auto& [domain, e] : cfg->domains) {
+      if (e.beta_of.empty()) continue;
+      auto prod = cfg->domains.find(e.beta_of);
+      if (prod == cfg->domains.end() || !prod->second.beta_of.empty()) {
+        return *error = "domains." + domain + ".beta-of is " + e.beta_of + ", which isn't a production domain in \"domains\"", nullptr;
+      }
+      if (prod->second.tenant == e.tenant) {
+        return *error = "domains." + domain + " is a beta, so it needs a tenant of its own, like " + e.tenant + "_beta", nullptr;
+      }
+      auto [b, b_new] = beta_tenant_of.emplace(prod->second.tenant, e.tenant);
+      auto [p, p_new] = prod_tenant_of.emplace(e.tenant, prod->second.tenant);
+      if (b->second != e.tenant) return *error = "tenant " + prod->second.tenant + " has two beta tenants: one beta a site", nullptr;
+      if (p->second != prod->second.tenant) return *error = "beta tenant " + e.tenant + " is the beta of two tenants", nullptr;
+    }
+    for (const auto& [domain, e] : cfg->domains) {
+      if (e.beta_of.empty() && prod_tenant_of.count(e.tenant)) {
+        return *error = "domains." + domain + " is in beta tenant " + e.tenant + " but has no beta-of: a beta tenant holds only beta domains", nullptr;
+      }
+      if (!e.beta_of.empty() && beta_tenant_of.count(e.tenant)) {
+        return *error = "tenant " + e.tenant + " is both a beta and has a beta", nullptr;
+      }
     }
   }
   if (const auto* ops = get_object(root, "operations", &err)) {
-    if (!check_keys(*ops, {"token", "domain", "listen"}, "operations", &err)) return *error = err, nullptr;
+    if (!check_keys(*ops, {"token", "domain", "listen", "beta-domain"}, "operations", &err)) return *error = err, nullptr;
+    if (auto v = get_string(*ops, "beta-domain", &err)) {
+      std::string d = base::to_lower(*v);
+      if (!is_dns_name(d)) return *error = "operations.beta-domain must be a DNS name, like beta-ops.example.com", nullptr;
+      cfg->operations_beta_domain = d;
+    }
     if (auto v = get_string(*ops, "token", &err)) cfg->operations_token = *v;
     if (auto v = get_string(*ops, "domain", &err)) {
       std::string d = base::to_lower(*v);
@@ -301,6 +365,12 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
   if (cfg->domains.count(cfg->operations_domain)) {
     *error = "operations.domain " + cfg->operations_domain +
              " is also a tenant's domain: the panel needs a domain of its own, like ops." + cfg->operations_domain;
+    return nullptr;
+  }
+  if (!cfg->operations_beta_domain.empty() &&
+      (cfg->domains.count(cfg->operations_beta_domain) || cfg->redirects.count(cfg->operations_beta_domain) ||
+       cfg->operations_beta_domain == cfg->operations_domain)) {
+    *error = "operations.beta-domain " + cfg->operations_beta_domain + " needs a domain of its own, like beta-ops.example.com";
     return nullptr;
   }
   if (!cfg->operations_token.empty() && cfg->operations_token.size() < 16) {

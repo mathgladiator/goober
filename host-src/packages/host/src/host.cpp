@@ -292,6 +292,13 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
                                                    [this](const identity::Mail& m) { send_mail(m); });
   identity_->set_id_source(next_id_);
   backups_ = std::make_unique<BackupService>([this] { return config_.get(); }, *keys_, config_file_);
+  // Beta domains answer as their production domains, with the boxes' beta versions (053 § 3).
+  manifest::set_domain_aliases(config->domain_aliases());
+  {
+    std::set<std::string> beta;
+    for (const auto& [d, p] : config->domain_aliases()) beta.insert(d);
+    boxes_->set_beta_domains(std::move(beta));
+  }
   for (auto& w : boxes_->load_all()) startup_notes_.push_back(std::move(w));
   mcp_ = std::make_unique<mcp::McpServer>(
       "goober-operations", std::string(kVersion),
@@ -356,6 +363,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_skill_tools();
   register_cleanup_tools();
   register_split_tools();
+  register_beta_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "
                   "publish, and watchers, and each open subscription's route, subscribers, evaluations, and last "
@@ -608,6 +616,12 @@ std::string Host::reload() {
   if (!next) return "reload refused: " + err;
   if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
+  manifest::set_domain_aliases(next->domain_aliases());
+  {
+    std::set<std::string> beta;
+    for (const auto& [d, p] : next->domain_aliases()) beta.insert(d);
+    boxes_->set_beta_domains(std::move(beta));
+  }
   set_outbound_sandbox(next->sandbox);
   setup_version_keeping();  // limits.version-* (045 § 3.1)
   setup_controls();         // controls.defaults (047 § 2), under every domain's own
@@ -1809,7 +1823,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
   }
   // An A/B split (052): a signed-in person by domain and user id, anyone else by address, so a
   // person stays on one version. A try runs the version it named.
-  if (!trying && active && !active->splits.empty()) {
+  if (!trying && active && !active->splits.empty() && cfg->beta_of(domain).empty()) {
     if (auto it = active->splits.find(ref.box->manifest.box); it != active->splits.end()) {
       std::string key = who ? "u:" + domain + ":" + std::to_string(who->user.user_id) : "a:" + rate_key(client_address(req));
       auto arm = split_arm(*active, ref, key);

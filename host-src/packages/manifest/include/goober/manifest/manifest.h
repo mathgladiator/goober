@@ -350,6 +350,10 @@ struct Manifest {
   bool applies_to(std::string_view domain) const;
 };
 
+// Domains that answer as another for applies_to: a beta domain as its production domain
+// (design/machine/053.Beta.md § 2), set by the host from its config. Safe from any thread.
+void set_domain_aliases(std::map<std::string, std::string, std::less<>> aliases);
+
 // Parses requirements in disjunctive normal form: a list of roles (one clause), or a
 // list of lists of roles. Parameters must belong to `pattern`; content pages pass an
 // empty pattern, so only {!tenant} and {!user_id} can be substituted.

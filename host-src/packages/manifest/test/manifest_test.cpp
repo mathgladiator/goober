@@ -715,3 +715,15 @@ TEST(Manifest, RouteLimits) {
   refused(R"({"rate":{"per-minute":1}})", "only fuel applies here", "timer");
   refused(R"({"closed":true})", "unknown key closed");
 }
+
+TEST(Manifest, ABetaDomainAnswersAsItsProductionDomain) {
+  std::string err;
+  auto m = parse_manifest(R"({"box":"site","domains":["example.com"]})", &err);
+  ASSERT_TRUE(m) << err;
+  EXPECT_FALSE(m->applies_to("beta.example.com"));
+  set_domain_aliases({{"beta.example.com", "example.com"}});
+  EXPECT_TRUE(m->applies_to("beta.example.com"));
+  EXPECT_FALSE(m->applies_to("beta.other.com"));
+  set_domain_aliases({});
+  EXPECT_FALSE(m->applies_to("beta.example.com"));
+}
