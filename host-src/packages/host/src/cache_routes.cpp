@@ -198,7 +198,7 @@ void Host::cache_check(const boxes::RouteRef& ref, const std::string& key, Cache
       perf_->record_cache(entry.tenant, entry.box, entry.route, "mismatch", base::now_unix_ms());
       log_line("boxes/" + entry.box,
                bj::object{{"at", base::format_utc_ms(base::now_unix_ms())},
-                          {"request_id", request_id},
+                          {"tenant", entry.tenant}, {"request_id", request_id},
                           {"version", entry.version},
                           {"level", "host"},
                           {"text", "cache check: route " + entry.route + " answered differently from its cached answer "

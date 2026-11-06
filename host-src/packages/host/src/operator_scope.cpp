@@ -81,7 +81,7 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     for (const char* t : {"beta_mail_list", "beta_mail_get"}) m[t] = Rule::kTenant;
     m["promotion_preview"] = Rule::kTenant;
     m["promotion_start"] = Rule::kHost;  // production's, the owner's (053 § 11)
-    m["beta_mail_send"] = Rule::kOpen;  // checked by the address's beta tenant in beta-ops' scope (053 § 6)
+    m["beta_mail_send"] = Rule::kOpen;  // the address names the tenant: beta_mail_inject checks it is in scope (053 § 6)
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
     for (const char* t : {"source_build", "source_checkout", "source_commit", "source_deploy", "source_diff",
@@ -330,6 +330,8 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
         return beta_who + ": " + tool + " goes to beta with channel \"beta\"; production is promoted by its owner";
       }
     }
+    // A box live in production is never beta's to drop; any other not beta's alone waits for an
+    // owner (beta_drop_free).
     if (tool == "box_drop" && boxes_->active()->boxes.count(text_arg(args, "box"))) {
       return beta_who + ": box " + text_arg(args, "box") + " is live in production; beta_clear takes it out of beta";
     }
@@ -548,11 +550,14 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
   // A drop always waits for a person (051 § 4); everything else only when approvals are on.
   if (hold) {
     bool on = approvals_on(operator_name);
-    // Drops don't wait in development mode (051 § 4), nor for beta's operator, whose drops reach
-    // only beta (053 § 6).
-    bool local = config_.get()->local || operator_scope(operator_name).beta;
-    policy.hold = [this, operator_name, on, local](const std::string& tool, const bj::object& args) -> std::optional<mcp::ToolResult> {
-      if (!on && (local || !always_held(tool, args))) return std::nullopt;
+    // Drops don't wait in development mode (051 § 4), nor beta's operator's of what is beta's
+    // alone (053 § 6).
+    bool local = config_.get()->local;
+    bool beta = operator_scope(operator_name).beta;
+    policy.hold = [this, operator_name, on, local, beta](const std::string& tool,
+                                                          const bj::object& args) -> std::optional<mcp::ToolResult> {
+      bool free = local || (beta && beta_drop_free(tool, args));
+      if (!on && (free || !always_held(tool, args))) return std::nullopt;
       return hold_for_approval(operator_name, tool, args);
     };
   }

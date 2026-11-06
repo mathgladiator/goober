@@ -377,7 +377,7 @@ TEST(Config, ControlDefaultsAreCheckedAgainstTheHostsLimits) {
 TEST(Config, BetaDomainsLinkToProduction) {
   std::string err;
   auto cfg = parse_config(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"},
-      "other.com": {"tenant": "other"}}, "operations": {"domain": "ops.example.com", "beta-domain": "beta-ops.example.com"}})", "/", &err);
+      "other.example": {"tenant": "other"}}, "operations": {"domain": "ops.example.com", "beta-domain": "beta-ops.example.com"}})", "/", &err);
   ASSERT_TRUE(cfg) << err;
   EXPECT_EQ(cfg->beta_of("beta.example.com"), "example.com");
   EXPECT_EQ(cfg->beta_of("example.com"), "");
@@ -394,13 +394,13 @@ TEST(Config, BetaDomainsLinkToProduction) {
     EXPECT_FALSE(parse_config(text, "/", &e)) << text;
     EXPECT_NE(e.find(want), std::string::npos) << e;
   };
-  bad(R"({"domains": {"beta.example.com": {"tenant": "b", "beta-of": "nowhere.com"}}})", "isn't a production domain");
+  bad(R"({"domains": {"beta.example.com": {"tenant": "b", "beta-of": "nowhere.example"}}})", "isn't a production domain");
   bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme", "beta-of": "example.com"}}})",
       "tenant of its own");
   bad(R"({"domains": {"example.com": {"tenant": "acme"}, "a.example.com": {"tenant": "b1", "beta-of": "example.com"},
       "b.example.com": {"tenant": "b2", "beta-of": "example.com"}}})", "two beta tenants");
   bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "b", "beta-of": "example.com"},
-      "loose.com": {"tenant": "b"}}})", "has no beta-of");
+      "loose.example": {"tenant": "b"}}})", "has no beta-of");
   bad(R"({"domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "b", "beta-of": "example.com"},
       "gamma.example.com": {"tenant": "c", "beta-of": "beta.example.com"}}})", "isn't a production domain");
   bad(R"({"domains": {"example.com": {"tenant": "acme"}}, "operations": {"beta-domain": "example.com"}})", "domain of its own");

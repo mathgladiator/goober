@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -154,6 +155,46 @@ bool ActiveSet::build(std::string* error) {
 }
 
 namespace {
+// A split the registry ends (a new live version, a disable; 052 § 4): its record moves to
+// split-last, as Host::split_end keeps it, so split_report says how it ended.
+void end_split(wal::Bundle& bundle, const std::filesystem::path& root, const std::string& box, const std::string& why) {
+  auto text = base::read_file(root / "boxes" / box / "split");
+  if (!text) return;
+  bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""});
+  std::string err;
+  auto v = json::parse(*text, &err);
+  if (!v || !v->is_object()) return;
+  auto last = v->as_object();
+  last.erase("salt");
+  last["ended_ms"] = base::now_unix_ms();
+  last["outcome"] = "ended";
+  last["ended_by"] = "host";
+  last["end_why"] = why;
+  bundle.push_back({wal::FileChange::Kind::kWrite, "boxes/" + box + "/split-last", json::dump(last)});
+}
+
+// Production wins over beta (053 § 6): builds `set` with its beta versions left out one by one
+// where they conflict, answering the boxes whose beta versions were left out; nullopt when the set
+// conflicts even with none (production's own conflict).
+std::optional<std::vector<std::string>> fit_beta(ActiveSet& set) {
+  auto beta = set.beta;
+  set.beta.clear();
+  std::string err;
+  if (!set.build(&err)) return std::nullopt;
+  std::vector<std::string> left;
+  for (const auto& [name, box] : beta) {
+    set.beta[name] = box;
+    if (!set.build(&err)) {
+      set.beta.erase(name);
+      left.push_back(name);
+    }
+  }
+  set.build(&err);
+  return left;
+}
+}  // namespace
+
+namespace {
 std::vector<std::string> exports_of(const manifest::Manifest& m) {
   std::vector<std::string> out;
   for (const auto& r : m.routes) out.push_back(r.export_name());
@@ -301,13 +342,20 @@ std::vector<std::string> BoxRegistry::load_all() {
 }
 
 bool BoxRegistry::split_set(const std::string& box, const std::string& version, int64_t share_bp,
-                            const boost::json::object& record, std::string* error) {
+                            const boost::json::object& record, bool existing, std::string* error) {
   std::lock_guard lock(mu_);
   if (!base::is_valid_name(box) || !valid_version(version)) return *error = "bad box or version", false;
   auto current = active();
   auto live = current->boxes.find(box);
   if (live == current->boxes.end()) return *error = "box " + box + " isn't live: only a live box splits", false;
   if (live->second->version == version) return *error = "version " + version + " is the live one", false;
+  // Starting and changing are told apart under the lock, so a change never brings back a split
+  // that ended meanwhile, nor does a second start replace the first.
+  auto now_split = current->splits.find(box);
+  if (!existing && now_split != current->splits.end()) return *error = box + " is split already", false;
+  if (existing && (now_split == current->splits.end() || now_split->second.candidate->version != version)) {
+    return *error = box + "'s split with " + version + " ended meanwhile", false;
+  }
   std::shared_ptr<const ActiveBox> candidate;
   std::string salt;
   if (auto it = current->splits.find(box); it != current->splits.end() && it->second.candidate->version == version) {
@@ -387,9 +435,13 @@ void BoxRegistry::set_beta_domains(std::set<std::string> domains) {
   next->beta_domains = beta_domains_;
   std::string err;
   if (!next->build(&err)) {
-    // A beta version that conflicts on a newly named beta domain: beta answers with live there.
-    next->beta.clear();
-    next->build(&err);
+    // A beta version that conflicts on a newly named beta domain answers with live there, left
+    // out as load_all leaves it out after a restart (its beta file stays; beta_status says so).
+    if (auto left = fit_beta(*next)) {
+      for (const auto& b : *left) {
+        std::cerr << "goober-host: box " << b << "'s beta version conflicts on a beta domain and isn't served\n";
+      }
+    }
   }
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
@@ -498,14 +550,27 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   // Its beta version going live (a promotion, 053 § 11): beta follows live again.
   bool beta_promoted = next->beta.count(name) && next->beta.at(name)->version == candidate->version;
   if (beta_promoted) next->beta.erase(name);
-  if (!next->build(error)) return false;
+  std::vector<std::string> beta_left;
+  if (!next->build(error)) {
+    // A beta version in the way answers with live on beta again, and production goes on.
+    auto left = fit_beta(*next);
+    if (!left) return false;
+    beta_left = std::move(*left);
+    error->clear();
+  }
   if (dry_run) return true;
   // A new live version ends the box's split (052 § 4).
   next->splits.erase(name);
   wal::Bundle all = bundle;
   std::error_code sec;
-  if (fs::exists(wal_.root() / "boxes" / name / "split", sec)) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/split", ""});
+  end_split(all, wal_.root(), name, "version " + candidate->version + " went live");
   if (beta_promoted) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/beta", ""});
+  // Left out of beta for good, so memory and disk agree: the box's beta slot is cleared.
+  for (const auto& b : beta_left) {
+    all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + b + "/beta", ""});
+    std::cerr << "goober-host: box " << name << " going live cleared box " << b
+              << "'s beta version, which conflicts with it on a beta domain (053 § 6)\n";
+  }
   if (!wal_.commit(all, error)) return false;
   std::lock_guard snap(snapshot_mu_);
   active_ = next;
@@ -523,12 +588,13 @@ bool BoxRegistry::check(std::string_view manifest_text, std::string_view module,
 }
 
 std::optional<UploadResult> BoxRegistry::store(std::string_view manifest_text, std::string_view module,
-                                               std::string_view types_text, std::string* error) {
-  return upload_or_check(manifest_text, module, types_text, Mode::kStore, error);
+                                               std::string_view types_text, std::string* error, bool for_beta) {
+  return upload_or_check(manifest_text, module, types_text, Mode::kStore, error, for_beta);
 }
 
 std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manifest_text, std::string_view module,
-                                                         std::string_view types_text, Mode mode, std::string* error) {
+                                                         std::string_view types_text, Mode mode, std::string* error,
+                                                         bool for_beta) {
   std::lock_guard lock(mu_);
   auto m = manifest::parse_manifest(manifest_text, error);
   if (!m) return std::nullopt;
@@ -586,6 +652,8 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
       if (actor) {
         if (auto by = actor(); !by.empty()) life["stored_by"] = by;
       }
+      // Stored for beta (053 § 6): what beta's operator may drop without the owner.
+      if (for_beta) life["channel"] = "beta";
     }
     bool live_now = base::read_file(wal_.root() / "boxes" / box / "active").value_or("") == version;
     if (!live_now && (life.contains("archived_ms") || !life.contains("inactive_since_ms"))) {
@@ -629,7 +697,7 @@ std::optional<std::string> BoxRegistry::disable(const std::string& box, const st
   wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
                         {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
   std::error_code sec;
-  if (fs::exists(wal_.root() / "boxes" / box / "split", sec)) bundle.push_back({wal::FileChange::Kind::kDelete, "boxes/" + box + "/split", ""});
+  end_split(bundle, wal_.root(), box, "the box was disabled");
   live_moves(bundle, box, "", nullptr, base::now_unix_ms());
   if (!wal_.commit(bundle, error)) return std::nullopt;
   std::lock_guard snap(snapshot_mu_);
@@ -803,6 +871,7 @@ std::vector<VersionInfo> BoxRegistry::versions(const std::string& box) const {
     if (!info.stored_ms) info.stored_ms = mtime_ms(wal_.root() / "boxes" / box / "versions" / v / "manifest.json");
     if (const auto* p = l.if_contains("live"); p && p->is_array()) info.live = p->as_array();
     if (const auto* b = l.if_contains("stored_by"); b && b->is_string()) info.stored_by = std::string(b->as_string());
+    info.for_beta = l.contains("channel") && l.at("channel") == "beta";
     info.archived_ms = num(l, "archived_ms");
     info.state = info.active ? "live" : info.archived_ms ? "archived" : "stored";
     if (!info.active) {

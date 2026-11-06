@@ -1150,7 +1150,7 @@ The human: "I'd like the ability to train so let's get a/b traffic flow started.
 - [x] The controller on the timer thread: guardrails (5xx delta, p99 ratio) roll back on their
       own; the ladder steps and promotes at 100%; tests.
 - [x] `split_start`, `split_set`, `split_stop`, `split_report`, `split_list`; audited, change log
-      actions, scope rules; tests.
+      actions (the operator's calls; the controller's steps are audited only), scope rules; tests.
 - [x] The box page's Split and Last split cards.
 - [ ] Not opened in a browser yet: the Split card.
 - [ ] Later (052 § 8): subscriptions, timers, and internal calls in splits; shadowing and the
@@ -1166,7 +1166,9 @@ production, promotion in-host first and shaped for a remote host later):
 - [x] Step 2: the registry's beta slot (`boxes/<box>/beta`), beta route tables, a box only in
       beta; `version_upload {channel: "beta"}`, `version_promote {channel: "beta"}`,
       `beta_status`, `beta_clear`; timers, identity events, inbound mail, outbox results, and
-      internal calls pick the beta version for beta tenants; splits never on beta; tests.
+      internal calls pick the beta version for beta tenants; splits never on beta; tests (for the
+      slot, the tables, a box only in beta, and inbound mail; not yet for timers, identity events,
+      outbox results, or internal calls on beta versions).
 - [x] Step 3: a beta tenant's mail (host and box) captured in `mail/beta/<tenant>/` (newest 2000,
       30 days), never sent; mail from outside refused for beta; `beta_mail_list`, `beta_mail_get`,
       `beta_mail_send` (injected through the MTA hook's own delivery, its From trusted, threaded by
@@ -1178,7 +1180,9 @@ production, promotion in-host first and shaped for a remote host later):
       do `host:beta` alone and a focus on beta tenants alone. Beta's operator stages production's
       boxes only with channel "beta" (version_upload, version_promote, source_deploy), never
       disables, splits, restores, or drops a live box, works on beta tenants' content and data,
-      and its drops don't wait; a fixed-tenant strategy opens its beta's database for beta; the
+      and drops at once only what is beta's alone (the rest waits for an owner, 054); a
+      fixed-tenant strategy opens its beta's database for beta, and fails for a tenant with no
+      beta (054); the
       beta-ops panel looks and injects mail; the panel's Beta view (boxes, mailbox, composer);
       tests.
 - [ ] Not opened in a browser yet: the Beta view and beta-ops.

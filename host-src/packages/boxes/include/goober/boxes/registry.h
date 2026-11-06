@@ -99,6 +99,7 @@ struct VersionInfo {
   boost::json::array live;                      // when it was live: [{from_ms?, until_ms?}]
   std::string module_sha256;                    // a deleted version's, from its tombstone
   std::string stored_by;                        // who stored it, when known
+  bool for_beta = false;                        // first stored for beta's channel (053 § 6)
 };
 
 // How long a version no longer live is kept (045 § 3.1).
@@ -150,9 +151,10 @@ class BoxRegistry {
   bool check(std::string_view manifest_text, std::string_view module, std::string_view types_text, std::string* error);
 
   // Every upload check (conflicts with the active boxes included), then stores the version
-  // without making it active: promote makes it live later.
+  // without making it active: promote makes it live later. `for_beta` marks a version first
+  // stored for beta's channel (053 § 6) in its life record.
   std::optional<UploadResult> store(std::string_view manifest_text, std::string_view module,
-                                    std::string_view types_text, std::string* error);
+                                    std::string_view types_text, std::string* error, bool for_beta = false);
 
   // Makes an existing version active (and a disabled box enabled again).
   bool promote(const std::string& box, const std::string& version, std::string* error);
@@ -175,9 +177,12 @@ class BoxRegistry {
   // Splits (052): starts or changes the split of a live box to `version` at `share_bp`, keeping
   // `record` (the controller's state) in boxes/$box/split. Refused when the box isn't live, the
   // version is the live one or can't be loaded, or the two aren't compatible
-  // (split_refusals). A new live version, a disable, or a drop ends the box's split.
+  // (split_refusals). A new live version or a disable ends the box's split, its record kept as
+  // boxes/$box/split-last; a drop ends it too.
+  // `existing` changes a running split with this candidate (refused when it ended meanwhile);
+  // otherwise it starts one (refused when the box is split already).
   bool split_set(const std::string& box, const std::string& version, int64_t share_bp, const boost::json::object& record,
-                 std::string* error);
+                 bool existing, std::string* error);
   // Ends a box's split: the live version answers everything again.
   bool split_end(const std::string& box, std::string* error);
   // A box's split record, or nullopt.
@@ -254,7 +259,8 @@ class BoxRegistry {
                 bool dry_run = false);
   enum class Mode { kActivate, kCheck, kStore };
   std::optional<UploadResult> upload_or_check(std::string_view manifest_text, std::string_view module,
-                                              std::string_view types_text, Mode mode, std::string* error);
+                                              std::string_view types_text, Mode mode, std::string* error,
+                                              bool for_beta = false);
 
   wal::HostWal& wal_;
   runtime::wasm::Engine& engine_;

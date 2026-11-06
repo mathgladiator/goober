@@ -159,7 +159,7 @@ void Host::register_skill_tools() {
        "something happens). Pass if_etag (skill_get's file_etag, or \"none\" for a new one) so you don't write "
        "over someone's change. Write facts and steps for whoever comes next; never a secret, a token, or a "
        "person's data. Audited and in the change log, with the text before and after. Answers {name, "
-       "revision, file_etag, change_id}.",
+       "revision, file_etag, created, change_id}.",
        object_schema({{"name", name_prop},
                       {"title", string_property("A short title, like \"Deploy a box\".")},
                       {"description", string_property("One line: when to reach for it.")},

@@ -863,10 +863,16 @@ class Host {
   boost::json::object split_report_of(const std::string& box);
   void register_split_tools();
   std::mutex splits_mu_;
+  // Held across a split's read, judgment, and write, by the controller and the split tools alike.
+  std::mutex split_change_mu_;
   std::map<std::string, SplitStats> split_stats_;
   // Who lets a drop run now: the approving person, "development mode (--local)" in local mode
   // (where drops don't wait), or "" (the drop must wait).
-  std::string drop_approval();
+  std::string drop_approval(std::string_view tool, const boost::json::object& args);
+  // Beta's alone (053 § 6): not live, not disabled, in beta, every version first stored for beta
+  // and never live. Beta's operator drops such a box, or a beta tenant's database, without a wait.
+  bool beta_only_box(const std::string& box);
+  bool beta_drop_free(std::string_view tool, const boost::json::object& args);
 
  private:
   std::mutex upload_tickets_mu_;

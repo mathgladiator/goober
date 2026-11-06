@@ -161,7 +161,7 @@ void Host::serve_subscription(const Request& req, const Finish& finish, boxes::R
     }
     // The status vocabulary, exactly as for an HTTP route (037).
     if (std::string why = box_status_refusal(call.result.status, call.result.headers); !why.empty()) {
-      log_line("boxes/" + m.box, bj::object{{"request_id", request_id}, {"version", ref.box->version}, {"level", "host"}, {"text", why}});
+      log_line("boxes/" + m.box, bj::object{{"tenant", tenant}, {"request_id", request_id}, {"version", ref.box->version}, {"level", "host"}, {"text", why}});
       return finish(error_page(tenant, 500, request_id), json::dump(call.extra));
     }
     res.status = call.result.status;

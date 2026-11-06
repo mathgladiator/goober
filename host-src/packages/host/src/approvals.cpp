@@ -138,7 +138,8 @@ bool Host::agent_still_signs_in(const std::string& name) {
 bool Host::approvals_on(const std::string& agent) {
   std::lock_guard lock(approvals_mu_);
   sqlite::Stmt s(approvals_db(), "SELECT 1 FROM switches WHERE agent = ?");
-  s.bind(1, agent);
+  // The same agent through beta-ops is still the agent its switch was set for (053 § 6).
+  s.bind(1, std::string(beta_unwrapped(agent)));
   return s.step();
 }
 

@@ -284,7 +284,7 @@ TEST_F(RegistryTest, ASplitServesTheCandidateUnderItsShare) {
   // The same routes, another module: a candidate stored dark.
   auto v2 = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "ab_get_extra_export_unused"}), "", &err);
   ASSERT_TRUE(v2) << err;
-  ASSERT_TRUE(reg->split_set("ab", v2->version, 2500, {{"by", "test"}}, &err)) << err;
+  ASSERT_TRUE(reg->split_set("ab", v2->version, 2500, {{"by", "test"}}, false, &err)) << err;
   auto set = reg->active();
   auto ref = *set->table_for("x").match({"ab"}, "get").value;
   EXPECT_EQ(ref.box->version, v1->version);  // the tables hold the live version
@@ -315,14 +315,14 @@ TEST_F(RegistryTest, OnlyCompatibleVersionsOfALiveBoxSplit) {
   auto v1 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get"}), &err);
   auto moved = reg->store(manifest_for("ab", "*", "/moved", "ab_get"), module_for({"ab_get"}), "", &err);
   ASSERT_TRUE(v1 && moved) << err;
-  EXPECT_FALSE(reg->split_set("ab", moved->version, 100, {}, &err));
+  EXPECT_FALSE(reg->split_set("ab", moved->version, 100, {}, false, &err));
   EXPECT_NE(err.find("can't split"), std::string::npos) << err;
-  EXPECT_FALSE(reg->split_set("ab", v1->version, 100, {}, &err));
+  EXPECT_FALSE(reg->split_set("ab", v1->version, 100, {}, false, &err));
   EXPECT_NE(err.find("live one"), std::string::npos) << err;
-  EXPECT_FALSE(reg->split_set("nope", v1->version, 100, {}, &err));
+  EXPECT_FALSE(reg->split_set("nope", v1->version, 100, {}, false, &err));
   auto same = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "x"}), "", &err);
   ASSERT_TRUE(same) << err;
-  ASSERT_TRUE(reg->split_set("ab", same->version, 100, {}, &err)) << err;
+  ASSERT_TRUE(reg->split_set("ab", same->version, 100, {}, false, &err)) << err;
   // Disabling the box ends it.
   ASSERT_TRUE(reg->disable("ab", "pause", &err)) << err;
   EXPECT_FALSE(reg->active()->splits.count("ab"));
@@ -367,5 +367,48 @@ TEST_F(RegistryTest, ABetaVersionAnswersOnlyOnBetaDomains) {
   // Cleared, beta follows live again.
   ASSERT_TRUE(reg->beta_clear("site", &err)) << err;
   EXPECT_FALSE(reg->active()->table_for("beta.example.com").match({"new"}, "get").value);
+  manifest::set_domain_aliases({});
+}
+
+TEST_F(RegistryTest, ASplitEndedByTheRegistryKeepsItsRecordAndIsNotChangedAfter) {
+  std::string err;
+  auto v1 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get"}), &err);
+  auto v2 = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "y"}), "", &err);
+  ASSERT_TRUE(v1 && v2) << err;
+  ASSERT_TRUE(reg->split_set("ab", v2->version, 100, {{"why", "try"}}, false, &err)) << err;
+  // A second start is refused; a change of the running split isn't.
+  EXPECT_FALSE(reg->split_set("ab", v2->version, 200, {}, false, &err));
+  EXPECT_NE(err.find("split already"), std::string::npos) << err;
+  ASSERT_TRUE(reg->split_set("ab", v2->version, 200, {{"why", "try"}}, true, &err)) << err;
+  // A new live version ends it, keeping the record as split-last.
+  auto v3 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "z"}), &err);
+  ASSERT_TRUE(v3) << err;
+  auto last = base::read_file(w->root() / "boxes" / "ab" / "split-last");
+  ASSERT_TRUE(last);
+  EXPECT_NE(last->find("\"outcome\":\"ended\""), std::string::npos) << *last;
+  EXPECT_EQ(last->find("salt"), std::string::npos) << *last;
+  // A change that read the record before the end can't bring the split back.
+  EXPECT_FALSE(reg->split_set("ab", v2->version, 500, {}, true, &err));
+  EXPECT_NE(err.find("ended meanwhile"), std::string::npos) << err;
+  EXPECT_FALSE(reg->active()->splits.count("ab"));
+}
+
+TEST_F(RegistryTest, ProductionGoesLiveOverABetaVersionInItsWay) {
+  std::string err;
+  manifest::set_domain_aliases({{"beta.example.com", "example.com"}});
+  reg->set_beta_domains({"beta.example.com"});
+  // A box only in beta claims GET /x on beta.
+  auto squat = reg->store(manifest_for("squat", "example.com", "/x", "squat_x"), module_for({"squat_x"}), "", &err, true);
+  ASSERT_TRUE(squat) << err;
+  ASSERT_TRUE(reg->beta_set("squat", squat->version, &err)) << err;
+  bool marked = false;
+  for (const auto& v : reg->versions("squat")) marked |= v.for_beta;
+  EXPECT_TRUE(marked);
+  // Production's box adds GET /x: it goes live, and the beta version in its way is cleared.
+  ASSERT_TRUE(reg->upload(manifest_for("shop", "example.com", "/x", "shop_x"), module_for({"shop_x"}), &err)) << err;
+  EXPECT_EQ(reg->active()->table_for("beta.example.com").match({"x"}, "get").value->box->manifest.box, "shop");
+  EXPECT_FALSE(reg->beta_version("squat"));
+  // Production's own conflicts still refuse.
+  EXPECT_FALSE(reg->upload(manifest_for("rival", "example.com", "/x", "rival_x"), module_for({"rival_x"}), &err));
   manifest::set_domain_aliases({});
 }

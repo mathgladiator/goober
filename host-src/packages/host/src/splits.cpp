@@ -173,6 +173,8 @@ void Host::split_tick(int64_t now_ms) {
   auto active = boxes_->active();
   if (active->splits.empty()) return;
   for (const auto& [box, sp] : active->splits) {
+    // Read, judged, and written under the lock the tools hold: no step over an operator's change.
+    std::lock_guard change(split_change_mu_);
     auto rec = boxes_->split_record(box);
     if (!rec) continue;
     SplitStats s{text_of(*rec, "version")};
@@ -210,7 +212,7 @@ void Host::split_tick(int64_t now_ms) {
     hist.push_back(bj::object{{"at_ms", now_ms}, {"share_bp", *next}, {"by", "host"}, {"why", "the step held its guardrails"}});
     r["history"] = std::move(hist);
     std::string err;
-    if (!boxes_->split_set(box, s.version, *next, r, &err)) {
+    if (!boxes_->split_set(box, s.version, *next, r, true, &err)) {
       std::cerr << "goober-host: split " << box << ": " << err << "\n";
       continue;
     }
@@ -289,6 +291,7 @@ void Host::register_split_tools() {
                       {"guardrails", any_property("{error_rate_delta?: 0 to 1 (0.02), p99_ratio?: 1 to 100 (1.5)}.")}},
                      {"box", "version", "why"}),
        [this](const bj::object& args) {
+         std::lock_guard change(split_change_mu_);
          std::string box = text_of(args, "box"), version = text_of(args, "version"), why = text_of(args, "why");
          if (why.empty()) return ToolResult::fail("why is required: say what the candidate changes");
          if (boxes_->split_record(box)) return ToolResult::fail(box + " is split already: split_set changes it, split_stop ends it");
@@ -339,26 +342,20 @@ void Host::register_split_tools() {
          rec["guardrails"] = std::move(guard);
          rec["history"] = bj::array{bj::object{{"at_ms", base::now_unix_ms()}, {"share_bp", share}, {"by", current_operator()}, {"why", "started"}}};
          std::string err;
-         if (!boxes_->split_set(box, version, share, rec, &err)) return ToolResult::fail(err);
+         if (!boxes_->split_set(box, version, share, rec, false, &err)) return ToolResult::fail(err);
          {
            std::lock_guard lock(splits_mu_);
            split_stats_.insert_or_assign(box, SplitStats{version});
          }
          audit("split.start", current_operator(), "box:" + box, "ok",
                bj::object{{"version", version}, {"share_percent", pct(share)}, {"mode", rec.at("mode")}, {"why", why.substr(0, 500)}});
-         if (changes_) {
-           try {
-             changes_->record_action(operations::Action{base::now_unix_ms(), current_operator(), "split_start", current_request_id(),
-                                                        bj::object{{"box", box}, {"version", version}, {"share_percent", pct(share)}}, false});
-           } catch (const std::exception&) {
-           }
-         }
+         // The change log's row is the generic one every operator call writes (operations.cpp).
          return ToolResult::ok(split_report_of(box));
        }});
 
   mcp_->add_tool(
       {"split_set",
-       "Changes a running split: `share` (percent, 0 to 100) holds that share and pauses the ladder (0 sends everyone "
+       "Changes a running split: `share` (percent, 0 to below 100) holds that share and pauses the ladder (0 sends everyone "
        "to the live version while the split stays); mode \"ladder\" resumes the ladder from the next step above the "
        "share. Guardrails keep holding either way. Audited.",
        object_schema({{"box", box_prop},
@@ -367,6 +364,7 @@ void Host::register_split_tools() {
                       {"why", string_property("Why, for the audit log.")}},
                      {"box"}),
        [this](const bj::object& args) {
+         std::lock_guard change(split_change_mu_);
          std::string box = text_of(args, "box");
          auto rec = boxes_->split_record(box);
          if (!rec) return ToolResult::fail("box " + box + " isn't split (split_start starts one)");
@@ -392,7 +390,7 @@ void Host::register_split_tools() {
          hist.push_back(bj::object{{"at_ms", base::now_unix_ms()}, {"share_bp", share}, {"by", current_operator()}, {"why", text_of(args, "why")}});
          r["history"] = std::move(hist);
          std::string err;
-         if (!boxes_->split_set(box, text_of(r, "version"), share, r, &err)) return ToolResult::fail(err);
+         if (!boxes_->split_set(box, text_of(r, "version"), share, r, true, &err)) return ToolResult::fail(err);
          {
            std::lock_guard lock(splits_mu_);
            if (auto it = split_stats_.find(box); it != split_stats_.end()) {
@@ -415,6 +413,7 @@ void Host::register_split_tools() {
                       {"why", string_property("Why, for the audit log.")}},
                      {"box", "outcome"}),
        [this](const bj::object& args) {
+         std::lock_guard change(split_change_mu_);
          std::string box = text_of(args, "box"), outcome = text_of(args, "outcome");
          if (outcome != "rollback" && outcome != "promote") return ToolResult::fail("outcome is rollback or promote");
          if (auto err = split_end(box, outcome, current_operator(), text_of(args, "why"))) return ToolResult::fail(*err);

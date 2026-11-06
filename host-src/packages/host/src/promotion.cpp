@@ -140,7 +140,7 @@ std::optional<bj::object> Host::promotion_start(const std::string& tenant, const
                     {"boxes", std::move(versions)},
                     {"files", int64_t(files.size())},
                     {"preview", preview && !preview->is_error ? preview->value : bj::value(nullptr)},
-                    {"next", "changeset_apply {id: \"" + id + "\", version} makes it live (the owner's); changeset_rollback undoes it"}};
+                    {"next", "changeset_apply {id: \"" + id + "\", version} makes it live (from the panel's Promote view, the owner's alone); changeset_rollback undoes it"}};
 }
 
 void Host::register_promotion_tools() {
@@ -167,7 +167,7 @@ void Host::register_promotion_tools() {
       {"promotion_start",
        "Makes a draft change set (042) promoting beta to production for one site: the boxes' beta versions and beta's "
        "content files (all of promotion_preview's, or only boxes and paths named), previewed. Nothing is live until "
-       "changeset_apply, which is the owner's; changeset_rollback undoes it in one call. Answers the change set's id, "
+       "changeset_apply (in the panel, the Promote view is the owner's alone); changeset_rollback undoes it in one call. Answers the change set's id, "
        "its draft_version, and the preview.",
        object_schema({{"tenant", string_property("The production tenant.")},
                       {"boxes", list("Only these boxes.")},

@@ -723,7 +723,26 @@ TEST(Manifest, ABetaDomainAnswersAsItsProductionDomain) {
   EXPECT_FALSE(m->applies_to("beta.example.com"));
   set_domain_aliases({{"beta.example.com", "example.com"}});
   EXPECT_TRUE(m->applies_to("beta.example.com"));
-  EXPECT_FALSE(m->applies_to("beta.other.com"));
+  EXPECT_FALSE(m->applies_to("beta.other.example"));
   set_domain_aliases({});
   EXPECT_FALSE(m->applies_to("beta.example.com"));
+}
+
+TEST(Manifest, ABetaRequestNeverOpensProductionsData) {
+  DataStrategy pinned;
+  pinned.tenant = "acme";
+  DataStrategy directory;
+  directory.tenant = "directory";
+  DataStrategy own;
+  set_beta_tenants({{"acme_beta", "acme"}});
+  // A fixed tenant with a beta: a beta request opens the beta.
+  EXPECT_EQ(pinned.tenant_for("acme_beta"), "acme_beta");
+  EXPECT_EQ(pinned.tenant_for("acme"), "acme");
+  // A fixed tenant with none: a beta request opens nothing at all, never production.
+  EXPECT_TRUE(directory.tenant_for("acme_beta").starts_with(kNoBetaTenant));
+  EXPECT_EQ(directory.tenant_for("acme"), "directory");
+  // The request's own tenant, beta or not, as ever.
+  EXPECT_EQ(own.tenant_for("acme_beta"), "acme_beta");
+  set_beta_tenants({});
+  EXPECT_EQ(directory.tenant_for("acme_beta"), "directory");
 }

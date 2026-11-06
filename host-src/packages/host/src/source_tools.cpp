@@ -534,7 +534,9 @@ void Host::register_source_tools() {
         {deploy ? "source_deploy" : "source_build",
          deploy ? "Builds a revision (newest by default) and puts it live: first every check a build runs, and if "
                   "any fails nothing is stored; then it stores the project's schemas for good, uploads each box as a "
-                  "new version that goes live at once, and writes each site's files. Answers the job: its state, log, "
+                  "new version that goes live at once, and writes each site's files; with channel \"beta\", each box "
+                  "goes to its beta slot and each site's files to its beta instead, and production is untouched. "
+                  "Answers the job: its state, log, "
                   "and the schemas, box versions, and sites it deployed. Returns once done, or after 25 s with a job to "
                   "follow with source_job. To check without deploying, source_build. A changing tool."
                 : "Builds a revision (newest by default) in the host's sandbox (no network; Rust crates from the host's "
@@ -543,13 +545,16 @@ void Host::register_source_tools() {
                   "each box as an upload would be, conflicts with live boxes included. A green build deploys. Answers "
                   "the job: its state and log, compiler errors included. Returns once done, or after 25 s with a job "
                   "to follow with source_job. A changing tool (it runs a build job).",
-         mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
-                             {"verbose", mcp::boolean_property("The whole log even when it succeeds.")},
-                             {"channel", mcp::enum_property("A deploy's channel: \"beta\" puts each box in its beta slot "
-                                                            "and each site's files in that tenant's beta (053); \"live\" "
-                                                            "(the default) as before.",
-                                                            {"live", "beta"})}},
-                            {"project"}),
+         deploy ? mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
+                                      {"verbose", mcp::boolean_property("The whole log even when it succeeds.")},
+                                      {"channel", mcp::enum_property("\"beta\" puts each box in its beta slot and each "
+                                                                     "site's files in that tenant's beta (053); \"live\" "
+                                                                     "(the default) as before.",
+                                                                     {"live", "beta"})}},
+                                     {"project"})
+                : mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
+                                      {"verbose", mcp::boolean_property("The whole log even when it succeeds.")}},
+                                     {"project"}),
          [this, deploy](const bj::object& args) {
            std::string name = arg(args, "project").value_or("");
            auto project = source_->get(name);
@@ -704,7 +709,7 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
     std::string replaced;
     if (auto live = boxes_->active(); live->boxes.count(b.box)) replaced = live->boxes.at(b.box)->version;
     bool beta = job.channel == "beta";
-    auto r = beta ? boxes_->store(b.manifest, b.module, b.types, &err) : boxes_->upload(b.manifest, b.module, b.types, &err);
+    auto r = beta ? boxes_->store(b.manifest, b.module, b.types, &err, true) : boxes_->upload(b.manifest, b.module, b.types, &err);
     if (r && beta && !boxes_->beta_set(b.box, r->version, &err)) r.reset();
     if (r && !beta && job_runs_) job_runs_->replaced(b.box, replaced, r->version, job.author, base::now_unix_ms());
     if (!r) {

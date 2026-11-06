@@ -492,7 +492,7 @@ A beta of your site runs on this machine at `beta.example.com`, with its own acc
   would have sent is in the mailbox, sign-in codes included. **Write a message in** sends mail
   to the site as if it arrived; the replies show up in the mailbox.
 - **Promote.** The panel's **Promote** view shows each box beta changed (and what it widens) and
-  each page's changes. Untick what stays, press **Promote…**, and type the site's name. It goes
+  each page's changes. Untick what stays, press **Promote…**, and type the production tenant's name (like `acme`). It goes
   live as one change; **Roll back** undoes it in one press. Data never moves from beta.
 
 ## Try a new version on part of the traffic (splits)

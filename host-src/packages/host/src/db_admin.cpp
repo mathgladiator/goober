@@ -84,37 +84,43 @@ std::vector<Host::DbBinding> Host::db_bindings(const std::string& tenant, const 
   auto cfg = config_.get();
   auto active = boxes_->active();
   for (const auto& name : boxes_->box_names()) {
-    std::shared_ptr<const manifest::Manifest> m;
-    std::string version;
-    bool disabled = false;
+    // Every version that may open it: the live one, a disabled box's (it can be enabled again),
+    // and the beta version (053 § 3).
+    struct Bound {
+      std::shared_ptr<const manifest::Manifest> m;
+      std::string version;
+      bool disabled = false;
+    };
+    std::vector<Bound> versions;
     if (auto it = active->boxes.find(name); it != active->boxes.end()) {
-      m = std::shared_ptr<const manifest::Manifest>(it->second, &it->second->manifest);
-      version = it->second->version;
+      versions.push_back({std::shared_ptr<const manifest::Manifest>(it->second, &it->second->manifest), it->second->version});
     } else if (auto d = boxes_->disabled(name)) {
-      // A disabled box can be enabled again, so its database is still spoken for.
       auto text = boxes_->manifest_text(name, d->version);
       std::string err;
       auto parsed = text ? manifest::parse_manifest(*text, &err) : std::nullopt;
-      if (!parsed) continue;
-      m = std::make_shared<const manifest::Manifest>(std::move(*parsed));
-      version = d->version;
-      disabled = true;
-    } else {
-      continue;
+      if (parsed) versions.push_back({std::make_shared<const manifest::Manifest>(std::move(*parsed)), d->version, true});
     }
-    std::set<std::string> served;
-    for (const auto& [t, domain] : tenants_of(*cfg, *m)) served.insert(t);
-    for (const auto& d : m->data) {
-      if (!d.applies_schema()) continue;
-      bool binds = d.tenant.empty() ? served.count(tenant) > 0 : d.tenant == tenant;
-      if (!binds || d.database_for(tenant) != database) continue;
-      DbBinding b{name, version, d.name, d.schema, disabled, {}};
-      for (const auto& [t, g] : d.tables) b.tables.insert(t);
-      if (!d.table.empty()) b.tables.insert(d.table);
-      if (auto schema = schemas_->get(d.schema)) {
-        for (const auto& t : schema->tables) b.tables.insert(t.name);
+    if (auto it = active->beta.find(name); it != active->beta.end()) {
+      versions.push_back({std::shared_ptr<const manifest::Manifest>(it->second, &it->second->manifest), it->second->version});
+    }
+    for (const auto& [m, version, disabled] : versions) {
+      std::set<std::string> served;
+      for (const auto& [t, domain] : tenants_of(*cfg, *m)) served.insert(t);
+      for (const auto& d : m->data) {
+        if (!d.applies_schema()) continue;
+        // Whatever tenant a request comes for, the database its strategy opens: a fixed tenant's
+        // beta for a beta request (DataStrategy::tenant_for).
+        bool binds = !d.tenant.empty() && d.tenant == tenant && d.database_for(tenant) == database;
+        for (const auto& r : served) binds |= d.tenant_for(r) == tenant && d.database_for(r) == database;
+        if (!binds) continue;
+        DbBinding b{name, version, d.name, d.schema, disabled, {}};
+        for (const auto& [t, g] : d.tables) b.tables.insert(t);
+        if (!d.table.empty()) b.tables.insert(d.table);
+        if (auto schema = schemas_->get(d.schema)) {
+          for (const auto& t : schema->tables) b.tables.insert(t.name);
+        }
+        out.push_back(std::move(b));
       }
-      out.push_back(std::move(b));
     }
   }
   return out;

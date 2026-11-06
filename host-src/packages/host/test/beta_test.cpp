@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
@@ -243,7 +245,9 @@ bj::object call_on(uint16_t port, const std::string& domain, const std::string& 
   auto v = json::parse(r.body, &err);
   if (!v || !v->as_object().contains("result")) return bj::object{{"isError", true}, {"text", r.body}};
   auto res = v->as_object().at("result").as_object();
-  return bj::object{{"isError", res.at("isError")}, {"text", res.at("content").at(0).at("text")}};
+  bj::object out{{"isError", res.at("isError")}, {"text", res.at("content").at(0).at("text")}};
+  if (auto parsed = json::parse(std::string(res.at("content").at(0).at("text").as_string()), &err)) out["value"] = *parsed;
+  return out;
 }
 
 }  // namespace
@@ -326,4 +330,109 @@ TEST_F(BetaTest, APromotionCarriesBoxesAndContentAsOneChangeSet) {
   // Beta's operator can't promote.
   auto refused = call_on(port, "beta-ops.example.com", kToken, "promotion_start", {{"tenant", "acme"}, {"why", "x"}});
   EXPECT_TRUE(refused.at("isError").as_bool()) << refused.at("text");
+}
+
+// Out of development mode: what beta's operator may drop at once, and what waits for an owner.
+TEST(BetaHeld, BetasOperatorDropsOnlyWhatIsBetasAloneAndKeepsItsApprovals) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "beta_held";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"}},
+      "operations": {"token": "op-token-for-beta-tests-0123456789", "beta-domain": "beta-ops.example.com"},
+      "threads": {"network": 1, "boxes": 2}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto prod = std::make_shared<config::HostConfig>(*config::local_mode(cfg));
+  prod->local = false;
+  auto host = std::make_unique<host::Host>(prod);
+  uint16_t port = host->start();
+  const std::string ops = "beta-ops.example.com";
+  auto beta = [&](const std::string& tool, const bj::object& args) { return call_on(port, ops, kToken, tool, args); };
+  auto pending = [](const bj::object& r) {
+    const auto* v = r.if_contains("value");
+    return v && v->is_object() && v->as_object().contains("pending_approval");
+  };
+
+  // Production's box, disabled: beta's drop of it waits for an owner and drops nothing.
+  ASSERT_TRUE(host->boxes().upload(site_manifest(), module_saying("live"), &err)) << err;
+  ASSERT_TRUE(host->boxes().disable("site", "paused", &err)) << err;
+  auto held = beta("box_drop", {{"box", "site"}, {"why", "tidy"}});
+  EXPECT_TRUE(pending(held)) << held.at("text");
+  EXPECT_FALSE(host->boxes().versions("site").empty());
+  // Production's dark version staged for beta is still not beta's alone.
+  auto staged = beta("version_promote", {{"box", "site"}, {"version", host->boxes().versions("site").back().version},
+                                        {"channel", "beta"}});
+  ASSERT_FALSE(staged.at("isError").as_bool()) << staged.at("text");
+  EXPECT_FALSE(host->beta_only_box("site"));
+
+  // A box only ever in beta drops at once.
+  auto fresh = beta("version_upload", {{"manifest", R"({"box":"fresh","domains":["example.com"],"routes":{"http":{"/f":{"get":{"name":"f","public":true}}}}})"},
+                                       {"wat", module_saying("f", {"f"})},
+                                       {"channel", "beta"}});
+  ASSERT_FALSE(fresh.at("isError").as_bool()) << fresh.at("text");
+  EXPECT_TRUE(host->beta_only_box("fresh"));
+  auto dropped = beta("box_drop", {{"box", "fresh"}, {"why", "tidy"}});
+  ASSERT_FALSE(dropped.at("isError").as_bool()) << dropped.at("text");
+  EXPECT_FALSE(pending(dropped)) << dropped.at("text");
+  EXPECT_TRUE(host->boxes().dropped("fresh"));
+
+  // The approvals switch an owner sets on an agent holds it through beta-ops too.
+  host::SignedIn owner;
+  owner.user.email = "boss@example.com";
+  owner.roles = {"host:owner"};
+  ASSERT_EQ(host->panel_set_approvals(owner, {{"confirm", true}, {"agent", "config"}, {"on", true}}, "t").first, 200);
+  auto put = beta("page_put", {{"tenant", "acme_beta"}, {"path", "/about"}, {"format", "markdown"}, {"body", "x"}});
+  EXPECT_TRUE(pending(put)) << put.at("text");
+  host.reset();
+}
+
+TEST_F(BetaTest, InjectedMailGoesOnlyIntoABetaInTheOperatorsFocus) {
+  std::string err;
+  auto grok = *host::create_operator_token(root / "storage", "grok", 0, &err);
+  host::Host::OperatorScope production;
+  production.all = false;
+  production.tenants = {"acme"};
+  ASSERT_TRUE(host->set_operator_scope("token:grok", production, "test", &err)) << err;
+  auto r = call_on(port, "example.com", grok, "beta_mail_send",
+                   {{"to", "support@beta.example.com"}, {"from", "ann@example.org"}, {"subject", "s"}, {"text", "t"}});
+  EXPECT_TRUE(r.at("isError").as_bool()) << r.at("text");
+  EXPECT_NE(std::string(r.at("text").as_string()).find("isn't focused on acme_beta"), std::string::npos) << r.at("text");
+}
+
+TEST_F(BetaTest, BetasOperatorReadsOnlyBetasBoxLogLines) {
+  auto file = root / "storage" / "logs" / "boxes" / "site.log";
+  fs::create_directories(file.parent_path());
+  {
+    std::ofstream out(file, std::ios::app);
+    out << R"({"tenant":"acme","level":"info","text":"production's"})" << "\n"
+        << R"({"tenant":"acme_beta","level":"info","text":"beta's"})" << "\n";
+  }
+  auto lines = call_on(port, "beta-ops.example.com", kToken, "box_logs", {{"box", "site"}});
+  ASSERT_FALSE(lines.at("isError").as_bool()) << lines.at("text");
+  std::string text(lines.at("text").as_string());
+  EXPECT_NE(text.find("beta's"), std::string::npos) << text;
+  EXPECT_EQ(text.find("production's"), std::string::npos) << text;
+  // The owner's token on production's domain reads both.
+  auto all = op("box_logs", {{"box", "site"}});
+  EXPECT_NE(BetaTest::text(all).find("production's"), std::string::npos);
+}
+
+TEST_F(BetaTest, ADropCheckCountsWhatBetaVersionsBind) {
+  std::string err;
+  ASSERT_TRUE(host->schemas().put(R"({"schema":"items1","tables":{"items":{"columns":{"name":{"type":"string","max-length":40}}}}})", &err)) << err;
+  auto schema = host->schemas().get("items1");
+  ASSERT_TRUE(host->databases().open("acme_beta", "items", &*schema, &err)) << err;
+  // A box only in beta, its strategy pinned to acme: on beta it opens acme_beta's items.
+  auto up = op("version_upload",
+               {{"manifest", R"({"box":"keeper","domains":["example.com"],
+                   "data":{"sqlite3":{"w":{"schema":"items1","database":"items","tenant":"acme","pattern":"sql","tables":{"items":{"read":true}}}}},
+                   "routes":{"http":{"/k":{"get":{"name":"k","public":true}}}}})"},
+                {"wat", module_saying("k", {"k"})},
+                {"channel", "beta"}});
+  ASSERT_FALSE(up.at("isError").as_bool()) << text(up);
+  auto check = op("db_drop", {{"tenant", "acme_beta"}, {"database", "items"}, {"dry_run", true}});
+  ASSERT_FALSE(check.at("isError").as_bool()) << text(check);
+  EXPECT_NE(text(check).find("keeper"), std::string::npos) << text(check);
+  auto box = op("box_drop", {{"box", "keeper"}, {"dry_run", true}});
+  EXPECT_EQ(box.at("value").at("state"), "beta") << text(box);
 }

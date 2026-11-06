@@ -1690,6 +1690,11 @@ std::optional<bj::object> Databases::operate(std::string_view tenant, std::strin
 Session::~Session() { rollback(); }
 
 Session::Open* Session::open_database(const std::string& tenant, const std::string& database, std::string* error) {
+  if (tenant.starts_with(manifest::kNoBetaTenant)) {
+    return *error = "tenant " + tenant.substr(manifest::kNoBetaTenant.size()) +
+                    " has no beta, and beta never opens production's data (053 § 2)",
+           nullptr;
+  }
   std::string key = tenant + "/" + database;
   auto& open = open_[key];
   if (open.db) return &open;

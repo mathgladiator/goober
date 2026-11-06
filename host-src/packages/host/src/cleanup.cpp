@@ -54,13 +54,30 @@ bool Host::always_held(std::string_view tool, const bj::object& args) {
   return (tool == "box_drop" || tool == "db_drop") && !flag_of(args, "dry_run");
 }
 
-std::string Host::drop_approval() {
+std::string Host::drop_approval(std::string_view tool, const bj::object& args) {
   if (!approved_by_now().empty()) return approved_by_now();
   // Development mode (--local, `just run`): drops don't wait (the human, 2026-11-04).
   if (config_.get()->local) return "development mode (--local)";
-  // Beta's operator drops only beta's (its scope holds it there): no wait (053 § 6).
-  if (operator_scope(current_operator()).beta) return "beta's operator (053 § 6)";
+  // Beta's operator drops what is beta's alone without a wait (053 § 6); the rest waits for an owner.
+  if (operator_scope(current_operator()).beta && beta_drop_free(tool, args)) return "beta's operator (053 § 6)";
   return "";
+}
+
+bool Host::beta_only_box(const std::string& box) {
+  if (!base::is_valid_name(box) || boxes_->active()->boxes.count(box) || boxes_->disabled(box)) return false;
+  if (!boxes_->beta_version(box)) return false;
+  // Every version first stored for beta, and none ever live: production never had it.
+  for (const auto& v : boxes_->versions(box)) {
+    if (v.state == "deleted") continue;
+    if (!v.for_beta || !v.live.empty()) return false;
+  }
+  return true;
+}
+
+bool Host::beta_drop_free(std::string_view tool, const bj::object& args) {
+  if (tool == "box_drop") return beta_only_box(text_of(args, "box"));
+  if (tool == "db_drop") return config_.get()->is_beta_tenant(text_of(args, "tenant"));
+  return false;
 }
 
 std::string& Host::approved_by_now() {
@@ -93,6 +110,11 @@ bj::object Host::box_drop_check(const std::string& box) {
   } else if (auto d = boxes_->disabled(box)) {
     state = "disabled";
     version = d->version;
+  } else if (auto it = active->beta.find(box); it != active->beta.end()) {
+    // Only in beta (053 § 3): it answers there, so dropping it takes it out of beta at once.
+    state = "beta";
+    version = it->second->version;
+    m = it->second->manifest;
   }
   int64_t stored = 0, newest_ms = -1;
   std::string newest;
@@ -138,23 +160,29 @@ bj::object Host::box_drop_check(const std::string& box) {
     }
     out["databases"] = std::move(dbs);
   }
-  // A box that calls this one (live or disabled, so it may be enabled again) would break.
+  // A box that calls this one (live or disabled, so it may be enabled again; or its beta version)
+  // would break.
   bj::array callers;
   for (const auto& name : boxes_->box_names()) {
     if (name == box) continue;
-    std::optional<manifest::Manifest> other;
+    std::vector<std::pair<manifest::Manifest, std::string>> others;  // a version, and which
     if (auto it = active->boxes.find(name); it != active->boxes.end()) {
-      other = it->second->manifest;
+      others.emplace_back(it->second->manifest, "");
     } else if (auto d = boxes_->disabled(name)) {
       std::string err;
-      if (auto text = boxes_->manifest_text(name, d->version)) other = manifest::parse_manifest(*text, &err);
+      auto text = boxes_->manifest_text(name, d->version);
+      if (auto m = text ? manifest::parse_manifest(*text, &err) : std::nullopt) others.emplace_back(std::move(*m), "");
     }
-    if (!other) continue;
-    for (const auto& svc : other->external) {
-      if (svc.box != box) continue;
-      callers.push_back(bj::value(name));
-      blocked.push_back(bj::value("box " + name + " calls it (external." + svc.name + "): drop " + name +
-                                  " first, or deploy a version of it that no longer does"));
+    if (auto it = active->beta.find(name); it != active->beta.end()) others.emplace_back(it->second->manifest, "beta version of ");
+    bool listed = false;
+    for (const auto& [other, which] : others) {
+      for (const auto& svc : other.external) {
+        if (svc.box != box) continue;
+        if (!listed) callers.push_back(bj::value(name));
+        listed = true;
+        blocked.push_back(bj::value("the " + which + "box " + name + " calls it (external." + svc.name + "): drop " + name +
+                                    " first, or deploy a version of it that no longer does"));
+      }
     }
   }
   out["callers"] = std::move(callers);
@@ -169,7 +197,7 @@ bj::object Host::box_drop_check(const std::string& box) {
     }
   }
   out["controls_on_domains"] = std::move(controls);
-  out["takes"] = std::string(state == "live" ? "out of service at once; " : "") +
+  out["takes"] = std::string(state == "live" ? "out of service at once; " : state == "beta" ? "out of beta at once; " : "") +
                  "every stored version, each leaving a tombstone (version_get shows it); its flags. Its databases, "
                  "logs, and change log rows stay. The name can be uploaded again as a new box.";
   out["blocked"] = std::move(blocked);
@@ -276,7 +304,7 @@ void Host::register_cleanup_tools() {
        [this](const bj::object& args) {
          std::string box = text_of(args, "box");
          if (flag_of(args, "dry_run")) return ToolResult::ok(box_drop_check(box));
-         std::string approved = drop_approval();
+         std::string approved = drop_approval("box_drop", args);
          if (approved.empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
          auto [status, body] = drop_box(box, current_operator(), text_of(args, "why"), approved, current_request_id());
          if (status != 200) return ToolResult::fail(text_of(body, "error"));
@@ -298,7 +326,7 @@ void Host::register_cleanup_tools() {
        [this](const bj::object& args) {
          std::string tenant = text_of(args, "tenant"), database = text_of(args, "database"), table = text_of(args, "table");
          if (flag_of(args, "dry_run")) return ToolResult::ok(db_drop_check(tenant, database, table));
-         std::string approved = drop_approval();
+         std::string approved = drop_approval("db_drop", args);
          if (approved.empty()) return ToolResult::fail("a drop runs only once a person approves it in the panel");
          auto [status, body] = drop_database(tenant, database, table, current_operator(), text_of(args, "why"),
                                              approved, current_request_id());

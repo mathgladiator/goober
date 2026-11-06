@@ -174,6 +174,12 @@ bj::object Host::beta_mail_inject(const std::string& to_in, const std::string& f
   if (!parts) return *error = "to isn't an address", bj::object{};
   if (!inbound::split_address(from)) return *error = "from isn't an address", bj::object{};
   if (cfg->beta_of(parts->second).empty()) return *error = parts->second + " isn't a beta domain: only beta takes injected mail", bj::object{};
+  // Only into a beta the operator is focused on (030, 053 § 6), judged by the address's domain.
+  std::string domain_tenant = cfg->tenant_for_host(parts->second).value_or("");
+  if (auto scope = operator_scope(current_operator()); !scope.all && !scope.tenants.count(domain_tenant)) {
+    return *error = "operator " + current_operator() + " isn't focused on " + domain_tenant + ", whose address " + to + " is",
+           bj::object{};
+  }
   std::string why;
   auto match = match_mail(to, &why);
   if (!match) return *error = "no box takes mail at " + to + " on beta (" + why + ")", bj::object{};

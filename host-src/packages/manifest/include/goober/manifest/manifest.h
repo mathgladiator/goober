@@ -175,12 +175,15 @@ struct DataStrategy {
   bool applies_schema() const { return pattern == "sql" || pattern == "by_timer"; }
   // The database's name for a tenant, with {!tenant} filled in.
   std::string database_for(std::string_view tenant) const;
-  // The tenant whose database a request for `tenant` reaches: the fixed one, or its own.
   // The tenant whose database this strategy opens for a request of `tenant`: the request's, or
   // the fixed one; for a beta tenant's request, the fixed tenant's beta (053 § 2), so beta never
-  // opens production's data.
+  // opens production's data. A fixed tenant with no beta answers kNoBetaTenant + its name, which
+  // is no tenant's: opening it fails.
   std::string tenant_for(std::string_view tenant) const;
 };
+
+// The prefix tenant_for gives a fixed tenant with no beta, for a beta request (053 § 2).
+inline constexpr std::string_view kNoBetaTenant = "!no-beta:";
 
 // One method of an external service (030.TheLargerEnvironment.md, 035.TheOutBox.md;
 // design/machine/015.Network.md): what the box may call, and how the host sends it.

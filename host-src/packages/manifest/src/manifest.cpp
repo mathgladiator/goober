@@ -1,4 +1,3 @@
-#include <atomic>
 #include "goober/manifest/manifest.h"
 #include "goober/mail_inbound/address.h"
 #include "goober/timers/cron.h"
@@ -6,6 +5,7 @@
 #include "goober/router/table.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <set>
 
@@ -28,13 +28,13 @@ std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>
   return a;
 }
 
-}  // namespace
-
 std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>>& beta_tenants() {
   static std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>> b{
       std::make_shared<const std::map<std::string, std::string, std::less<>>>()};
   return b;
 }
+
+}  // namespace
 
 void set_beta_tenants(std::map<std::string, std::string, std::less<>> m) {
   beta_tenants().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(m)));
@@ -47,6 +47,8 @@ std::string DataStrategy::tenant_for(std::string_view request_tenant) const {
     for (const auto& [beta, prod] : *b) {
       if (prod == tenant) return beta;
     }
+    // A fixed tenant with no beta: never production's data from beta, so a name that opens nothing.
+    return std::string(kNoBetaTenant) + tenant;
   }
   return tenant;
 }

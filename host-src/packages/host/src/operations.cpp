@@ -957,7 +957,7 @@ void Host::register_tools() {
            box_name = std::string(m->as_object().at("box").as_string());
          }
          if (auto live = boxes_->active(); live->boxes.count(box_name)) replaced = live->boxes.at(box_name)->version;
-         auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err);
+         auto result = activate ? boxes_->upload(manifest, module, types, &err) : boxes_->store(manifest, module, types, &err, beta);
          if (!result) return ToolResult::fail(err);
          if (beta) {
            if (!boxes_->beta_set(box_name, result->version, &err)) return ToolResult::fail("stored " + result->version + ", but not as the beta version: " + err);
@@ -1414,16 +1414,29 @@ void Host::register_tools() {
 
   mcp_->add_tool({"box_logs",
                   "Read tool. The newest lines a box wrote with goober_log, plus the host's notes about calls that "
-                  "failed (level host), as a list, newest last.",
+                  "failed (level host), as a list, newest last; each names its tenant, and an operator focused on "
+                  "some tenants sees only theirs.",
                   object_schema({{"box", string_property("The box name.")},
                                  {"limit", integer_property("How many lines, 1 to 1000. Default 50.")}},
                                 {"box"}),
                   [this](const bj::object& args) {
                     auto box = arg(args, "box");
                     if (!box || !base::is_valid_name(*box)) return ToolResult::fail("a valid box name is required");
+                    size_t limit = size_t(std::clamp<int64_t>(int_arg(args, "limit", 50), 1, 1000));
+                    auto scope = operator_scope(current_operator());
+                    // A focused operator reads only its tenants' lines (030; beta's, 053 § 6): read further
+                    // back so the filter still fills the limit.
                     auto lines = base::tail_lines(config_.get()->storage / "logs" / "boxes" / (*box + ".log"),
-                                                  size_t(std::clamp<int64_t>(int_arg(args, "limit", 50), 1, 1000)));
-                    return ToolResult::ok(parse_lines(lines));
+                                                  scope.all ? limit : limit * 8);
+                    auto parsed = parse_lines(lines);
+                    if (scope.all) return ToolResult::ok(std::move(parsed));
+                    bj::array mine;
+                    for (auto& l : parsed) {
+                      const auto* t = l.is_object() ? l.as_object().if_contains("tenant") : nullptr;
+                      if (t && t->is_string() && scope.tenants.count(std::string(t->as_string()))) mine.push_back(std::move(l));
+                    }
+                    if (mine.size() > limit) mine.erase(mine.begin(), mine.begin() + std::ptrdiff_t(mine.size() - limit));
+                    return ToolResult::ok(std::move(mine));
                   }});
 
   mcp_->add_tool({"access_log",

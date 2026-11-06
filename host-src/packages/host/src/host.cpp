@@ -321,7 +321,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "wrote down; when you learn how to do something, write it for the next engineer with skill_put. "
       "Terms every tool uses: a read tool changes nothing and never waits; a changing tool acts at once, unless "
       "approvals are on for you (a person turns them on in the panel), when it answers pending_approval and waits "
-      "for a person (approval_status follows it). A changing tool that writes the change log answers change_id (or "
+      "for a person (approval_status follows it); box_drop and db_drop wait for an owner whatever the switch says (not in development mode). A changing tool that writes the change log answers change_id (or "
       "change_ids), numbers to pin in a review. \"Goes live\" means served now; \"stored dark\" means kept but not "
       "served (version_upload activate: false, then version_promote); a \"dry run\" checks everything and stores "
       "nothing, changes nothing. file_etag is a stored file's etag, the one if_etag compares; body_etag is the "
@@ -1592,7 +1592,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   auto log_file = cfg->storage / "logs" / "boxes" / (m.box + ".log");
   for (const auto& line : result.logs) {
     log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
-                                                     {"request_id", request_id},
+                                                     {"tenant", tenant}, {"request_id", request_id},
                                                      {"version", ref.box->version},
                                                      {"level", line.level},
                                                      {"text", line.text}}));
@@ -1602,7 +1602,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
   bool quiet_return = options.no_response_ok && result.outcome == runtime::wasm::CallResult::Outcome::kNoResponse;
   if (result.outcome != runtime::wasm::CallResult::Outcome::kOk && !quiet_return) {
     log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
-                                                     {"request_id", request_id},
+                                                     {"tenant", tenant}, {"request_id", request_id},
                                                      {"version", ref.box->version},
                                                      {"level", "host"},
                                                      {"text", std::string(outcome_name(result.outcome)) + ": " +
@@ -1629,7 +1629,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
     auto checked = parsed ? ref.box->types->check(type, *parsed, &err) : std::nullopt;
     if (!checked) {
       log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
-                                                       {"request_id", request_id},
+                                                       {"tenant", tenant}, {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
                                                        {"text", "response isn't a valid " + type + ": " + err}}));
@@ -1678,7 +1678,7 @@ Host::BoxCall Host::call_box(const boxes::RouteRef& ref, const bj::object& doc, 
       result.error = err;
       extra["outcome"] = "commit_failed";
       log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(input.now_ms)},
-                                                       {"request_id", request_id},
+                                                       {"tenant", tenant}, {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
                                                        {"text", "commit failed: " + err}}));
@@ -2029,7 +2029,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
     std::string why = box_status_refusal(result.status, result.headers);
     if (!why.empty()) {
       log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
-                                                       {"request_id", request_id},
+                                                       {"tenant", tenant}, {"request_id", request_id},
                                                        {"version", ref.box->version},
                                                        {"level", "host"},
                                                        {"text", why}}));
@@ -2086,7 +2086,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         templated = true;
       } else {
         log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
-                                                         {"request_id", request_id},
+                                                         {"tenant", tenant}, {"request_id", request_id},
                                                          {"version", ref.box->version},
                                                          {"level", "host"},
                                                          {"text", "template " + ref.route->template_name + ": " + err}}));
@@ -2122,7 +2122,7 @@ void Host::serve_box(Request req, Finish finish, boxes::RouteRef ref, std::map<s
         for (const auto& n : e.missing) names += (names.empty() ? "" : ", ") + n;
         res.headers.emplace_back("x-goober-partial-missing", names);
         log_line("boxes/" + m.box, (bj::object{{"at", base::format_utc_ms(now_ms)},
-                                                         {"request_id", request_id},
+                                                         {"tenant", tenant}, {"request_id", request_id},
                                                          {"version", ref.box->version},
                                                          {"level", "host"},
                                                          {"text", "no partial named " + names + " (_partials/)"}}));
