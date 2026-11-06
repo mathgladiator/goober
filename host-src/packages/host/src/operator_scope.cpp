@@ -160,7 +160,12 @@ std::optional<Host::ScopeRule> Host::scope_rule(std::string_view tool) {
   return it->second;
 }
 
-std::string Host::scope_key(const std::string& operator_name) {
+std::string_view Host::beta_unwrapped(std::string_view name) {
+  return name.starts_with("beta:") ? name.substr(5) : name;
+}
+
+std::string Host::scope_key(const std::string& name) {
+  std::string operator_name(beta_unwrapped(name));
   // A person is one operator whichever way they come: the panel, or any agent signed in as them.
   if (operator_name.starts_with("oauth:")) {
     std::string rest = operator_name.substr(6);
@@ -202,7 +207,37 @@ Host::OperatorScope Host::operator_scope(const std::string& operator_name) const
   auto all = operator_scopes();
   if (auto broken = all.find("*"); broken != all.end() && all.size() == 1 && !broken->second.all) return broken->second;
   auto it = all.find(scope_key(operator_name));
-  return it == all.end() ? OperatorScope{} : it->second;
+  OperatorScope s = it == all.end() ? OperatorScope{} : it->second;
+  // Beta (053 § 6): through beta-ops, with only host:beta, or focused on beta tenants alone, an
+  // operator is beta's: its tenants are the beta tenants (within any focus it has), and it
+  // changes production's boxes only through their beta slots.
+  auto cfg = config_.get();
+  std::set<std::string> beta;
+  for (const auto& [d, e] : cfg->domains) {
+    if (!e.beta_of.empty()) beta.insert(e.tenant);
+  }
+  bool only_beta_role = false;
+  {
+    auto roles = operator_roles(operator_name);
+    bool beta_role = false, more = false;
+    for (const auto& r : roles) {
+      beta_role |= r == "host:beta";
+      more |= r == "host:owner" || r == "host:operator";
+    }
+    only_beta_role = beta_role && !more;
+  }
+  bool focused_on_beta = !s.all && !s.tenants.empty() && !beta.empty() &&
+                         std::all_of(s.tenants.begin(), s.tenants.end(), [&](const std::string& t) { return beta.count(t) > 0; });
+  if (operator_name.starts_with("beta:") || only_beta_role || focused_on_beta) {
+    std::set<std::string> tenants;
+    for (const auto& t : beta) {
+      if (s.all || s.tenants.count(t)) tenants.insert(t);
+    }
+    s.all = false;
+    s.tenants = std::move(tenants);
+    s.beta = true;
+  }
+  return s;
 }
 
 bool Host::set_operator_scope(const std::string& key, const OperatorScope& scope, const std::string& by,
@@ -230,6 +265,10 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
   std::string who = "operator " + operator_name + " is focused on " + (names.empty() ? "no tenant" : names);
   std::string widen = "; an owner can widen it in the panel's Operators view";
   auto in = [&](const std::string& tenant) { return scope.tenants.count(tenant) > 0; };
+  // Beta's operator (053 § 6) shapes production's boxes through their beta slots: a box or a
+  // project's code counts as in scope when its tenants' betas are; data and content stay
+  // exactly the beta tenants.
+  auto in_code = [&](const std::string& tenant) { return in(tenant) || (scope.beta && in(cfg->beta_tenant_of(tenant))); };
   auto tenant_of_domain = [&](const std::string& domain) -> std::optional<std::string> {
     std::string name = base::to_lower(domain);
     if (auto r = cfg->redirects.find(name); r != cfg->redirects.end()) name = r->second;  // its primary's tenant
@@ -245,10 +284,10 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       if (d == "*") return *out_of = "every tenant (\"*\")", false;
       auto t = tenant_of_domain(d);
       if (!t) return *out_of = d + " (no tenant yet)", false;
-      if (!in(*t)) return *out_of = *t, false;
+      if (!in_code(*t)) return *out_of = *t, false;
     }
     for (const auto& s : m.data) {
-      if (!s.tenant.empty() && !in(s.tenant)) return *out_of = "tenant " + s.tenant + "'s database (data." + s.name + ")", false;
+      if (!s.tenant.empty() && !in_code(s.tenant)) return *out_of = "tenant " + s.tenant + "'s database (data." + s.name + ")", false;
     }
     return true;
   };
@@ -276,6 +315,28 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
 
   auto rule = scope_rule(tool);
   if (!rule) return who + ", and " + tool + " has no scope rule, so it's refused" + widen;
+  // Beta's operator never changes what production serves (053 § 6): versions and projects go to
+  // the beta channel; a box is dropped only while it is beta's alone; the rest of production's
+  // box controls are the owner's.
+  if (scope.beta) {
+    std::string beta_who = "operator " + operator_name + " works on beta";
+    bool channel_beta = text_arg(args, "channel") == "beta";
+    if ((tool == "version_upload" || tool == "version_promote" || tool == "source_deploy") && !channel_beta) {
+      // A dry run changes nothing, so it may check as production would.
+      const auto* dr = args.if_contains("dry_run");
+      if (!(tool == "version_upload" && dr && dr->is_bool() && dr->as_bool())) {
+        return beta_who + ": " + tool + " goes to beta with channel \"beta\"; production is promoted by its owner";
+      }
+    }
+    if (tool == "box_drop" && boxes_->active()->boxes.count(text_arg(args, "box"))) {
+      return beta_who + ": box " + text_arg(args, "box") + " is live in production; beta_clear takes it out of beta";
+    }
+    static const std::set<std::string, std::less<>> kProduction = {
+        "box_disable", "box_enable", "version_restore", "split_start", "split_set", "split_stop", "changeset_apply",
+        "changeset_rollback", "promotion_start"};
+    if (kProduction.count(tool)) return beta_who + ": " + tool + " changes production, which its owner does";
+    if (*rule == Rule::kHost && tool == "beta_status") return std::nullopt;
+  }
   switch (*rule) {
     case Rule::kOpen:
     case Rule::kFiltered:
@@ -390,7 +451,7 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       auto spec = read_spec(*text, &err);
       if (!spec) return std::nullopt;  // the tool says what's wrong with it
       for (const auto& [dir, tenant] : spec->sites) {
-        if (!in(tenant)) return who + ", and project " + project + " writes tenant " + tenant + "'s site" + widen;
+        if (!in_code(tenant)) return who + ", and project " + project + " writes tenant " + tenant + "'s site" + widen;
       }
       for (const auto& dir : spec->boxes) {
         auto mtext = read(dir == "." ? "manifest.json" : dir + "/manifest.json");
@@ -485,7 +546,9 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
   // A drop always waits for a person (051 § 4); everything else only when approvals are on.
   if (hold) {
     bool on = approvals_on(operator_name);
-    bool local = config_.get()->local;  // development mode: drops don't wait (051 § 4)
+    // Drops don't wait in development mode (051 § 4), nor for beta's operator, whose drops reach
+    // only beta (053 § 6).
+    bool local = config_.get()->local || operator_scope(operator_name).beta;
     policy.hold = [this, operator_name, on, local](const std::string& tool, const bj::object& args) -> std::optional<mcp::ToolResult> {
       if (!on && (local || !always_held(tool, args))) return std::nullopt;
       return hold_for_approval(operator_name, tool, args);
@@ -534,11 +597,12 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
     };
   }
   if (read_only || !scope.all) {
-    policy.allowed = [read_only, focused = !scope.all](const std::string& tool) {
+    policy.allowed = [read_only, focused = !scope.all, beta = scope.beta](const std::string& tool) {
       if (read_only && !is_read_tool(tool)) return false;
       if (focused) {
         auto rule = scope_rule(tool);
-        return rule && *rule != ScopeRule::kHost;
+        // beta_status is host-wide, and beta's operator reads it (053 § 6).
+        return rule && (*rule != ScopeRule::kHost || (beta && tool == "beta_status"));
       }
       return true;
     };

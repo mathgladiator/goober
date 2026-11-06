@@ -101,6 +101,15 @@ bool is_loopback_address(std::string_view address) {
   return parts == 3 && digits > 0;
 }
 
+std::string HostConfig::beta_panel_domain() const {
+  if (!operations_beta_domain.empty()) return operations_beta_domain;
+  if (!local) return "";
+  for (const auto& [d, e] : domains) {
+    if (!e.beta_of.empty()) return "beta-ops.localhost";
+  }
+  return "";
+}
+
 std::string HostConfig::beta_of(std::string_view domain) const {
   auto it = domains.find(std::string(domain));
   return it == domains.end() ? std::string() : it->second.beta_of;

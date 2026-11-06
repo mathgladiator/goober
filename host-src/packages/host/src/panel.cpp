@@ -66,7 +66,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "skill_list", "skill_search", "skill_get",
     "cleanup_report", "split_report", "split_list", "beta_status", "beta_mail_list", "beta_mail_get"};
 
-const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer"};
+const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer", "host:beta"};
 
 constexpr const char* kPanelCsp =
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
@@ -153,9 +153,16 @@ std::string& Host::current_request_id() {
   return id;
 }
 
-std::vector<std::string> Host::operator_roles(const std::string& operator_name) const {
+std::vector<std::string> Host::operator_roles(const std::string& name) const {
+  // Through beta-ops (053 § 6) an operator keeps its roles; its scope is beta's.
+  std::string operator_name(beta_unwrapped(name));
   // The config's token and minted tokens are the owner's own (design/machine/023 § 3).
   if (operator_name == "config" || operator_name.starts_with("token:")) return {"host:owner"};
+  if (operator_name.starts_with("panel:")) {
+    auto cfg = config_.get();
+    if (auto it = cfg->identity.operators.find(operator_name.substr(6)); it != cfg->identity.operators.end()) return it->second;
+    return {};
+  }
   if (operator_name.starts_with("oauth:")) {
     std::string rest = operator_name.substr(6);
     std::string email = rest.substr(0, rest.rfind(':'));
@@ -167,7 +174,8 @@ std::vector<std::string> Host::operator_roles(const std::string& operator_name) 
 
 bool Host::may_change(const std::vector<std::string>& roles) {
   for (const auto& r : roles) {
-    if (r == "host:owner" || r == "host:operator") return true;
+    // host:beta changes beta alone: its scope holds it there (053 § 6).
+    if (r == "host:owner" || r == "host:operator" || r == "host:beta") return true;
   }
   return false;
 }
@@ -175,6 +183,14 @@ bool Host::may_change(const std::vector<std::string>& roles) {
 bool Host::is_panel_request(const Request& req, bool panel_listener) const {
   if (panel_listener) return true;
   std::string domain = config_.get()->panel_domain();
+  std::string h = base::to_lower(req.header("host"));
+  if (auto colon = h.rfind(':'); colon != std::string::npos && h.find(']') == std::string::npos) h = h.substr(0, colon);
+  if (!h.empty() && h.back() == '.') h.pop_back();
+  return (!domain.empty() && h == domain) || is_beta_ops_request(req);
+}
+
+bool Host::is_beta_ops_request(const Request& req) const {
+  std::string domain = config_.get()->beta_panel_domain();
   if (domain.empty()) return false;
   std::string h = base::to_lower(req.header("host"));
   if (auto colon = h.rfind(':'); colon != std::string::npos && h.find(']') == std::string::npos) h = h.substr(0, colon);
@@ -247,8 +263,14 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       for (const auto& [d, e] : cfg->domains) {
         if (seen.insert(e.tenant).second) tenants.push_back(bj::value(e.tenant));
       }
-      auto scope = operator_scope("panel:" + who->user.email);
+      bool beta_ops = is_beta_ops_request(req);
+      auto scope = operator_scope((beta_ops ? "beta:panel:" : "panel:") + who->user.email);
       bool owner = std::find(who->roles.begin(), who->roles.end(), "host:owner") != who->roles.end();
+      // The beta sites (053), for the Beta view: beta-ops shows them alone.
+      bj::array beta_sites;
+      for (const auto& [d, e] : cfg->domains) {
+        if (!e.beta_of.empty()) beta_sites.push_back(bj::object{{"domain", d}, {"tenant", e.tenant}, {"beta_of", e.beta_of}});
+      }
       bj::array all_tenants = tenants;
       bj::value focus = nullptr;
       if (!scope.all) {
@@ -268,6 +290,8 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
                                                {"all_tenants", owner ? std::move(all_tenants) : bj::array(tenants)},
                                                {"build", std::string(kBuildCommit)},
                                                {"tenants", std::move(tenants)},
+                                               {"beta_ops", beta_ops},
+                                               {"beta_sites", std::move(beta_sites)},
                                                {"domain", domain}}),
                     R"({"panel":"me"})");
     }
@@ -296,12 +320,30 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       }
       args = v->as_object();
     }
-    std::string me = "panel:" + who->user.email;
+    // beta-ops (053 § 6): the same panel, its every call in beta's scope; it looks, and it injects mail.
+    bool beta_ops = is_beta_ops_request(req);
+    std::string me = (beta_ops ? "beta:panel:" : "panel:") + who->user.email;
+    if (beta_ops && tool.starts_with("write/") && tool != "write/beta_mail_send") {
+      return finish(json_reply(403, bj::object{{"error", "beta-ops looks and injects mail; production's changes are made in the panel"}}),
+                    json::dump(bj::object{{"panel", tool}, {"why", "beta-ops"}}));
+    }
     // The panel's own writes: the only changes it makes, each a human's (030 § 2, 029 § 6).
     // The panel's own answers are {"result": ...}, as a tool's are, which is what its script reads.
     auto own = [](int status, bj::object body) {
       return status == 200 ? json_reply(200, bj::object{{"result", std::move(body)}}) : json_reply(status, body);
     };
+    if (tool == "write/beta_mail_send") {
+      if (!may_change(who->roles)) return finish(json_reply(403, bj::object{{"error", "an observer can't send mail into beta"}}), "");
+      std::string err;
+      bj::object out;
+      {
+        OperatorContext as(*this, me, request_id);
+        out = beta_mail_inject(arg_text(args, "to"), arg_text(args, "from"), arg_text(args, "subject"), arg_text(args, "text"),
+                               arg_text(args, "in_reply_to"), &err);
+      }
+      if (!err.empty()) return finish(json_reply(400, bj::object{{"error", err}}), json::dump(bj::object{{"panel", tool}}));
+      return finish(own(200, std::move(out)), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
     if (tool == "operators") return finish(own(200, panel_operators(*who)), R"({"panel":"operators"})");
     if (tool == "approvals") return finish(own(200, panel_approvals(*who)), R"({"panel":"approvals"})");
     // Approvals (035): turning them on or off for an agent, and deciding a held call.

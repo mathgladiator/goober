@@ -67,7 +67,8 @@ bool has_role(const SignedIn& who, const char* role) {
 
 // The person an agent acts as: "oauth:ann@x:client" is ann@x; tokens and the config's token are
 // no one's.
-std::string person_of(const std::string& agent) {
+std::string person_of(const std::string& name) {
+  std::string agent = name.starts_with("beta:") ? name.substr(5) : name;  // through beta-ops (053 § 6)
   if (agent.starts_with("oauth:")) {
     std::string rest = agent.substr(6);
     return rest.substr(0, rest.rfind(':'));
@@ -118,7 +119,8 @@ sqlite::Db& Host::approvals_db() {
   return *approvals_db_;
 }
 
-bool Host::agent_still_signs_in(const std::string& agent) {
+bool Host::agent_still_signs_in(const std::string& name) {
+  std::string agent(beta_unwrapped(name));
   auto cfg = config_.get();
   if (agent == "config") return !cfg->operations_token.empty();
   if (agent.starts_with("token:")) {

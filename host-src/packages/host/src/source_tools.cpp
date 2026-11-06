@@ -544,7 +544,11 @@ void Host::register_source_tools() {
                   "the job: its state and log, compiler errors included. Returns once done, or after 25 s with a job "
                   "to follow with source_job. A changing tool (it runs a build job).",
          mcp::object_schema({{"project", project_prop}, {"rev", rev_prop},
-                             {"verbose", mcp::boolean_property("The whole log even when it succeeds.")}},
+                             {"verbose", mcp::boolean_property("The whole log even when it succeeds.")},
+                             {"channel", mcp::enum_property("A deploy's channel: \"beta\" puts each box in its beta slot "
+                                                            "and each site's files in that tenant's beta (053); \"live\" "
+                                                            "(the default) as before.",
+                                                            {"live", "beta"})}},
                             {"project"}),
          [this, deploy](const bj::object& args) {
            std::string name = arg(args, "project").value_or("");
@@ -558,6 +562,10 @@ void Host::register_source_tools() {
            job.rev = rev;
            job.kind = deploy ? "deploy" : "build";
            job.author = current_operator();
+           if (auto c = arg(args, "channel")) {
+             if (*c != "live" && *c != "beta") return ToolResult::fail("channel is \"live\" or \"beta\"");
+             job.channel = *c;
+           }
            int64_t id = jobs_->submit(job, [this, deploy](BuildJob& j) { run_source_job(j, deploy); });
            auto done = jobs_->get(id, 25000);
            if (!done) return ToolResult::fail("the job vanished");
@@ -695,35 +703,57 @@ void Host::run_source_job(BuildJob& job, bool deploy) {
   for (const auto& b : built.boxes) {
     std::string replaced;
     if (auto live = boxes_->active(); live->boxes.count(b.box)) replaced = live->boxes.at(b.box)->version;
-    auto r = boxes_->upload(b.manifest, b.module, b.types, &err);
-    if (r && job_runs_) job_runs_->replaced(b.box, replaced, r->version, job.author, base::now_unix_ms());
+    bool beta = job.channel == "beta";
+    auto r = beta ? boxes_->store(b.manifest, b.module, b.types, &err) : boxes_->upload(b.manifest, b.module, b.types, &err);
+    if (r && beta && !boxes_->beta_set(b.box, r->version, &err)) r.reset();
+    if (r && !beta && job_runs_) job_runs_->replaced(b.box, replaced, r->version, job.author, base::now_unix_ms());
     if (!r) {
       job.log += "✗ box " + b.box + ": " + err + "\n";
       job.state = "failed";
       job.result["schemas"] = schemas;
       job.result["boxes"] = boxes;
       // The boxes uploaded before this one are live: they came from this revision all the same.
-      if (!deployed.boxes.empty()) source_->record_deploy(deployed);
+      if (!deployed.boxes.empty() && job.channel != "beta") source_->record_deploy(deployed);
       return;
     }
     deployed.boxes.emplace_back(b.box, r->version);
     bj::array warnings;
     for (const auto& w : r->warnings) warnings.push_back(bj::value(w));
     boxes.push_back(bj::object{{"box", b.box}, {"version", r->version}, {"warnings", warnings}});
-    job.log += "deployed box " + b.box + " as version " + r->version + "\n";
+    job.log += "deployed box " + b.box + " as version " + r->version + (job.channel == "beta" ? " to beta" : "") + "\n";
   }
   for (const auto& site : built.sites) {
     int written = 0;
+    // A beta deploy writes the site's beta tenant (053 § 3).
+    std::string tenant = site.tenant;
+    if (job.channel == "beta") {
+      tenant = config_.get()->beta_tenant_of(site.tenant);
+      if (tenant.empty()) {
+        job.log += "✗ " + site.tenant + " has no beta site (beta-of in host.json)\n";
+        job.state = "failed";
+        return;
+      }
+    }
     for (const auto& [path, bytes] : site.files) {
-      if (!content_->put(site.tenant, path, bytes, &err)) {
-        job.log += "✗ " + site.tenant + "/" + path + ": " + err + "\n";
+      if (!content_->put(tenant, path, bytes, &err)) {
+        job.log += "✗ " + tenant + "/" + path + ": " + err + "\n";
         job.state = "failed";
         return;
       }
       ++written;
     }
-    sites.push_back(bj::object{{"tenant", site.tenant}, {"files", written}});
-    job.log += "wrote " + std::to_string(written) + " files for " + site.tenant + "\n";
+    sites.push_back(bj::object{{"tenant", tenant}, {"files", written}});
+    job.log += "wrote " + std::to_string(written) + " files for " + tenant + "\n";
+  }
+  job.result["channel"] = job.channel;
+  if (job.channel == "beta") {
+    // Not a production deploy: the project's deployed revision and the boxes' history are live's.
+    job.result["schemas"] = schemas;
+    job.result["boxes"] = boxes;
+    job.result["sites"] = sites;
+    job.log += "✓ revision " + std::to_string(job.rev) + " of " + job.project + " is on beta\n";
+    job.state = "succeeded";
+    return;
   }
   source_->set_deployed(job.project, job.rev, base::now_unix_ms());
   source_->record_deploy(deployed);

@@ -30,6 +30,27 @@ std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>
 
 }  // namespace
 
+std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>>& beta_tenants() {
+  static std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>> b{
+      std::make_shared<const std::map<std::string, std::string, std::less<>>>()};
+  return b;
+}
+
+void set_beta_tenants(std::map<std::string, std::string, std::less<>> m) {
+  beta_tenants().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(m)));
+}
+
+std::string DataStrategy::tenant_for(std::string_view request_tenant) const {
+  if (tenant.empty()) return std::string(request_tenant);
+  auto b = beta_tenants().load();
+  if (b->count(request_tenant)) {
+    for (const auto& [beta, prod] : *b) {
+      if (prod == tenant) return beta;
+    }
+  }
+  return tenant;
+}
+
 void set_domain_aliases(std::map<std::string, std::string, std::less<>> a) {
   aliases().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(a)));
 }

@@ -116,6 +116,9 @@ struct HostConfig {
   std::optional<uint16_t> operations_listen_port;
   // beta-ops (053 § 6): the panel and operator MCP for beta tenants only, or "".
   std::string operations_beta_domain;
+  // beta-ops' domain: operations.beta-domain, or beta-ops.localhost in local mode when a beta site
+  // exists, or "" (off).
+  std::string beta_panel_domain() const;
   // Beta (053): the production domain a beta domain answers as, or "".
   std::string beta_of(std::string_view domain) const;
   // Whether a tenant is a beta tenant; a production tenant's beta tenant ("" for none); a beta

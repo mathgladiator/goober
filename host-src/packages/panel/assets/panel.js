@@ -1739,6 +1739,53 @@ const views = {
     ];
   },
 
+  // Beta (053): the beta sites, each box's live and beta versions, and beta's mailbox, where a
+  // person reads what the site would have sent and injects mail as if it arrived.
+  async beta(params) {
+    const sites = state.me.beta_sites || [];
+    if (!sites.length) return [h('h1', {}, 'Beta'), h('p', { class: 'muted' }, 'No beta site: give a domain "beta-of" in host.json (053).')];
+    const tenant = params.get('tenant') || sites[0].tenant;
+    const id = params.get('id');
+    const go = (k, x) => { if (x) params.set(k, x); else params.delete(k); location.hash = '#/beta?' + params; };
+    const [status, mail] = await Promise.all([api('beta_status', {}).catch(() => null), api('beta_mail_list', { tenant, limit: 100 })]);
+    const out = [h('h1', {}, state.me.beta_ops ? 'Beta operations' : 'Beta'),
+      h('p', { class: 'muted small' }, 'Beta runs on this host beside production, with its own tenant, accounts, and data. Boxes answer ' +
+        'there with their beta versions (version_upload or source_deploy with channel "beta"); nothing beta sends leaves the machine. ' +
+        (state.me.beta_ops ? 'This is beta-ops: every view here sees beta alone.' : ''))];
+    out.push(h('div', { class: 'bar' }, h('label', {}, 'Site '), segmented(sites.map((s) => s.tenant), tenant, (t) => { params.delete('id'); go('tenant', t); })));
+    if (status) {
+      out.push(wideCard('Boxes', table([
+        { label: 'Box', get: (b) => b.box, cls: () => 'mono' },
+        { label: 'Live', get: (b) => (b.live_version || '–').slice(0, 12), cls: () => 'mono muted' },
+        { label: 'Beta', get: (b) => (b.beta_version || '–').slice(0, 12), cls: () => 'mono' },
+        { label: 'State', get: (b) => h('span', { class: 'pill' + (b.state === 'differs from live' || b.state === 'beta only' ? ' deploy' : '') }, b.state) },
+      ], status.boxes)));
+    }
+    if (id) {
+      const m = await api('beta_mail_get', { tenant, id });
+      out.push(wideCard(m.subject || '(no subject)',
+        h('p', { class: 'small' }, h('b', {}, m.direction === 'in' ? 'Injected' : m.direction === 'push' ? 'Push' : 'Captured'), ' · ',
+          fmt.time(m.at_ms), ' · from ', h('span', { class: 'mono' }, m.from), ' to ', h('span', { class: 'mono' }, m.to),
+          m.reply_to ? [' · replies to ', h('span', { class: 'mono' }, m.reply_to)] : null,
+          m.outcome ? [' · ', h('span', { class: 'pill' + (m.outcome === 'delivered' ? ' ok' : ' failed') }, m.outcome)] : null),
+        h('pre', { class: 'json' }, m.text || ''),
+        m.html ? h('details', {}, h('summary', {}, 'HTML (its source, never drawn)'), h('pre', { class: 'json' }, m.html)) : null,
+        h('p', {}, h('a', { href: '#/beta?tenant=' + encodeURIComponent(tenant) }, '← the mailbox'))));
+      if (mayChange() || (state.me.roles || []).includes('host:beta')) out.push(composeCard(tenant, sites, m));
+      return out;
+    }
+    out.push(wideCard(`Mailbox (${mail.length})`, mail.length ? table([
+      { label: '', get: (m) => m.direction === 'in' ? '→ in' : m.direction === 'push' ? 'push' : 'out →', cls: () => 'muted small' },
+      { label: 'When', get: (m) => fmt.time(m.at_ms), cls: () => 'muted small' },
+      { label: 'From', get: (m) => m.from, cls: () => 'mono small' },
+      { label: 'To', get: (m) => m.to, cls: () => 'mono small' },
+      { label: 'Subject', get: (m) => h('div', {}, m.subject || '(no subject)', h('div', { class: 'muted small' }, clip(m.preview, 100))) },
+      { label: '', get: (m) => m.outcome ? h('span', { class: 'pill' + (m.outcome === 'delivered' ? ' ok' : ' failed') }, m.outcome) : '' },
+    ], mail, (m) => go('id', m.id)) : h('p', { class: 'muted' }, 'Nothing yet: sign in on the beta site, or inject a message below.')));
+    if (mayChange() || (state.me.roles || []).includes('host:beta')) out.push(composeCard(tenant, sites, null));
+    return out;
+  },
+
   // Skills and playbooks (050 § 6): search and read what the host's engineers wrote down, by role.
   // Look-only: operators write them with skill_put and skill_delete.
   async skills(params) {
@@ -1830,6 +1877,29 @@ function splitCard(r) {
       { label: 'By', get: (x) => x.by, cls: () => 'muted small' },
       { label: 'Why', get: (x) => x.why || '' },
     ], s.history || [])));
+}
+
+// Beta's mail client (053 § 4): writes a message to a beta address, or a reply to one in the
+// mailbox, and injects it as if it arrived by mail.
+function composeCard(tenant, sites, replyTo) {
+  const site = sites.find((s) => s.tenant === tenant) || sites[0];
+  const to = h('input', { type: 'text', size: 40, value: replyTo ? (replyTo.reply_to || replyTo.from) : 'support@' + site.domain });
+  const from = h('input', { type: 'text', size: 32, value: replyTo ? replyTo.to : 'tester@example.org' });
+  const subject = h('input', { type: 'text', size: 60, value: replyTo ? (/^re:/i.test(replyTo.subject || '') ? replyTo.subject : 'Re: ' + (replyTo.subject || '')) : '' });
+  const text = h('textarea', { rows: 6, cols: 80 });
+  const out = h('p', { class: 'muted small' });
+  const send = h('button', { type: 'button', onclick: async () => {
+    try {
+      const r = await api('write/beta_mail_send', { to: to.value.trim(), from: from.value.trim(), subject: subject.value, text: text.value,
+        in_reply_to: replyTo && replyTo.direction === 'out' ? replyTo.id : '' });
+      out.textContent = `Injected: ${r.box}'s ${r.route} answered ${r.outcome}.`;
+      setTimeout(() => { location.hash = '#/beta?tenant=' + encodeURIComponent(tenant); }, 600);
+    } catch (e) { out.textContent = e.message; }
+  } }, 'Inject');
+  return wideCard(replyTo ? 'Reply' : 'Write a message in',
+    h('p', { class: 'muted small' }, 'As if it arrived by mail: the box\'s mail route gets it, with its From taken as verified. Its replies land in the mailbox.'),
+    h('div', { class: 'bar' }, h('label', {}, 'To '), to), h('div', { class: 'bar' }, h('label', {}, 'From '), from),
+    h('div', { class: 'bar' }, h('label', {}, 'Subject '), subject), text, h('div', { class: 'bar' }, send), out);
 }
 
 function isDrop(r) { return (r.tool === 'box_drop' || r.tool === 'db_drop') && !(r.args && r.args.dry_run); }
@@ -2515,6 +2585,10 @@ async function start() {
   append(who, [focus() ? h('span', { class: 'pill focus' }, 'Focused on ' + focus().join(', ')) : null,
     h('span', { title: state.me.roles.join(', ') }, state.me.email), h('span', {}, 'build ' + state.me.build),
     h('form', { method: 'post', action: '/identity/sign-out' }, h('input', { type: 'hidden', name: 'return', value: '/' }), h('button', {}, 'Sign out'))]);
+  // Beta (053): its view only where a beta site exists; beta-ops opens on it.
+  const betaLink = document.querySelector('#nav a[data-view="beta"]');
+  if (betaLink && !(state.me.beta_sites || []).length) betaLink.remove();
+  if (state.me.beta_ops && !location.hash) location.hash = '#/beta';
   window.addEventListener('hashchange', () => render(false));
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {

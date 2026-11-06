@@ -296,6 +296,13 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   // Beta domains answer as their production domains, with the boxes' beta versions (053 § 3).
   manifest::set_domain_aliases(config->domain_aliases());
   {
+    std::map<std::string, std::string, std::less<>> betas;
+    for (const auto& [d, e] : config->domains) {
+      if (!e.beta_of.empty()) betas[e.tenant] = config->production_tenant_of(e.tenant);
+    }
+    manifest::set_beta_tenants(std::move(betas));
+  }
+  {
     std::set<std::string> beta;
     for (const auto& [d, p] : config->domain_aliases()) beta.insert(d);
     boxes_->set_beta_domains(std::move(beta));
@@ -618,6 +625,13 @@ std::string Host::reload() {
   if (config_.get()->local) next = config::local_mode(next);
   std::string notes = config_.replace(next);
   manifest::set_domain_aliases(next->domain_aliases());
+  {
+    std::map<std::string, std::string, std::less<>> betas;
+    for (const auto& [d, e] : next->domains) {
+      if (!e.beta_of.empty()) betas[e.tenant] = next->production_tenant_of(e.tenant);
+    }
+    manifest::set_beta_tenants(std::move(betas));
+  }
   {
     std::set<std::string> beta;
     for (const auto& [d, p] : next->domain_aliases()) beta.insert(d);

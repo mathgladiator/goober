@@ -110,6 +110,8 @@ std::string Host::bearer_operator(const Request& req) const {
 
 void Host::handle_operations(const Request& req, const Finish& finish) {
   std::string operator_name = bearer_operator(req);
+  // Through beta-ops (053 § 6) every operator works in beta's scope.
+  if (!operator_name.empty() && is_beta_ops_request(req)) operator_name = "beta:" + operator_name;
   if (operator_name.empty()) {
     mcp_forget(req, "operator");  // a revoked token stops counting as its operator's (047 § 14)
     // Wrong tokens are slowed per address; right ones aren't counted at all.

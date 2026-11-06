@@ -7,6 +7,7 @@
 #include <boost/beast.hpp>
 
 #include "goober/host/host.h"
+#include "goober/host/operator_tokens.h"
 #include "goober/json/json.h"
 
 using namespace goober;
@@ -229,4 +230,60 @@ TEST_F(BetaTest, ServicesFailInBetaUnlessTheyAllowReads) {
   auto allowed = fetch(port, "beta.example.com", bhttp::verb::get, "/ask").body;
   EXPECT_EQ(allowed.find("isn't reached from beta"), std::string::npos) << allowed;
   EXPECT_FALSE(host->boxes().upload(ask_manifest(R"("beta":"sometimes",)"), kAskWat, &err));
+}
+
+namespace {
+
+bj::object call_on(uint16_t port, const std::string& domain, const std::string& bearer, const std::string& tool, const bj::object& args) {
+  auto r = fetch(port, domain, bhttp::verb::post, "/goober-operations-mcp",
+                 {{"authorization", "Bearer " + bearer}, {"content-type", "application/json"}},
+                 json::dump(bj::object{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"},
+                                       {"params", bj::object{{"name", tool}, {"arguments", args}}}}));
+  std::string err;
+  auto v = json::parse(r.body, &err);
+  if (!v || !v->as_object().contains("result")) return bj::object{{"isError", true}, {"text", r.body}};
+  auto res = v->as_object().at("result").as_object();
+  return bj::object{{"isError", res.at("isError")}, {"text", res.at("content").at(0).at("text")}};
+}
+
+}  // namespace
+
+TEST_F(BetaTest, ThroughBetaOpsAnOperatorChangesOnlyBeta) {
+  const std::string ops = "beta-ops.example.com";
+  auto beta = [&](const std::string& tool, const bj::object& args) { return call_on(port, ops, kToken, tool, args); };
+  auto refused = [&](const bj::object& r, const std::string& why) {
+    EXPECT_TRUE(r.at("isError").as_bool()) << r.at("text");
+    EXPECT_NE(std::string(r.at("text").as_string()).find(why), std::string::npos) << r.at("text");
+  };
+  // Production's box: staged for beta only.
+  refused(beta("version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("x")}}), "channel");
+  auto staged = beta("version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("staged")}, {"channel", "beta"}});
+  ASSERT_FALSE(staged.at("isError").as_bool()) << staged.at("text");
+  EXPECT_EQ(fetch(port, "beta.example.com", bhttp::verb::get, "/hi").body, "staged");
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "live");
+  refused(beta("version_promote", {{"box", "site"}, {"version", live}}), "channel");
+  refused(beta("box_disable", {{"box", "site"}, {"why", "x"}}), "changes production");
+  refused(beta("box_drop", {{"box", "site"}, {"why", "x"}}), "live in production");
+  // Content and data: beta's tenant, never production's.
+  refused(beta("page_put", {{"tenant", "acme"}, {"path", "/x"}, {"format", "markdown"}, {"body", "x"}}), "");
+  auto page = beta("page_put", {{"tenant", "acme_beta"}, {"path", "/about"}, {"format", "markdown"}, {"body", "beta about"}});
+  EXPECT_FALSE(page.at("isError").as_bool()) << page.at("text");
+  auto bs = beta("beta_status", {});
+  EXPECT_FALSE(bs.at("isError").as_bool()) << bs.at("text");
+  refused(beta("backup_status", {}), "");
+  // The same token on production's domain is the owner's, as always.
+  EXPECT_FALSE(call_on(port, "example.com", kToken, "version_promote", {{"box", "site"}, {"version", live}}).at("isError").as_bool());
+
+  // A token focused on beta tenants alone is beta's anywhere.
+  std::string err;
+  auto grok = *host::create_operator_token(root / "storage", "grok", 0, &err);
+  host::Host::OperatorScope only_beta;
+  only_beta.all = false;
+  only_beta.tenants = {"acme_beta"};
+  ASSERT_TRUE(host->set_operator_scope("token:grok", only_beta, "test", &err)) << err;
+  EXPECT_TRUE(host->operator_scope("token:grok").beta);
+  refused(call_on(port, "example.com", grok, "version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("x")}}), "channel");
+  EXPECT_FALSE(host->operator_scope("token:other").beta);
+  EXPECT_TRUE(host->operator_scope("beta:token:other").beta);
+  EXPECT_EQ(host->operator_scope("beta:token:other").tenants, std::set<std::string>{"acme_beta"});
 }

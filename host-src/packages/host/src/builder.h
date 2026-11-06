@@ -71,6 +71,7 @@ std::optional<std::vector<source::Change>> template_files(const std::string& kin
 struct BuildJob {
   int64_t id = 0;
   std::string project, kind;  // build or deploy
+  std::string channel = "live";  // a deploy's: "live", or "beta" (boxes to their beta slots, sites to beta tenants; 053)
   int64_t rev = 0;
   std::string state = "queued";  // queued, running, succeeded, failed
   std::string author;

@@ -58,6 +58,8 @@ std::string Host::drop_approval() {
   if (!approved_by_now().empty()) return approved_by_now();
   // Development mode (--local, `just run`): drops don't wait (the human, 2026-11-04).
   if (config_.get()->local) return "development mode (--local)";
+  // Beta's operator drops only beta's (its scope holds it there): no wait (053 § 6).
+  if (operator_scope(current_operator()).beta) return "beta's operator (053 § 6)";
   return "";
 }
 

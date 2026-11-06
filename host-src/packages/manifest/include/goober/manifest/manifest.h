@@ -176,7 +176,10 @@ struct DataStrategy {
   // The database's name for a tenant, with {!tenant} filled in.
   std::string database_for(std::string_view tenant) const;
   // The tenant whose database a request for `tenant` reaches: the fixed one, or its own.
-  std::string tenant_for(std::string_view tenant) const { return this->tenant.empty() ? std::string(tenant) : this->tenant; }
+  // The tenant whose database this strategy opens for a request of `tenant`: the request's, or
+  // the fixed one; for a beta tenant's request, the fixed tenant's beta (053 § 2), so beta never
+  // opens production's data.
+  std::string tenant_for(std::string_view tenant) const;
 };
 
 // One method of an external service (030.TheLargerEnvironment.md, 035.TheOutBox.md;
@@ -356,6 +359,8 @@ struct Manifest {
 // Domains that answer as another for applies_to: a beta domain as its production domain
 // (design/machine/053.Beta.md § 2), set by the host from its config. Safe from any thread.
 void set_domain_aliases(std::map<std::string, std::string, std::less<>> aliases);
+// Each beta tenant's production tenant (053 § 2), for DataStrategy::tenant_for.
+void set_beta_tenants(std::map<std::string, std::string, std::less<>> beta_to_production);
 
 // Parses requirements in disjunctive normal form: a list of roles (one clause), or a
 // list of lists of roles. Parameters must belong to `pattern`; content pages pass an

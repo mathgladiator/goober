@@ -1173,7 +1173,15 @@ production, promotion in-host first and shaped for a remote host later):
       in_reply_to); tests.
 - [x] Step 4: from a beta tenant, service calls fail unless the service says `"beta": "allow"` and
       the method is read-only; push is captured in the mailbox; tests.
-- [ ] Step 5: beta-ops (panel and operator MCP), `host:beta`, scope.
+- [x] Step 5: beta-ops: the panel and the operator MCP on `operations.beta-domain` (or
+      beta-ops.localhost in local mode) run every call as `beta:<operator>`, in beta's scope; so
+      do `host:beta` alone and a focus on beta tenants alone. Beta's operator stages production's
+      boxes only with channel "beta" (version_upload, version_promote, source_deploy), never
+      disables, splits, restores, or drops a live box, works on beta tenants' content and data,
+      and its drops don't wait; a fixed-tenant strategy opens its beta's database for beta; the
+      beta-ops panel looks and injects mail; the panel's Beta view (boxes, mailbox, composer);
+      tests.
+- [ ] Not opened in a browser yet: the Beta view and beta-ops.
 - [ ] Step 6: promotion as a change set, in-host.
 - [ ] Step 7: the deploy audit's two offers.
 - [x] Decisions (053 § 9).

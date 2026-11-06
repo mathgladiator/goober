@@ -196,11 +196,16 @@ class Host {
   struct OperatorScope {
     bool all = true;
     std::set<std::string> tenants;  // when not all
+    // Beta's operator (053 § 6): its tenants are beta tenants, it may stage production's boxes
+    // in their beta slots and deploy projects to beta, and nothing else of production's.
+    bool beta = false;
     std::string set_by;
     int64_t at_ms = 0;
   };
   // Every operator tool's rule; nullopt for a tool that has none (refused when focused).
   static std::optional<ScopeRule> scope_rule(std::string_view tool);
+  // An operator name without beta-ops' "beta:" (053 § 6).
+  static std::string_view beta_unwrapped(std::string_view name);
   // Whose scope an operator name uses: "person:$email" for the panel and OAuth agents alike,
   // else the name ("config", "token:$name").
   static std::string scope_key(const std::string& operator_name);
@@ -817,6 +822,7 @@ class Host {
   // Who approved the call running on this thread now (panel_decide sets it), or "".
   static std::string& approved_by_now();
   // Beta (design/machine/053.Beta.md; beta.cpp).
+  bool is_beta_ops_request(const server::http::Request& req) const;
   boost::json::object beta_status();
   // Beta's mailbox (053 § 4): mail/beta/<tenant>/, each message a JSON file, the newest 2000
   // kept for 30 days. Out: what the tenant would have sent; in: what an operator injected.
