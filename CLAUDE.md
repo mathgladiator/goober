@@ -303,6 +303,12 @@ Read these before doing design work:
     promotion of boxes and content as one change set the owner applies and rolls back (in-host now,
     shaped for a remote host); the deploy offers beta and beta-ops; 310's "another host" now one of two
     ways.
+  - `design/machine/054.ReviewNovember2.md`: the code, security, performance, and quality review of
+    2026-11-04 to 05's work (skills, cleanup, splits, beta), in two loops of four reviewers: beta's
+    drops of production boxes, the approvals switch through beta-ops, pinned tenants opening
+    production's data, beta blocking production deploys, split races, box scope over disabled and
+    dark boxes, UTF-8 cuts, the mailbox's bytes, skills' lock; measurements, what wasn't fixed, and
+    four decisions for the human (OAuth on beta-ops, who applies a promotion).
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

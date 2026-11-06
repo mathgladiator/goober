@@ -542,3 +542,18 @@ TEST_F(ScopeTest, APersonChangesAControlInThePanelAtAnyTime) {
   auto history = call("control_report", R"({"domain":"acme.example.com","id":"hi_tight","window":"1h"})");
   EXPECT_NE(std::string(history.at("text").as_string()).find("not needed"), std::string::npos);
 }
+
+TEST_F(ScopeTest, AFocusedAgentCantTakeAnotherTenantsSchemasNextVersion) {
+  std::string err;
+  ASSERT_TRUE(host->schemas().put(R"({"schema":"theirs1","tables":{"t":{"columns":{"c":{"type":"string","max-length":10}}}}})", &err))
+      << err;
+  ASSERT_TRUE(host->boxes().upload(
+      R"({"box":"theirs","domains":["other.example.com"],"data":{"sqlite3":{"d":{"schema":"theirs1","database":"d","pattern":"sql","tables":{"t":{"read":true}}}}},
+          "routes":{"http":{"/t":{"get":{"name":"t_get","public":true}}}}})",
+      std::regex_replace(kModule, std::regex("route_hi"), "route_t_get"), &err))
+      << err;
+  focus_grok(R"(["acme"])");
+  auto r = call("schema_put", R"({"schema":{"schema":"mine2","follows":"theirs1","tables":{"t":{"columns":{"c":{"type":"string","max-length":10}}}}}})");
+  EXPECT_TRUE(r.at("isError").as_bool()) << json::dump(r);
+  EXPECT_NE(std::string(r.at("text").as_string()).find("schema theirs1"), std::string::npos) << json::dump(r);
+}

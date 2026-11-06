@@ -342,7 +342,8 @@ A deployed revision's files, with the box versions and build log, are in
 Open the panel's **Cleanup** view (`design/machine/051.Cleanup.md`). Signed in as host:owner:
 
 - **Grok asks, you decide.** Tell Grok "ask to drop the boxes the migration replaced, and their
-  databases". It runs `box_drop` and `db_drop`; nothing goes until you press **Approve…** under
+  databases". It runs `box_drop` and `db_drop`; nothing goes (outside `just run`, and besides what beta's
+  own agent drops of beta's alone) until you press **Approve…** under
   "Waiting for you" and type the name. Each request shows what it takes and what blocks it.
 - **Or drop it yourself.** Every box and database is listed; press **Drop…**, type its name,
   and say why.

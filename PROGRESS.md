@@ -1170,7 +1170,7 @@ production, promotion in-host first and shaped for a remote host later):
       slot, the tables, a box only in beta, and inbound mail; not yet for timers, identity events,
       outbox results, or internal calls on beta versions).
 - [x] Step 3: a beta tenant's mail (host and box) captured in `mail/beta/<tenant>/` (newest 2000,
-      30 days), never sent; mail from outside refused for beta; `beta_mail_list`, `beta_mail_get`,
+      30 days, `limits.beta-mail-bytes` 64 MiB; text and html cut at 256 KiB, 054), never sent; mail from outside refused for beta; `beta_mail_list`, `beta_mail_get`,
       `beta_mail_send` (injected through the MTA hook's own delivery, its From trusted, threaded by
       in_reply_to); tests.
 - [x] Step 4: from a beta tenant, service calls fail unless the service says `"beta": "allow"` and
@@ -1192,10 +1192,30 @@ production, promotion in-host first and shaped for a remote host later):
       checks a page given as a file where it is served; tests.
 - [x] Step 7: `goober-host audit` suggests `beta.<domain>` and then `beta-ops.<domain>`; the
       deploy offers both (yes, not now, never) and proves them with a restart; audit test.
-- [ ] Not built: promotion to another host (`changeset_import`), attachments in injected mail.
+- [ ] Not built: promotion to another host (`changeset_import`), attachments in injected mail,
+      `beta_ship` and `beta_copy_content` (053 § 3), a captured message naming which box or
+      feature sent it, the operator OAuth issuer on beta-ops (054 § 6).
 - [ ] Not opened in a browser yet: the Promote view; the deploy offers not run against a real
       machine.
 - [x] Decisions (053 § 9).
+
+### Phase 60: the review of skills, cleanup, splits, and beta (2026-11-06)
+`design/machine/054.ReviewNovember2.md`, at the human's request, in two loops of four reviewers
+(code, security, performance, quality):
+- [x] Loop 1: beta's drops of production boxes, the approvals switch through beta-ops, pinned
+      tenants opening production's data, beta mail injected outside a focus, box logs across
+      tenants, beta blocking production deploys, split races, drop checks blind to beta; the
+      mailbox's bytes, skills' lock, the Cleanup refresh, the beta maps' reads; docs and tool
+      texts; tests (`9b3b18a`, `c893403`).
+- [x] Loop 2: UTF-8 cuts, pinned beta tenants, a split's promotion over a disable, warnings for
+      cleared beta slots, reloads that keep production's tables, beta timers of pinned boxes,
+      beta OAuth clients bound to beta, box scope over disabled and dark boxes, beta's drop
+      checked again under the lock, schema `follows` in scope, `beta_status` by scope; docs;
+      tests (`6e3a3d7` and the commit after).
+- [ ] Not fixed (054 § 5): `fit_beta`'s builds per beta version, skill writes behind searches,
+      the mailbox scan per capture, `box_drop_check`'s cost, split history, tests for beta timers
+      and outbox results and several split paths.
+- [ ] Decisions (054 § 6).
 
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),

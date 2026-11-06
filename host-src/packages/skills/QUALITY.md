@@ -14,4 +14,5 @@ kept as one markdown file per skill, and the library the skill tools search.
   starts with it; a name or title counts most, then roles, the description, and the body. No
   stemming, no synonyms.
 - **Bounded.** At most 1000 skills; the host also budgets their bytes (`limits.skills-bytes`).
-  Search holds the library's lock while it scores, which at that size is microseconds.
+  Searches and reads share the library's lock, a write holds it alone, and the byte and skill
+  totals are atomic, so a limits check never waits behind a search.

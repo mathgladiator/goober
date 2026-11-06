@@ -426,22 +426,26 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
       return std::nullopt;
     }
     case Rule::kSchema: {
-      std::string name;
+      // The schema's own name, and the one it follows (041): taking another tenant's schema's one
+      // "follows" slot would block that schema's next version.
+      std::optional<bj::object> doc;
       if (const auto* s = args.if_contains("schema"); s && s->is_object()) {
-        if (const auto* n = s->as_object().if_contains("schema"); n && n->is_string()) name = std::string(n->as_string());
+        doc = s->as_object();
       } else if (s && s->is_string()) {
         std::string err;
-        if (auto parsed = json::parse(s->as_string(), &err); parsed && parsed->is_object()) {
-          if (const auto* n = parsed->as_object().if_contains("schema"); n && n->is_string()) name = std::string(n->as_string());
-        }
+        if (auto parsed = json::parse(s->as_string(), &err); parsed && parsed->is_object()) doc = parsed->as_object();
       }
       auto active = boxes_->active();
-      for (const auto& [box_name, box] : active->boxes) {
-        bool binds = false;
-        for (const auto& d : box->manifest.data) binds |= d.schema == name;
-        std::string out_of;
-        if (binds && !manifest_in(box->manifest, &out_of)) {
-          return who + ", and schema " + name + " is bound by box " + box_name + ", which serves " + out_of + widen;
+      for (const char* key : {"schema", "follows"}) {
+        std::string name = doc ? text_arg(*doc, key) : "";
+        if (name.empty()) continue;
+        for (const auto& [box_name, box] : active->boxes) {
+          bool binds = false;
+          for (const auto& d : box->manifest.data) binds |= d.schema == name;
+          std::string out_of;
+          if (binds && !manifest_in(box->manifest, &out_of)) {
+            return who + ", and schema " + name + " is bound by box " + box_name + ", which serves " + out_of + widen;
+          }
         }
       }
       return std::nullopt;

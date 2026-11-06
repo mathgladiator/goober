@@ -12,3 +12,9 @@ Parses and checks the v1 subset of a box manifest (design/machine/005.FirstVersi
 - Every route says who may call it: `"public": true` or `requirements`, never both or
   neither. Requirement roles are checked against the role grammar and the route's own
   parameters at upload, so `check_access` never sees a malformed role.
+- Two maps are process-wide, set by the host from its config: beta domains' aliases
+  (`set_domain_aliases`, read by `applies_to`) and beta tenants (`set_beta_tenants`, read by
+  `DataStrategy::tenant_for`). Each thread reads its own copy, refreshed when the map's generation
+  moves, so readers never contend. Two hosts in one process share them, so tests reset them.
+- A beta request never opens production's data: a fixed tenant maps to its beta, and one with no
+  beta to `kNoBetaTenant` + its name, which no database opens.

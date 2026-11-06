@@ -26,3 +26,7 @@ and the `goober-host` binary with SIGHUP reload.
   tenant owner, and a cookie-authenticated POST must be same-origin.
 - A box's JSON rendered through a template is data: it can't supply `body`, so it can't
   inject markup.
+- Box log lines name their tenant, and `box_logs` shows a focused operator only its tenants'.
+- Beta's operator (053 § 6) changes only beta: what it drops at once is beta's alone, checked
+  again under the registry's lock; any other drop waits for an owner, and an agent's approvals
+  switch holds it through beta-ops too.

@@ -241,7 +241,9 @@ each ranch's site weekly.
   - beta (the Beta and Promote views, and beta-ops): a beta of a site on this host with its own
     data, where Grok stages boxes and content and beta's mail stays in a mailbox you read and write
     into; you promote what you like to production in one press and roll it back in one
-    (`design/machine/053.Beta.md`);
+    (`design/machine/053.Beta.md`). Grok signs in by OAuth, which beta-ops doesn't serve yet
+    (`design/machine/054.ReviewNovember2.md` § 6): hold Grok to beta by focusing it on the beta
+    tenants in the Operators view;
   - cleanup (the Cleanup view): old boxes and databases Grok asks to drop wait there for you
     to approve, or you drop them yourself (`design/machine/051.Cleanup.md`);
   - skills and playbooks (the Skills view): what Grok's engineers wrote down for each role,
