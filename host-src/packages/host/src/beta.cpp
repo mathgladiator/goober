@@ -79,7 +79,7 @@ bj::object Host::beta_status() {
     boxes.push_back(std::move(row));
   }
   return bj::object{{"sites", std::move(sites)},
-                    {"beta_ops", cfg->operations_beta_domain.empty() ? bj::value(nullptr) : bj::value(cfg->operations_beta_domain)},
+                    {"beta_ops", cfg->beta_panel_domain().empty() ? bj::value(nullptr) : bj::value(cfg->beta_panel_domain())},
                     {"boxes", std::move(boxes)}};
 }
 
