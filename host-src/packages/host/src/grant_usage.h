@@ -2,11 +2,13 @@
 
 // What boxes actually do with their grants (design/machine/008.Databases.md § 4), private to
 // the host package. Every call's statements report the tables and columns the authorizer let
-// them use; the host sums them per box version in memory, since the host started, and
-// grant_usage compares them with what each strategy grants: tables never touched, writes
-// never made, and `true` grants a column list would cover.
+// them use; the host sums them per box version in memory, kept in operations/grant-usage.json
+// across restarts (a deploy restarts the host), and grant_usage compares them with what each
+// strategy grants: tables never touched, writes never made, and `true` grants a column list
+// would cover.
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <string>
@@ -22,6 +24,14 @@ namespace goober::host {
 class GrantUsage {
  public:
   explicit GrantUsage(int64_t since_ms) : since_ms_(since_ms) {}
+  // Counting kept in `file`: what it holds is loaded (and its since_ms with it), or counting
+  // starts at now_ms.
+  GrantUsage(std::filesystem::path file, int64_t now_ms);
+  // Writes what changed since the last save, at most once every `every_ms`; a box version
+  // unused for kKeepMs, and the least recently used past kMaxVersions, are dropped first.
+  void save(int64_t now_ms, int64_t every_ms = 0);
+  static constexpr int64_t kKeepMs = 400LL * 86400000;
+  static constexpr size_t kMaxVersions = 2000;
 
   struct Seen {
     db::TableUse use;
@@ -38,6 +48,9 @@ class GrantUsage {
 
  private:
   int64_t since_ms_;
+  std::filesystem::path file_;
+  bool dirty_ = false;
+  int64_t saved_ms_ = 0;
   mutable std::mutex mu_;
   std::map<std::pair<std::string, std::string>, Seen2> seen_;  // (box, version)
 };

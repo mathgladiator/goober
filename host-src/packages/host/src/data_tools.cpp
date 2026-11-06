@@ -401,14 +401,14 @@ bool Host::check_data(const manifest::Manifest& m, std::string* error) const {
 
 void Host::register_data_tools() {
   using mcp::any_property;
-  grant_usage_ = std::make_unique<GrantUsage>(started_ms_);
+  grant_usage_ = std::make_unique<GrantUsage>(config_.get()->storage / "operations" / "grant-usage.json", started_ms_);
   mcp_->add_tool(
       {"grant_usage",
        "What each active box's data strategies grant, table by table, against what its statements actually did since "
-       "the host started (tables, columns, insert, update, delete), with findings: tables granted and never touched, "
+       "counting began (since; kept across restarts) (tables, columns, insert, update, delete), with findings: tables granted and never touched, "
        "writes granted and never made, and read: true or update: true where the columns used would do (a suggested "
-       "list). Narrow a box's grants to these before its next version. Use is counted in memory since the host "
-       "started, so \"unused\" means \"not yet\" for routes that run rarely. A read tool.",
+       "list). Narrow a box's grants to these before its next version. Use is kept across restarts, but a version "
+       "that went live after since has been counted only since then, so \"unused\" means \"not yet\" for routes that run rarely. A read tool.",
        mcp::object_schema({{"box", mcp::string_property("Only this box, by name, as box_list shows it.")}}, {}), [this](const bj::object& args) {
          auto only = arg(args, "box");
          bj::array out;

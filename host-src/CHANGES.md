@@ -6,6 +6,7 @@ build (`host_health`'s `build`). Add an entry with every change agents should kn
 
 ## 2026-11-06
 
+- grant_usage keeps its counts across restarts (a deploy restarts the host), so a table isn't "unused" just because the host restarted: since is when counting began, and the answer's note says a version that went live later has been counted only since then.
 - Promotion requests (design/machine/053.Beta.md § 11): promotion_request {tenant, why, boxes?, paths?} asks the owner to promote a site's beta, from beta-ops too. What beta has now is pinned, and the request always answers pending_approval, whatever your approvals switch says; the owner approves it in the panel's Promote view, and it runs as one change set, refused if beta changed since (ask again). approval_status {id} follows it.
 - beta_mail_clear {tenant, ids? | before_ms?} empties a beta mailbox, or part of it.
 - beta_seed {tenant, databases?, content?, dry_run?, why?} copies a site's production databases over its beta's (beta's own snapshotted first), and with content: true its content files beta lacks or has otherwise; never accounts, keys, flags, or attachments. Only an operator not focused on tenants seeds; beta's agents then read that data.

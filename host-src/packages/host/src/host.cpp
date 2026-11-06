@@ -605,6 +605,7 @@ void Host::stop() {
   } catch (const std::exception& e) {
     std::cerr << "goober-host: box failures: " << e.what() << "\n";
   }
+  if (grant_usage_) grant_usage_->save(base::now_unix_ms());  // what boxes used, kept across the restart
   mcp_queue_flush();  // the MCP queue's rows, open buckets too (047 § 14), written just below
   // What every control counted, open buckets too (047 § 6).
   try {

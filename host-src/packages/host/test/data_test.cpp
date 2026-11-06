@@ -14,6 +14,7 @@
 #include "goober/backup/backup.h"
 #include "../src/exports.h"
 #include "../src/keys.h"
+#include "../src/grant_usage.h"
 
 using namespace goober;
 namespace asio = boost::asio;
@@ -902,4 +903,33 @@ TEST_F(DataRoutesTest, DiskLimitsRefuseWorkPastThemAndReportUse) {
   EXPECT_FALSE(fs::exists(root / "storage/tmp/left-behind"));
   EXPECT_TRUE(fs::exists(root / "storage/tmp/fresh"));
   EXPECT_TRUE(fs::exists(root / "storage/tmp/jobs/7"));
+}
+
+// grant_usage's counting is kept across restarts (a deploy restarts the host): what one host
+// saved, the next loads, since_ms included; a version unused past kKeepMs is dropped.
+TEST(GrantUsageFile, KeptAcrossRestarts) {
+  auto file = fs::path(GOOBER_TEST_TMP) / "grant_usage" / "grant-usage.json";
+  fs::remove_all(file.parent_path());
+  db::Usage used;
+  used["main"]["notes"].read = {"text"};
+  used["main"]["notes"].insert = true;
+  {
+    host::GrantUsage g(file, 1000);
+    g.record("notes", "v1", used, 2000);
+    g.record("old", "v0", used, 1500);
+    g.save(3000);
+  }
+  host::GrantUsage again(file, 9000);
+  EXPECT_EQ(again.since_ms(), 1000);
+  auto seen = again.of("notes", "v1");
+  ASSERT_TRUE(seen.count("main"));
+  EXPECT_EQ(seen["main"]["notes"].calls, 1);
+  EXPECT_TRUE(seen["main"]["notes"].use.insert);
+  EXPECT_EQ(seen["main"]["notes"].use.read, std::set<std::string>{"text"});
+  // Nothing changed: no write. A change, a write, and a long-unused version goes.
+  again.record("notes", "v1", used, 1500 + host::GrantUsage::kKeepMs + 10);
+  again.save(1500 + host::GrantUsage::kKeepMs + 20);
+  host::GrantUsage third(file, 1500 + host::GrantUsage::kKeepMs + 30);
+  EXPECT_EQ(third.of("notes", "v1")["main"]["notes"].calls, 2);
+  EXPECT_TRUE(third.of("old", "v0").empty());
 }
