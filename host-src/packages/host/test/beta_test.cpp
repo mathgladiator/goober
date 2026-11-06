@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <fstream>
+#include <thread>
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -435,4 +436,33 @@ TEST_F(BetaTest, ADropCheckCountsWhatBetaVersionsBind) {
   EXPECT_NE(text(check).find("keeper"), std::string::npos) << text(check);
   auto box = op("box_drop", {{"box", "keeper"}, {"dry_run", true}});
   EXPECT_EQ(box.at("value").at("state"), "beta") << text(box);
+}
+
+TEST(BetaMailbox, KeepsWithinItsBytesAndListsFromRows) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "beta_mailbox";
+  fs::remove_all(root);
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"}},
+      "limits": {"beta-mail-bytes": 1048576}, "threads": {"network": 1, "boxes": 2}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto host = std::make_unique<host::Host>(config::local_mode(cfg));
+  std::string big(300 * 1024, 'x');
+  std::vector<std::string> ids;
+  for (int i = 0; i < 6; ++i) {
+    ids.push_back(host->beta_mail_keep("acme_beta", bj::object{{"direction", "push"}, {"from", "box"}, {"to", "push"},
+                                                              {"subject", "s" + std::to_string(i)}, {"text", big}, {"html", ""}}));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  // Each cut at 256 KiB, said so; the oldest gone past 1 MiB, the newest kept.
+  auto newest = host->beta_mail_get("acme_beta", ids.back());
+  ASSERT_TRUE(newest);
+  EXPECT_EQ(newest->at("text").as_string().size(), 256u * 1024);
+  EXPECT_TRUE(newest->at("truncated").as_bool());
+  EXPECT_FALSE(host->beta_mail_get("acme_beta", ids.front()));
+  auto list = host->beta_mail_list("acme_beta", 100);
+  EXPECT_GE(list.size(), 3u);
+  EXPECT_LE(list.size(), 4u);
+  EXPECT_EQ(list.at(0).at("subject"), "s5");
+  EXPECT_EQ(list.at(0).at("preview").as_string().size(), 160u + std::string("…").size());
 }

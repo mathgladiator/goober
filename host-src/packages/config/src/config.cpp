@@ -507,7 +507,8 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
     if (!check_keys(*limits, {"body-max-bytes", "timeout-ms", "fuel", "memory-max-bytes", "requests-per-minute",
                               "outbox-daily-per-service", "try-bytes", "exports-bytes", "traffic-bytes", "snapshot-bytes",
                               "snapshot-files", "logs-bytes", "free-bytes", "tmp-hours", "version-archive-days",
-                              "version-delete-days", "version-keep", "upload-bytes-per-day", "studies-bytes", "skills-bytes"},
+                              "version-delete-days", "version-keep", "upload-bytes-per-day", "studies-bytes", "skills-bytes",
+                              "beta-mail-bytes"},
                     "limits", &err)) {
       return *error = err, nullptr;
     }
@@ -531,7 +532,8 @@ std::shared_ptr<const HostConfig> parse_config(std::string_view text, const std:
                              DiskKey{"version-keep", &cfg->disk.version_keep, 1, 100},
                              DiskKey{"upload-bytes-per-day", &cfg->disk.upload_bytes_per_day, 0, kTiB},
                              DiskKey{"studies-bytes", &cfg->disk.studies_bytes, 1 * kMiB, kTiB},
-                             DiskKey{"skills-bytes", &cfg->disk.skills_bytes, 1 * kMiB, kTiB}}) {
+                             DiskKey{"skills-bytes", &cfg->disk.skills_bytes, 1 * kMiB, kTiB},
+                             DiskKey{"beta-mail-bytes", &cfg->disk.beta_mail_bytes, 1 * kMiB, kTiB}}) {
       if (auto v = get_int(*limits, d.key, &err)) {
         if (*v < d.min || *v > d.max) {
           return *error = "limits." + std::string(d.key) + " must be " + std::to_string(d.min) + " to " + std::to_string(d.max),

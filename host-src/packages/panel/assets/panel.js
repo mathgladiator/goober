@@ -2653,7 +2653,7 @@ async function start() {
   // Live views refresh every 15 seconds while visible; the database and change pages don't.
   setInterval(() => {
     const v = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'overview';
-    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'controls', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job', 'studies', 'cleanup'].includes(v)) render(true);
+    if (document.visibilityState === 'visible' && ['overview', 'traffic', 'services', 'controls', 'flow', 'boxes', 'box', 'perf', 'agents', 'source', 'job', 'studies'].includes(v)) render(true);
   }, 15000);
   render(false);
 }

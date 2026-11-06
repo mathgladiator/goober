@@ -1,6 +1,7 @@
 #include "goober/skills/skills.h"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 
 #include "goober/base/encoding.h"
@@ -45,10 +46,12 @@ void count_words(std::map<std::string, int, std::less<>>& into, std::string_view
 }
 
 // How often words starting with `term` occur in a field.
-int prefix_count(const std::map<std::string, int, std::less<>>& field, const std::string& term) {
+// How often words starting with `term` occur in a field, counted no further than `cap`.
+int prefix_count(const std::map<std::string, int, std::less<>>& field, const std::string& term,
+                 int cap = std::numeric_limits<int>::max()) {
   int n = 0;
-  for (auto it = field.lower_bound(term); it != field.end() && it->first.starts_with(term); ++it) n += it->second;
-  return n;
+  for (auto it = field.lower_bound(term); it != field.end() && it->first.starts_with(term) && n < cap; ++it) n += it->second;
+  return std::min(n, cap);
 }
 
 bool is_word_byte(unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c >= 0x80; }
@@ -231,7 +234,7 @@ Library::Entry Library::index(Found found) {
 void Library::put(Skill skill, int64_t file_bytes, std::string etag) {
   std::string name = skill.name;
   Entry e = index(Found{std::move(skill), std::move(etag), file_bytes});
-  std::lock_guard lock(mu_);
+  std::unique_lock lock(mu_);
   if (auto it = skills_.find(name); it != skills_.end()) {
     bytes_ -= it->second.found.bytes;
     it->second = std::move(e);
@@ -239,38 +242,35 @@ void Library::put(Skill skill, int64_t file_bytes, std::string etag) {
     skills_.emplace(std::move(name), std::move(e));
   }
   bytes_ += file_bytes;
+  count_ = skills_.size();
 }
 
 void Library::remove(std::string_view name) {
-  std::lock_guard lock(mu_);
+  std::unique_lock lock(mu_);
   if (auto it = skills_.find(name); it != skills_.end()) {
     bytes_ -= it->second.found.bytes;
     skills_.erase(it);
   }
+  count_ = skills_.size();
 }
 
 void Library::clear() {
-  std::lock_guard lock(mu_);
+  std::unique_lock lock(mu_);
   skills_.clear();
   bytes_ = 0;
+  count_ = 0;
 }
 
 std::optional<Library::Found> Library::get(std::string_view name) const {
-  std::lock_guard lock(mu_);
+  std::shared_lock lock(mu_);
   auto it = skills_.find(name);
   if (it == skills_.end()) return std::nullopt;
   return it->second.found;
 }
 
-size_t Library::count() const {
-  std::lock_guard lock(mu_);
-  return skills_.size();
-}
+size_t Library::count() const { return count_.load(); }
 
-int64_t Library::bytes() const {
-  std::lock_guard lock(mu_);
-  return bytes_;
-}
+int64_t Library::bytes() const { return bytes_.load(); }
 
 bj::object Library::card(const Found& f) {
   const Skill& s = f.skill;
@@ -282,7 +282,7 @@ bj::object Library::card(const Found& f) {
 }
 
 bj::array Library::list(std::string_view role, std::string_view kind) const {
-  std::lock_guard lock(mu_);
+  std::shared_lock lock(mu_);
   bj::array out;
   for (const auto& [name, e] : skills_) {
     const Skill& s = e.found.skill;
@@ -294,7 +294,7 @@ bj::array Library::list(std::string_view role, std::string_view kind) const {
 }
 
 bj::array Library::roles() const {
-  std::lock_guard lock(mu_);
+  std::shared_lock lock(mu_);
   std::map<std::string, std::map<std::string, int64_t>> by;
   for (const auto& [name, e] : skills_) {
     for (const auto& r : e.found.skill.roles) ++by[r][e.found.skill.kind];
@@ -324,7 +324,7 @@ bj::array Library::search(std::string_view query, std::string_view role, std::st
     const Entry* e;
   };
   std::vector<Hit> hits;
-  std::lock_guard lock(mu_);
+  std::shared_lock lock(mu_);
   for (const auto& [name, e] : skills_) {
     const Skill& s = e.found.skill;
     if (!kind.empty() && s.kind != kind) continue;
@@ -333,7 +333,7 @@ bj::array Library::search(std::string_view query, std::string_view role, std::st
     bool every = true;
     for (const auto& t : terms) {
       int64_t here = 8 * prefix_count(e.head, t) + 5 * prefix_count(e.roles, t) + 3 * prefix_count(e.description, t) +
-                     std::min(prefix_count(e.body, t), 5);
+                     prefix_count(e.body, t, 5);
       if (here == 0) {
         every = false;
         break;

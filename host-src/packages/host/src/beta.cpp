@@ -25,6 +25,7 @@ namespace {
 
 constexpr size_t kMailboxMax = 2000;              // messages per beta tenant, the newest kept
 constexpr int64_t kMailboxMs = 30LL * 86400000;  // and none older than 30 days
+constexpr size_t kMessageTextMax = 256 * 1024;   // each of a message's text and html, cut past this
 
 std::string random_hex(size_t bytes) {
   std::vector<uint8_t> raw(bytes);
@@ -94,17 +95,40 @@ std::string Host::beta_mail_keep(const std::string& tenant, bj::object message) 
   message["at_ms"] = now;
   message["tenant"] = tenant;
   if (!message.contains("message_id")) message["message_id"] = "<beta-" + id + "@" + tenant + ".beta>";
+  // A message is a test's: its text and html are cut at kMessageTextMax, said so.
+  for (const char* k : {"text", "html"}) {
+    std::string v = text_of(message, k);
+    if (v.size() > kMessageTextMax) {
+      message[k] = v.substr(0, kMessageTextMax);
+      message["truncated"] = true;
+    }
+  }
+  // Its row for beta_mail_list, beside it, so a list never reads whole messages.
+  std::string body = text_of(message, "text");
+  bj::object head{{"id", id}, {"at_ms", now}, {"direction", message.at("direction")}, {"from", message.at("from")},
+                  {"to", message.at("to")}, {"subject", message.at("subject")},
+                  {"preview", body.size() > 160 ? body.substr(0, 160) + "…" : body}};
+  if (message.contains("outcome")) head["outcome"] = message.at("outcome");
   base::write_file_durable(dir / (id + ".json"), json::dump(message));
-  // The newest kMailboxMax, none past 30 days: names sort by time.
+  base::write_file_durable(dir / (id + ".head"), json::dump(head));
+  // The newest kMailboxMax within limits.beta-mail-bytes, none past 30 days: names sort by time.
   std::vector<std::string> names;
   for (const auto& e : fs::directory_iterator(dir, ec)) {
     std::string n = e.path().filename().string();
-    if (n.ends_with(".json")) names.push_back(n);
+    if (n.ends_with(".json")) names.push_back(n.substr(0, n.size() - 5));
   }
-  std::sort(names.begin(), names.end());
+  std::sort(names.rbegin(), names.rend());
+  int64_t budget = config_.get()->disk.beta_mail_bytes, bytes = 0;
   for (size_t i = 0; i < names.size(); ++i) {
+    std::error_code se;
+    auto size = fs::file_size(dir / (names[i] + ".json"), se);
+    bytes += se ? 0 : int64_t(size);
     bool old = std::strtoll(names[i].substr(0, 13).c_str(), nullptr, 10) < now - kMailboxMs;
-    if (old || names.size() - i > kMailboxMax) fs::remove(dir / names[i], ec);
+    // The newest message stays whatever its size.
+    if (i > 0 && (old || i >= kMailboxMax || bytes > budget)) {
+      fs::remove(dir / (names[i] + ".json"), ec);
+      fs::remove(dir / (names[i] + ".head"), ec);
+    }
   }
   return id;
 }
@@ -143,6 +167,14 @@ bj::array Host::beta_mail_list(const std::string& tenant, int64_t limit) {
   for (const auto& n : names) {
     if (int64_t(out.size()) >= limit) break;
     std::string err;
+    // Its row, else (a message kept before rows were) the whole message.
+    std::string stem = n.substr(0, n.size() - 5);
+    if (auto head = base::read_file(dir / (stem + ".head"))) {
+      if (auto h = json::parse(*head, &err); h && h->is_object()) {
+        out.push_back(std::move(*h));
+        continue;
+      }
+    }
     auto text = base::read_file(dir / n);
     auto v = text ? json::parse(*text, &err) : std::nullopt;
     if (!v || !v->is_object()) continue;

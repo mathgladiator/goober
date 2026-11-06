@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <map>
+#include <mutex>
 #include <set>
 
 #include "goober/base/encoding.h"
@@ -22,29 +24,57 @@ using goober::json::get_string;
 
 namespace {
 
-std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>>& aliases() {
-  static std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>> a{
-      std::make_shared<const std::map<std::string, std::string, std::less<>>>()};
+using NameMap = std::map<std::string, std::string, std::less<>>;
+
+// A map the host sets now and then and every thread reads often: each thread keeps its own copy
+// and takes the lock only when the generation moved, so readers never contend.
+struct Published {
+  std::atomic<uint64_t> generation{0};
+  std::mutex mu;
+  std::shared_ptr<const NameMap> map = std::make_shared<const NameMap>();
+
+  void set(NameMap m) {
+    auto next = std::make_shared<const NameMap>(std::move(m));
+    std::lock_guard lock(mu);
+    map = std::move(next);
+    generation.fetch_add(1, std::memory_order_release);
+  }
+};
+
+struct Seen {
+  uint64_t generation = UINT64_MAX;
+  std::shared_ptr<const NameMap> map;
+};
+
+const NameMap& read(Published& p, Seen& seen) {
+  if (p.generation.load(std::memory_order_acquire) != seen.generation) {
+    std::lock_guard lock(p.mu);
+    seen.map = p.map;
+    seen.generation = p.generation.load(std::memory_order_relaxed);
+  }
+  return *seen.map;
+}
+
+Published& aliases() {
+  static Published a;
   return a;
 }
 
-std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>>& beta_tenants() {
-  static std::atomic<std::shared_ptr<const std::map<std::string, std::string, std::less<>>>> b{
-      std::make_shared<const std::map<std::string, std::string, std::less<>>>()};
+Published& beta_tenants() {
+  static Published b;
   return b;
 }
 
 }  // namespace
 
-void set_beta_tenants(std::map<std::string, std::string, std::less<>> m) {
-  beta_tenants().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(m)));
-}
+void set_beta_tenants(std::map<std::string, std::string, std::less<>> m) { beta_tenants().set(std::move(m)); }
 
 std::string DataStrategy::tenant_for(std::string_view request_tenant) const {
   if (tenant.empty()) return std::string(request_tenant);
-  auto b = beta_tenants().load();
-  if (b->count(request_tenant)) {
-    for (const auto& [beta, prod] : *b) {
+  thread_local Seen seen;
+  const auto& b = read(beta_tenants(), seen);
+  if (b.count(request_tenant)) {
+    for (const auto& [beta, prod] : b) {
       if (prod == tenant) return beta;
     }
     // A fixed tenant with no beta: never production's data from beta, so a name that opens nothing.
@@ -53,17 +83,16 @@ std::string DataStrategy::tenant_for(std::string_view request_tenant) const {
   return tenant;
 }
 
-void set_domain_aliases(std::map<std::string, std::string, std::less<>> a) {
-  aliases().store(std::make_shared<const std::map<std::string, std::string, std::less<>>>(std::move(a)));
-}
+void set_domain_aliases(std::map<std::string, std::string, std::less<>> a) { aliases().set(std::move(a)); }
 
 bool Manifest::applies_to(std::string_view domain) const {
   for (const auto& d : domains) {
     if (d == "*" || d == domain) return true;
   }
   // A beta domain answers as its production domain (design/machine/053.Beta.md § 2).
-  auto a = aliases().load();
-  if (auto it = a->find(domain); it != a->end()) {
+  thread_local Seen seen;
+  const auto& a = read(aliases(), seen);
+  if (auto it = a.find(domain); it != a.end()) {
     for (const auto& d : domains) {
       if (d == it->second) return true;
     }

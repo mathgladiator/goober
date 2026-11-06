@@ -6,10 +6,12 @@
 // host's own fields; this package checks one, reads and writes the file, and keeps the library
 // every tool searches.
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -97,9 +99,12 @@ class Library {
   static Entry index(Found found);
   static bj::object card(const Found& f);
 
-  mutable std::mutex mu_;
+  // Searches and reads share it; a put, remove, or clear holds it alone. The totals need none,
+  // so the limits check never waits behind a search.
+  mutable std::shared_mutex mu_;
   std::map<std::string, Entry, std::less<>> skills_;
-  int64_t bytes_ = 0;
+  std::atomic<int64_t> bytes_ = 0;
+  std::atomic<size_t> count_ = 0;
 };
 
 // The words of a text as search reads them: runs of letters and digits, lowercased (bytes past
