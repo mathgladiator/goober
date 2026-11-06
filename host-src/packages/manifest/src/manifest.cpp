@@ -73,6 +73,8 @@ std::string DataStrategy::tenant_for(std::string_view request_tenant) const {
   if (tenant.empty()) return std::string(request_tenant);
   thread_local Seen seen;
   const auto& b = read(beta_tenants(), seen);
+  // Pinned to a beta tenant itself: that is beta's data already.
+  if (b.count(tenant)) return tenant;
   if (b.count(request_tenant)) {
     for (const auto& [beta, prod] : b) {
       if (prod == tenant) return beta;

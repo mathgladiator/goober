@@ -102,7 +102,10 @@ std::string Host::bearer_operator(const Request& req) const {
     // by an address still in identity.operators: taking it out of the config ends its access.
     if (auto b = identity_->bearer(identity::kHostRealm, std::string_view(auth).substr(7), base::now_unix_ms())) {
       auto it = cfg->identity.operators.find(b->user.email);
-      if (it != cfg->identity.operators.end() && !it->second.empty()) return "oauth:" + b->user.email + ":" + b->client_id;
+      // An agent that came in through beta-ops is beta's wherever it calls from (053 § 6).
+      if (it != cfg->identity.operators.end() && !it->second.empty()) {
+        return std::string(is_beta_client(b->client_id) ? "beta:" : "") + "oauth:" + b->user.email + ":" + b->client_id;
+      }
     }
   }
   return "";
@@ -111,7 +114,9 @@ std::string Host::bearer_operator(const Request& req) const {
 void Host::handle_operations(const Request& req, const Finish& finish) {
   std::string operator_name = bearer_operator(req);
   // Through beta-ops (053 § 6) every operator works in beta's scope.
-  if (!operator_name.empty() && is_beta_ops_request(req)) operator_name = "beta:" + operator_name;
+  if (!operator_name.empty() && is_beta_ops_request(req) && !operator_name.starts_with("beta:")) {
+    operator_name = "beta:" + operator_name;
+  }
   if (operator_name.empty()) {
     mcp_forget(req, "operator");  // a revoked token stops counting as its operator's (047 § 14)
     // Wrong tokens are slowed per address; right ones aren't counted at all.

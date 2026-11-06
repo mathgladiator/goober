@@ -50,6 +50,11 @@ std::string joined(const bj::array& a) {
 
 }  // namespace
 
+namespace {
+// Who lets beta's own drop run (053 § 6); the registry checks again that the box is unserved.
+constexpr std::string_view kBetaDrop = "beta's operator (053 § 6)";
+}  // namespace
+
 bool Host::always_held(std::string_view tool, const bj::object& args) {
   return (tool == "box_drop" || tool == "db_drop") && !flag_of(args, "dry_run");
 }
@@ -59,7 +64,7 @@ std::string Host::drop_approval(std::string_view tool, const bj::object& args) {
   // Development mode (--local, `just run`): drops don't wait (the human, 2026-11-04).
   if (config_.get()->local) return "development mode (--local)";
   // Beta's operator drops what is beta's alone without a wait (053 § 6); the rest waits for an owner.
-  if (operator_scope(current_operator()).beta && beta_drop_free(tool, args)) return "beta's operator (053 § 6)";
+  if (operator_scope(current_operator()).beta && beta_drop_free(tool, args)) return std::string(kBetaDrop);
   return "";
 }
 
@@ -213,7 +218,7 @@ std::pair<int, bj::object> Host::drop_box(const std::string& box, const std::str
   bj::object record{{"by", by}, {"why", why.substr(0, 500)}, {"was", check.at("state")}, {"version", check.at("version")}};
   if (!approved_by.empty()) record["approved_by"] = approved_by;
   std::string err;
-  auto gone = boxes_->drop(box, record, &err);
+  auto gone = boxes_->drop(box, record, &err, approved_by == kBetaDrop);
   if (!gone) return {400, bj::object{{"error", err}}};
   // Its flags, for every tenant.
   wal::Bundle flags;
@@ -288,7 +293,9 @@ void Host::register_cleanup_tools() {
   const std::string waits =
       " Without dry_run it always waits for a person, whatever your approvals switch says: it answers pending_approval "
       "{id}, a host:owner approves or denies it in the panel's Cleanup view (typing the name of what goes), and "
-      "approval_status {id} gives the outcome. The checks run again when it is approved.";
+      "approval_status {id} gives the outcome. The checks run again when it is approved. Two exceptions: in development "
+      "mode (--local) it runs at once; and through beta-ops (or as beta's operator) a drop of what is beta's alone (a "
+      "box first stored for beta and never live in production, or a beta tenant's database) runs at once.";
 
   mcp_->add_tool(
       {"box_drop",
@@ -314,7 +321,7 @@ void Host::register_cleanup_tools() {
   mcp_->add_tool(
       {"db_drop",
        "Asks to drop a tenant's database, or one table of it with `table`: a snapshot first (kept until a person "
-       "deletes it), then the database or table and its rows. Refused while a box (live or disabled) binds it: drop "
+       "deletes it), then the database or table and its rows. Refused while a box (live, disabled, or its beta version) binds it: drop "
        "the box first. dry_run: true changes nothing and answers what it would take (bytes, tables and rows) and what "
        "blocks it." + waits,
        object_schema({{"tenant", string_property("The tenant.")},

@@ -4,6 +4,7 @@
 // that read and clear the beta slots.
 
 #include <filesystem>
+#include <fstream>
 
 #include "goober/base/encoding.h"
 #include "goober/base/files.h"
@@ -26,6 +27,14 @@ namespace {
 constexpr size_t kMailboxMax = 2000;              // messages per beta tenant, the newest kept
 constexpr int64_t kMailboxMs = 30LL * 86400000;  // and none older than 30 days
 constexpr size_t kMessageTextMax = 256 * 1024;   // each of a message's text and html, cut past this
+
+// The first `max` bytes of a text, cut back to a UTF-8 boundary, so what is kept stays text.
+std::string cut_utf8(std::string_view s, size_t max) {
+  if (s.size() <= max) return std::string(s);
+  size_t n = max;
+  while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+  return std::string(s.substr(0, n));
+}
 
 std::string random_hex(size_t bytes) {
   std::vector<uint8_t> raw(bytes);
@@ -54,9 +63,22 @@ std::string text_of(const bj::object& o, const char* k) {
 bj::object Host::beta_status() {
   auto cfg = config_.get();
   auto active = boxes_->active();
+  // A focused operator (beta's included) sees its own sites and boxes (030, 053 § 6).
+  auto scope = operator_scope(current_operator());
+  auto tenant_in = [&](const std::string& t) {
+    return scope.all || scope.tenants.count(t) || scope.tenants.count(cfg->beta_tenant_of(t));
+  };
+  auto box_in = [&](const manifest::Manifest& m) {
+    if (scope.all) return true;
+    for (const auto& d : m.domains) {
+      if (d == "*") return true;
+      if (auto t = cfg->tenant_for_host(d); t && tenant_in(*t)) return true;
+    }
+    return false;
+  };
   bj::array sites;
   for (const auto& [domain, e] : cfg->domains) {
-    if (e.beta_of.empty()) continue;
+    if (e.beta_of.empty() || !tenant_in(e.tenant)) continue;
     auto prod = cfg->domains.find(e.beta_of);
     sites.push_back(bj::object{{"domain", domain},
                                {"tenant", e.tenant},
@@ -65,6 +87,7 @@ bj::object Host::beta_status() {
   }
   bj::array boxes;
   for (const auto& [name, box] : active->versions(true)) {
+    if (!box_in(box->manifest)) continue;
     auto live = active->boxes.find(name);
     auto beta = active->beta.find(name);
     bj::object row{{"box", name},
@@ -78,6 +101,25 @@ bj::object Host::beta_status() {
     for (const auto& d : box->manifest.domains) domains.push_back(bj::value(d));
     row["domains"] = std::move(domains);
     boxes.push_back(std::move(row));
+  }
+  // A beta version kept in its slot but left out, conflicting on a beta domain (053 § 12).
+  for (const auto& name : boxes_->box_names()) {
+    auto version = boxes_->beta_version(name);
+    if (!version) continue;
+    auto served = active->beta.find(name);
+    if (served != active->beta.end() && served->second->version == *version) continue;
+    if (!scope.all) {
+      std::string err;
+      auto text = boxes_->manifest_text(name, *version);
+      auto m = text ? manifest::parse_manifest(*text, &err) : std::nullopt;
+      if (!m || !box_in(*m)) continue;
+    }
+    auto live = active->boxes.find(name);
+    boxes.push_back(bj::object{{"box", name},
+                               {"live_version", live == active->boxes.end() ? bj::value(nullptr) : bj::value(live->second->version)},
+                               {"beta_version", *version},
+                               {"state", "not served: it conflicts on a beta domain (beta_clear, or stage another)"},
+                               {"domains", bj::array{}}});
   }
   return bj::object{{"sites", std::move(sites)},
                     {"beta_ops", cfg->beta_panel_domain().empty() ? bj::value(nullptr) : bj::value(cfg->beta_panel_domain())},
@@ -99,7 +141,7 @@ std::string Host::beta_mail_keep(const std::string& tenant, bj::object message) 
   for (const char* k : {"text", "html"}) {
     std::string v = text_of(message, k);
     if (v.size() > kMessageTextMax) {
-      message[k] = v.substr(0, kMessageTextMax);
+      message[k] = cut_utf8(v, kMessageTextMax);
       message["truncated"] = true;
     }
   }
@@ -107,10 +149,15 @@ std::string Host::beta_mail_keep(const std::string& tenant, bj::object message) 
   std::string body = text_of(message, "text");
   bj::object head{{"id", id}, {"at_ms", now}, {"direction", message.at("direction")}, {"from", message.at("from")},
                   {"to", message.at("to")}, {"subject", message.at("subject")},
-                  {"preview", body.size() > 160 ? body.substr(0, 160) + "…" : body}};
+                  {"preview", body.size() > 160 ? cut_utf8(body, 160) + "…" : body}};
   if (message.contains("outcome")) head["outcome"] = message.at("outcome");
   base::write_file_durable(dir / (id + ".json"), json::dump(message));
-  base::write_file_durable(dir / (id + ".head"), json::dump(head));
+  // The row is rebuilt from the message if lost, so it needn't be durable.
+  // A torn one doesn't parse, and the list reads the message instead.
+  {
+    std::ofstream out(dir / (id + ".head"), std::ios::binary | std::ios::trunc);
+    out << json::dump(head);
+  }
   // The newest kMailboxMax within limits.beta-mail-bytes, none past 30 days: names sort by time.
   std::vector<std::string> names;
   for (const auto& e : fs::directory_iterator(dir, ec)) {
@@ -182,7 +229,7 @@ bj::array Host::beta_mail_list(const std::string& tenant, int64_t limit) {
     std::string body = text_of(o, "text");
     bj::object row{{"id", o.at("id")},     {"at_ms", o.at("at_ms")},       {"direction", o.at("direction")},
                    {"from", o.at("from")}, {"to", o.at("to")},             {"subject", o.at("subject")},
-                   {"preview", body.size() > 160 ? body.substr(0, 160) + "…" : body}};
+                   {"preview", body.size() > 160 ? cut_utf8(body, 160) + "…" : body}};
     if (o.contains("outcome")) row["outcome"] = o.at("outcome");
     out.push_back(std::move(row));
   }
@@ -274,7 +321,8 @@ void Host::register_beta_tools() {
       {"beta_mail_list",
        "Read tool. A beta tenant's mailbox, newest first (053 § 4): direction out (what the site would have sent: "
        "sign-in codes, invites, a box's mail, captured instead) and in (what an operator injected, with the outcome). "
-       "Each {id, at_ms, direction, from, to, subject, preview}. Nothing from beta ever leaves the machine.",
+       "Each {id, at_ms, direction, from, to, subject, preview, outcome?}. Nothing from beta ever leaves the machine. "
+       "A mailbox keeps the newest 2000 messages of 30 days within limits.beta-mail-bytes (64 MiB): the oldest go.",
        object_schema({{"tenant", string_property("The beta tenant.")},
                       {"limit", mcp::integer_property("How many, 1 to 500; 50 when left out.")}},
                      {"tenant"}),
@@ -289,7 +337,8 @@ void Host::register_beta_tools() {
       {"beta_mail_get",
        "Read tool. One message of a beta tenant's mailbox, whole: from, to, subject, text, html (as its source), "
        "reply_to (where a reply goes: often a reply-token address), message_id, in_reply_to, references, and for "
-       "an injected one its outcome and the SMTP answer the box gave.",
+       "an injected one its outcome and the SMTP answer the box gave. Text and html past 256 KiB are cut, with "
+       "truncated: true.",
        object_schema({{"tenant", string_property("The beta tenant.")}, {"id", string_property("The message's id.")}},
                      {"tenant", "id"}),
        [this](const bj::object& args) {
@@ -305,7 +354,7 @@ void Host::register_beta_tools() {
        "Injects a message to a beta address, as if it arrived by mail (053 § 4): the box's mail route gets it as the "
        "MTA hook would deliver it, with its From taken as verified, and its answer (delivered, rejected, deferred) "
        "comes back as the outcome. Reply to a captured message with in_reply_to (its id) and to = its reply_to (or "
-       "from). Text only. Audited.",
+       "from). Text only. Refused for a beta outside your focus. Audited.",
        object_schema({{"to", string_property("A beta address, like support@beta.example.com, or a reply token's.")},
                       {"from", string_property("Who it is from, like ann@example.org.")},
                       {"subject", string_property("The subject.")},

@@ -321,7 +321,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
       "wrote down; when you learn how to do something, write it for the next engineer with skill_put. "
       "Terms every tool uses: a read tool changes nothing and never waits; a changing tool acts at once, unless "
       "approvals are on for you (a person turns them on in the panel), when it answers pending_approval and waits "
-      "for a person (approval_status follows it); box_drop and db_drop wait for an owner whatever the switch says (not in development mode). A changing tool that writes the change log answers change_id (or "
+      "for a person (approval_status follows it); box_drop and db_drop wait for an owner whatever the switch says (not in development mode, nor beta's operator's drop of what is beta's alone). A changing tool that writes the change log answers change_id (or "
       "change_ids), numbers to pin in a review. \"Goes live\" means served now; \"stored dark\" means kept but not "
       "served (version_upload activate: false, then version_promote); a \"dry run\" checks everything and stores "
       "nothing, changes nothing. file_etag is a stored file's etag, the one if_etag compares; body_etag is the "

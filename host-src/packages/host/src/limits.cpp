@@ -237,12 +237,16 @@ bj::object Host::limits_report(bool name_tenants) {
   add("skills", skills_.bytes(), d.skills_bytes, "skills-bytes",
       bj::object{{"note", "skills and playbooks, kept until an operator deletes one; past the budget skill_put refuses to grow them"}});
   {
-    int64_t betas = 0;
-    for (const auto& [domain, e] : cfg->domains) betas += e.beta_of.empty() ? 0 : 1;
-    if (betas > 0) {
-      add("beta-mail", bytes_under(cfg->storage / "mail" / "beta"), d.beta_mail_bytes * betas, "beta-mail-bytes",
+    std::set<std::string> betas;
+    for (const auto& [domain, e] : cfg->domains) {
+      if (!e.beta_of.empty()) betas.insert(e.tenant);
+    }
+    if (!betas.empty()) {
+      add("beta-mail", bytes_under(cfg->storage / "mail" / "beta"), d.beta_mail_bytes * int64_t(betas.size()),
+          "beta-mail-bytes",
           bj::object{{"note", "beta's mailboxes, each the newest 2000 messages of 30 days within limits.beta-mail-bytes "
-                              "(budgeted here for every beta tenant); past it, the oldest go"}});
+                              "(budgeted here for every beta tenant); past it, the oldest go, so a full mailbox is "
+                              "normal and needs nothing done"}});
     }
   }
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",

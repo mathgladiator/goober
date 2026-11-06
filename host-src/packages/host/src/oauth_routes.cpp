@@ -374,6 +374,8 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       e = {"unsupported_grant_type", "use authorization_code, refresh_token, or the device_code grant"};
     }
     bj::object extra{{"oauth", op ? "operator_token" : "token"}, {"grant", grant}, {"client_id", client_id}};
+    // An operator agent that takes its tokens from beta-ops is beta's from then on (053 § 6).
+    if (t && op && is_beta_ops_request(req)) mark_beta_client(client_id);
     if (!t) {
       extra["error"] = e.code;
       extra["why"] = e.description;
@@ -420,6 +422,7 @@ void Host::handle_oauth(const Request& req, const Finish& finish, const std::str
       return finish(json_response(400, bj::object{{"error", "invalid_client_metadata"}, {"error_description", why}}),
                     json::dump(bj::object{{"oauth", "register_refused"}, {"why", why}, {"redirect_uris", std::move(asked)}}));
     }
+    if (op && is_beta_ops_request(req)) mark_beta_client(c->client_id);
     bj::array out_uris;
     for (const auto& u : c->redirect_uris) out_uris.push_back(bj::value(u));
     return finish(json_response(201, bj::object{{"client_id", c->client_id},

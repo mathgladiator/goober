@@ -94,6 +94,12 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   ASSERT_TRUE(skills) << err;
   EXPECT_EQ(skills->disk.skills_bytes, 4194304);
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"skills-bytes":1000}})", "/", &err));
+  // Beta's mailbox (053 § 4, 054): 64 MiB a beta tenant unless set, at least 1 MiB.
+  EXPECT_EQ(plain->disk.beta_mail_bytes, int64_t(64) << 20);
+  auto mail = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"beta-mail-bytes":2097152}})", "/", &err);
+  ASSERT_TRUE(mail) << err;
+  EXPECT_EQ(mail->disk.beta_mail_bytes, 2097152);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"beta-mail-bytes":1000}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

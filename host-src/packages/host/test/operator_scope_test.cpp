@@ -399,6 +399,15 @@ TEST_F(ScopeTest, FocusedAgentsCantReachThroughKeysDataBoxesOrVersions) {
   auto replaced = call("version_upload", R"J({"manifest":{"box":"otherbox","domains":["acme.example.com"]},"wat":"(module)"})J");
   EXPECT_TRUE(replaced.at("isError").as_bool());
   EXPECT_NE(std::string(replaced.at("text").as_string()).find("already serves"), std::string::npos) << json::dump(replaced);
+  // ...nor once it is disabled, nor read through a version stored later under its name.
+  ASSERT_TRUE(host->boxes().disable("otherbox", "paused", &err)) << err;
+  EXPECT_TRUE(call("version_upload", R"J({"manifest":{"box":"otherbox","domains":["acme.example.com"]},"wat":"(module)"})J")
+                  .at("isError").as_bool());
+  EXPECT_TRUE(host->boxes().disabled("otherbox"));
+  ASSERT_TRUE(host->boxes().store(R"({"box":"darkbox","domains":["other.example.com"]})", kModule, "", &err)) << err;
+  EXPECT_TRUE(call("version_list", R"({"box":"darkbox"})").at("isError").as_bool());
+  EXPECT_TRUE(call("version_upload", R"J({"manifest":{"box":"darkbox","domains":["acme.example.com"]},"wat":"(module)","activate":false})J")
+                  .at("isError").as_bool());
   // Promoting a stored version that serves another tenant, of a box that's theirs now.
   auto v1 = host->boxes().upload(R"({"box":"flip","domains":["other.example.com"]})",
                                  kModule, &err);

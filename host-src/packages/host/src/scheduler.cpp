@@ -181,8 +181,17 @@ void Host::timer_tick(int64_t now_ms) {
           }
           if (!all_fixed) fixed.clear();
         }
-        // A fixed tenant is on one side only.
-        if (!fixed.empty() && cfg->is_beta_tenant(fixed) != on_beta) continue;
+        // A fixed tenant fires on production for itself and on beta for its beta, as
+        // DataStrategy::tenant_for opens it (053 § 2); a tenant with no beta has no beta fires.
+        if (!fixed.empty()) {
+          if (on_beta && !cfg->is_beta_tenant(fixed)) {
+            std::string beta = cfg->beta_tenant_of(fixed);
+            if (beta.empty()) continue;
+            fixed = beta;
+          } else if (!on_beta && cfg->is_beta_tenant(fixed)) {
+            continue;
+          }
+        }
         for (const auto& [own_tenant, domain] : tenants_of(*cfg, box->manifest, on_beta)) {
           // One tenant's trouble (its timers.db or its rows unreadable) is its own: logged,
           // and every other tenant's timers fire.

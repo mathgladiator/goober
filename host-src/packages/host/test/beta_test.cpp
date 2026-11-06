@@ -9,6 +9,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
+#include "goober/base/files.h"
 #include "goober/host/host.h"
 #include "goober/host/operator_tokens.h"
 #include "goober/json/json.h"
@@ -72,7 +73,8 @@ class BetaTest : public ::testing::Test {
     fs::remove_all(root);
     std::string err;
     auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
-        "domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"}},
+        "domains": {"example.com": {"tenant": "acme"}, "beta.example.com": {"tenant": "acme_beta", "beta-of": "example.com"},
+                    "other.example.com": {"tenant": "other"}},
         "operations": {"token": "op-token-for-beta-tests-0123456789", "beta-domain": "beta-ops.example.com"},
         "threads": {"network": 1, "boxes": 2}})", root, &err);
     ASSERT_TRUE(cfg) << err;
@@ -465,4 +467,54 @@ TEST(BetaMailbox, KeepsWithinItsBytesAndListsFromRows) {
   EXPECT_LE(list.size(), 4u);
   EXPECT_EQ(list.at(0).at("subject"), "s5");
   EXPECT_EQ(list.at(0).at("preview").as_string().size(), 160u + std::string("…").size());
+}
+
+TEST_F(BetaTest, CutMessagesStayText) {
+  // A cut that lands inside a character steps back to its start, so the message reads back.
+  std::string text = std::string(256 * 1024 - 1, 'a') + "é and more";
+  std::string head = std::string(159, 'b') + "ü tail";
+  auto id = host->beta_mail_keep("acme_beta", bj::object{{"direction", "out"}, {"from", "a@example.com"}, {"to", "b@example.com"},
+                                                        {"subject", "s"}, {"text", text}, {"html", ""}});
+  auto got = host->beta_mail_get("acme_beta", id);
+  ASSERT_TRUE(got);
+  EXPECT_EQ(got->at("text").as_string().size(), 256u * 1024 - 1);
+  auto row_id = host->beta_mail_keep("acme_beta", bj::object{{"direction", "out"}, {"from", "a@example.com"}, {"to", "b@example.com"},
+                                                            {"subject", "short"}, {"text", head}, {"html", ""}});
+  auto row = base::read_file(root / "storage/mail/beta/acme_beta" / (row_id + ".head"));
+  ASSERT_TRUE(row);
+  std::string err;
+  EXPECT_TRUE(json::parse(*row, &err)) << err;
+  EXPECT_EQ(host->beta_mail_list("acme_beta", 10).size(), 2u);
+}
+
+TEST_F(BetaTest, BetaStatusShowsAFocusedOperatorItsOwn) {
+  std::string err;
+  auto grok = *host::create_operator_token(root / "storage", "grok", 0, &err);
+  host::Host::OperatorScope elsewhere;
+  elsewhere.all = false;
+  elsewhere.tenants = {"other"};
+  ASSERT_TRUE(host->set_operator_scope("token:grok", elsewhere, "test", &err)) << err;
+  auto own = op("beta_status", {});
+  EXPECT_NE(text(own).find("\"site\""), std::string::npos) << text(own);
+  auto theirs = call_on(port, "example.com", grok, "beta_status", {});
+  EXPECT_EQ(std::string(theirs.at("text").as_string()).find("\"site\""), std::string::npos) << theirs.at("text");
+  // The limits check counts beta's mailboxes.
+  EXPECT_NE(text(op("host_health", {})).find("beta-mail-bytes"), std::string::npos);
+}
+
+TEST_F(BetaTest, OnlySourceDeployTakesAChannel) {
+  auto r = fetch(port, "example.com", bhttp::verb::post, "/goober-operations-mcp",
+                 {{"authorization", std::string("Bearer ") + kToken}, {"content-type", "application/json"}},
+                 R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})");
+  std::string err;
+  auto v = json::parse(r.body, &err);
+  ASSERT_TRUE(v) << err;
+  int seen = 0;
+  for (const auto& t : v->at("result").at("tools").as_array()) {
+    const auto& name = t.at("name").as_string();
+    if (name != "source_build" && name != "source_deploy") continue;
+    ++seen;
+    EXPECT_EQ(t.at("inputSchema").at("properties").as_object().contains("channel"), name == "source_deploy") << name;
+  }
+  EXPECT_EQ(seen, 2);
 }

@@ -412,3 +412,55 @@ TEST_F(RegistryTest, ProductionGoesLiveOverABetaVersionInItsWay) {
   EXPECT_FALSE(reg->upload(manifest_for("rival", "example.com", "/x", "rival_x"), module_for({"rival_x"}), &err));
   manifest::set_domain_aliases({});
 }
+
+TEST_F(RegistryTest, ASplitsPromotionDoesntUndoADisable) {
+  std::string err;
+  auto v1 = reg->upload(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get"}), &err);
+  auto v2 = reg->store(manifest_for("ab", "*", "/ab", "ab_get"), module_for({"ab_get", "w"}), "", &err);
+  ASSERT_TRUE(v1 && v2) << err;
+  ASSERT_TRUE(reg->split_set("ab", v2->version, 100, {}, false, &err)) << err;
+  ASSERT_TRUE(reg->disable("ab", "kill switch", &err)) << err;
+  // The controller read the split before the disable; its promotion is refused.
+  EXPECT_FALSE(reg->promote("ab", v2->version, &err, true));
+  EXPECT_NE(err.find("ended meanwhile"), std::string::npos) << err;
+  EXPECT_TRUE(reg->disabled("ab"));
+  // The split-last a disable leaves.
+  auto last = base::read_file(w->root() / "boxes" / "ab" / "split-last");
+  ASSERT_TRUE(last);
+  EXPECT_NE(last->find("disabled"), std::string::npos) << *last;
+}
+
+TEST_F(RegistryTest, AReloadLeavesOutOnlyTheBetaVersionsThatConflict) {
+  std::string err;
+  manifest::set_domain_aliases({{"beta.example.com", "example.com"}});
+  reg->set_beta_domains({"beta.example.com"});
+  ASSERT_TRUE(reg->upload(manifest_for("shop", "example.com", "/x", "shop_x"), module_for({"shop_x"}), &err)) << err;
+  auto fine = reg->store(manifest_for("fine", "example.com", "/f", "fine_f"), module_for({"fine_f"}), "", &err, true);
+  ASSERT_TRUE(fine && reg->beta_set("fine", fine->version, &err)) << err;
+  // A box that names the beta domain outright, staged for beta: fine until that domain is beta's.
+  auto odd = reg->store(manifest_for("odd", "other.example.com", "/x", "odd_x"), module_for({"odd_x"}), "", &err, true);
+  ASSERT_TRUE(odd && reg->beta_set("odd", odd->version, &err)) << err;
+  manifest::set_domain_aliases({{"beta.example.com", "example.com"}, {"other.example.com", "example.com"}});
+  reg->set_beta_domains({"beta.example.com", "other.example.com"});
+  auto set = reg->active();
+  EXPECT_TRUE(set->beta.count("fine"));
+  EXPECT_FALSE(set->beta.count("odd"));
+  EXPECT_TRUE(reg->beta_version("odd"));  // kept on disk, said by beta_status
+  EXPECT_TRUE(set->table_for("example.com").match({"x"}, "get").value);
+  manifest::set_domain_aliases({});
+}
+
+TEST_F(RegistryTest, BetasDropIsRefusedOnceTheBoxIsProductions) {
+  std::string err;
+  auto v = reg->store(manifest_for("fresh", "*", "/fresh", "fresh_get"), module_for({"fresh_get"}), "", &err, true);
+  ASSERT_TRUE(v) << err;
+  ASSERT_TRUE(reg->promote("fresh", v->version, &err)) << err;
+  EXPECT_FALSE(reg->drop("fresh", {{"by", "beta"}}, &err, true));
+  EXPECT_NE(err.find("production's now"), std::string::npos) << err;
+  EXPECT_FALSE(reg->dropped("fresh"));
+  // The same bytes stored for production lose beta's mark.
+  auto again = reg->store(manifest_for("dark", "*", "/dark", "dark_get"), module_for({"dark_get"}), "", &err, true);
+  ASSERT_TRUE(again) << err;
+  ASSERT_TRUE(reg->store(manifest_for("dark", "*", "/dark", "dark_get"), module_for({"dark_get"}), "", &err)) << err;
+  for (const auto& info : reg->versions("dark")) EXPECT_FALSE(info.for_beta);
+}

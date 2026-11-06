@@ -206,6 +206,10 @@ class Host {
   static std::optional<ScopeRule> scope_rule(std::string_view tool);
   // An operator name without beta-ops' "beta:" (053 § 6).
   static std::string_view beta_unwrapped(std::string_view name);
+  // Operator OAuth clients that registered or took tokens through beta-ops (053 § 6), kept in
+  // storage/operations/beta-clients.json: their agents are beta's on any domain.
+  bool is_beta_client(const std::string& client_id) const;
+  void mark_beta_client(const std::string& client_id);
   // Whose scope an operator name uses: "person:$email" for the panel and OAuth agents alike,
   // else the name ("config", "token:$name").
   static std::string scope_key(const std::string& operator_name);
@@ -865,6 +869,7 @@ class Host {
   std::mutex splits_mu_;
   // Held across a split's read, judgment, and write, by the controller and the split tools alike.
   std::mutex split_change_mu_;
+  std::mutex beta_clients_mu_;
   std::map<std::string, SplitStats> split_stats_;
   // Who lets a drop run now: the approving person, "development mode (--local)" in local mode
   // (where drops don't wait), or "" (the drop must wait).

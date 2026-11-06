@@ -45,7 +45,6 @@ void count_words(std::map<std::string, int, std::less<>>& into, std::string_view
   for (auto& w : words_of(text)) ++into[w];
 }
 
-// How often words starting with `term` occur in a field.
 // How often words starting with `term` occur in a field, counted no further than `cap`.
 int prefix_count(const std::map<std::string, int, std::less<>>& field, const std::string& term,
                  int cap = std::numeric_limits<int>::max()) {

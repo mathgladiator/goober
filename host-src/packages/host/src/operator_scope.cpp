@@ -129,6 +129,7 @@ std::string text_arg(const bj::object& args, const char* k) {
 }
 
 fs::path scopes_file(const fs::path& storage) { return storage / "operations" / "scopes.json"; }
+fs::path beta_clients_file(const fs::path& storage) { return storage / "operations" / "beta-clients.json"; }
 
 }  // namespace
 
@@ -160,6 +161,33 @@ std::optional<Host::ScopeRule> Host::scope_rule(std::string_view tool) {
   auto it = rules().find(tool);
   if (it == rules().end()) return std::nullopt;
   return it->second;
+}
+
+bool Host::is_beta_client(const std::string& client_id) const {
+  auto text = base::read_file(beta_clients_file(config_.get()->storage));
+  if (!text) return false;
+  std::string err;
+  auto v = json::parse(*text, &err);
+  // A file that doesn't parse holds every OAuth agent to beta rather than letting one out.
+  if (!v || !v->is_object()) return true;
+  return v->as_object().contains(client_id);
+}
+
+void Host::mark_beta_client(const std::string& client_id) {
+  std::lock_guard lock(beta_clients_mu_);
+  auto file = beta_clients_file(config_.get()->storage);
+  bj::object all;
+  if (auto text = base::read_file(file)) {
+    std::string err;
+    if (auto v = json::parse(*text, &err); v && v->is_object()) all = v->as_object();
+  }
+  if (all.contains(client_id)) return;
+  all[client_id] = base::now_unix_ms();
+  std::error_code ec;
+  fs::create_directories(file.parent_path(), ec);
+  if (!base::write_file_durable(file, json::pretty(all))) {
+    std::cerr << "goober-host: couldn't write " << file.string() << "\n";
+  }
 }
 
 std::string_view Host::beta_unwrapped(std::string_view name) {
@@ -293,27 +321,32 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
     }
     return true;
   };
-  // A new version replaces the box of that name: if one exists outside the scope, it's not theirs.
-  auto existing_in = [&](const std::string& name, std::string* out_of) {
+  // Whose a box is: a live box's live manifest; a disabled box's, the version it would enable
+  // again; a box only stored, every version it has (none may be outside the scope, so a version
+  // stored later can't claim another tenant's box). `absent` answers for a box with no versions.
+  auto owned_in = [&](const std::string& name, std::string* out_of, bool absent) {
     auto active = boxes_->active();
     auto it = active->boxes.find(name);
     if (it != active->boxes.end()) return manifest_in(it->second->manifest, out_of);
-    return true;
-  };
-  auto box_in = [&](const std::string& name, std::string* out_of) {
-    auto active = boxes_->active();
-    auto it = active->boxes.find(name);
-    if (it != active->boxes.end()) return manifest_in(it->second->manifest, out_of);
-    // Versions not active: the newest stored manifest decides.
-    auto versions = boxes_->versions(name);
-    if (!versions.empty()) {
+    auto judge = [&](const std::string& version) {
       std::string err;
-      auto text = boxes_->manifest_text(name, versions.back().version);
+      auto text = boxes_->manifest_text(name, version);
       auto m = text ? manifest::parse_manifest(*text, &err) : std::nullopt;
-      if (m) return manifest_in(*m, out_of);
+      return m ? manifest_in(*m, out_of) : (*out_of = "box " + name + "'s version " + version, false);
+    };
+    if (auto d = boxes_->disabled(name)) return judge(d->version);
+    bool any = false;
+    for (const auto& v : boxes_->versions(name)) {
+      if (v.state == "deleted") continue;
+      any = true;
+      if (!judge(v.version)) return false;
     }
+    if (any || absent) return true;
     return *out_of = "box " + name + ", which this host doesn't have", false;
   };
+  // A new version replaces the box of that name: if one exists outside the scope, it's not theirs.
+  auto existing_in = [&](const std::string& name, std::string* out_of) { return owned_in(name, out_of, true); };
+  auto box_in = [&](const std::string& name, std::string* out_of) { return owned_in(name, out_of, false); };
 
   auto rule = scope_rule(tool);
   if (!rule) return who + ", and " + tool + " has no scope rule, so it's refused" + widen;

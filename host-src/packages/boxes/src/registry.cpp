@@ -192,9 +192,7 @@ std::optional<std::vector<std::string>> fit_beta(ActiveSet& set) {
   set.build(&err);
   return left;
 }
-}  // namespace
 
-namespace {
 std::vector<std::string> exports_of(const manifest::Manifest& m) {
   std::vector<std::string> out;
   for (const auto& r : m.routes) out.push_back(r.export_name());
@@ -297,8 +295,14 @@ std::vector<std::string> BoxRegistry::load_all() {
     next->build(&err);
   }
   // Beta versions (053 § 3), on the beta domains: one that can't be loaded or conflicts there is
-  // left out, said.
+  // left out, said. Production's own boxes conflicting on a beta domain (one names it outright):
+  // beta gets no tables of its own rather than production losing its.
   next->beta_domains = beta_domains_;
+  if (std::string why; !next->build(&why)) {
+    warnings.push_back("beta domains not served from beta versions: production's boxes conflict there: " + why);
+    next->beta_domains.clear();
+    next->build(&err);
+  }
   for (const auto& entry : fs::directory_iterator(wal_.root() / "boxes", ec)) {
     std::string box = entry.path().filename().string();
     auto version = base::read_file(entry.path() / "beta");
@@ -436,11 +440,20 @@ void BoxRegistry::set_beta_domains(std::set<std::string> domains) {
   std::string err;
   if (!next->build(&err)) {
     // A beta version that conflicts on a newly named beta domain answers with live there, left
-    // out as load_all leaves it out after a restart (its beta file stays; beta_status says so).
+    // out as load_all leaves it out after a restart (its beta file stays; beta_status shows it
+    // as "not served").
     if (auto left = fit_beta(*next)) {
       for (const auto& b : *left) {
         std::cerr << "goober-host: box " << b << "'s beta version conflicts on a beta domain and isn't served\n";
       }
+    } else {
+      // Production's own boxes conflict on a beta domain: beta gets no tables of its own rather
+      // than production losing its.
+      std::cerr << "goober-host: beta domains not served from beta versions: production's boxes conflict there: "
+                << err << "\n";
+      next->beta = active()->beta;
+      next->beta_domains.clear();
+      next->build(&err);
     }
   }
   std::lock_guard snap(snapshot_mu_);
@@ -486,7 +499,7 @@ std::vector<std::string> BoxRegistry::unloaded() const {
 }
 
 bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
-                           bool dry_run) {
+                           bool dry_run, std::vector<std::string>* notes) {
   auto current = active();
   auto next = std::make_shared<ActiveSet>(*current);  // its splits, beta versions, and beta domains too
   const std::string& name = candidate->manifest.box;
@@ -558,11 +571,16 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
     beta_left = std::move(*left);
     error->clear();
   }
+  if (notes) {
+    for (const auto& b : beta_left) {
+      notes->push_back("going live clears box " + b + "'s beta version, which claims the same route on a beta domain "
+                       "(production wins, 053 § 6)");
+    }
+  }
   if (dry_run) return true;
   // A new live version ends the box's split (052 § 4).
   next->splits.erase(name);
   wal::Bundle all = bundle;
-  std::error_code sec;
   end_split(all, wal_.root(), name, "version " + candidate->version + " went live");
   if (beta_promoted) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/beta", ""});
   // Left out of beta for good, so memory and disk agree: the box's beta slot is cleared.
@@ -654,6 +672,9 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
       }
       // Stored for beta (053 § 6): what beta's operator may drop without the owner.
       if (for_beta) life["channel"] = "beta";
+    } else if (!for_beta) {
+      // The same bytes stored for production too are production's as well.
+      life.erase("channel");
     }
     bool live_now = base::read_file(wal_.root() / "boxes" / box / "active").value_or("") == version;
     if (!live_now && (life.contains("archived_ms") || !life.contains("inactive_since_ms"))) {
@@ -671,7 +692,7 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
   // warning, and version_promote checks again when it goes live.
   if (mode == Mode::kStore) {
     std::string conflict;
-    if (!activate(candidate, bundle, &conflict, true)) {
+    if (!activate(candidate, bundle, &conflict, true, &result.warnings)) {
       result.warnings.push_back("not live-able while the active boxes are as they are: " + conflict +
                                 ". Stored dark, but version_promote will refuse it until the other box gives way: "
                                 "box_disable it (or move its route) first, then promote this one.");
@@ -679,7 +700,7 @@ std::optional<UploadResult> BoxRegistry::upload_or_check(std::string_view manife
     if (!wal_.commit(bundle, error)) return std::nullopt;
     return result;
   }
-  if (!activate(candidate, bundle, error, mode != Mode::kActivate)) return std::nullopt;
+  if (!activate(candidate, bundle, error, mode != Mode::kActivate, &result.warnings)) return std::nullopt;
   return result;
 }
 
@@ -696,7 +717,6 @@ std::optional<std::string> BoxRegistry::disable(const std::string& box, const st
   std::string record = json::dump(boost::json::object{{"version", version}, {"why", why.substr(0, 500)}});
   wal::Bundle bundle = {{wal::FileChange::Kind::kDelete, "boxes/" + box + "/active", ""},
                         {wal::FileChange::Kind::kWrite, "boxes/" + box + "/disabled", record}};
-  std::error_code sec;
   end_split(bundle, wal_.root(), box, "the box was disabled");
   live_moves(bundle, box, "", nullptr, base::now_unix_ms());
   if (!wal_.commit(bundle, error)) return std::nullopt;
@@ -720,11 +740,20 @@ std::optional<BoxRegistry::Disabled> BoxRegistry::disabled(const std::string& bo
   return Disabled{str("version"), str("why")};
 }
 
-bool BoxRegistry::promote(const std::string& box, const std::string& version, std::string* error) {
+bool BoxRegistry::promote(const std::string& box, const std::string& version, std::string* error, bool from_split) {
   std::lock_guard lock(mu_);
   if (!base::is_valid_name(box) || !base::is_safe_relative_path(version) || version.find('/') != std::string::npos) {
     *error = "bad box or version";
     return false;
+  }
+  // A split's promotion only while that split still runs: a disable or a new live version that
+  // ended it meanwhile stands.
+  if (from_split) {
+    auto current = active();
+    auto it = current->splits.find(box);
+    if (it == current->splits.end() || it->second.candidate->version != version) {
+      return *error = box + "'s split with " + version + " ended meanwhile", false;
+    }
   }
   if (archived(box, version, error)) return false;
   auto loaded = load_version(box, version, error);
@@ -784,12 +813,16 @@ std::vector<std::string> stored_versions(const fs::path& root, const std::string
 }  // namespace
 
 std::optional<std::vector<std::string>> BoxRegistry::drop(const std::string& box, const boost::json::object& record,
-                                                          std::string* error) {
+                                                          std::string* error, bool only_unserved) {
   std::lock_guard lock(mu_);
   if (!base::is_valid_name(box)) return *error = "bad box name", std::nullopt;
   fs::path root = wal_.root() / "boxes" / box;
   std::error_code ec;
   if (!fs::is_directory(root, ec)) return *error = "no box named " + box, std::nullopt;
+  // Checked again under the lock: a box that went live or was disabled since isn't beta's alone.
+  if (only_unserved && (active()->boxes.count(box) || fs::exists(root / "disabled", ec))) {
+    return *error = "box " + box + " is production's now (live or disabled): its drop waits for an owner", std::nullopt;
+  }
   if (fs::exists(root / "dropped", ec)) return *error = "box " + box + " was dropped already", std::nullopt;
   auto current = active();
   std::shared_ptr<ActiveSet> next;

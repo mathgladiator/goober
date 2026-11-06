@@ -746,3 +746,12 @@ TEST(Manifest, ABetaRequestNeverOpensProductionsData) {
   set_beta_tenants({});
   EXPECT_EQ(directory.tenant_for("acme_beta"), "directory");
 }
+
+TEST(Manifest, AStrategyPinnedToABetaTenantOpensIt) {
+  DataStrategy pinned;
+  pinned.tenant = "acme_beta";
+  set_beta_tenants({{"acme_beta", "acme"}});
+  EXPECT_EQ(pinned.tenant_for("acme_beta"), "acme_beta");
+  EXPECT_EQ(pinned.tenant_for("acme"), "acme_beta");
+  set_beta_tenants({});
+}

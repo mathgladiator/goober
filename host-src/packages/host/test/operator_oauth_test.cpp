@@ -30,13 +30,13 @@ struct Reply {
   std::map<std::string, std::string> headers;
 };
 
-Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target,
-            std::vector<std::pair<std::string, std::string>> headers = {}, const std::string& body = "") {
+Reply fetch_on(const std::string& host, uint16_t port, bhttp::verb verb, const std::string& target,
+               std::vector<std::pair<std::string, std::string>> headers = {}, const std::string& body = "") {
   asio::io_context io;
   beast::tcp_stream stream(io);
   stream.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
   bhttp::request<bhttp::string_body> req(verb, target, 11);
-  req.set(bhttp::field::host, "localhost:8080");
+  req.set(bhttp::field::host, host);
   for (const auto& [k, v] : headers) req.set(k, v);
   req.body() = body;
   req.prepare_payload();
@@ -47,6 +47,11 @@ Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target,
   Reply r{int(res.result_int()), res.body(), {}};
   for (const auto& f : res) r.headers[base::to_lower(std::string(f.name_string()))] = std::string(f.value());
   return r;
+}
+
+Reply fetch(uint16_t port, bhttp::verb verb, const std::string& target,
+            std::vector<std::pair<std::string, std::string>> headers = {}, const std::string& body = "") {
+  return fetch_on("localhost:8080", port, verb, target, std::move(headers), body);
 }
 
 bj::object parse(const std::string& s) {
@@ -71,7 +76,7 @@ class OperatorOAuthTest : public ::testing::Test {
     std::string err;
     auto cfg = config::parse_config(R"({
         "listen": {"port": 0}, "storage": "storage", "platform-domain": "localhost",
-        "domains": {"localhost": {"tenant": "playground"}},
+        "domains": {"localhost": {"tenant": "playground"}, "beta.localhost": {"tenant": "playground_beta", "beta-of": "localhost"}},
         "identity": {"operators": {"boss@example.com": ["host:owner"]}},
         "threads": {"network": 1, "boxes": 2}})",
                                     root, &err);
@@ -259,4 +264,51 @@ TEST_F(OperatorOAuthTest, OnlyOperatorsCanSignInAndTheRealmsStayApart) {
   auto r = fetch(port, bhttp::verb::get, "/oauth/operator/authorize?" + authorize_query(site_client), {{"cookie", boss}});
   EXPECT_EQ(r.status, 400);
   EXPECT_NE(r.body.find("registered here"), std::string::npos) << r.body;
+}
+
+TEST_F(OperatorOAuthTest, AnAgentThatCameThroughBetaOpsStaysBetasEverywhere) {
+  // beta-ops doesn't serve the operator issuer (054: a decision for the human).
+  EXPECT_EQ(fetch_on("beta-ops.localhost:8080", port, bhttp::verb::post, "/oauth/operator/register",
+                     {{"content-type", "application/json"}}, R"({"client_name":"Grok","redirect_uris":["https://grok.example/callback"]})")
+                .status,
+            404);
+  // Registered on production's domain, a client isn't beta's; signed in and given a token there,
+  // its agent is the operator, until the client is marked beta's.
+  auto prod = fetch(port, bhttp::verb::post, "/oauth/operator/register", {{"content-type", "application/json"}},
+                    R"({"client_name":"Grok","redirect_uris":["https://grok.example/callback"]})");
+  std::string client_id(parse(prod.body)["client_id"].as_string());
+  EXPECT_FALSE(host->is_beta_client(client_id));
+  std::string boss = sign_in("boss%40example.com", true);
+  auto consent = fetch(port, bhttp::verb::get, "/oauth/operator/authorize?" + authorize_query(client_id), {{"cookie", boss}});
+  std::smatch m;
+  ASSERT_TRUE(std::regex_search(consent.body, m, std::regex(R"re(name="consent" value="([^"]+)")re")));
+  auto allowed = fetch(port, bhttp::verb::post, "/oauth/operator/authorize",
+                       {{"content-type", "application/x-www-form-urlencoded"}, {"cookie", boss}, {"origin", "http://localhost:8080"}},
+                       authorize_query(client_id) + "&decision=allow&consent=" + std::string(m[1]));
+  std::string loc = allowed.headers["refresh"].substr(6);
+  std::string code = router::parse_query(loc.substr(loc.find('?') + 1))["code"];
+  auto tok = parse(fetch(port, bhttp::verb::post, "/oauth/operator/token", kForm,
+                         "grant_type=authorization_code&client_id=" + client_id + "&code=" + code +
+                             "&redirect_uri=" + base::percent_encode(kRedirect) + "&code_verifier=" + kVerifier)
+                       .body);
+  ASSERT_TRUE(tok.contains("access_token")) << json::dump(tok);
+  std::string access(tok["access_token"].as_string());
+  auto disable = [&](const std::string& bearer) {
+    return fetch(port, bhttp::verb::post, "/goober-operations-mcp",
+                 {{"content-type", "application/json"}, {"authorization", "Bearer " + bearer}},
+                 R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"box_disable","arguments":{"box":"none","why":"x"}}})")
+        .body;
+  };
+  EXPECT_EQ(disable(access).find("changes production"), std::string::npos);
+  // A client marked beta's (as one that registers or takes tokens through beta-ops is): on
+  // production's domain too, its agent now changes only beta, its refreshed tokens as well.
+  host->mark_beta_client(client_id);
+  EXPECT_TRUE(host->is_beta_client(client_id));
+  auto refreshed = parse(fetch(port, bhttp::verb::post, "/oauth/operator/token", kForm,
+                               "grant_type=refresh_token&client_id=" + client_id + "&refresh_token=" +
+                                   std::string(tok["refresh_token"].as_string()))
+                             .body);
+  ASSERT_TRUE(refreshed.contains("access_token")) << json::dump(refreshed);
+  EXPECT_NE(disable(access).find("changes production"), std::string::npos);
+  EXPECT_NE(disable(std::string(refreshed["access_token"].as_string())).find("changes production"), std::string::npos);
 }

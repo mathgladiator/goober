@@ -156,8 +156,9 @@ class BoxRegistry {
   std::optional<UploadResult> store(std::string_view manifest_text, std::string_view module,
                                     std::string_view types_text, std::string* error, bool for_beta = false);
 
-  // Makes an existing version active (and a disabled box enabled again).
-  bool promote(const std::string& box, const std::string& version, std::string* error);
+  // Makes an existing version active (and a disabled box enabled again). `from_split` promotes a
+  // split's candidate only while that split still runs.
+  bool promote(const std::string& box, const std::string& version, std::string* error, bool from_split = false);
 
   // Takes a box out of the active set: none of its routes, tools, timers, mail routes, or jobs
   // answer. Its versions stay, and boxes/$box/disabled remembers the version and why, for
@@ -173,7 +174,9 @@ class BoxRegistry {
   // live, its disabled record gone, every stored version deleted leaving its tombstone (with
   // "dropped": true), and boxes/$box/dropped holding `record`. The name stays usable: uploading
   // the box again starts it afresh. Answers the versions deleted.
-  std::optional<std::vector<std::string>> drop(const std::string& box, const boost::json::object& record, std::string* error);
+  // `only_unserved` refuses, under the lock, a box live or disabled now (beta's own drops, 053 § 6).
+  std::optional<std::vector<std::string>> drop(const std::string& box, const boost::json::object& record, std::string* error,
+                                               bool only_unserved = false);
   // Splits (052): starts or changes the split of a live box to `version` at `share_bp`, keeping
   // `record` (the controller's state) in boxes/$box/split. Refused when the box isn't live, the
   // version is the live one or can't be loaded, or the two aren't compatible
@@ -255,8 +258,9 @@ class BoxRegistry {
 
   std::optional<ActiveBox> load_version(const std::string& box, const std::string& version, std::string* error) const;
   // Checks the candidate against every other active box, then swaps it in.
+  // `notes` gets what going live would do besides, like clearing another box's beta version.
   bool activate(std::shared_ptr<const ActiveBox> candidate, const wal::Bundle& bundle, std::string* error,
-                bool dry_run = false);
+                bool dry_run = false, std::vector<std::string>* notes = nullptr);
   enum class Mode { kActivate, kCheck, kStore };
   std::optional<UploadResult> upload_or_check(std::string_view manifest_text, std::string_view module,
                                               std::string_view types_text, Mode mode, std::string* error,

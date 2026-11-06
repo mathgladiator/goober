@@ -114,7 +114,7 @@ std::optional<std::string> Host::split_end(const std::string& box, const std::st
   std::string version = text_of(*rec, "version"), err;
   if (outcome == "promote") {
     // Promoting ends the split in the same step (the registry's activate).
-    if (!boxes_->promote(box, version, &err)) return "couldn't promote " + version + ": " + err;
+    if (!boxes_->promote(box, version, &err, true)) return "couldn't promote " + version + ": " + err;
   } else if (!boxes_->split_end(box, &err)) {
     return err;
   }

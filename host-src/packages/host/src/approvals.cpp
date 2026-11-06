@@ -265,9 +265,11 @@ bj::object Host::panel_approvals(const SignedIn& who) {
   {
     // A person who isn't an owner sees their own agents' requests only, selected before the limit.
     sqlite::Stmt s(db, "SELECT id, at_ms, agent, tool, args, request_id, state, decided_by, decided_ms, result, is_error "
-                       "FROM requests WHERE state = 'pending' AND (? OR agent LIKE ? ESCAPE '\\') ORDER BY id LIMIT 200");
+                       "FROM requests WHERE state = 'pending' AND (? OR agent LIKE ? ESCAPE '\\' OR agent LIKE ? ESCAPE '\\') "
+                       "ORDER BY id LIMIT 200");
+    // Their agents through beta-ops too (053 § 6).
     std::string like = "oauth:" + like_escape(who.user.email) + ":%";
-    s.bind(1, int64_t(owner)).bind(2, like);
+    s.bind(1, int64_t(owner)).bind(2, like).bind(3, "beta:" + like);
     while (s.step()) {
       auto o = approval_json(s, true);
       // A held upload says what it would change from the live version, worked out when the
@@ -306,8 +308,10 @@ bj::object Host::panel_approvals(const SignedIn& who) {
   }
   {
     sqlite::Stmt s(db, "SELECT id, at_ms, agent, tool, args, request_id, state, decided_by, decided_ms, result, is_error "
-                       "FROM requests WHERE state != 'pending' AND (? OR agent LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT 30");
-    s.bind(1, int64_t(owner)).bind(2, "oauth:" + like_escape(who.user.email) + ":%");
+                       "FROM requests WHERE state != 'pending' AND (? OR agent LIKE ? ESCAPE '\\' OR agent LIKE ? ESCAPE '\\') "
+                       "ORDER BY id DESC LIMIT 30");
+    s.bind(1, int64_t(owner)).bind(2, "oauth:" + like_escape(who.user.email) + ":%")
+        .bind(3, "beta:oauth:" + like_escape(who.user.email) + ":%");
     while (s.step()) recent.push_back(approval_json(s, false));
   }
   return bj::object{{"agents", std::move(list)}, {"pending", std::move(pending)}, {"recent", std::move(recent)}};
