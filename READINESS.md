@@ -238,6 +238,10 @@ each ranch's site weekly.
   - a database explorer with a read-only SQL box;
   - heat studies (the Studies view): one domain's heat, rates, and concurrency by endpoint over
     an hour or a day, with suggested controls in observe mode (`design/machine/048.HeatStudy.md`);
+  - beta (the Beta and Promote views, and beta-ops): a beta of a site on this host with its own
+    data, where Grok stages boxes and content and beta's mail stays in a mailbox you read and write
+    into; you promote what you like to production in one press and roll it back in one
+    (`design/machine/053.Beta.md`);
   - cleanup (the Cleanup view): old boxes and databases Grok asks to drop wait there for you
     to approve, or you drop them yourself (`design/machine/051.Cleanup.md`);
   - skills and playbooks (the Skills view): what Grok's engineers wrote down for each role,

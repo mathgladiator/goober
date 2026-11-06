@@ -870,6 +870,14 @@ for f in json.load(sys.stdin)["findings"]:
         print(f["data"]["domain"], f["data"]["to"], f["data"]["dns"])
 ' 2>/dev/null || true)"
 
+# Beta sites (053 § 7): beta.example.com on this host, in a tenant of its own, linked to example.com.
+BETAS="$(sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" --json 2>/dev/null | python3 -I -c '
+import json, sys
+for f in json.load(sys.stdin)["findings"]:
+    if f["id"] == "beta" and f["level"] == "suggest":
+        print(f["data"]["domain"], f["data"]["of"], f["data"]["beta_tenant"], f["data"]["dns"])
+' 2>/dev/null || true)"
+
 # Edits host.json as the host's user: "operations.domain" set, a redirect domain added
 # ("www.example.com=example.com"), or a check added to audit.quiet.
 edit_config() {
@@ -879,9 +887,14 @@ path, what, value = sys.argv[1:4]
 cfg = json.load(open(path))
 if what == "panel":
     cfg.setdefault("operations", {})["domain"] = value
+elif what == "beta-ops":
+    cfg.setdefault("operations", {})["beta-domain"] = value
 elif what == "redirect":
     name, to = value.split("=", 1)
     cfg.setdefault("domains", {})[name] = {"redirect-to": to}
+elif what == "beta":
+    name, of, tenant = value.split("=", 2)
+    cfg.setdefault("domains", {})[name] = {"tenant": tenant, "beta-of": of}
 else:
     quiet = cfg.setdefault("audit", {}).setdefault("quiet", [])
     if value not in quiet:
@@ -900,8 +913,10 @@ PY
 # each checked, the host proved by a restart, and both files put back if anything is refused.
 #   add_site panel ops.example.com example.com
 #   add_site redirect www.example.com example.com
+#   add_site beta beta.example.com example.com acme_beta
+#   add_site beta-ops beta-ops.example.com example.com
 add_site() {
-  local kind="$1" d="$2" site="$3"
+  local kind="$1" d="$2" site="$3" beta_tenant="${4:-}"
   # host.json's copy is made and put back by the host's user: DIR is theirs (no root writes in it).
   sudo -u "$RUN_AS" cp --remove-destination "$DIR/host.json" "$DIR/host.json.before-$kind" ||
     { echo "   couldn't copy host.json aside; nothing changed"; return 1; }
@@ -916,8 +931,10 @@ add_site() {
       FAILED+=("putting host.json and the Caddyfile back after adding $d")
     fi
   }
-  if [[ "$kind" == panel ]]; then
-    edit_config panel "$d" || { undo "couldn't edit host.json"; return 1; }
+  if [[ "$kind" == panel || "$kind" == beta-ops ]]; then
+    edit_config "$kind" "$d" || { undo "couldn't edit host.json"; return 1; }
+  elif [[ "$kind" == beta ]]; then
+    edit_config beta "$d=$site=$beta_tenant" || { undo "couldn't edit host.json"; return 1; }
   else
     edit_config redirect "$d=$site" || { undo "couldn't edit host.json"; return 1; }
   fi
@@ -953,8 +970,10 @@ PY
   for _ in $(seq 1 30); do
     got="$(curl -s -o /dev/null -m 10 -w '%{http_code} %{redirect_url}' "https://$d/" || true)"
     code="${got%% *}"
-    if [[ "$kind" == panel ]]; then
+    if [[ "$kind" == panel || "$kind" == beta-ops ]]; then
       [[ "$code" =~ ^(200|302|303)$ ]] && break
+    elif [[ "$kind" == beta ]]; then
+      [[ "$code" =~ ^(200|301|302|303|404)$ ]] && break
     else
       [[ "$got" == "301 https://$site/" ]] && break
     fi
@@ -962,6 +981,10 @@ PY
   done
   if [[ "$kind" == panel && "$code" =~ ^(200|302|303)$ ]]; then
     echo "   ✓ the panel answers at https://$d/ (sign in with an operator address)"
+  elif [[ "$kind" == beta-ops && "$code" =~ ^(200|302|303)$ ]]; then
+    echo "   ✓ beta-ops answers at https://$d/ (sign in with an operator address; host:beta sees beta alone)"
+  elif [[ "$kind" == beta && "$code" =~ ^(200|301|302|303|404)$ ]]; then
+    echo "   ✓ https://$d/ is beta: boxes answer there with their beta versions, and its mail stays in beta-ops"
   elif [[ "$kind" == redirect && "$got" == "301 https://$site/" ]]; then
     echo "   ✓ https://$d/ redirects to https://$site/"
   else
@@ -970,17 +993,17 @@ PY
 }
 
 # Asks about one name the audit suggested: set it up now when its DNS is ready, or never ask.
-#   offer KIND NAME SITE DNS QUIET-ID WHAT
+#   offer KIND NAME SITE DNS QUIET-ID WHAT [BETA-TENANT]
 # (Whether the deploy has a terminal is read once, here: the loop below feeds offer its own input.)
 [[ -t 0 ]] && TERMINAL=1 || TERMINAL=""
 offer() {
-  local kind="$1" d="$2" site="$3" dns="$4" quiet="$5" what="$6" answer
+  local kind="$1" d="$2" site="$3" dns="$4" quiet="$5" what="$6" beta_tenant="${7:-}" answer
   if [[ -z "$TERMINAL" ]]; then
     echo "   (deploy from a terminal to be offered $what)"
   elif [[ "$dns" == ready ]]; then
     read -r -p "   $what now? [y]es, [n]ot now, ne[v]er: " answer </dev/tty || answer=n
     case "$answer" in
-      y|Y|yes) add_site "$kind" "$d" "$site" || true ;;
+      y|Y|yes) add_site "$kind" "$d" "$site" "$beta_tenant" || true ;;
       v|V|never) edit_config quiet "$quiet" && echo "   won't suggest it again (audit.quiet in host.json)" ;;
       *) echo "   not now; the next deploy asks again" ;;
     esac
@@ -1005,6 +1028,25 @@ while read -r R_NAME R_TO R_DNS <&3; do
   [[ "$R_NAME" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ && "$R_TO" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || continue
   offer redirect "$R_NAME" "$R_TO" "$R_DNS" "redirect:$R_NAME" "Redirect https://$R_NAME/ to https://$R_TO/" || true
 done 3<<<"$REDIRECTS"
+# A beta site (053 § 7), then beta-ops, asked again after a beta was set up just now.
+while read -r B_NAME B_OF B_TENANT B_DNS <&3; do
+  [[ -n "$B_NAME" ]] || continue
+  [[ "$B_NAME" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ && "$B_OF" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ && "$B_TENANT" =~ ^[a-z][a-z0-9_]*$ ]] || continue
+  offer beta "$B_NAME" "$B_OF" "$B_DNS" "beta:$B_NAME" \
+    "Set up a beta of https://$B_OF/ at https://$B_NAME/ (tenant $B_TENANT: its own data; mail stays in beta-ops)" "$B_TENANT" || true
+done 3<<<"$BETAS"
+BETA_OPS="$(sudo -u "$RUN_AS" "$BIN" audit "${AUDIT_ARGS[@]}" --json 2>/dev/null | python3 -I -c '
+import json, sys
+for f in json.load(sys.stdin)["findings"]:
+    if f["id"] == "beta-ops" and f["level"] == "suggest":
+        print(f["data"]["domain"], f["data"]["dns"])
+' 2>/dev/null || true)"
+if [[ -n "$BETA_OPS" ]]; then
+  read -r BO_DOMAIN BO_DNS <<<"$BETA_OPS"
+  [[ "$BO_DOMAIN" =~ ^beta-ops\.[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] &&
+    { offer beta-ops "$BO_DOMAIN" "${BO_DOMAIN#beta-ops.}" "$BO_DNS" beta-ops \
+        "Set up beta-ops (beta's panel, operator MCP, and mail) at https://$BO_DOMAIN/" || true; }
+fi
 
 # Missing settings (028.Panel.md § 8.2): each finding about one (a tenant's postal address, the
 # mailer, backups, operators, the AWS keys) says what to ask for. From a terminal, the deploy

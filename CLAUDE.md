@@ -163,7 +163,9 @@ Read these before doing design work:
     view of log volume, who writes it, and uploads per day (§ 4.7); the Studies view of heat studies
     (heat by endpoint, clients, suggested controls; § 4.8, 048); the Skills view of skills and
     playbooks by role (§ 4.10, 050); the Cleanup view of drop requests an owner approves, every box and
-    database with what dropping it takes, and what was dropped (§ 4.11, 051); the Controls view of each domain's
+    database with what dropping it takes, and what was dropped (§ 4.11, 051); the Beta view (boxes'
+    beta slots, beta's mailbox, a composer) and the Promote view (beta's changes as one change set an
+    owner applies and rolls back), and beta-ops on its own domain (§ 4.12, 053); the Controls view of each domain's
     controls, their effective values, and what each did, where `host:owner` and `host:operator`
     change any control at any time (§ 4.9, 047 § 9); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
@@ -293,11 +295,14 @@ Read these before doing design work:
     ladder (1, 5, 25, 50, 100%) stepping every `step_minutes` after `min_requests`, guardrails on 5xx and
     p99 that roll back on their own, promotion at 100%; `split_start`, `split_set`, `split_stop`,
     `split_report`, `split_list`; the box page's Split card; five decisions for the human.
-  - `design/machine/053.Beta.md`: a proposal, not built: a beta site on the production host
-    (`beta.example.com` as a `<tenant>-beta` tenant, `beta-ops.example.com` for its panel and MCP),
-    staging deployments as a beta slot per box shipped by promote or split, beta mail captured with a
-    mail viewer and injector in beta-ops, effects that fail in beta, the deploy audit's two offers; flags
-    the conflict with 310's "staging is another host"; seven decisions for the human.
+  - `design/machine/053.Beta.md`: beta on the production host, decided by the human and built:
+    `beta.example.com` in a `<tenant>_beta` tenant linked by `beta-of`, its own data; a beta slot per
+    box (`channel: "beta"` on version_upload, version_promote, source_deploy); beta mail captured in a
+    mailbox with an injector (`beta_mail_*`); service calls fail in beta unless `"beta": "allow"` on a
+    read; beta-ops (`operations.beta-domain`) and `host:beta`, where operators change only beta;
+    promotion of boxes and content as one change set the owner applies and rolls back (in-host now,
+    shaped for a remote host); the deploy offers beta and beta-ops; 310's "another host" now one of two
+    ways.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.

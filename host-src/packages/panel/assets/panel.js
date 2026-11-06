@@ -1786,6 +1786,63 @@ const views = {
     return out;
   },
 
+  // Promotion (053 § 11): what beta changed, reviewed here and carried to production as one
+  // change set by the owner, and the promotions made, each rolled back by one press.
+  async promote(params) {
+    const sites = (state.me.beta_sites || []);
+    if (!sites.length) return [h('h1', {}, 'Promote'), h('p', { class: 'muted' }, 'No beta site: give a domain "beta-of" in host.json (053).')];
+    const status = await api('beta_status', {}).catch(() => null);
+    const pairs = status ? status.sites.map((s) => ({ beta: s.tenant, prod: s.production_tenant })) : [];
+    const tenant = params.get('tenant') || (pairs[0] && pairs[0].prod) || '';
+    const owner = (state.me.roles || []).includes('host:owner');
+    const out = h('p', { class: 'muted small' });
+    const [plan, sets] = await Promise.all([api('promotion_preview', { tenant }), api('changeset_list', {}).catch(() => [])]);
+    const boxes = new Set(plan.boxes.map((b) => b.box)), paths = new Set(plan.content.map((c) => c.path));
+    const tick = (set, key) => h('input', { type: 'checkbox', checked: true, onchange: (e) => { if (e.target.checked) set.add(key); else set.delete(key); } });
+    const promoteButton = owner && (plan.boxes.length || plan.content.length) ? h('button', { type: 'button', onclick: async () => {
+      const typed = prompt(`Promote ${plan.beta_tenant} to ${tenant}: ${boxes.size} box(es) and ${paths.size} file(s) go live in production ` +
+        `as one change set (rolled back by one press below). Type ${tenant} to go ahead.`);
+      if (typed === null) return;
+      const why = prompt('What does it carry? (kept with the change set)') || 'promotion';
+      try {
+        const r = await api('write/promote', { tenant, confirm: typed, why, boxes: [...boxes], paths: [...paths] });
+        out.textContent = `Promoted as change set ${r.changeset}.`;
+        render(false);
+      } catch (e) { out.textContent = e.message; }
+    } }, 'Promote…') : null;
+    const promotions = sets.filter((c) => /^promote /.test(c.title || '') && c.title.endsWith(' to ' + tenant));
+    return [
+      h('div', { class: 'bar' }, h('h1', {}, 'Promote beta'), pairs.length > 1 ? segmented(pairs.map((p) => p.prod), tenant, (t) => { params.set('tenant', t); location.hash = '#/promote?' + params; }) : null),
+      h('p', { class: 'muted small' }, `What ${plan.beta_tenant} has that ${tenant} lacks. Promoting makes it one change set: boxes' beta versions ` +
+        'go live, content is deployed and checked, and one press rolls it all back. ' + plan.not_carried.replace(/^./, (c) => c.toUpperCase()) +
+        ' never go.' + (owner ? '' : ' Only host:owner promotes.')),
+      plan.warnings.length ? h('div', { class: 'notice bad' }, plan.warnings.map((w) => h('div', {}, w))) : null,
+      wideCard(`Boxes (${plan.boxes.length})`, plan.boxes.length ? table([
+        { label: '', get: (b) => tick(boxes, b.box) },
+        { label: 'Box', get: (b) => b.box, cls: () => 'mono' },
+        { label: 'Live', get: (b) => (b.from || 'new box').slice(0, 12), cls: () => 'mono muted' },
+        { label: 'Beta', get: (b) => b.to.slice(0, 12), cls: () => 'mono' },
+        { label: 'Widens', get: (b) => (b.widens || []).length ? h('ul', { class: 'small' }, b.widens.map((w) => h('li', {}, w))) : (b.note || 'nothing'), cls: () => 'small' },
+      ], plan.boxes) : h('p', { class: 'muted' }, 'Every box answers beta with its live version.')),
+      wideCard(`Content (${plan.content.length})`, plan.content.length ? plan.content.map((c) => h('details', {},
+        h('summary', {}, tick(paths, c.path), ' ', h('span', { class: 'mono' }, c.path), ' ', h('span', { class: 'pill' + (c.change === 'new' ? ' deploy' : '') }, c.change)),
+        c.after !== undefined ? diffView(c.before || '', c.after) : h('p', { class: 'muted' }, 'Not text, or too large to show: ' + fmt.bytes(c.bytes_after) + '.')))
+        : h('p', { class: 'muted' }, 'Beta\'s content matches production\'s.'),
+        plan.only_in_production.length ? h('p', { class: 'muted small' }, `${plan.only_in_production.length} file(s) only production has stay as they are.`) : null),
+      h('div', { class: 'bar' }, promoteButton, out),
+      wideCard('Promotions', promotions.length ? table([
+        { label: 'Change set', get: (c) => c.id, cls: () => 'mono' },
+        { label: 'State', get: (c) => h('span', { class: 'pill' + (c.state === 'applied' ? ' ok' : c.state === 'failed' ? ' failed' : '') }, c.state) },
+        { label: 'By', get: (c) => c.by, cls: () => 'muted small' },
+        { label: 'When', get: (c) => fmt.time(c.applied_ms || c.created_ms), cls: () => 'muted small' },
+        { label: '', get: (c) => owner && c.state === 'applied' ? h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+          if (!confirm(`Roll back change set ${c.id}? Boxes go back to the versions they had and files to what they were.`)) return;
+          try { await api('write/promotion_rollback', { changeset: c.id, tenant }); render(false); } catch (e) { out.textContent = e.message; }
+        } }, 'Roll back') : '' },
+      ], promotions) : h('p', { class: 'muted' }, 'None yet.')),
+    ];
+  },
+
   // Skills and playbooks (050 § 6): search and read what the host's engineers wrote down, by role.
   // Look-only: operators write them with skill_put and skill_delete.
   async skills(params) {
@@ -2588,6 +2645,9 @@ async function start() {
   // Beta (053): its view only where a beta site exists; beta-ops opens on it.
   const betaLink = document.querySelector('#nav a[data-view="beta"]');
   if (betaLink && !(state.me.beta_sites || []).length) betaLink.remove();
+  // Promotion is production's: never in beta-ops, and only with a beta site.
+  const promoteLink = document.querySelector('#nav a[data-view="promote"]');
+  if (promoteLink && (state.me.beta_ops || !(state.me.beta_sites || []).length)) promoteLink.remove();
   if (state.me.beta_ops && !location.hash) location.hash = '#/beta';
   window.addEventListener('hashchange', () => render(false));
   // Live views refresh every 15 seconds while visible; the database and change pages don't.

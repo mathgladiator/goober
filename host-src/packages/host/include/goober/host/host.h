@@ -821,6 +821,10 @@ class Host {
   void register_cleanup_tools();
   // Who approved the call running on this thread now (panel_decide sets it), or "".
   static std::string& approved_by_now();
+  // Promotion (053 § 11; promotion.cpp): beta's differences as a change set.
+  std::optional<boost::json::object> promotion_plan(const std::string& tenant, std::string* error);
+  std::optional<boost::json::object> promotion_start(const std::string& tenant, const boost::json::object& args, std::string* error);
+  void register_promotion_tools();
   // Beta (design/machine/053.Beta.md; beta.cpp).
   bool is_beta_ops_request(const server::http::Request& req) const;
   boost::json::object beta_status();

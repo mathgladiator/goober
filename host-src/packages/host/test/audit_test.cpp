@@ -235,3 +235,29 @@ TEST(Audit, StorageTheHostCantUseIsNamed) {
   EXPECT_NE(f.steps.back().find("chown -hR"), std::string::npos) << f.steps.back();
   fs::permissions(storage / "tmp" / "locked", fs::perms::owner_all, ec);
 }
+
+TEST(Audit, SuggestsABetaSiteAndThenBetaOps) {
+  auto here = std::vector<std::string>{"203.0.113.7"};
+  auto cfg = parse(R"({"platform-domain": "shop.example", "domains": {"shop.example": {"tenant": "shop"}}})");
+  auto all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}}));
+  const auto& beta = find(all, "beta");
+  EXPECT_EQ(beta.level, "suggest");
+  EXPECT_EQ(beta.data.at("domain"), "beta.shop.example");
+  EXPECT_EQ(beta.data.at("of"), "shop.example");
+  EXPECT_EQ(beta.data.at("beta_tenant"), "shop_beta");
+  EXPECT_EQ(beta.data.at("dns"), "missing");
+  for (const auto& f : all) EXPECT_NE(f.id, "beta-ops");  // only once a beta exists
+
+  cfg = parse(R"({"platform-domain": "shop.example", "domains": {"shop.example": {"tenant": "shop"},
+    "beta.shop.example": {"tenant": "shop_beta", "beta-of": "shop.example"}}})");
+  all = host::audit_operations(*cfg, kCaddy, dns({{"shop.example", here}, {"beta-ops.shop.example", here}}));
+  for (const auto& f : all) EXPECT_NE(f.id, "beta");  // it has one
+  const auto& ops = find(all, "beta-ops");
+  EXPECT_EQ(ops.level, "suggest");
+  EXPECT_EQ(ops.data.at("domain"), "beta-ops.shop.example");
+  EXPECT_EQ(ops.data.at("dns"), "ready");
+
+  cfg = parse(R"({"platform-domain": "shop.example", "domains": {"shop.example": {"tenant": "shop"}},
+    "audit": {"quiet": ["beta:beta.shop.example"]}})");
+  EXPECT_EQ(find(host::audit_operations(*cfg, kCaddy, dns({})), "beta").level, "quiet");
+}

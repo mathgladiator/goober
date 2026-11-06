@@ -64,7 +64,7 @@ const std::set<std::string, std::less<>> kReadTools = {
     "changeset_show", "changeset_list", "changeset_preview",
     "heat_study_get", "heat_study_list",
     "skill_list", "skill_search", "skill_get",
-    "cleanup_report", "split_report", "split_list", "beta_status", "beta_mail_list", "beta_mail_get"};
+    "cleanup_report", "split_report", "split_list", "beta_status", "beta_mail_list", "beta_mail_get", "promotion_preview"};
 
 const std::set<std::string, std::less<>> kPanelRoles = {"host:owner", "host:operator", "host:observer", "host:beta"};
 
@@ -342,6 +342,41 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
                                arg_text(args, "in_reply_to"), &err);
       }
       if (!err.empty()) return finish(json_reply(400, bj::object{{"error", err}}), json::dump(bj::object{{"panel", tool}}));
+      return finish(own(200, std::move(out)), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
+    // Promotion (053 § 11): the owner carries beta to production as one change set, applied at
+    // once, and rolls one back. Typing the tenant's name confirms.
+    if (tool == "write/promote" || tool == "write/promotion_rollback") {
+      if (std::find(who->roles.begin(), who->roles.end(), "host:owner") == who->roles.end()) {
+        return finish(json_reply(403, bj::object{{"error", "only host:owner promotes beta to production"}}), "");
+      }
+      bj::object out;
+      std::string err;
+      {
+        OperatorContext as(*this, me, request_id);
+        if (tool == "write/promote") {
+          std::string tenant = arg_text(args, "tenant");
+          if (arg_text(args, "confirm") != tenant || tenant.empty()) {
+            return finish(json_reply(400, bj::object{{"error", "type the tenant's name to promote its beta"}}), "");
+          }
+          auto started = promotion_start(tenant, args, &err);
+          if (!started) return finish(json_reply(400, bj::object{{"error", err}}), "");
+          bj::object apply{{"id", started->at("changeset")}};
+          if (started->at("draft_version").is_int64()) apply["version"] = started->at("draft_version");
+          auto applied = mcp_->call("changeset_apply", apply);
+          out = bj::object{{"changeset", started->at("changeset")},
+                           {"applied", applied && !applied->is_error},
+                           {"result", applied ? applied->value : bj::value(nullptr)}};
+          if (!applied || applied->is_error) err = "the change set didn't apply (nothing stayed changed): " + (applied ? json::dump(applied->value) : std::string("no tool"));
+        } else {
+          auto rolled = mcp_->call("changeset_rollback", bj::object{{"id", arg_text(args, "changeset")}});
+          out = bj::object{{"changeset", arg_text(args, "changeset")}, {"result", rolled ? rolled->value : bj::value(nullptr)}};
+          if (!rolled || rolled->is_error) err = rolled ? json::dump(rolled->value) : "no tool";
+        }
+      }
+      audit(tool == "write/promote" ? "panel.promote" : "panel.promotion_rollback", me, arg_text(args, "tenant"),
+            err.empty() ? "ok" : "failed", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
+      if (!err.empty()) return finish(json_reply(400, bj::object{{"error", err}, {"detail", out}}), "");
       return finish(own(200, std::move(out)), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
     }
     if (tool == "operators") return finish(own(200, panel_operators(*who)), R"({"panel":"operators"})");

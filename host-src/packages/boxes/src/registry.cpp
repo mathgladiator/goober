@@ -495,6 +495,9 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
     }
   }
   next->boxes[name] = candidate;
+  // Its beta version going live (a promotion, 053 § 11): beta follows live again.
+  bool beta_promoted = next->beta.count(name) && next->beta.at(name)->version == candidate->version;
+  if (beta_promoted) next->beta.erase(name);
   if (!next->build(error)) return false;
   if (dry_run) return true;
   // A new live version ends the box's split (052 § 4).
@@ -502,6 +505,7 @@ bool BoxRegistry::activate(std::shared_ptr<const ActiveBox> candidate, const wal
   wal::Bundle all = bundle;
   std::error_code sec;
   if (fs::exists(wal_.root() / "boxes" / name / "split", sec)) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/split", ""});
+  if (beta_promoted) all.push_back({wal::FileChange::Kind::kDelete, "boxes/" + name + "/beta", ""});
   if (!wal_.commit(all, error)) return false;
   std::lock_guard snap(snapshot_mu_);
   active_ = next;

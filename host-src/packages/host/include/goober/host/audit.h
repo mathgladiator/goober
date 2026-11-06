@@ -18,8 +18,8 @@ namespace goober::host {
 
 // Every check, by id: the ids audit.quiet may name. A check about one name (a finding whose data
 // has "domain") is also quieted for that name alone by "id:name", like "redirect:www.example.com".
-inline const std::vector<std::string> kAuditChecks = {"panel",     "caddy",  "mailer",  "backup",
-                                                      "operators", "postal", "redirect", "storage"};
+inline const std::vector<std::string> kAuditChecks = {"panel",     "caddy",  "mailer",   "backup",  "operators",
+                                                      "postal",    "redirect", "storage", "beta",    "beta-ops"};
 
 // One value the deploy may ask for (028 § 8.2). Kinds:
 // - "text": a string set at `path` in host.json, with `also` set beside it once answered;

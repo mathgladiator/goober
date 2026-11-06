@@ -215,6 +215,9 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
     if (!config.operations_domain.empty() && !served(sites, config.operations_domain)) {
       missing.push_back(config.operations_domain);
     }
+    if (!config.operations_beta_domain.empty() && !served(sites, config.operations_beta_domain)) {
+      missing.push_back(config.operations_beta_domain);
+    }
     AuditFinding f{"caddy", "ok", "Caddy serves every domain in host.json", {}, {{"missing", strings(missing)}}, {}};
     if (!missing.empty()) {
       f.level = "warn";
@@ -257,6 +260,53 @@ std::vector<AuditFinding> audit_operations(const config::HostConfig& config, con
                       " to the Caddyfile's site line, and restart both; a deploy offers to do this once DNS is ready");
     f.steps.push_back("Not wanted: add \"redirect:" + www + "\" to audit.quiet in host.json, or answer \"never\" at the deploy prompt");
     add(std::move(f));
+  }
+
+  // Beta (design/machine/053.Beta.md § 7): a beta site for each site without one, at
+  // beta.<its first public domain>, and beta-ops once a beta exists. A deploy offers both.
+  {
+    std::set<std::string> offered;
+    std::string first_beta_of;
+    for (const auto& [name, entry] : config.domains) {
+      if (!entry.beta_of.empty()) {
+        if (first_beta_of.empty()) first_beta_of = entry.beta_of;
+        continue;
+      }
+      if (!is_public_name(name) || name.starts_with("www.") || !config.beta_tenant_of(entry.tenant).empty()) continue;
+      if (!offered.insert(entry.tenant).second) continue;  // one beta a site: its first public domain
+      std::string beta = "beta." + name;
+      if (config.domains.count(beta) || config.redirects.count(beta) || beta == config.operations_domain) continue;
+      std::string dns = dns_state(resolve(beta), ours);
+      std::string beta_tenant = entry.tenant + "_beta";
+      AuditFinding f{"beta", "suggest", "no beta site for " + name + ": suggest one at " + beta, {},
+                     {{"domain", beta}, {"of", name}, {"tenant", entry.tenant}, {"beta_tenant", beta_tenant}, {"dns", dns},
+                      {"addresses", strings(ours)}},
+                     {}};
+      if (dns != "ready") f.steps.push_back("Add DNS: " + records_for(beta, ours) + (dns == "elsewhere" ? " (it resolves elsewhere now)" : ""));
+      f.steps.push_back("Add \"" + beta + "\": {\"tenant\": \"" + beta_tenant + "\", \"beta-of\": \"" + name +
+                        "\"} to host.json's domains, add " + beta + " to the Caddyfile's site line, and restart both; a deploy "
+                        "offers to do this once DNS is ready (053)");
+      f.steps.push_back("Not wanted: add \"beta:" + beta + "\" to audit.quiet in host.json, or answer \"never\" at the deploy prompt");
+      add(std::move(f));
+    }
+    if (!first_beta_of.empty()) {
+      std::string d = config.operations_beta_domain.empty() ? "beta-ops." + first_beta_of : config.operations_beta_domain;
+      std::string dns = dns_state(resolve(d), ours);
+      AuditFinding f{"beta-ops", "ok", "beta-ops is at https://" + d + "/", {}, {{"domain", d}, {"dns", dns}, {"addresses", strings(ours)}}, {}};
+      if (config.operations_beta_domain.empty()) {
+        f.level = "suggest";
+        f.title = "a beta site has no beta-ops: suggest it at " + d;
+        if (dns != "ready") f.steps.push_back("Add DNS: " + records_for(d, ours));
+        f.steps.push_back("Set operations.beta-domain to \"" + d + "\" in host.json, add " + d +
+                          " to the Caddyfile's site line, and restart both; a deploy offers to do this once DNS is ready");
+        f.steps.push_back("Not wanted: add \"beta-ops\" to audit.quiet in host.json, or answer \"never\" at the deploy prompt");
+      } else if (dns == "missing" || dns == "elsewhere") {
+        f.level = "warn";
+        f.title = "beta-ops' domain " + d + (dns == "missing" ? " doesn't resolve" : " points somewhere else");
+        f.steps.push_back((dns == "missing" ? "Add DNS: " : "Point it here: ") + records_for(d, ours));
+      }
+      add(std::move(f));
+    }
   }
 
   auto aws = aws_key_asks(has_key);

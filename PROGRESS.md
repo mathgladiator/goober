@@ -1182,8 +1182,15 @@ production, promotion in-host first and shaped for a remote host later):
       beta-ops panel looks and injects mail; the panel's Beta view (boxes, mailbox, composer);
       tests.
 - [ ] Not opened in a browser yet: the Beta view and beta-ops.
-- [ ] Step 6: promotion as a change set, in-host.
-- [ ] Step 7: the deploy audit's two offers.
+- [x] Step 6: `promotion_preview`, `promotion_start` (a draft change set of beta's differing
+      boxes and content), the panel's Promote view (an owner promotes at once and rolls back by
+      one press); a box's beta slot clears when its beta version goes live; `content_deploy`
+      checks a page given as a file where it is served; tests.
+- [x] Step 7: `goober-host audit` suggests `beta.<domain>` and then `beta-ops.<domain>`; the
+      deploy offers both (yes, not now, never) and proves them with a restart; audit test.
+- [ ] Not built: promotion to another host (`changeset_import`), attachments in injected mail.
+- [ ] Not opened in a browser yet: the Promote view; the deploy offers not run against a real
+      machine.
 - [x] Decisions (053 § 9).
 
 ### Later, not planned yet

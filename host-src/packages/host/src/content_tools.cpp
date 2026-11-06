@@ -452,7 +452,9 @@ std::string html_unescape_attr(std::string s) {
   return s;
 }
 
-Inspection inspect_html(const std::string& html) {
+// `local`: a local-mode host serves every domain over plain HTTP, so its pages' links to
+// themselves are http: and that isn't the problem the check is for.
+Inspection inspect_html(const std::string& html, bool local = false) {
   Inspection in;
   std::string lower = base::to_lower(html);
   for (size_t at = lower.find("<script type=\"application/ld+json\""); at != std::string::npos;
@@ -476,7 +478,7 @@ Inspection inspect_html(const std::string& html) {
     for (size_t at = lower.find(attr); at != std::string::npos; at = lower.find(attr, at + 1)) {
       // A plain-HTTP host on this machine (local mode) links to itself over http: that's not the problem.
       size_t host = at + std::strlen(attr) + 2;
-      if (lower.compare(host, 9, "localhost") == 0 || lower.compare(host, 9, "127.0.0.1") == 0) continue;
+      if (local || lower.compare(host, 9, "localhost") == 0 || lower.compare(host, 9, "127.0.0.1") == 0) continue;
       ++in.http_links;
     }
   }
@@ -1005,7 +1007,7 @@ void Host::register_content_tools() {
          }
          bool html = r.content_type.find("text/html") != std::string::npos;
          if (html) {
-           auto in = inspect_html(r.body);
+           auto in = inspect_html(r.body, config_.get()->local);
            out["checks"] = in.to_json();
            out["problems"] = problems_of(in, true, false);
          }
@@ -1130,7 +1132,7 @@ void Host::register_content_tools() {
          out["sha256"] = base::sha256_hex(e.html);
          if (!e.missing.empty()) out["partials_missing"] = bj::value_from(e.missing);
          if (!e.errors.empty()) out["partial_errors"] = bj::value_from(e.errors);
-         auto in = inspect_html(e.html);
+         auto in = inspect_html(e.html, config_.get()->local);
          out["checks"] = in.to_json();
          out["problems"] = problems_of(in, true, false);
          constexpr size_t kMax = 200 * 1024;
@@ -1551,7 +1553,7 @@ void Host::register_content_kit_tools() {
                            const std::string& expect_location = "") {
     auto r = fetch_self(domain, path);
     bool html = r.content_type.find("text/html") != std::string::npos;
-    auto in = inspect_html(html ? r.body : "");
+    auto in = inspect_html(html ? r.body : "", config_.get()->local);
     bj::object o{{"status", r.status}, {"content_type", r.content_type}, {"bytes", int64_t(r.body.size())},
                  {"sha256", base::sha256_hex(r.body)}};
     // The served body's etag, as HTTP clients see it, and the stored file's, which if_etag compares.
@@ -1625,7 +1627,7 @@ void Host::register_content_kit_tools() {
       o["body_etag"] = r.etag;
     }
     if (!location.empty()) o["location"] = location;
-    auto in = inspect_html(html ? r.body : "");
+    auto in = inspect_html(html ? r.body : "", config_.get()->local);
     if (html) o["checks"] = in.to_json();
     auto problems = problems_of(in, html, strict);
     if (status != expect) {
@@ -1818,7 +1820,9 @@ void Host::register_content_kit_tools() {
                it.path = path;
                it.file = path;
                it.data = std::move(data);
-               it.url = "/" + path;
+               // A page given as a file (about.md, blog/index.html) is checked where it is served.
+               auto served = site::page_url(path);
+               it.url = served ? *served : "/" + path;
                items.push_back(std::move(it));
                continue;
              }
@@ -1911,7 +1915,8 @@ void Host::register_content_kit_tools() {
            item["status"] = c.at("status");
            written.push_back(std::move(item));
            const auto& problems = c.at("problems").as_array();
-           if (it.kind == "file" && it.expect == 200 && c.at("status").as_int64() == 200 && f &&
+           // A page given as a file is served rendered, so only a raw file's bytes compare.
+           if (it.kind == "file" && it.url == "/" + it.path && it.expect == 200 && c.at("status").as_int64() == 200 && f &&
                std::string(c.at("sha256").as_string()) != base::sha256_hex(f->data)) {
              ok = false;
              lines.push_back(bj::value("✗ " + it.url + " served bytes differ from what was written"));

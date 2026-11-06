@@ -287,3 +287,43 @@ TEST_F(BetaTest, ThroughBetaOpsAnOperatorChangesOnlyBeta) {
   EXPECT_TRUE(host->operator_scope("beta:token:other").beta);
   EXPECT_EQ(host->operator_scope("beta:token:other").tenants, std::set<std::string>{"acme_beta"});
 }
+
+TEST_F(BetaTest, APromotionCarriesBoxesAndContentAsOneChangeSet) {
+  auto up = op("version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("next")}, {"channel", "beta"}});
+  ASSERT_FALSE(up.at("isError").as_bool()) << text(up);
+  std::string next(up.at("value").at("version").as_string());
+  ASSERT_FALSE(op("page_put", {{"tenant", "acme_beta"}, {"path", "/about"}, {"format", "markdown"}, {"body", "# About\n\nNew words."}})
+                   .at("isError").as_bool());
+
+  auto plan = op("promotion_preview", {{"tenant", "acme"}});
+  ASSERT_FALSE(plan.at("isError").as_bool()) << text(plan);
+  ASSERT_EQ(plan.at("value").at("boxes").as_array().size(), 1u) << text(plan);
+  EXPECT_EQ(plan.at("value").at("boxes").at(0).at("to").as_string(), next);
+  EXPECT_EQ(plan.at("value").at("boxes").at(0).at("from").as_string(), live);
+  ASSERT_GE(plan.at("value").at("content").as_array().size(), 1u) << text(plan);
+  EXPECT_EQ(plan.at("value").at("content").at(0).at("change"), "new");
+  EXPECT_TRUE(op("promotion_preview", {{"tenant", "acme_beta"}}).at("isError").as_bool());  // a beta has no beta
+
+  auto started = op("promotion_start", {{"tenant", "acme"}, {"why", "ship the new hello"}});
+  ASSERT_FALSE(started.at("isError").as_bool()) << text(started);
+  std::string cs(started.at("value").at("changeset").as_string());
+  // Nothing is live until it applies.
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "live");
+  bj::object apply{{"id", cs}};
+  if (started.at("value").at("draft_version").is_int64()) apply["version"] = started.at("value").at("draft_version");
+  auto applied = op("changeset_apply", apply);
+  ASSERT_FALSE(applied.at("isError").as_bool()) << text(applied);
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "next");
+  EXPECT_NE(fetch(port, "example.com", bhttp::verb::get, "/about").body.find("New words"), std::string::npos);
+  // The beta slot cleared itself: beta follows live, now the same.
+  EXPECT_FALSE(host->boxes().beta_version("site"));
+  EXPECT_EQ(fetch(port, "beta.example.com", bhttp::verb::get, "/hi").body, "next");
+  // Rolled back in one call.
+  auto back = op("changeset_rollback", {{"id", cs}});
+  ASSERT_FALSE(back.at("isError").as_bool()) << text(back);
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "live");
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/about").status, 404);
+  // Beta's operator can't promote.
+  auto refused = call_on(port, "beta-ops.example.com", kToken, "promotion_start", {{"tenant", "acme"}, {"why", "x"}});
+  EXPECT_TRUE(refused.at("isError").as_bool()) << refused.at("text");
+}

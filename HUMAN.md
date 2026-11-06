@@ -479,6 +479,22 @@ curl -s https://example.com/goober/ready | jq '.health.mcp'
 fine. The Controls view shows each queue, and `mcp_queue_report` explains it
 (`design/machine/047.Controls.md` § 13).
 
+## Beta: let Grok work there, and promote what you like
+
+A beta of your site runs on this machine at `beta.example.com`, with its own accounts and data
+(`design/machine/053.Beta.md`). A deploy offers to set it up, and then beta-ops at
+`beta-ops.example.com`.
+
+- **Point Grok at beta.** Connect it to `https://beta-ops.example.com/goober-operations-mcp`.
+  Everything it does there stays in beta: it stages boxes (`source_deploy {channel: "beta"}`) and
+  writes beta's pages, and it can't change production.
+- **Mail in beta never leaves.** Open **Beta** in the panel (or beta-ops): every mail the site
+  would have sent is in the mailbox, sign-in codes included. **Write a message in** sends mail
+  to the site as if it arrived; the replies show up in the mailbox.
+- **Promote.** The panel's **Promote** view shows each box beta changed (and what it widens) and
+  each page's changes. Untick what stays, press **Promote…**, and type the site's name. It goes
+  live as one change; **Roll back** undoes it in one press. Data never moves from beta.
+
 ## Try a new version on part of the traffic (splits)
 
 A split sends a share of a box's real traffic to a new version beside the live one
