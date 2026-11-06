@@ -441,3 +441,91 @@ TEST_F(MailInTest, AVerifiedSenderIsNamedByItsUserId) {
   EXPECT_TRUE(typed.at("sender").is_null());
   EXPECT_NE(std::string(typed.at("sender_why").as_string()).find("no DKIM key"), std::string::npos);
 }
+
+// The operators' mailbox (055): admin@, postmaster@, and abuse@ come to the operators before any
+// box's route, even a catch-all; they are read and answered as one of those addresses, within a
+// person's focus.
+TEST_F(MailInTest, TheOperatorsAddressesComeToTheOperatorsMailbox) {
+  std::string err;
+  ASSERT_TRUE(host->boxes().upload(kInbox, kWat, &err)) << err;  // a catch-all, "*@"
+  EXPECT_EQ(action(call(hook("rcpt", {"admin@acme.example"}))), "accept");
+  EXPECT_EQ(action(call(hook("rcpt", {"postmaster@acme.example"}))), "accept");
+  std::string mixed = "From: Ann Lee <ann@example.org>\r\nTo: admin@acme.example\r\nSubject: Invoice\r\n"
+                      "Message-ID: <inv1@example.org>\r\nContent-Type: multipart/mixed; boundary=b";
+  std::string body = "--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n--b\r\nContent-Type: application/pdf\r\n"
+                     "Content-Disposition: attachment; filename=invoice.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+                     "JVBERi0xLjQK\r\n--b--\r\n";
+  EXPECT_EQ(action(call(hook("data", {"admin@acme.example"}, mixed, body))), "discard");
+  EXPECT_TRUE(rows().empty());  // the catch-all box never saw it
+  // Other addresses still go to the box.
+  EXPECT_EQ(action(call(hook("data", {"hello@acme.example"}, "Subject: hi", "hi\r\n"))), "discard");
+  EXPECT_EQ(rows().size(), 1u);
+
+  host::Host::OperatorScope all;
+  auto inbox = host->operator_mail_list(all, "inbox", 50);
+  ASSERT_EQ(inbox.size(), 1u);
+  EXPECT_EQ(inbox[0].at("subject"), "Invoice");
+  EXPECT_EQ(inbox[0].at("attachments"), 1);
+  EXPECT_FALSE(inbox[0].at("sender_verified").as_bool());  // no DKIM signature
+  std::string id(inbox[0].at("id").as_string());
+  auto m = host->operator_mail_get(all, id);
+  ASSERT_TRUE(m);
+  EXPECT_EQ(m->at("text"), "See attached.");
+  EXPECT_EQ(m->at("message_id"), "inv1@example.org");
+  auto pdf = host->operator_mail_attachment(all, id, 0);
+  ASSERT_TRUE(pdf);
+  EXPECT_EQ(pdf->at("filename"), "invoice.pdf");
+  EXPECT_EQ(pdf->at("base64"), "JVBERi0xLjQK");
+  EXPECT_FALSE(host->operator_mail_attachment(all, id, 1));
+
+  // A person focused on another tenant sees none of it and can't send as acme's admin@.
+  host::Host::OperatorScope other;
+  other.all = false;
+  other.tenants = {"other"};
+  EXPECT_TRUE(host->operator_mail_list(other, "all", 50).empty());
+  EXPECT_FALSE(host->operator_mail_get(other, id));
+  EXPECT_FALSE(host->operator_mail_delete(other, id));
+  EXPECT_FALSE(host->operator_mail_send(other, "panel:sam@example.com",
+                                        {{"from", "admin@acme.example"}, {"to", "ann@example.org"}, {"subject", "x"}, {"text", "x"}}, &err));
+
+  // A reply as admin@ threads under the message and is kept in Sent.
+  auto sent = host->operator_mail_send(all, "panel:boss@example.com",
+                                       {{"from", "admin@acme.example"}, {"to", "ann@example.org"}, {"subject", "Re: Invoice"},
+                                        {"text", "Paid."}, {"in_reply_to", id}}, &err);
+  ASSERT_TRUE(sent) << err;
+  EXPECT_EQ(sent->at("via"), "dev");
+  auto out = host->operator_mail_list(all, "sent", 50);
+  ASSERT_EQ(out.size(), 1u);
+  auto kept = host->operator_mail_get(all, std::string(out[0].at("id").as_string()));
+  EXPECT_EQ(kept->at("in_reply_to"), "inv1@example.org");
+  EXPECT_EQ(kept->at("by"), "panel:boss@example.com");
+  // Only the operators' addresses send: not a box's, and not someone else's.
+  EXPECT_FALSE(host->operator_mail_send(all, "x", {{"from", "support@acme.example"}, {"to", "ann@example.org"}, {"subject", "x"}, {"text", "x"}}, &err));
+  EXPECT_FALSE(host->operator_mail_send(all, "x", {{"from", "admin@elsewhere.example"}, {"to", "ann@example.org"}, {"subject", "x"}, {"text", "x"}}, &err));
+  EXPECT_FALSE(host->operator_mail_send(all, "x", {{"from", "admin@acme.example"}, {"to", "a@example.org, b@example.org"}, {"subject", "x"}, {"text", "x"}}, &err));
+
+  // Deleted, it's gone with its attachment.
+  EXPECT_TRUE(host->operator_mail_delete(all, id));
+  EXPECT_FALSE(host->operator_mail_get(all, id));
+  EXPECT_FALSE(fs::exists(root / "storage/mail/operators" / (id + ".parts")));
+}
+
+// Past limits.operator-mail-bytes, new mail is refused for now (452), and nothing is dropped.
+TEST(OperatorMailbox, AFullMailboxRefusesNewMailForNow) {
+  auto root = fs::path(GOOBER_TEST_TMP) / "operator_mail_full";
+  fs::remove_all(root);
+  fs::create_directories(root / "storage/mail/operators");
+  base::write_file_durable(root / "hook.token", kToken + "\n");
+  base::write_file_durable(root / "storage/mail/operators/1700000000000-00000000.json", std::string(17 << 20, ' '));
+  std::string err;
+  auto cfg = config::parse_config(R"({"listen": {"port": 0}, "storage": "storage",
+      "domains": {"acme.example": {"tenant": "acme"}}, "mail": {"inbound": {"token-file": "hook.token"}},
+      "limits": {"operator-mail-bytes": 16777216}, "threads": {"network": 1, "boxes": 1}})", root, &err);
+  ASSERT_TRUE(cfg) << err;
+  auto host = std::make_unique<host::Host>(cfg);
+  uint16_t port = host->start();
+  auto r = post(port, "/internal/routes/mta/stalwart", hook("rcpt", {"abuse@acme.example"}), {{"authorization", "Bearer " + kToken}});
+  EXPECT_NE(r.body.find("\"status\":452"), std::string::npos) << r.body;
+  EXPECT_TRUE(fs::exists(root / "storage/mail/operators/1700000000000-00000000.json"));
+  host.reset();
+}

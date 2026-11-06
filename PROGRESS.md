@@ -1217,6 +1217,20 @@ production, promotion in-host first and shaped for a remote host later):
       and outbox results and several split paths.
 - [ ] Decisions (054 § 6).
 
+### Phase 61: promotion requests, seeding beta, the mailbox's cleanup, and the operators' mail (2026-11-06)
+At the human's request after 054:
+- [x] `promotion_request`: an agent (beta's included) asks; pinned to what beta had; always waits
+      for an owner, even in development mode; approved in the Promote view by typing the tenant,
+      refused if beta moved (053 § 11).
+- [x] `beta_seed`: production's databases (SQLite's online backup into beta's live files, beta's
+      own snapshotted first) and, when asked, content; unfocused operators only (053 § 13).
+- [x] `beta_mail_clear` and the Beta view's Empty and Delete; the full-mailbox warning stays.
+- [x] The operators' mailbox (055): admin@, postmaster@, abuse@ before any box route; the panel's
+      Mail view (read, attachments, reply, write, delete); `limits.operator-mail-bytes`.
+- [ ] Decisions: seeding personal data against 310 (054 § 6, decision 6); agents and the
+      operators' mail, and a richer client (055 § 7); admin@ in 041's list (055 § 6).
+- [ ] The Mail and Promote views' new parts tried in a browser.
+
 ### Later, not planned yet
 Domain registry (015), configs and rewrites (012), write sets (025),
 access patterns and generators (020, 028, 110, 120), sourcing (023),

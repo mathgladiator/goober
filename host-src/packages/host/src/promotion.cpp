@@ -4,6 +4,7 @@
 // beta tenant and the production tenant; never data, accounts, keys, flags, or attachments.
 
 #include "goober/base/encoding.h"
+#include "goober/base/hash.h"
 #include "goober/base/time.h"
 #include "goober/host/host.h"
 
@@ -143,6 +144,62 @@ std::optional<bj::object> Host::promotion_start(const std::string& tenant, const
                     {"next", "changeset_apply {id: \"" + id + "\", version} makes it live (from the panel's Promote view, the owner's alone); changeset_rollback undoes it"}};
 }
 
+std::optional<bj::object> Host::promotion_pin(const std::string& tenant, const bj::object& args, std::string* error) {
+  auto plan = promotion_plan(tenant, error);
+  if (!plan) return std::nullopt;
+  bool boxes_given = false, paths_given = false;
+  auto only_boxes = names_of(args, "boxes", &boxes_given);
+  auto only_paths = names_of(args, "paths", &paths_given);
+  bj::object boxes, files;
+  for (const auto& b : plan->at("boxes").as_array()) {
+    std::string box = text_of(b.as_object(), "box");
+    if (!boxes_given || only_boxes.count(box)) boxes[box] = b.at("to");
+  }
+  std::string beta = text_of(*plan, "beta_tenant");
+  for (const auto& c : plan->at("content").as_array()) {
+    std::string path = text_of(c.as_object(), "path");
+    if (paths_given && !only_paths.count(path)) continue;
+    if (auto f = content_->get(beta, path)) files[path] = base::sha256_hex(f->data);
+  }
+  if (boxes.empty() && files.empty()) return *error = "nothing to promote: beta and " + tenant + " are the same, or nothing was chosen", std::nullopt;
+  return bj::object{{"boxes", std::move(boxes)}, {"files", std::move(files)}};
+}
+
+std::optional<bj::object> Host::promotion_request_run(const std::string& tenant, const bj::object& args, std::string* error) {
+  // Only with an owner's approval (panel_decide sets who approved on this thread).
+  std::string owner = approved_by_now();
+  if (owner.empty()) return *error = "a promotion request runs only when a host:owner approves it in the panel's Promote view", std::nullopt;
+  const auto* pinned = args.if_contains("pinned");
+  if (!pinned || !pinned->is_object()) return *error = "the request holds no pinned plan; ask again", std::nullopt;
+  // What the owner approved is what beta was when asked: anything changed since refuses it.
+  bj::object now_args;
+  bj::array box_names, paths;
+  for (const auto& [box, v] : pinned->at("boxes").as_object()) box_names.push_back(bj::value(box));
+  for (const auto& [path, v] : pinned->at("files").as_object()) paths.push_back(bj::value(path));
+  now_args["boxes"] = box_names;
+  now_args["paths"] = paths;
+  auto now = promotion_pin(tenant, now_args, error);
+  if (!now) return std::nullopt;
+  if (json::dump(*now) != json::dump(*pinned)) {
+    return *error = "beta changed since the request: its plan isn't the one approved (nothing was promoted); ask again", std::nullopt;
+  }
+  std::string why = "requested by " + current_operator() + ", approved by " + owner + ": " + text_of(args, "why");
+  bj::object start{{"boxes", box_names}, {"paths", paths}, {"why", why}};
+  std::string request_id = current_request_id();
+  OperatorContext as(*this, owner, request_id);
+  auto started = promotion_start(tenant, start, error);
+  if (!started) return std::nullopt;
+  bj::object apply{{"id", started->at("changeset")}};
+  if (started->at("draft_version").is_int64()) apply["version"] = started->at("draft_version");
+  auto applied = mcp_->call("changeset_apply", apply);
+  if (!applied || applied->is_error) {
+    return *error = "change set " + text_of(*started, "changeset") + " didn't apply (nothing stayed changed): " +
+                    (applied ? json::dump(applied->value) : std::string("no tool")),
+           std::nullopt;
+  }
+  return bj::object{{"changeset", started->at("changeset")}, {"applied", true}, {"approved_by", owner}, {"result", applied->value}};
+}
+
 void Host::register_promotion_tools() {
   using mcp::object_schema;
   using mcp::string_property;
@@ -161,6 +218,27 @@ void Host::register_promotion_tools() {
          auto plan = promotion_plan(text_of(args, "tenant"), &err);
          if (!plan) return ToolResult::fail(err);
          return ToolResult::ok(std::move(*plan));
+       }});
+
+  mcp_->add_tool(
+      {"promotion_request",
+       "Asks the owner to promote beta to production for one site: what beta has now (all of promotion_preview's, "
+       "or only the boxes and paths named) is pinned, and the request always waits for a host:owner, whatever your "
+       "approvals switch says. It answers pending_approval; the owner approves it in the panel's Promote view by "
+       "typing the tenant, and it then runs as one change set (042), applied at once, which changeset_rollback "
+       "undoes. Refused when beta changed since you asked: ask again. Beta's operator may ask for its own sites. "
+       "approval_status {id} follows it. design/machine/053.Beta.md § 11.",
+       object_schema({{"tenant", string_property("The production tenant, like acme.")},
+                      {"boxes", list("Only these boxes.")},
+                      {"paths", list("Only these content paths.")},
+                      {"why", string_property("What the promotion carries and why it's ready, for the owner.")},
+                      {"pinned", mcp::any_property("Set by the host when you ask: what beta has now. Anything given is replaced.")}},
+                     {"tenant", "why"}),
+       [this](const bj::object& args) {
+         std::string err;
+         auto out = promotion_request_run(text_of(args, "tenant"), args, &err);
+         if (!out) return ToolResult::fail(err);
+         return ToolResult::ok(std::move(*out));
        }});
 
   mcp_->add_tool(

@@ -14,6 +14,7 @@
 #include "goober/host/host.h"
 #include "goober/mail_inbound/address.h"
 #include "goober/mail_inbound/mime.h"
+#include "mailbox.h"
 
 namespace goober::host {
 namespace bj = boost::json;
@@ -28,29 +29,10 @@ constexpr size_t kMailboxMax = 2000;              // messages per beta tenant, t
 constexpr int64_t kMailboxMs = 30LL * 86400000;  // and none older than 30 days
 constexpr size_t kMessageTextMax = 256 * 1024;   // each of a message's text and html, cut past this
 
-// The first `max` bytes of a text, cut back to a UTF-8 boundary, so what is kept stays text.
-std::string cut_utf8(std::string_view s, size_t max) {
-  if (s.size() <= max) return std::string(s);
-  size_t n = max;
-  while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
-  return std::string(s.substr(0, n));
-}
-
 std::string random_hex(size_t bytes) {
   std::vector<uint8_t> raw(bytes);
   base::os_random_fill(raw);
   return base::hex_encode(std::string_view(reinterpret_cast<const char*>(raw.data()), raw.size()));
-}
-
-// A message id as the mailbox names its files: 13 digits, "-", 8 hex digits.
-bool valid_id(std::string_view id) {
-  if (id.size() != 22 || id[13] != '-') return false;
-  for (size_t i = 0; i < id.size(); ++i) {
-    char c = id[i];
-    if (i == 13) continue;
-    if (i < 13 ? !(c >= '0' && c <= '9') : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-  }
-  return true;
 }
 
 std::string text_of(const bj::object& o, const char* k) {
@@ -126,13 +108,26 @@ bj::object Host::beta_status() {
                     {"boxes", std::move(boxes)}};
 }
 
+fs::path Host::beta_mailbox_dir(const std::string& tenant) const {
+  return config_.get()->storage / "mail" / "beta" / tenant;
+}
+
+namespace {
+// A message's row for beta_mail_list.
+bj::object beta_head(const bj::object& o) {
+  std::string body = text_of(o, "text");
+  bj::object row{{"id", o.at("id")},     {"at_ms", o.at("at_ms")},       {"direction", o.at("direction")},
+                 {"from", o.at("from")}, {"to", o.at("to")},             {"subject", o.at("subject")},
+                 {"preview", body.size() > 160 ? mailbox::cut_utf8(body, 160) + "…" : body}};
+  if (o.contains("outcome")) row["outcome"] = o.at("outcome");
+  return row;
+}
+}  // namespace
+
 std::string Host::beta_mail_keep(const std::string& tenant, bj::object message) {
-  fs::path dir = config_.get()->storage / "mail" / "beta" / tenant;
-  std::error_code ec;
-  fs::create_directories(dir, ec);
+  fs::path dir = beta_mailbox_dir(tenant);
   int64_t now = base::now_unix_ms();
-  std::string at = std::to_string(now);
-  std::string id = std::string(13 - std::min<size_t>(13, at.size()), '0') + at + "-" + random_hex(4);
+  std::string id = mailbox::new_id(now);
   message["id"] = id;
   message["at_ms"] = now;
   message["tenant"] = tenant;
@@ -141,42 +136,13 @@ std::string Host::beta_mail_keep(const std::string& tenant, bj::object message) 
   for (const char* k : {"text", "html"}) {
     std::string v = text_of(message, k);
     if (v.size() > kMessageTextMax) {
-      message[k] = cut_utf8(v, kMessageTextMax);
+      message[k] = mailbox::cut_utf8(v, kMessageTextMax);
       message["truncated"] = true;
     }
   }
-  // Its row for beta_mail_list, beside it, so a list never reads whole messages.
-  std::string body = text_of(message, "text");
-  bj::object head{{"id", id}, {"at_ms", now}, {"direction", message.at("direction")}, {"from", message.at("from")},
-                  {"to", message.at("to")}, {"subject", message.at("subject")},
-                  {"preview", body.size() > 160 ? cut_utf8(body, 160) + "…" : body}};
-  if (message.contains("outcome")) head["outcome"] = message.at("outcome");
-  base::write_file_durable(dir / (id + ".json"), json::dump(message));
-  // The row is rebuilt from the message if lost, so it needn't be durable.
-  // A torn one doesn't parse, and the list reads the message instead.
-  {
-    std::ofstream out(dir / (id + ".head"), std::ios::binary | std::ios::trunc);
-    out << json::dump(head);
-  }
-  // The newest kMailboxMax within limits.beta-mail-bytes, none past 30 days: names sort by time.
-  std::vector<std::string> names;
-  for (const auto& e : fs::directory_iterator(dir, ec)) {
-    std::string n = e.path().filename().string();
-    if (n.ends_with(".json")) names.push_back(n.substr(0, n.size() - 5));
-  }
-  std::sort(names.rbegin(), names.rend());
-  int64_t budget = config_.get()->disk.beta_mail_bytes, bytes = 0;
-  for (size_t i = 0; i < names.size(); ++i) {
-    std::error_code se;
-    auto size = fs::file_size(dir / (names[i] + ".json"), se);
-    bytes += se ? 0 : int64_t(size);
-    bool old = std::strtoll(names[i].substr(0, 13).c_str(), nullptr, 10) < now - kMailboxMs;
-    // The newest message stays whatever its size.
-    if (i > 0 && (old || i >= kMailboxMax || bytes > budget)) {
-      fs::remove(dir / (names[i] + ".json"), ec);
-      fs::remove(dir / (names[i] + ".head"), ec);
-    }
-  }
+  mailbox::write(dir, id, message, beta_head(message));
+  // The newest kMailboxMax within limits.beta-mail-bytes, none past 30 days.
+  mailbox::trim(dir, kMailboxMax, kMailboxMs, config_.get()->disk.beta_mail_bytes, now);
   return id;
 }
 
@@ -201,48 +167,13 @@ void Host::beta_capture(const identity::Mail& m, const std::string& tenant) {
 }
 
 bj::array Host::beta_mail_list(const std::string& tenant, int64_t limit) {
-  bj::array out;
-  if (!base::is_valid_name(tenant)) return out;
-  fs::path dir = config_.get()->storage / "mail" / "beta" / tenant;
-  std::vector<std::string> names;
-  std::error_code ec;
-  for (const auto& e : fs::directory_iterator(dir, ec)) {
-    std::string n = e.path().filename().string();
-    if (n.ends_with(".json")) names.push_back(n);
-  }
-  std::sort(names.rbegin(), names.rend());
-  for (const auto& n : names) {
-    if (int64_t(out.size()) >= limit) break;
-    std::string err;
-    // Its row, else (a message kept before rows were) the whole message.
-    std::string stem = n.substr(0, n.size() - 5);
-    if (auto head = base::read_file(dir / (stem + ".head"))) {
-      if (auto h = json::parse(*head, &err); h && h->is_object()) {
-        out.push_back(std::move(*h));
-        continue;
-      }
-    }
-    auto text = base::read_file(dir / n);
-    auto v = text ? json::parse(*text, &err) : std::nullopt;
-    if (!v || !v->is_object()) continue;
-    auto& o = v->as_object();
-    std::string body = text_of(o, "text");
-    bj::object row{{"id", o.at("id")},     {"at_ms", o.at("at_ms")},       {"direction", o.at("direction")},
-                   {"from", o.at("from")}, {"to", o.at("to")},             {"subject", o.at("subject")},
-                   {"preview", body.size() > 160 ? cut_utf8(body, 160) + "…" : body}};
-    if (o.contains("outcome")) row["outcome"] = o.at("outcome");
-    out.push_back(std::move(row));
-  }
-  return out;
+  if (!base::is_valid_name(tenant)) return bj::array{};
+  return mailbox::list(beta_mailbox_dir(tenant), limit, beta_head);
 }
 
 std::optional<bj::object> Host::beta_mail_get(const std::string& tenant, const std::string& id) {
-  if (!base::is_valid_name(tenant) || !valid_id(id)) return std::nullopt;
-  auto text = base::read_file(config_.get()->storage / "mail" / "beta" / tenant / (id + ".json"));
-  std::string err;
-  auto v = text ? json::parse(*text, &err) : std::nullopt;
-  if (!v || !v->is_object()) return std::nullopt;
-  return v->as_object();
+  if (!base::is_valid_name(tenant)) return std::nullopt;
+  return mailbox::get(beta_mailbox_dir(tenant), id);
 }
 
 bj::object Host::beta_mail_inject(const std::string& to_in, const std::string& from_in, const std::string& subject,
@@ -302,6 +233,26 @@ bj::object Host::beta_mail_inject(const std::string& to_in, const std::string& f
   return bj::object{{"id", id}, {"tenant", tenant}, {"outcome", outcome}, {"answer", reply},
                     {"box", match->ref.box->manifest.box}, {"route", match->ref.route->name},
                     {"next", "the box's replies, if any, are in beta_mail_list as direction out"}};
+}
+
+std::optional<bj::object> Host::beta_mail_clear(const std::string& tenant, const bj::object& args, std::string* error) {
+  if (!config_.get()->is_beta_tenant(tenant)) return *error = tenant + " isn't a beta tenant (beta_status names them)", std::nullopt;
+  fs::path dir = beta_mailbox_dir(tenant);
+  int64_t removed = 0;
+  bj::object detail{{"tenant", tenant}};
+  if (const auto* ids = args.if_contains("ids"); ids && ids->is_array()) {
+    for (const auto& v : ids->as_array()) {
+      if (v.is_string()) removed += mailbox::remove(dir, std::string(v.as_string())) ? 1 : 0;
+    }
+    detail["ids"] = *ids;
+  } else {
+    auto before = mcp::integer_arg(args, "before_ms");
+    removed = mailbox::remove_before(dir, before.ok ? std::max<int64_t>(before.value, 1) : 0);
+    if (before.ok) detail["before_ms"] = before.value;
+  }
+  detail["removed"] = removed;
+  audit("beta.mail_clear", current_operator(), tenant, "ok", detail);
+  return bj::object{{"tenant", tenant}, {"removed", removed}, {"left", int64_t(mailbox::list(dir, 1 << 30, beta_head).size())}};
 }
 
 void Host::register_beta_tools() {
@@ -367,6 +318,22 @@ void Host::register_beta_tools() {
                                      text_of(args, "in_reply_to"), &err);
          if (!err.empty()) return ToolResult::fail(err);
          return ToolResult::ok(std::move(out));
+       }});
+
+  mcp_->add_tool(
+      {"beta_mail_clear",
+       "Empties a beta tenant's mailbox, or part of it: the messages named by ids, or every one kept before "
+       "before_ms, or (with neither) every message. Beta's mail is a test's: nothing of production's is touched. "
+       "Answers how many went. Audited.",
+       object_schema({{"tenant", string_property("The beta tenant.")},
+                      {"ids", bj::object{{"type", "array"}, {"items", bj::object{{"type", "string"}}}, {"description", "Only these messages."}}},
+                      {"before_ms", mcp::integer_property("Only messages kept before this time (Unix milliseconds).")}},
+                     {"tenant"}),
+       [this](const bj::object& args) {
+         std::string tenant = text_of(args, "tenant"), err;
+         auto out = beta_mail_clear(tenant, args, &err);
+         if (!out) return ToolResult::fail(err);
+         return ToolResult::ok(std::move(*out));
        }});
 
   mcp_->add_tool(

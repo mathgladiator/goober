@@ -1748,6 +1748,7 @@ const views = {
     const id = params.get('id');
     const go = (k, x) => { if (x) params.set(k, x); else params.delete(k); location.hash = '#/beta?' + params; };
     const [status, mail] = await Promise.all([api('beta_status', {}).catch(() => null), api('beta_mail_list', { tenant, limit: 100 })]);
+    const mayClear = mayChange() || (state.me.roles || []).includes('host:beta');
     const out = [h('h1', {}, state.me.beta_ops ? 'Beta operations' : 'Beta'),
       h('p', { class: 'muted small' }, 'Beta runs on this host beside production, with its own tenant, accounts, and data. Boxes answer ' +
         'there with their beta versions (version_upload or source_deploy with channel "beta"); nothing beta sends leaves the machine. ' +
@@ -1770,11 +1771,19 @@ const views = {
           m.outcome ? [' · ', h('span', { class: 'pill' + (m.outcome === 'delivered' ? ' ok' : ' failed') }, m.outcome)] : null),
         h('pre', { class: 'json' }, m.text || ''),
         m.html ? h('details', {}, h('summary', {}, 'HTML (its source, never drawn)'), h('pre', { class: 'json' }, m.html)) : null,
-        h('p', {}, h('a', { href: '#/beta?tenant=' + encodeURIComponent(tenant) }, '← the mailbox'))));
+        h('div', { class: 'bar' }, h('a', { href: '#/beta?tenant=' + encodeURIComponent(tenant) }, '← the mailbox'),
+          mayClear ? h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+            if (!confirm('Delete this message from beta\'s mailbox?')) return;
+            try { await api('write/beta_mail_clear', { tenant, ids: [m.id] }); go('id', ''); } catch (e) { alert(e.message); }
+          } }, 'Delete') : null)));
       if (mayChange() || (state.me.roles || []).includes('host:beta')) out.push(composeCard(tenant, sites, m));
       return out;
     }
-    out.push(wideCard(`Mailbox (${mail.length})`, mail.length ? table([
+    const empty = mayClear && mail.length ? h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+      if (!confirm(`Empty ${tenant}'s beta mailbox? Every message in it goes; nothing of production's is touched.`)) return;
+      try { await api('write/beta_mail_clear', { tenant }); render(false); } catch (e) { alert(e.message); }
+    } }, 'Empty the mailbox…') : null;
+    out.push(wideCard(`Mailbox (${mail.length})`, empty ? h('div', { class: 'bar' }, empty) : null, mail.length ? table([
       { label: '', get: (m) => m.direction === 'in' ? '→ in' : m.direction === 'push' ? 'push' : 'out →', cls: () => 'muted small' },
       { label: 'When', get: (m) => fmt.time(m.at_ms), cls: () => 'muted small' },
       { label: 'From', get: (m) => m.from, cls: () => 'mono small' },
@@ -1796,7 +1805,34 @@ const views = {
     const tenant = params.get('tenant') || (pairs[0] && pairs[0].prod) || '';
     const owner = (state.me.roles || []).includes('host:owner');
     const out = h('p', { class: 'muted small' });
-    const [plan, sets] = await Promise.all([api('promotion_preview', { tenant }), api('changeset_list', {}).catch(() => [])]);
+    const [plan, sets, appr] = await Promise.all([api('promotion_preview', { tenant }), api('changeset_list', {}).catch(() => []),
+      api('approvals').catch(() => ({ pending: [] }))]);
+    // Requests to promote (053 § 11): an agent asked; the owner approves by typing the tenant.
+    const asked = appr.pending.filter((r) => r.tool === 'promotion_request' && r.args && r.args.tenant === tenant);
+    const requestCard = (r) => {
+      const p = r.promotion || {}, pin = p.pinned || { boxes: {}, files: {} };
+      const approve = owner && !p.beta_moved ? h('button', { type: 'button', class: 'small', onclick: async () => {
+        const typed = prompt(`Approve ${r.agent}'s request to promote ${plan.beta_tenant} to ${tenant}? ` +
+          `${Object.keys(pin.boxes).length} box(es) and ${Object.keys(pin.files).length} file(s) go live as one change set.\nType ${tenant} to approve.`);
+        if (typed === null) return;
+        try {
+          const o = await api('write/decide', { id: r.id, decision: 'approve', confirm: true, confirm_name: typed });
+          out.textContent = o.is_error ? `#${r.id} ran and failed: ${typeof o.result === 'string' ? o.result : JSON.stringify(o.result)}` : `Promoted (#${r.id}).`;
+          render(false);
+        } catch (e) { out.textContent = e.message; }
+      } }, 'Approve…') : null;
+      const deny = mayChange() ? h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+        if (!confirm(`Deny ${r.agent}'s request to promote?`)) return;
+        try { await api('write/decide', { id: r.id, decision: 'deny', confirm: true }); render(false); } catch (e) { out.textContent = e.message; }
+      } }, 'Deny') : null;
+      return h('div', { class: 'card' },
+        h('div', { class: 'bar' }, h('b', {}, 'Asked to promote'), h('span', { class: 'muted small' }, '#' + r.id + ' · ' + r.agent + ' · ' + fmt.ago(r.at_ms)),
+          p.beta_moved ? h('span', { class: 'pill failed' }, 'beta changed since: deny it and ask again') : null, approve, deny),
+        r.args.why ? h('p', {}, 'Why: ', r.args.why) : null,
+        h('ul', { class: 'small' },
+          Object.entries(pin.boxes).map(([b, v]) => h('li', {}, 'box ', h('span', { class: 'mono' }, b), ' → ', h('span', { class: 'mono' }, String(v).slice(0, 12)))),
+          Object.keys(pin.files).map((f) => h('li', {}, 'file ', h('span', { class: 'mono' }, f)))));
+    };
     const boxes = new Set(plan.boxes.map((b) => b.box)), paths = new Set(plan.content.map((c) => c.path));
     const tick = (set, key) => h('input', { type: 'checkbox', checked: true, onchange: (e) => { if (e.target.checked) set.add(key); else set.delete(key); } });
     const promoteButton = owner && (plan.boxes.length || plan.content.length) ? h('button', { type: 'button', onclick: async () => {
@@ -1817,6 +1853,7 @@ const views = {
         'go live, content is deployed and checked, and one press rolls it all back. ' + plan.not_carried.replace(/^./, (c) => c.toUpperCase()) +
         ' never go.' + (owner ? '' : ' Only host:owner promotes.')),
       plan.warnings.length ? h('div', { class: 'notice bad' }, plan.warnings.map((w) => h('div', {}, w))) : null,
+      asked.length ? wideCard(`Requests (${asked.length})`, asked.map(requestCard)) : null,
       wideCard(`Boxes (${plan.boxes.length})`, plan.boxes.length ? table([
         { label: '', get: (b) => tick(boxes, b.box) },
         { label: 'Box', get: (b) => b.box, cls: () => 'mono' },
@@ -1841,6 +1878,76 @@ const views = {
         } }, 'Roll back') : '' },
       ], promotions) : h('p', { class: 'muted' }, 'None yet.')),
     ];
+  },
+
+  // Mail (055): the operators' mailbox. Mail to admin@, postmaster@, and abuse@ on production's
+  // domains, read here and answered as any of them through the host's mailer. Text only: a
+  // message's HTML is shown as its source, never drawn.
+  async mail(params) {
+    const folder = params.get('folder') || 'inbox';
+    const id = params.get('id');
+    const compose = params.get('compose');
+    const go = (k, x) => { if (x) params.set(k, x); else params.delete(k); location.hash = '#/mail?' + params; };
+    const box = await api('operator_mail', { folder, limit: 200 });
+    const status = h('p', { class: 'muted small' });
+    const out = [h('div', { class: 'bar' }, h('h1', {}, 'Mail'),
+      segmented(['inbox', 'sent', 'all'], folder, (x) => { params.delete('id'); params.delete('compose'); go('folder', x); }),
+      h('button', { type: 'button', class: 'small', onclick: () => { params.delete('id'); go('compose', '1'); } }, 'Write…')),
+      h('p', { class: 'muted small' }, 'Mail to ' + (box.addresses.length ? 'admin@, postmaster@, and abuse@ on ' +
+        [...new Set(box.addresses.map((a) => a.split('@')[1]))].join(', ') : 'the operators\' addresses') +
+        ' lands here, before any box\'s mail route. Replies go out through the host\'s mailer as the address you pick. ' +
+        'A sender is "verified" when its DKIM signature matches its From; otherwise anyone could have written it.'), status];
+    if (id) {
+      const m = await api('operator_mail_get', { id });
+      const verified = m.direction === 'in' ? h('span', { class: 'pill' + (m.sender_verified ? ' ok' : ' failed'), title: m.sender_why || '' },
+        m.sender_verified ? 'sender verified' : 'sender not verified') : null;
+      const download = (a) => h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+        try {
+          const f = await api('operator_mail_attachment', { id: m.id, index: a.index });
+          const raw = atob(f.base64), bytes = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+          const link = h('a', { href: url, download: f.filename || 'attachment' });
+          document.body.append(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        } catch (e) { status.textContent = e.message; }
+      } }, (a.filename || 'attachment') + ' · ' + fmt.bytes(a.bytes));
+      out.push(wideCard(m.subject || '(no subject)',
+        h('p', { class: 'small' }, h('b', {}, m.direction === 'in' ? 'Received' : 'Sent'), ' · ', fmt.time(m.at_ms), ' · from ',
+          h('span', { class: 'mono' }, (m.from_name ? m.from_name + ' ' : '') + '<' + m.from + '>'), ' to ', h('span', { class: 'mono' }, m.to), ' ',
+          verified, m.automatic ? h('span', { class: 'pill' }, 'automatic') : null,
+          m.direction === 'out' ? h('span', { class: 'pill' + (m.sent ? ' ok' : ' failed') }, m.sent ? 'sent via ' + m.via : 'not sent') : null,
+          m.by ? h('span', { class: 'muted' }, ' by ' + m.by) : null),
+        m.error ? h('p', { class: 'err small' }, m.error) : null,
+        (m.cc || []).length ? h('p', { class: 'small muted' }, 'Cc: ' + m.cc.map((c) => c.address).join(', ')) : null,
+        m.reply_to ? h('p', { class: 'small muted' }, 'Replies go to ' + m.reply_to) : null,
+        h('pre', { class: 'json' }, m.text || '(no text)'),
+        m.truncated ? h('p', { class: 'muted small' }, 'Cut: the message was longer than what is kept.') : null,
+        (m.attachments || []).length ? h('div', { class: 'bar' }, h('span', { class: 'small' }, 'Attachments '), m.attachments.map(download)) : null,
+        m.html ? h('details', {}, h('summary', {}, 'HTML (its source, never drawn)'), h('pre', { class: 'json' }, m.html)) : null,
+        h('div', { class: 'bar' }, h('a', { href: '#/mail?folder=' + folder }, '← ' + folder),
+          h('button', { type: 'button', class: 'small secondary', onclick: async () => {
+            if (!confirm('Delete this message? It can\'t be brought back here.')) return;
+            try { await api('write/operator_mail_delete', { id: m.id }); go('id', ''); } catch (e) { status.textContent = e.message; }
+          } }, 'Delete'))));
+      out.push(mailComposeCard(box.addresses, m));
+      return out;
+    }
+    if (compose) out.push(mailComposeCard(box.addresses, null));
+    out.push(wideCard(`${folder === 'inbox' ? 'Inbox' : folder === 'sent' ? 'Sent' : 'Everything'} (${box.messages.length})`, box.messages.length ? table([
+      { label: '', get: (m) => m.direction === 'in' ? '→ in' : 'out →', cls: () => 'muted small' },
+      { label: 'When', get: (m) => fmt.time(m.at_ms), cls: () => 'muted small' },
+      { label: m0(folder), get: (m) => h('span', { title: m.direction === 'in' ? m.from : m.to }, m.direction === 'in' ? (m.from_name || m.from) : m.to), cls: () => 'small' },
+      { label: 'To', get: (m) => m.direction === 'in' ? m.to : m.from, cls: () => 'mono small muted' },
+      { label: 'Subject', get: (m) => h('div', {}, m.subject || '(no subject)', h('div', { class: 'muted small' }, clip(m.preview || '', 100))) },
+      { label: '', get: (m) => [m.attachments ? h('span', { class: 'pill' }, m.attachments + ' file' + (m.attachments === 1 ? '' : 's')) : null,
+        m.direction === 'in' && !m.sender_verified ? h('span', { class: 'pill', title: 'no DKIM signature matching its From' }, 'unverified') : null,
+        m.automatic ? h('span', { class: 'pill' }, 'automatic') : null,
+        m.direction === 'out' && !m.sent ? h('span', { class: 'pill failed' }, 'not sent') : null] },
+    ], box.messages, (m) => go('id', m.id)) : h('p', { class: 'muted' }, folder === 'sent' ? 'Nothing sent yet.' : 'Nothing yet.')));
+    return out;
   },
 
   // Skills and playbooks (050 § 6): search and read what the host's engineers wrote down, by role.
@@ -1956,6 +2063,36 @@ function composeCard(tenant, sites, replyTo) {
   return wideCard(replyTo ? 'Reply' : 'Write a message in',
     h('p', { class: 'muted small' }, 'As if it arrived by mail: the box\'s mail route gets it, with its From taken as verified. Its replies land in the mailbox.'),
     h('div', { class: 'bar' }, h('label', {}, 'To '), to), h('div', { class: 'bar' }, h('label', {}, 'From '), from),
+    h('div', { class: 'bar' }, h('label', {}, 'Subject '), subject), text, h('div', { class: 'bar' }, send), out);
+}
+
+function m0(folder) { return folder === 'sent' ? 'To' : 'From'; }
+
+// Writing as one of the operators' addresses (055): a new message, or a reply threaded under one.
+function mailComposeCard(addresses, replyTo) {
+  if (!addresses.length) return wideCard('Write', h('p', { class: 'muted' }, 'No address of yours to send as: the operators\' addresses are on production\'s domains in your focus.'));
+  const pick = replyTo ? (replyTo.direction === 'in' && addresses.includes(replyTo.to) ? replyTo.to : replyTo.direction === 'out' ? replyTo.from : null) : null;
+  const from = h('select', {}, addresses.map((a) => h('option', { value: a, selected: a === (pick || addresses.find((x) => x.startsWith('admin@')) || addresses[0]) }, a)));
+  const name = h('input', { type: 'text', size: 24, placeholder: 'Name shown (optional)' });
+  const to = h('input', { type: 'text', size: 40, value: replyTo ? (replyTo.direction === 'in' ? (replyTo.reply_to || replyTo.from) : replyTo.to) : '' });
+  const subject = h('input', { type: 'text', size: 60, value: replyTo ? (/^re:/i.test(replyTo.subject || '') ? replyTo.subject : 'Re: ' + (replyTo.subject || '')) : '' });
+  const quoted = replyTo && replyTo.text ? '\n\n' + `On ${new Date(replyTo.at_ms).toUTCString()}, ${replyTo.from} wrote:\n` +
+    replyTo.text.split('\n').slice(0, 200).map((l) => '> ' + l).join('\n') : '';
+  const text = h('textarea', { rows: 10, cols: 80 });
+  text.value = quoted;
+  const out = h('p', { class: 'muted small' });
+  const send = h('button', { type: 'button', onclick: async () => {
+    if (!confirm(`Send to ${to.value.trim()} as ${from.value}? It leaves the machine.`)) return;
+    send.disabled = true;
+    try {
+      const r = await api('write/operator_mail_send', { from: from.value, from_name: name.value.trim(), to: to.value.trim(), subject: subject.value, text: text.value,
+        in_reply_to: replyTo ? replyTo.id : '' });
+      out.textContent = `Sent via ${r.via}.`;
+      setTimeout(() => { location.hash = '#/mail?folder=sent'; }, 600);
+    } catch (e) { out.textContent = e.message; send.disabled = false; }
+  } }, 'Send');
+  return wideCard(replyTo ? 'Reply' : 'Write',
+    h('div', { class: 'bar' }, h('label', {}, 'From '), from, name), h('div', { class: 'bar' }, h('label', {}, 'To '), to),
     h('div', { class: 'bar' }, h('label', {}, 'Subject '), subject), text, h('div', { class: 'bar' }, send), out);
 }
 
@@ -2294,7 +2431,9 @@ async function approvalsCard() {
     } });
     return h('label', {}, box, ' ', ag.approvals ? 'on' : 'off');
   };
-  const decide = (r, decision) => isDrop(r) && decision === 'approve' ? h('a', { href: '#/cleanup' }, 'In Cleanup →')
+  const decide = (r, decision) => r.tool === 'promotion_request' && decision === 'approve'
+    ? h('a', { href: '#/promote?tenant=' + encodeURIComponent((r.args || {}).tenant || '') }, 'In Promote →')
+    : isDrop(r) && decision === 'approve' ? h('a', { href: '#/cleanup' }, 'In Cleanup →')
     : h('button', { class: 'small' + (decision === 'deny' ? ' secondary' : ''), onclick: async () => {
     if (!confirm((decision === 'approve' ? 'Run ' : 'Deny ') + r.tool + ' for ' + r.agent + '?')) return;
     try {
@@ -2648,6 +2787,9 @@ async function start() {
   // Promotion is production's: never in beta-ops, and only with a beta site.
   const promoteLink = document.querySelector('#nav a[data-view="promote"]');
   if (promoteLink && (state.me.beta_ops || !(state.me.beta_sites || []).length)) promoteLink.remove();
+  // The operators' mail (055): people who change things, never on beta-ops.
+  const mailLink = document.querySelector('#nav a[data-view="mail"]');
+  if (mailLink && (state.me.beta_ops || !mayChange())) mailLink.remove();
   if (state.me.beta_ops && !location.hash) location.hash = '#/beta';
   window.addEventListener('hashchange', () => render(false));
   // Live views refresh every 15 seconds while visible; the database and change pages don't.

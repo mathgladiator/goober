@@ -518,3 +518,116 @@ TEST_F(BetaTest, OnlySourceDeployTakesAChannel) {
   }
   EXPECT_EQ(seen, 2);
 }
+
+// A promotion request (053 § 11): beta's operator asks; it waits for an owner even in
+// development mode; the owner approves by typing the tenant, and production gets beta's version.
+TEST_F(BetaTest, BetasOperatorAsksForAPromotionAndTheOwnerApprovesIt) {
+  const std::string ops = "beta-ops.example.com";
+  auto staged = call_on(port, ops, kToken, "version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("beta")}, {"channel", "beta"}});
+  ASSERT_FALSE(staged.at("isError").as_bool()) << staged.at("text");
+  auto asked = call_on(port, ops, kToken, "promotion_request", {{"tenant", "acme"}, {"why", "beta says beta"}});
+  ASSERT_FALSE(asked.at("isError").as_bool()) << asked.at("text");
+  ASSERT_TRUE(asked.at("value").as_object().contains("pending_approval")) << asked.at("text");
+  int64_t id = asked.at("value").at("pending_approval").as_int64();
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "live");
+
+  // The owner's panel sees what it pinned.
+  host::SignedIn owner;
+  owner.user.email = "boss@example.com";
+  owner.roles = {"host:owner"};
+  auto pending = host->panel_approvals(owner).at("pending").as_array();
+  ASSERT_EQ(pending.size(), 1u);
+  EXPECT_EQ(pending[0].at("promotion").at("pinned").at("boxes").at("site").as_string(), host->boxes().beta_version("site").value_or(""));
+  EXPECT_FALSE(pending[0].at("promotion").at("beta_moved").as_bool());
+
+  // Only an owner approves, typing the tenant.
+  host::SignedIn operator_;
+  operator_.user.email = "sam@example.com";
+  operator_.roles = {"host:operator"};
+  EXPECT_EQ(host->panel_decide(operator_, {{"id", id}, {"decision", "approve"}, {"confirm", true}, {"confirm_name", "acme"}}, "t").first, 403);
+  EXPECT_EQ(host->panel_decide(owner, {{"id", id}, {"decision", "approve"}, {"confirm", true}, {"confirm_name", "acm"}}, "t").first, 400);
+  auto done = host->panel_decide(owner, {{"id", id}, {"decision", "approve"}, {"confirm", true}, {"confirm_name", "acme"}}, "t");
+  ASSERT_EQ(done.first, 200) << json::dump(done.second);
+  EXPECT_FALSE(done.second.at("is_error").as_bool()) << json::dump(done.second);
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "beta");
+}
+
+TEST_F(BetaTest, APromotionRequestIsRefusedWhenBetaMovedAndOutsideTheFocus) {
+  const std::string ops = "beta-ops.example.com";
+  ASSERT_FALSE(call_on(port, ops, kToken, "version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("one")}, {"channel", "beta"}})
+                   .at("isError").as_bool());
+  auto asked = call_on(port, ops, kToken, "promotion_request", {{"tenant", "acme"}, {"why", "one"}});
+  int64_t id = asked.at("value").at("pending_approval").as_int64();
+  ASSERT_FALSE(call_on(port, ops, kToken, "version_upload", {{"manifest", site_manifest()}, {"wat", module_saying("two")}, {"channel", "beta"}})
+                   .at("isError").as_bool());
+  host::SignedIn owner;
+  owner.user.email = "boss@example.com";
+  owner.roles = {"host:owner"};
+  EXPECT_TRUE(host->panel_approvals(owner).at("pending").at(0).at("promotion").at("beta_moved").as_bool());
+  auto done = host->panel_decide(owner, {{"id", id}, {"decision", "approve"}, {"confirm", true}, {"confirm_name", "acme"}}, "t");
+  ASSERT_EQ(done.first, 200);
+  EXPECT_TRUE(done.second.at("is_error").as_bool());
+  EXPECT_NE(json::dump(done.second).find("beta changed since the request"), std::string::npos) << json::dump(done.second);
+  EXPECT_EQ(fetch(port, "example.com", bhttp::verb::get, "/hi").body, "live");
+
+  // An operator focused on another site can't ask for acme's.
+  std::string err;
+  auto grok = *host::create_operator_token(root / "storage", "grok", 0, &err);
+  host::Host::OperatorScope other;
+  other.all = false;
+  other.tenants = {"other"};
+  ASSERT_TRUE(host->set_operator_scope("token:grok", other, "test", &err)) << err;
+  auto refused = call_on(port, "example.com", grok, "promotion_request", {{"tenant", "acme"}, {"why", "x"}});
+  EXPECT_TRUE(refused.at("isError").as_bool()) << refused.at("text");
+}
+
+TEST_F(BetaTest, BetasMailboxEmpties) {
+  for (int i = 0; i < 3; ++i) host->beta_mail_keep("acme_beta", bj::object{{"direction", "out"}, {"from", "a@x.example"}, {"to", "b@x.example"},
+                                                                         {"subject", "s" + std::to_string(i)}, {"text", "t"}});
+  auto list = host->beta_mail_list("acme_beta", 10);
+  ASSERT_EQ(list.size(), 3u);
+  auto one = call_on(port, "beta-ops.example.com", kToken, "beta_mail_clear", {{"tenant", "acme_beta"}, {"ids", bj::array{list[0].at("id")}}});
+  ASSERT_FALSE(one.at("isError").as_bool()) << one.at("text");
+  EXPECT_EQ(one.at("value").at("removed"), 1);
+  EXPECT_EQ(one.at("value").at("left"), 2);
+  auto all = op("beta_mail_clear", {{"tenant", "acme_beta"}});
+  EXPECT_EQ(all.at("value").at("removed"), 2);
+  EXPECT_TRUE(host->beta_mail_list("acme_beta", 10).empty());
+  EXPECT_TRUE(op("beta_mail_clear", {{"tenant", "acme"}}).at("isError").as_bool());  // production has no mailbox
+}
+
+// Seeding (053 § 13): production's database copied over beta's, beta's own snapshotted first;
+// beta's operator can't seed.
+TEST_F(BetaTest, BetaIsSeededFromProduction) {
+  std::string err;
+  ASSERT_TRUE(host->schemas().put(R"({"schema":"notes1","tables":{"notes":{"columns":{"body":{"type":"string"}}}}})", &err)) << err;
+  auto schema = host->schemas().get("notes1");
+  ASSERT_TRUE(host->databases().ensure_schema("acme", "notes", *schema, &err)) << err;
+  ASSERT_TRUE(host->databases().ensure_schema("acme_beta", "notes", *schema, &err)) << err;
+  ASSERT_TRUE(host->databases().operate("acme", "notes", "INSERT INTO notes (body) VALUES ('real')", nullptr, 10, true, &err)) << err;
+  ASSERT_TRUE(host->databases().operate("acme_beta", "notes", "INSERT INTO notes (body) VALUES ('test')", nullptr, 10, true, &err)) << err;
+  ASSERT_TRUE(host->content().put("acme", "index.html", "production", &err)) << err;
+
+  auto dry = op("beta_seed", {{"tenant", "acme"}, {"content", true}, {"dry_run", true}});
+  ASSERT_FALSE(dry.at("isError").as_bool()) << text(dry);
+  EXPECT_TRUE(dry.at("value").at("databases").at(0).at("replaces_beta").as_bool());
+  EXPECT_EQ(dry.at("value").at("content").at(0), "index.html");
+  EXPECT_FALSE(host->content().get("acme_beta", "index.html"));
+
+  EXPECT_TRUE(call_on(port, "beta-ops.example.com", kToken, "beta_seed", {{"tenant", "acme"}}).at("isError").as_bool());
+  EXPECT_TRUE(op("beta_seed", {{"tenant", "acme_beta"}}).at("isError").as_bool());
+
+  auto seeded = op("beta_seed", {{"tenant", "acme"}, {"content", true}, {"why", "try on real data"}});
+  ASSERT_FALSE(seeded.at("isError").as_bool()) << text(seeded);
+  auto rows = host->databases().operate("acme_beta", "notes", "SELECT body FROM notes", nullptr, 10, false, &err);
+  ASSERT_TRUE(rows) << err;
+  ASSERT_EQ(rows->at("rows").as_array().size(), 1u);
+  EXPECT_EQ(rows->at("rows").at(0).at(0), "real");
+  EXPECT_EQ(host->content().get("acme_beta", "index.html")->data, "production");
+  // Beta's own was kept as a snapshot first.
+  std::string snap(seeded.at("value").at("snapshots").at("notes").as_string());
+  bool found = false;
+  auto snaps = op("db_snapshots", {{"tenant", "acme_beta"}});
+  for (const auto& s : snaps.at("value").at("snapshots").as_array()) found |= s.at("snapshot").as_string() == snap;
+  EXPECT_TRUE(found) << snap;
+}

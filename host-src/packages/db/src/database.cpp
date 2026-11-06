@@ -1544,6 +1544,40 @@ bool Databases::drop_database(std::string_view tenant, std::string_view database
   return true;
 }
 
+bool Databases::copy_from(std::string_view from_tenant, std::string_view to_tenant, std::string_view database,
+                          std::string* error) {
+  if (!exists(from_tenant, database)) {
+    return *error = "tenant " + std::string(from_tenant) + " has no database " + std::string(database), false;
+  }
+  if (!base::is_valid_name(to_tenant)) return *error = "bad tenant", false;
+  auto from = file(from_tenant, database), to = file(to_tenant, database);
+  std::error_code ec;
+  std::filesystem::create_directories(to.parent_path(), ec);
+  sqlite3 *src = nullptr, *dst = nullptr;
+  bool ok = false;
+  if (sqlite3_open_v2(from.c_str(), &src, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    *error = "opening " + from.string() + ": " + sqlite3_errmsg(src);
+  } else if (sqlite3_open_v2(to.c_str(), &dst, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+    *error = "opening " + to.string() + ": " + sqlite3_errmsg(dst);
+  } else {
+    // Boxes write with a busy timeout; the copy waits for them the same way.
+    sqlite3_busy_timeout(src, 5000);
+    sqlite3_busy_timeout(dst, 5000);
+    if (sqlite3_backup* b = sqlite3_backup_init(dst, "main", src, "main")) {
+      int rc = sqlite3_backup_step(b, -1);
+      sqlite3_backup_finish(b);
+      ok = rc == SQLITE_DONE;
+      if (!ok) *error = std::string("copying ") + std::string(database) + ": " + sqlite3_errstr(rc);
+    } else {
+      *error = std::string("copying ") + std::string(database) + ": " + sqlite3_errmsg(dst);
+    }
+  }
+  sqlite3_close(src);
+  sqlite3_close(dst);
+  forget(to_tenant, database);
+  return ok;
+}
+
 bool Databases::drop_table(std::string_view tenant, std::string_view database, std::string_view table,
                            std::string* error) {
   if (!exists(tenant, database)) return *error = "tenant " + std::string(tenant) + " has no database " + std::string(database), false;

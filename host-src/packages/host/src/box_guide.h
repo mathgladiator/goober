@@ -55,7 +55,7 @@ Out of service: box_disable {box, why} stops every route, tool, timer, mail rout
 a box, keeping its versions and data; box_enable {box} puts the same version back. To take
 out one route, deploy a version without it.
 Route names and mail addresses are unique among the ACTIVE boxes only: a disabled box holds
-none, so another box may take them. Moving a route (say admin@example.com) from box old to
+none, so another box may take them. Moving a route (say support@example.com) from box old to
 box new, with a quick rollback:
 1. version_upload new's version with activate: false. It is stored dark; its clash with old
    comes back as a warning ("not live-able while ..."), not a refusal.
@@ -757,7 +757,8 @@ A box receives mail on addresses it declares (the host's Stalwart takes SMTP and
   "reply+{ticket : token}@": {"receive": {"name": "ticket_reply", "public": true}},
   "*@": {"receive": {"name": "inbox", "public": true, "automatic": false}}}}
 support@ is that address on every domain the box serves (support@example.com for one).
-*@ takes what no other route claims. Parameters in the address arrive as params; a
+*@ takes what no other route claims. admin@, postmaster@, and abuse@ are the host's: they go to
+the operators' mailbox before any route, so no box gets them. Parameters in the address arrive as params; a
 {name : token} part is a reply token (below). Mail routes are public: anyone can send.
 The request's body is the message as JSON: {to, envelope_from, from: {address, name}, sender
 (a verified address, or null), sender_why (why not, when null), from_user_id (the sender's

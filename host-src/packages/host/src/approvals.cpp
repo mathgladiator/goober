@@ -161,7 +161,9 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
   // A route_try changes nothing real (its writes run on copies), so it never waits either.
   if (is_read_call(tool, args) || tool == "approval_status" || tool == "route_try") return std::nullopt;
   // A drop waits for a person whatever the switch says, except in development mode (051 § 4).
-  bool drop = always_held(tool, args) && !config_.get()->local;
+  // A promotion request waits even there: it is an ask of the owner (053 § 11).
+  bool promotion = tool == "promotion_request";
+  bool drop = always_held(tool, args) && (!config_.get()->local || promotion);
   if (!drop && !approvals_on(agent)) return std::nullopt;
   bj::object held = args;
   // A deploy or build held without a revision is pinned to the head now, so the person approves
@@ -184,6 +186,14 @@ std::optional<mcp::ToolResult> Host::hold_for_approval(const std::string& agent,
     sqlite::Stmt s(db, "INSERT INTO requests (at_ms, agent, tool, args, request_id) VALUES (?, ?, ?, ?, ?)");
     s.bind(1, base::now_unix_ms()).bind(2, agent).bind(3, tool).bind(4, text).bind(5, current_request_id()).run();
     id = db.last_insert_rowid();
+  }
+  if (promotion) {
+    return mcp::ToolResult::ok(bj::object{
+        {"pending_approval", id},
+        {"tool", tool},
+        {"note", "A promotion request always waits for the owner: a host:owner approves or denies it in the panel's "
+                 "Promote view. Nothing is promoted yet; what beta has now is pinned, and if beta changes before it's "
+                 "approved, it is refused. Ask approval_status {id} for the outcome; a request not decided in a day expires."}});
   }
   if (drop) {
     return mcp::ToolResult::ok(bj::object{
@@ -293,6 +303,22 @@ bj::object Host::panel_approvals(const SignedIn& who) {
         o["drop"] = o.at("tool") == "box_drop" ? box_drop_check(text_arg(a, "box"))
                                                 : db_drop_check(text_arg(a, "tenant"), text_arg(a, "database"), text_arg(a, "table"));
       }
+      // A held promotion request shows what it pinned and whether beta moved since (053 § 11).
+      if (o.at("tool") == "promotion_request") {
+        std::string err;
+        auto held = json::parse(s.text(4), &err);
+        bj::object a = held && held->is_object() ? held->as_object() : bj::object{};
+        const auto* pinned = a.if_contains("pinned");
+        bool moved = true;
+        if (pinned && pinned->is_object()) {
+          bj::array boxes, paths;
+          for (const auto& kv : pinned->at("boxes").as_object()) boxes.push_back(bj::value(kv.key()));
+          for (const auto& kv : pinned->at("files").as_object()) paths.push_back(bj::value(kv.key()));
+          auto now = promotion_pin(text_arg(a, "tenant"), bj::object{{"boxes", boxes}, {"paths", paths}}, &err);
+          moved = !now || json::dump(*now) != json::dump(*pinned);
+        }
+        o["promotion"] = bj::object{{"tenant", text_arg(a, "tenant")}, {"pinned", pinned ? *pinned : bj::value(nullptr)}, {"beta_moved", moved}};
+      }
       // A held change set shows its preview (without tries): every member and what widens.
       if (o.at("tool") == "changeset_apply") {
         std::string err;
@@ -396,12 +422,16 @@ std::pair<int, bj::object> Host::panel_decide(const SignedIn& who, const bj::obj
     auto held = json::parse(args_text, &perr);
     bj::object held_args = held && held->is_object() ? held->as_object() : bj::object{};
     if (decision == "approve" && always_held(tool, held_args)) {
-      if (!owner) return {403, bj::object{{"error", "only a host:owner approves a drop"}}};
-      std::string target = tool == "box_drop" ? text_arg(held_args, "box")
+      if (!owner) return {403, bj::object{{"error", tool == "promotion_request" ? "only a host:owner approves a promotion"
+                                                                                   : "only a host:owner approves a drop"}}};
+      std::string target = tool == "promotion_request" ? text_arg(held_args, "tenant")
+                           : tool == "box_drop" ? text_arg(held_args, "box")
                            : text_arg(held_args, "table").empty()
                                ? text_arg(held_args, "database")
                                : text_arg(held_args, "database") + "." + text_arg(held_args, "table");
-      if (text_arg(args, "confirm_name") != target) return {400, bj::object{{"error", "type " + target + " to approve dropping it"}}};
+      if (text_arg(args, "confirm_name") != target) {
+        return {400, bj::object{{"error", "type " + target + (tool == "promotion_request" ? " to approve promoting its beta" : " to approve dropping it")}}};
+      }
     }
     // An agent that can no longer sign in (its token revoked, the config's token removed) has its
     // requests denied, never run with the roles it used to have.

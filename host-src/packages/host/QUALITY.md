@@ -30,3 +30,9 @@ and the `goober-host` binary with SIGHUP reload.
 - Beta's operator (053 § 6) changes only beta: what it drops at once is beta's alone, checked
   again under the registry's lock; any other drop waits for an owner, and an agent's approvals
   switch holds it through beta-ops too.
+- A promotion request runs only with an owner's approval, as the owner, and only if beta still
+  matches what was pinned when it was asked; production's data reaches beta only by `beta_seed`,
+  an unfocused operator's, with beta's own snapshotted first.
+- The operators' mailbox is the panel's alone (no MCP tool reads or sends it): a person reads and
+  sends within their focus, a message's HTML is shown as source, and its sender is marked
+  verified only by an aligned DKIM pass.

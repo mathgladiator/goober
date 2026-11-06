@@ -245,10 +245,13 @@ bj::object Host::limits_report(bool name_tenants) {
       add("beta-mail", bytes_under(cfg->storage / "mail" / "beta"), d.beta_mail_bytes * int64_t(betas.size()),
           "beta-mail-bytes",
           bj::object{{"note", "beta's mailboxes, each the newest 2000 messages of 30 days within limits.beta-mail-bytes "
-                              "(budgeted here for every beta tenant); past it, the oldest go, so a full mailbox is "
-                              "normal and needs nothing done"}});
+                              "(budgeted here for every beta tenant); past it, the oldest go. Empty one with "
+                              "beta_mail_clear or the Beta view's Empty the mailbox"}});
     }
   }
+  add("operator-mail", bytes_under(cfg->storage / "mail" / "operators"), d.operator_mail_bytes, "operator-mail-bytes",
+      bj::object{{"note", "the operators' mailbox (admin@, postmaster@, abuse@; 055), kept 400 days; past the budget new "
+                          "mail is refused with 452 until a person deletes some in the panel's Mail view"}});
   add("tmp", bytes_under(cfg->storage / "tmp"), d.try_bytes * 2, "try-bytes",
       bj::object{{"note", "swept after limits.tmp-hours; budgeted as twice limits.try-bytes"}});
   // /goober/ready is public: each budget as its share and whether it warns, and the warnings as

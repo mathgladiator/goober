@@ -119,6 +119,10 @@ class Databases {
   // Removes a database's file (and its -wal and -shm). The caller has checked no box binds it
   // and taken a snapshot (008 § 11).
   bool drop_database(std::string_view tenant, std::string_view database, std::string* error);
+  // Makes `to_tenant`'s database `database` a copy of `from_tenant`'s, page for page, through
+  // SQLite's online backup into the live file: its readers and writers wait for the copy and then
+  // see it whole (beta seeded from production, 053 § 13). The caller took any snapshot first.
+  bool copy_from(std::string_view from_tenant, std::string_view to_tenant, std::string_view database, std::string* error);
   // Drops one table, its indexes and the host's records of them; the schemas that declared it
   // are marked unapplied, so a box binding one later makes the table again, empty.
   bool drop_table(std::string_view tenant, std::string_view database, std::string_view table, std::string* error);

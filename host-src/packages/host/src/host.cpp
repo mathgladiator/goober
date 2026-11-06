@@ -372,6 +372,7 @@ Host::Host(std::shared_ptr<const config::HostConfig> config, std::filesystem::pa
   register_cleanup_tools();
   register_split_tools();
   register_beta_tools();
+  register_beta_seed_tools();
   register_promotion_tools();
   mcp_->add_tool({"bus_status",
                   "Read tool. The bus (040; design/machine/036.Bus.md) for one tenant: each topic's sequence, last "

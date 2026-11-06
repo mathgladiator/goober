@@ -491,10 +491,28 @@ A beta of your site runs on this machine at `beta.example.com`, with its own acc
   writes beta's pages, and it can't change production.
 - **Mail in beta never leaves.** Open **Beta** in the panel (or beta-ops): every mail the site
   would have sent is in the mailbox, sign-in codes included. **Write a message in** sends mail
-  to the site as if it arrived; the replies show up in the mailbox.
+  to the site as if it arrived; the replies show up in the mailbox. **Empty the mailbox…** clears
+  it when the limits warning says it's full, and **Delete** takes one message.
 - **Promote.** The panel's **Promote** view shows each box beta changed (and what it widens) and
   each page's changes. Untick what stays, press **Promote…**, and type the production tenant's name (like `acme`). It goes
   live as one change; **Roll back** undoes it in one press. Data never moves from beta.
+- **Grok asks to promote.** Tell Grok "ask to promote beta" and it runs `promotion_request`.
+  Nothing changes until you open **Promote**, read the request (what it pinned, and a red pill if
+  beta changed since), press **Approve…**, and type the tenant. **Deny** turns it down.
+- **Seed beta from production.** Ask me (or any agent not focused on tenants) to run `beta_seed`
+  for the site: production's databases are copied over beta's, beta's own snapshotted first, and
+  `content: true` copies the pages too. Beta's agents then read that data, personal data
+  included (`design/machine/053.Beta.md` § 13), so seed only what you're content for them to see.
+
+## Mail to admin@, postmaster@, and abuse@
+
+Open the panel's **Mail** view (`design/machine/055.OperatorMail.md`). Mail to those three
+addresses on any of your production domains lands there, before any box sees it. Open a message to
+read it and save its attachments; a "sender not verified" pill means its From has no matching
+DKIM signature, so anyone could have written it. **Reply**, or **Write…** for a new message, sends
+as the address you pick (admin@ first) through SES, and keeps a copy in **Sent**. **Delete**
+removes a message; past 1 GiB (`limits.operator-mail-bytes`), new mail waits until you delete some.
+Mail reaches it only once the domain's MX points at this machine (`mail_domain_check` says).
 
 ## Try a new version on part of the traffic (splits)
 

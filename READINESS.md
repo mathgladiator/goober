@@ -16,7 +16,7 @@
 | 3c. An agent builds a ranch's whole digital side | **Partly** | The parts are there. Payments, mail inboxes, and scheduling need outside services. |
 | 4. A good robot for a local meat index | **Yes, small scale** | Polite crawling with views and extraction, built for hundreds of sites, not millions. |
 | 5. Survive losing the machine | **Yes, untried with real S3** | Sealed nightlies kept 14 days, database increments every 15 minutes, attachments, and `just rehydrate`. |
-| 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`. |
+| 6. Mail that arrives | **Yes, untried with real SES or a real MX** | Sign-in codes and boxes' mail out through Amazon SES; mail in through Stalwart to boxes' `routes.mail`; admin@, postmaster@, and abuse@ to the panel's Mail view, answered from there. |
 | 7. An agent people reach by email | **Yes** | Mail from the site's own address, in the person's thread, with unsubscribe and consent; model calls through the outbox with result routes. `design/machine/026.CaseStudy.md` § 3 is the recipe. |
 | 8. See what the host and Grok are doing | **Yes, once its domain is set up** | The operator panel: key graphs, traffic, errors, box failures, services and mail, heat, data flow, every box, the change log with diffs, and a read-only database explorer (`design/machine/028.Panel.md`). A heat study shows one domain's heat by endpoint for an hour or a day and suggests rate and concurrency controls to observe (`design/machine/048.HeatStudy.md`). |
 | 9. A site, or part of one, as an installable app | **Yes, untried on a phone** | `pwa_put`: manifest, offline worker, and push notifications from boxes (`design/machine/782.PWA.md`). |
@@ -243,7 +243,10 @@ each ranch's site weekly.
     into; you promote what you like to production in one press and roll it back in one
     (`design/machine/053.Beta.md`). Grok signs in by OAuth, which beta-ops doesn't serve yet
     (`design/machine/054.ReviewNovember2.md` § 6): hold Grok to beta by focusing it on the beta
-    tenants in the Operators view;
+    tenants in the Operators view. Grok asks to promote (`promotion_request`) and you approve in
+    Promote; an unfocused agent seeds beta from production (`beta_seed`), personal data included;
+  - mail to admin@, postmaster@, and abuse@ (the Mail view): read, reply, and write as those
+    addresses (`design/machine/055.OperatorMail.md`);
   - cleanup (the Cleanup view): old boxes and databases Grok asks to drop wait there for you
     to approve, or you drop them yourself (`design/machine/051.Cleanup.md`);
   - skills and playbooks (the Skills view): what Grok's engineers wrote down for each role,

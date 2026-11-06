@@ -344,6 +344,34 @@ void Host::handle_mail_hook(const Request& req, const Finish& finish) {
   // One recipient per message: one route decides, so its answer can be the SMTP answer. A
   // sender sends the rest again in another transaction (RFC 5321 § 4.5.3.1.10).
   if (to.size() > 1) return answer(hook_reject(452, "4.5.3", "One recipient per message here; send the others separately"), "one_recipient");
+  // The operators' addresses (admin@, postmaster@, abuse@; 041, 055) come to the operators'
+  // mailbox before any box's route.
+  if (operator_address_tenant(to.back())) {
+    log["operators"] = true;
+    if (operator_mailbox_full()) return answer(hook_reject(452, "4.2.2", "Mailbox full; try again later"), "operators_full");
+    if (stage == "rcpt") return answer(hook_accept(), "rcpt_accepted");
+    const auto* msg = o.if_contains("message");
+    if (!msg || !msg->is_object()) return answer(hook_reject(451, "4.3.0", "Try again later"), "no_message");
+    const auto& mo = msg->as_object();
+    int64_t size = mo.contains("size") && mo.at("size").is_int64() ? mo.at("size").as_int64() : int64_t(req.body.size());
+    log["bytes"] = size;
+    if (size > in.max_bytes) return answer(hook_reject(552, "5.3.4", "Message too big"), "too_big");
+    inbound::Headers headers;
+    if (const auto* hs = mo.if_contains("headers"); hs && hs->is_array()) {
+      for (const auto& h : hs->as_array()) {
+        if (h.is_array() && h.as_array().size() == 2 && h.as_array()[0].is_string() && h.as_array()[1].is_string()) {
+          headers.emplace_back(std::string(h.as_array()[0].as_string()), std::string(h.as_array()[1].as_string()));
+        }
+      }
+    }
+    try {
+      log["id"] = operator_mail_receive(to.back(), from, headers, str(mo.if_contains("contents")), size);
+    } catch (const std::exception& e) {
+      std::cerr << "goober-host: mail in: the operators' mailbox: " << e.what() << "\n";
+      return answer(hook_reject(451, "4.3.0", "Try again later"), "operators_failed");
+    }
+    return answer(hook_discard(), "operators");
+  }
   std::string why;
   auto match = match_mail(to.back(), &why);
   if (!match) {

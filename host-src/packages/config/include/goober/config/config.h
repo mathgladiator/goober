@@ -182,6 +182,9 @@ struct HostConfig {
     // Each beta tenant's mailbox (design/machine/053.Beta.md § 4), besides its 2000 messages and
     // 30 days; past this, the oldest messages go.
     int64_t beta_mail_bytes = int64_t(64) << 20;
+    // The operators' mailbox (admin@, postmaster@, abuse@; 055): past it, new mail is refused
+    // with 452 until an operator deletes some. Nothing is dropped for space.
+    int64_t operator_mail_bytes = int64_t(1) << 30;
   } disk;
   // The host sits behind a proxy like Caddy (099): the client's address is the last one in
   // X-Forwarded-For. Leave it off when clients connect directly, or they can forge it.

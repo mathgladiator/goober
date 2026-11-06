@@ -549,6 +549,39 @@ TEST_F(DbTest, DropsAndRetiring) {
   EXPECT_FALSE(schemas->retire("nope1", "{}", &err));
 }
 
+// Seeding (053 § 13): one tenant's database copied over another's, which a session then reads
+// whole, its own rows gone; a database the source lacks is refused.
+TEST_F(DbTest, CopiesOneTenantsDatabaseOverAnothers) {
+  manifest::TableGrant g;
+  g.read_all = true;
+  g.insert = true;
+  std::vector<manifest::DataStrategy> strategies{strategy(g)};
+  auto put = [&](const char* tenant, const char* name) {
+    db::Session s(*dbs, tenant, strategies, *schemas);
+    s.run("book", std::string("INSERT INTO entries (name, message, created_ms) VALUES ('") + name + "', 'hi', 1)", "");
+    std::string err;
+    ASSERT_TRUE(s.commit(&err)) << err;
+  };
+  put("playground", "Ada");
+  put("playground", "Grace");
+  put("playground_beta", "Tester");
+  std::string err;
+  ASSERT_TRUE(dbs->copy_from("playground", "playground_beta", "guestbook", &err)) << err;
+  {
+    db::Session s(*dbs, "playground_beta", strategies, *schemas);
+    auto r = J(s.run("book", "SELECT name FROM entries ORDER BY name", ""));
+    ASSERT_FALSE(r.as_object().contains("error")) << json::dump(r);
+    ASSERT_EQ(r.at("rows").as_array().size(), 2u) << json::dump(r);
+    EXPECT_EQ(r.at("rows").at(0).at(0), "Ada");
+  }
+  // Production's own is untouched, and a new tenant gets a new file.
+  EXPECT_EQ(dbs->describe("playground", "guestbook").at("tables").at(0).at("rows"), 2);
+  ASSERT_TRUE(dbs->copy_from("playground", "fresh_beta", "guestbook", &err)) << err;
+  EXPECT_TRUE(dbs->exists("fresh_beta", "guestbook"));
+  EXPECT_FALSE(dbs->copy_from("playground", "playground_beta", "nope", &err));
+  EXPECT_NE(err.find("has no database nope"), std::string::npos) << err;
+}
+
 // A table keyed by host ids (its default and triggers call the host's functions) drops too.
 TEST_F(DbTest, IdKeyedTablesDrop) {
   int64_t next = int64_t(1) << 32;

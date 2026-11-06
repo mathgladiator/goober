@@ -122,6 +122,7 @@ bool Host::is_read_call(std::string_view tool, const bj::object& args) {
   if (tool == "version_upload" || tool == "schema_apply") return flag("dry_run");
   // A drop's dry run only checks (051 § 4); the drop itself always waits for a person.
   if (tool == "box_drop" || tool == "db_drop") return flag("dry_run");
+  if (tool == "beta_seed") return flag("dry_run");
   // A content dry run stores nothing; staging builds only the operator's own draft, which no
   // one sees until a content_deploy (which waits) writes it.
   if (tool == "content_deploy") return flag("dry_run");
@@ -323,7 +324,7 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
     // beta-ops (053 § 6): the same panel, its every call in beta's scope; it looks, and it injects mail.
     bool beta_ops = is_beta_ops_request(req);
     std::string me = (beta_ops ? "beta:panel:" : "panel:") + who->user.email;
-    if (beta_ops && tool.starts_with("write/") && tool != "write/beta_mail_send") {
+    if (beta_ops && tool.starts_with("write/") && tool != "write/beta_mail_send" && tool != "write/beta_mail_clear") {
       return finish(json_reply(403, bj::object{{"error", "beta-ops looks and injects mail; production's changes are made in the panel"}}),
                     json::dump(bj::object{{"panel", tool}, {"why", "beta-ops"}}));
     }
@@ -343,6 +344,65 @@ void Host::handle_panel(const Request& req, const Finish& inner, const std::stri
       }
       if (!err.empty()) return finish(json_reply(400, bj::object{{"error", err}}), json::dump(bj::object{{"panel", tool}}));
       return finish(own(200, std::move(out)), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
+    // Emptying a beta mailbox (053 § 4): beta's own, so beta-ops may too.
+    if (tool == "write/beta_mail_clear") {
+      bool beta_role = std::find(who->roles.begin(), who->roles.end(), "host:beta") != who->roles.end();
+      if (!may_change(who->roles) && !beta_role) return finish(json_reply(403, bj::object{{"error", "an observer can't empty a mailbox"}}), "");
+      std::string tenant = arg_text(args, "tenant");
+      auto scope = operator_scope(me);
+      if (!scope.all && !scope.tenants.count(tenant)) {
+        return finish(json_reply(403, bj::object{{"error", "you're focused on other tenants, not " + tenant}}), "");
+      }
+      std::string err;
+      std::optional<bj::object> out;
+      {
+        OperatorContext as(*this, me, request_id);
+        out = beta_mail_clear(tenant, args, &err);
+      }
+      if (!out) return finish(json_reply(400, bj::object{{"error", err}}), json::dump(bj::object{{"panel", tool}}));
+      return finish(own(200, std::move(*out)), json::dump(bj::object{{"panel", tool}, {"operator", me}}));
+    }
+    // The operators' mailbox (055): admin@, postmaster@, abuse@, read and answered by people with
+    // host:owner or host:operator, within their focus; never on beta-ops.
+    if (tool.starts_with("operator_mail") || tool.starts_with("write/operator_mail")) {
+      if (beta_ops) return finish(json_reply(403, bj::object{{"error", "the operators' mail is read in the panel, not beta-ops"}}), "");
+      if (!may_change(who->roles)) {
+        return finish(json_reply(403, bj::object{{"error", "the operators' mail is for host:owner and host:operator"}}), "");
+      }
+      auto scope = operator_scope(me);
+      std::string id = arg_text(args, "id");
+      bj::object log{{"panel", tool}, {"operator", me}};
+      if (tool == "operator_mail") {
+        std::string folder = arg_text(args, "folder");
+        if (folder != "sent" && folder != "all") folder = "inbox";
+        return finish(own(200, bj::object{{"folder", folder},
+                                          {"messages", operator_mail_list(scope, folder, std::clamp<int64_t>(arg_int(args, "limit", 100), 1, 500))},
+                                          {"addresses", operator_mail_addresses(scope)}}),
+                      json::dump(log));
+      }
+      if (tool == "operator_mail_get") {
+        auto m = operator_mail_get(scope, id);
+        if (!m) return finish(json_reply(404, bj::object{{"error", "no message " + id + " in the mailbox you may read"}}), json::dump(log));
+        return finish(own(200, std::move(*m)), json::dump(log));
+      }
+      if (tool == "operator_mail_attachment") {
+        auto a = operator_mail_attachment(scope, id, arg_int(args, "index", -1));
+        if (!a) return finish(json_reply(404, bj::object{{"error", "no such attachment"}}), json::dump(log));
+        return finish(own(200, std::move(*a)), json::dump(log));
+      }
+      if (tool == "write/operator_mail_send") {
+        std::string err;
+        auto out = operator_mail_send(scope, me, args, &err);
+        if (!out) return finish(json_reply(400, bj::object{{"error", err}}), json::dump(log));
+        return finish(own(200, std::move(*out)), json::dump(log));
+      }
+      if (tool == "write/operator_mail_delete") {
+        if (!operator_mail_delete(scope, id)) return finish(json_reply(404, bj::object{{"error", "no message " + id + " in the mailbox you may read"}}), json::dump(log));
+        audit("operators.mail_delete", me, id, "ok", bj::object{{"ip", client_address(req)}, {"request_id", request_id}});
+        return finish(own(200, bj::object{{"id", id}, {"deleted", true}}), json::dump(log));
+      }
+      return finish(json_reply(404, bj::object{{"error", "not found"}}), json::dump(log));
     }
     // Promotion (053 § 11): the owner carries beta to production as one change set, applied at
     // once, and rolls one back. Typing the tenant's name confirms.

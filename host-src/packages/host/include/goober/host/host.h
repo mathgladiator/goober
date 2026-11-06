@@ -828,6 +828,11 @@ class Host {
   // Promotion (053 § 11; promotion.cpp): beta's differences as a change set.
   std::optional<boost::json::object> promotion_plan(const std::string& tenant, std::string* error);
   std::optional<boost::json::object> promotion_start(const std::string& tenant, const boost::json::object& args, std::string* error);
+  // A promotion request (053 § 11): what beta has now, pinned as {boxes: {box: version}, files:
+  // {path: sha256}}; and its run once an owner approves, refused when beta moved since.
+  std::optional<boost::json::object> promotion_pin(const std::string& tenant, const boost::json::object& args, std::string* error);
+  std::optional<boost::json::object> promotion_request_run(const std::string& tenant, const boost::json::object& args,
+                                                           std::string* error);
   void register_promotion_tools();
   // Beta (design/machine/053.Beta.md; beta.cpp).
   bool is_beta_ops_request(const server::http::Request& req) const;
@@ -836,12 +841,33 @@ class Host {
   // kept for 30 days. Out: what the tenant would have sent; in: what an operator injected.
   void beta_capture(const identity::Mail& mail, const std::string& tenant);
   std::string beta_mail_keep(const std::string& tenant, boost::json::object message);
+  std::filesystem::path beta_mailbox_dir(const std::string& tenant) const;
   boost::json::array beta_mail_list(const std::string& tenant, int64_t limit);
+  std::optional<boost::json::object> beta_mail_clear(const std::string& tenant, const boost::json::object& args, std::string* error);
   std::optional<boost::json::object> beta_mail_get(const std::string& tenant, const std::string& id);
   // Injects one message to a beta address, delivered as the MTA hook delivers (053 § 4).
   boost::json::object beta_mail_inject(const std::string& to, const std::string& from, const std::string& subject,
                                        const std::string& text, const std::string& in_reply_to, std::string* error);
   void register_beta_tools();
+  // Seeding beta from production (053 § 13; beta_seed.cpp): production's databases, and its
+  // content when asked, copied over a beta tenant's; beta's own snapshotted first.
+  std::optional<boost::json::object> beta_seed(const std::string& tenant, const boost::json::object& args, std::string* error);
+  void register_beta_seed_tools();
+  // The operators' mailbox (design/machine/055.OperatorMail.md; operator_mail.cpp): admin@,
+  // postmaster@, and abuse@ on production's domains, read and answered in the panel by people.
+  std::filesystem::path operator_mailbox_dir() const;
+  std::optional<std::string> operator_address_tenant(const std::string& address) const;
+  boost::json::array operator_mail_addresses(const OperatorScope& scope) const;
+  bool operator_mailbox_full();
+  std::string operator_mail_receive(const std::string& to, const std::string& envelope_from,
+                                    const mail::inbound::Headers& headers, const std::string& body, int64_t size);
+  bool operator_mail_in_scope(const OperatorScope& scope, const boost::json::object& head) const;
+  boost::json::array operator_mail_list(const OperatorScope& scope, const std::string& folder, int64_t limit);
+  std::optional<boost::json::object> operator_mail_get(const OperatorScope& scope, const std::string& id);
+  std::optional<boost::json::object> operator_mail_attachment(const OperatorScope& scope, const std::string& id, int64_t index);
+  bool operator_mail_delete(const OperatorScope& scope, const std::string& id);
+  std::optional<boost::json::object> operator_mail_send(const OperatorScope& scope, const std::string& by,
+                                                        const boost::json::object& args, std::string* error);
   // A/B splits and the traffic controller (design/machine/052.Splits.md; splits.cpp).
   struct SplitArm {
     int64_t requests = 0, errors = 0;

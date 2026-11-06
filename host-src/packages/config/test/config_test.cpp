@@ -100,6 +100,12 @@ TEST(Config, DiskLimitsHaveDefaultsAndBounds) {
   ASSERT_TRUE(mail) << err;
   EXPECT_EQ(mail->disk.beta_mail_bytes, 2097152);
   EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"beta-mail-bytes":1000}})", "/", &err));
+  // The operators' mailbox (055): 1 GiB unless set; at least 16 MiB.
+  EXPECT_EQ(plain->disk.operator_mail_bytes, int64_t(1) << 30);
+  auto ops = parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"operator-mail-bytes":33554432}})", "/", &err);
+  ASSERT_TRUE(ops) << err;
+  EXPECT_EQ(ops->disk.operator_mail_bytes, 33554432);
+  EXPECT_FALSE(parse_config(R"({"operations":{"token":"0123456789abcdef"},"limits":{"operator-mail-bytes":1048576}})", "/", &err));
 }
 
 TEST(Config, ReloadKeepsRestartOnlyFields) {

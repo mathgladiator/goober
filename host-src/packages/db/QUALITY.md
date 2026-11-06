@@ -21,6 +21,8 @@ operator queries.
 - **What the host declared is recorded in the database** (`goober_schemas`,
   `goober_columns`, `goober_indexes`), so comparisons never depend on parsing SQL.
 - **Every statement is bounded** by a row limit and a step budget.
+- **A database copied over another** (`copy_from`, beta's seeding) goes through SQLite's online
+  backup into the live file, so its readers and writers wait and then see the copy whole.
 - **A request's writes to one database land together or not at all**: a session rolls back
   unless it is committed, including when it is destroyed. Across databases, each commits on
   its own (no two-phase commit). The outbox's database commits last, so an element is never

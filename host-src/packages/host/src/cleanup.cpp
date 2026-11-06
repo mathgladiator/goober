@@ -56,6 +56,8 @@ constexpr std::string_view kBetaDrop = "beta's operator (053 § 6)";
 }  // namespace
 
 bool Host::always_held(std::string_view tool, const bj::object& args) {
+  // A promotion request is an ask of the owner, always (053 § 11).
+  if (tool == "promotion_request") return true;
   return (tool == "box_drop" || tool == "db_drop") && !flag_of(args, "dry_run");
 }
 

@@ -78,9 +78,11 @@ const std::map<std::string, Rule, std::less<>>& rules() {
     // Beta (053).
     m["beta_status"] = Rule::kHost;
     m["beta_clear"] = Rule::kBox;
-    for (const char* t : {"beta_mail_list", "beta_mail_get"}) m[t] = Rule::kTenant;
+    for (const char* t : {"beta_mail_list", "beta_mail_get", "beta_mail_clear"}) m[t] = Rule::kTenant;
+    m["beta_seed"] = Rule::kHost;  // production's data into beta: an unfocused operator's (053 § 13)
     m["promotion_preview"] = Rule::kTenant;
     m["promotion_start"] = Rule::kHost;  // production's, the owner's (053 § 11)
+    m["promotion_request"] = Rule::kOpen;  // a site or its beta in scope: scope_refusal checks (053 § 11)
     m["beta_mail_send"] = Rule::kOpen;  // the address names the tenant: beta_mail_inject checks it is in scope (053 § 6)
     for (const char* t : {"mail_domain_check", "mail_route_check"}) m[t] = Rule::kDomain;
     m["schema_put"] = Rule::kSchema;
@@ -350,6 +352,12 @@ std::optional<std::string> Host::scope_refusal(const OperatorScope& scope, const
 
   auto rule = scope_rule(tool);
   if (!rule) return who + ", and " + tool + " has no scope rule, so it's refused" + widen;
+  // Asking for a promotion: the site, or its beta (beta's operator asks for its own).
+  if (tool == "promotion_request") {
+    std::string t = text_arg(args, "tenant");
+    if (t.empty() || !in_code(t)) return who + ", not " + (t.empty() ? std::string("(no tenant)") : t) + " or its beta" + widen;
+    return std::nullopt;
+  }
   // Beta's operator never changes what production serves (053 § 6): versions and projects go to
   // the beta channel; a box is dropped only while it is beta's alone; the rest of production's
   // box controls are the owner's.
@@ -593,7 +601,7 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
     bool beta = operator_scope(operator_name).beta;
     policy.hold = [this, operator_name, on, local, beta](const std::string& tool,
                                                           const bj::object& args) -> std::optional<mcp::ToolResult> {
-      bool free = local || (beta && beta_drop_free(tool, args));
+      bool free = tool != "promotion_request" && (local || (beta && beta_drop_free(tool, args)));
       if (!on && (free || !always_held(tool, args))) return std::nullopt;
       return hold_for_approval(operator_name, tool, args);
     };
@@ -632,6 +640,13 @@ mcp::McpServer::Policy Host::operator_policy(const std::string& operator_name, b
       // An apply runs the draft as it was when asked for: a member added while it waits is refused.
       if (tool.name == "changeset_apply" && !args.contains("version")) {
         if (auto v = changeset_draft_version(text_arg(args, "id"))) args["version"] = *v;
+      }
+      // A promotion request pins what beta has now, so the owner approves exactly that (053 § 11);
+      // when it runs on approval, the pin it was held with stays.
+      if (tool.name == "promotion_request" && approved_by_now().empty()) {
+        std::string ignored;  // nothing to promote: the tool says so when it runs
+        if (auto pin = promotion_pin(text_arg(args, "tenant"), args, &ignored)) args["pinned"] = std::move(*pin);
+        else args.erase("pinned");
       }
       if (tool.name == "content_deploy" && !args.contains("stage_version")) {
         auto* s = args.if_contains("stage");

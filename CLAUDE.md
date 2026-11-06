@@ -165,7 +165,8 @@ Read these before doing design work:
     playbooks by role (§ 4.10, 050); the Cleanup view of drop requests an owner approves, every box and
     database with what dropping it takes, and what was dropped (§ 4.11, 051); the Beta view (boxes'
     beta slots, beta's mailbox, a composer) and the Promote view (beta's changes as one change set an
-    owner applies and rolls back), and beta-ops on its own domain (§ 4.12, 053); the Controls view of each domain's
+    owner applies and rolls back, with agents' promotion requests), and beta-ops on its own domain (§ 4.12, 053);
+    the Mail view of the operators' mailbox (§ 4.13, 055); the Controls view of each domain's
     controls, their effective values, and what each did, where `host:owner` and `host:operator`
     change any control at any time (§ 4.9, 047 § 9); the change log from the
     WAL's observer, data-flow graphs with services and the mailer (§ 6), the database explorer, `host:observer`;
@@ -241,7 +242,7 @@ Read these before doing design work:
     `limits` check in `/goober/ready`; traffic and failures as five-minute buckets kept 7 days;
     box versions no longer live archived after 30 days and deleted after 400, leaving a
     tombstone, never the newest three that were live (§ 3.1); the log-velocity warnings, the daily upload budget, heat study reports (`studies-bytes`), and the local
-    nightly copies (the newest 3 with S3 on, 14 off, kept by `goober-host backup`, named as `local-copies`), and skills (`skills-bytes`, 050) in the table.
+    nightly copies (the newest 3 with S3 on, 14 off, kept by `goober-host backup`, named as `local-copies`), skills (`skills-bytes`, 050), and the operators' mailbox (`operator-mail-bytes`, 055) in the table.
   - `design/machine/046.Operations.md`: running goober as its one operator: the stack around the
     host (Caddy on loopback, systemd, Stalwart, SES, the bucket), what a deploy does, what to watch
     and which tool answers which question, one table of everything kept (machine, memory, bucket),
@@ -301,14 +302,21 @@ Read these before doing design work:
     mailbox with an injector (`beta_mail_*`); service calls fail in beta unless `"beta": "allow"` on a
     read; beta-ops (`operations.beta-domain`) and `host:beta`, where operators change only beta;
     promotion of boxes and content as one change set the owner applies and rolls back (in-host now,
-    shaped for a remote host); the deploy offers beta and beta-ops; 310's "another host" now one of two
-    ways.
+    shaped for a remote host), and `promotion_request`, an agent's ask pinned to what beta had, always
+    waiting for the owner (§ 11); `beta_mail_clear`; seeding beta's databases and content from production
+    with `beta_seed`, beta's own snapshotted first, flagged against 310's synthetic staging data (§ 13); the
+    deploy offers beta and beta-ops; 310's "another host" now one of two ways.
   - `design/machine/054.ReviewNovember2.md`: the code, security, performance, and quality review of
     2026-11-04 to 05's work (skills, cleanup, splits, beta), in two loops of four reviewers: beta's
     drops of production boxes, the approvals switch through beta-ops, pinned tenants opening
     production's data, beta blocking production deploys, split races, box scope over disabled and
     dark boxes, UTF-8 cuts, the mailbox's bytes, skills' lock; measurements, what wasn't fixed, and
-    four decisions for the human (OAuth on beta-ops, who applies a promotion).
+    the decisions for the human (OAuth on beta-ops, who applies a promotion, seeding personal data).
+  - `design/machine/055.OperatorMail.md`: the operators' mailbox: admin@, postmaster@, and abuse@ on
+    production's domains come to it before any box's route; kept in `mail/operators/` 400 days within
+    `limits.operator-mail-bytes` (452 past it); the panel's Mail view reads, downloads attachments,
+    replies, and writes as those addresses through the host's mailer, within a person's focus; no MCP
+    tools; admin@ flagged against 041's list; two decisions for the human.
   - `design/machine/782.PWA.md`: progressive web apps: the audit of what PWAs need, apps over a
     scope (`_apps/$name.json`), the generated manifest, worker, and `<!--#include pwa-->` tags,
     offline caching, and Web Push (VAPID, aes128gcm on OpenSSL) through a box `push` service.
