@@ -2,9 +2,10 @@
 
 **The SlopBox Orchestration Service.**
 
-> Status: **design phase, with a first host to play with.** The design is written in
-> [`design/`](design/). A first host lives in [`host-src/`](host-src/README.md), and
-> [`PROGRESS.md`](PROGRESS.md) is the honest account of what it does and doesn't do yet.
+> Status: **on hiatus.** Goober was an experiment, and it has ended. [`END.md`](END.md) says
+> why it stopped and what it found; [`END.AI.md`](END.AI.md) is Claude's thoughts on making the
+> next version much better. This repository will be harvested for good ideas, and a new project
+> will start from a new round of human design documents. What follows is kept as it was.
 
 ## The bet
 
